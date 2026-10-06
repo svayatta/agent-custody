@@ -160,6 +160,7 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./sites.d:/etc/caddy/sites.d:ro  # other sites on this host (Caddyfile, last line)
       - caddy_data:/data
       - caddy_config:/config
       - checkpoints:/srv/checkpoints:ro
