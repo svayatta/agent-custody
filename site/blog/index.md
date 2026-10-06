@@ -1,6 +1,6 @@
 ---
 title: Writing
-description: Short pieces on evidence for AI agents, each tied to something in the repository you can run.
+description: "Short pieces on evidence for AI agents, each tied to something in the repository you can run."
 ---
 
 # Writing

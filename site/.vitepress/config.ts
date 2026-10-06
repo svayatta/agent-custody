@@ -37,6 +37,7 @@ export default withMermaid(
       "site/contact.md": "contact.md",
       "site/custody.md": "custody.md",
       "site/faq.md": "faq.md",
+      "site/use-cases.md": "use-cases.md",
       "site/blog/:page": "blog/:page",
       "site/reference/:page": "reference/:page",
       "site/guide/:page": "guide/:page",
@@ -102,6 +103,7 @@ export default withMermaid(
         { text: "Start here", items: [
           { text: "What each piece is for", link: "/guide/pieces" },
           { text: "FAQ: where the data goes", link: "/faq" },
+          { text: "Use cases, with their policies", link: "/use-cases" },
           { text: "Getting started", link: "/guide/getting-started" },
           { text: "Deployment", link: "/guide/deployment" },
           { text: "This repository, under custody", link: "/custody" },
@@ -125,7 +127,7 @@ export default withMermaid(
         { text: "Hosted", items: [{ text: "Register", link: "https://app.agent-custody.dev/#register" }, { text: "Pricing", link: "/pricing" }, { text: "The hosted log", link: "/early-access" }, { text: "Security questionnaire", link: "/security" }, { text: "Privacy", link: "/privacy" }, { text: "Terms for early access", link: "/terms" }, { text: "Contact", link: "/contact" }] },
       ] },
       socialLinks: [{ icon: "github", link: "https://github.com/svayatta/agent-custody" }, { icon: "npm", link: "https://www.npmjs.com/org/agent-custody" }],
-      footer: { message: 'Apache-2.0 · <a href="https://github.com/svayatta/agent-custody">GitHub</a> · <a href="https://www.npmjs.com/org/agent-custody">npm</a> · <a href="https://pypi.org/project/agent-custody/">PyPI</a> · <a href="/reference/">Docs</a> · <a href="/faq">FAQ</a> · <a href="/blog/">Writing</a> · <a href="/security">Security</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/contact">Contact</a>', copyright: "Charioteer Consulting Ltd" },
+      footer: { message: 'Apache-2.0 · <a href="https://github.com/svayatta/agent-custody">GitHub</a> · <a href="https://www.npmjs.com/org/agent-custody">npm</a> · <a href="https://pypi.org/project/agent-custody/">PyPI</a> · <a href="/reference/">Docs</a> · <a href="/faq">FAQ</a> · <a href="/use-cases">Use cases</a> · <a href="/blog/">Writing</a> · <a href="/security">Security</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/contact">Contact</a>', copyright: "Charioteer Consulting Ltd" },
       search: { provider: "local" },
     },
     markdown: {

@@ -1,6 +1,6 @@
 ---
 title: Risk-tiered merges, with evidence
-description: Agents open more pull requests than humans can read. SOC 2 and ISO 27001 do not ask for a human on every change; they ask for evidence. Here is a merge gate that produces it.
+description: "Agents open more pull requests than humans can read. SOC 2 and ISO 27001 do not ask for a human on every change; they ask for evidence. Here is a merge gate that produces it."
 ---
 
 # Risk-tiered merges, with evidence
