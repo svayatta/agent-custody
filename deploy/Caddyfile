@@ -140,3 +140,7 @@
 	}
 	file_server
 }
+
+# Other sites on this host, each a file in deploy/sites.d (not in this repository), for example
+# tells.svayattaforge.com. No file there is no site, and no error.
+import /etc/caddy/sites.d/*.caddy
