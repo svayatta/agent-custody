@@ -143,6 +143,7 @@ when { context.args.path like "notes/*"
 
       <section id="for" class="block">
         <h2>Built for the calls that matter.</h2>
+        <p class="intro">Four of them below, each with something to run. Crypto wallets, exchanges and payment providers, e-commerce, and legal technology, each with its policy and what the receipt proves, are on the <a href="/use-cases">use cases page</a>.</p>
         <ul class="uses">
           <li><b>Payments and refunds</b><p>A support agent that can refund, within a limit, for a customer the gateway verified, with the authorization logged before the provider hears anything.</p><a href="/verify?sample=gateway-denied">The receipt on this page</a><a href="https://github.com/svayatta/agent-custody/blob/main/packages/receipts/examples/17-rest-upstream.ts">Example 17, a REST API as the upstream</a></li>
           <li><b>Agents that write code</b><p>Risk-tiered merges: low merges alone, medium needs a human the gateway can see, high is refused for any agent. The receipts are the change-management evidence SOC 2 and ISO 27001 ask for.</p><a href="/blog/risk-tiered-merges-with-evidence">How it works</a><a href="https://github.com/svayatta/agent-custody/blob/main/packages/receipts/examples/24-agentic-cicd-merge-gate.ts">Example 24, the merge gate</a></li>
@@ -225,7 +226,7 @@ npx agent-custody verify receipts/&lt;id&gt;.json \
     </main>
 
     <footer>
-      <ul class="flinks"><li><a href="https://github.com/svayatta/agent-custody">GitHub</a></li><li><a href="https://www.npmjs.com/org/agent-custody">npm</a></li><li><a href="https://pypi.org/project/agent-custody/">PyPI</a></li><li><a href="/reference/">Reference</a></li><li><a href="/faq">FAQ</a></li><li><a href="/blog/">Writing</a></li><li><a href="/pricing">Pricing</a></li><li><a href="/security">Security</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li><li><a href="/contact">Contact</a></li></ul>
+      <ul class="flinks"><li><a href="https://github.com/svayatta/agent-custody">GitHub</a></li><li><a href="https://www.npmjs.com/org/agent-custody">npm</a></li><li><a href="https://pypi.org/project/agent-custody/">PyPI</a></li><li><a href="/reference/">Reference</a></li><li><a href="/faq">FAQ</a></li><li><a href="/use-cases">Use cases</a></li><li><a href="/blog/">Writing</a></li><li><a href="/pricing">Pricing</a></li><li><a href="/security">Security</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li><li><a href="/contact">Contact</a></li></ul>
       <p>Apache-2.0. Charioteer Consulting Ltd, {{ year }}.</p>
     </footer>
   </div>

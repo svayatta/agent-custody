@@ -1,6 +1,6 @@
 ---
 title: Logs are claims. Receipts are evidence.
-description: Why an agent's audit trail cannot be the agent's own log, and what a record has to carry before a stranger can rely on it.
+description: "Why an agent's audit trail cannot be the agent's own log, and what a record has to carry before a stranger can rely on it."
 ---
 
 # Logs are claims. Receipts are evidence.
