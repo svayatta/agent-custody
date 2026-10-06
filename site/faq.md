@@ -53,6 +53,18 @@ Yes, in the way SOC 2 and ISO 27001 allow. Neither standard says a human must re
 
 Yes. Set `"mode": "observe"` in the gateway or SDK config. Every call the grant allows goes through, and each receipt records the decision the policy would have made, marked `enforced: false`. You run it against real traffic, read the receipts that say "would have been denied", fix the policy, and switch to enforce. The verifier accepts an observe-mode receipt and says so in its report; a receipt that claims a deny was enforced beside a call that ran fails verification, so the mode cannot be hidden after the fact.
 
+## Why trust the enforcer?
+
+Three reasons, none of them "trust us". The gateway and the verifier are open source under Apache-2.0; read them. Policies are Cedar, the authorization language AWS built and formally verified, evaluated by its own engine; we do not interpret policies ourselves. And every receipt carries the SHA-256 of the policy text that decided it, so a verifier knows exactly which rules were in force, and the receipt format is published with 29 conformance vectors any second implementation must pass. The verifier's report also says what a receipt does not prove: an SDK receipt is the agent's own word, tamper-evident after issue, and the report prints that sentence.
+
+## How fast is it?
+
+Medians measured on an Apple-silicon laptop under Node 22, with [the script in the repository](https://github.com/svayatta/agent-custody/blob/main/packages/receipts/scripts/bench.ts), 6 October 2026: a policy decision 0.10 ms; a full gateway call, including the fact lookup, the decision, a stand-in upstream on the same machine, and the receipt signed and logged, 0.52 ms; verifying a receipt 0.14 ms. A receipt is about 5.7 KB of JSON; the hosted log receives 32 bytes of it. Your network adds whatever it adds, and the hosted log is on the path only for consequential calls, where a refusal withholds the call rather than losing the evidence.
+
+## What stays private?
+
+The receipt, which holds the arguments and the result, never leaves your machines unless you send it. The hosted log holds a hash per receipt and refuses anything more. The policy text stays with you; the log sees its digest, and you choose whether to publish named versions. A verifier you hand a receipt to sees everything in that receipt and nothing else: there is no account, no query to us, and no other tenant's data in the proof.
+
 ## Does the gateway call any AI service?
 
 No. Policy evaluation is Cedar, evaluated in the gateway's process. The only network calls it makes are the ones you configure: to your own tools, to the log you name, and to the exporters you turn on. It runs offline against local tools and a local log file.
