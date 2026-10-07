@@ -256,11 +256,6 @@ npx agent-custody verify receipts/&lt;id&gt;.json \
   --vp-c-bg: var(--ground); --vp-c-bg-soft: #eaeee7; --vp-c-divider: var(--rule); --vp-c-text-1: var(--ink); --vp-c-text-2: var(--ink-2); --vp-c-text-3: var(--rule-strong);
   min-height: 100vh; background: var(--ground); color: var(--ink); font-family: var(--sans); font-variation-settings: "wdth" 100; line-height: 1.55; font-variant-numeric: tabular-nums;
 }
-:global(.dark) .landing {
-  --ground: #0f1416; --rule: #27313a; --rule-strong: #4d5a66; --ink: #e8edf0; --ink-2: #9aa8b3; --paper: #171d22; --paper-ink: #e8edf0;
-  --amber: #f59e0b; --amber-ink: #1a1200; --deny: #ff8a80; --allow: #6fd39a; --term: #0a0e11; --term-ink: #dbe3e8;
-  --vp-c-bg: var(--ground); --vp-c-bg-soft: #161c21; --vp-c-divider: var(--rule); --vp-c-text-1: var(--ink); --vp-c-text-2: var(--ink-2); --vp-c-text-3: var(--rule-strong);
-}
 .landing a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--rule-strong); text-underline-offset: .2em; }
 .landing a:hover { text-decoration-color: var(--ink); }
 .landing :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
@@ -298,7 +293,6 @@ h1 { font-size: clamp(2.2rem, 5.4vw, 3.6rem); font-weight: 600; font-variation-s
 .slip-foot a { color: var(--paper-ink); font-weight: 500; } .slip-foot span { color: var(--ink-2); }
 .stamp { position: absolute; top: 1.3rem; right: 1.2rem; padding: .25rem .6rem; border: 3px double currentColor; border-radius: 4px; font-family: var(--mono); font-weight: 600; font-size: 1.25rem; letter-spacing: .16em; text-transform: uppercase; color: var(--deny); transform: rotate(-11deg); opacity: .85; mix-blend-mode: multiply; animation: stamp 420ms cubic-bezier(.2, .9, .3, 1.2) 1 both; }
 .stamp[data-d="allow"] { color: var(--allow); }
-:global(.dark) .landing .stamp { mix-blend-mode: normal; }
 @keyframes stamp { from { transform: rotate(-11deg) scale(1.35); opacity: 0; } to { transform: rotate(-11deg) scale(1); opacity: .85; } }
 @media (prefers-reduced-motion: reduce) { .stamp { animation: none; } }
 
@@ -360,4 +354,16 @@ footer { max-width: 76rem; margin: 0 auto; padding: 1.4rem 1.5rem 3rem; border-t
   .ledger > div, .rule { grid-template-columns: 1fr; gap: .4rem; } .steps { grid-template-columns: 1fr; }
   .slip dl { grid-template-columns: 1fr; gap: .1rem; } .slip dt { margin-top: .45rem; } .slip-head { padding-right: 7.5rem; } .stamp { top: 1.2rem; right: .8rem; font-size: 1.05rem; }
 }
+</style>
+
+<style>
+/* Dark tokens live outside the scoped block: Vue's scoped compiler collapses `:global(.dark) .landing` to `.dark`, which
+   sets the variables on the root where the scoped light values on .landing override them. html.dark .landing outranks
+   .landing[data-v]. */
+html.dark .landing {
+  --ground: #0f1416; --rule: #27313a; --rule-strong: #4d5a66; --ink: #e8edf0; --ink-2: #9aa8b3; --paper: #171d22; --paper-ink: #e8edf0;
+  --amber: #f59e0b; --amber-ink: #1a1200; --deny: #ff8a80; --allow: #6fd39a; --term: #0a0e11; --term-ink: #dbe3e8;
+  --vp-c-bg: var(--ground); --vp-c-bg-soft: #161c21; --vp-c-divider: var(--rule); --vp-c-text-1: var(--ink); --vp-c-text-2: var(--ink-2); --vp-c-text-3: var(--rule-strong);
+}
+html.dark .landing .stamp { mix-blend-mode: normal; }
 </style>
