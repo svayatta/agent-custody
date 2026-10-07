@@ -92,8 +92,8 @@ onBeforeUnmount(stop);
 
 <style scoped>
 .demo { margin: 0 0 3rem; }
-.demo figcaption { display: flex; justify-content: space-between; align-items: center; gap: 1rem; font-size: .82rem; letter-spacing: .06em; text-transform: uppercase; color: var(--vp-c-text-2); margin: 0 0 .6rem; }
-.demo button { font: inherit; letter-spacing: inherit; text-transform: inherit; padding: .25rem .7rem; border: 1px solid var(--vp-c-divider); border-radius: 5px; background: transparent; color: var(--vp-c-text-1); cursor: pointer; }
+.demo figcaption { display: flex; justify-content: space-between; align-items: center; gap: 1rem; font-size: .86rem; color: var(--vp-c-text-2); margin: 0 0 .6rem; }
+.demo button { font: inherit; padding: .25rem .7rem; border: 1px solid var(--vp-c-divider); border-radius: 3px; background: transparent; color: var(--vp-c-text-1); cursor: pointer; }
 .demo button:hover { border-color: var(--vp-c-text-2); }
 .demo pre { margin: 0; padding: 1rem 1.2rem; min-height: 22rem; background: var(--vp-c-bg-soft); border: 1px solid var(--vp-c-divider); border-radius: 8px; overflow-x: auto; font-family: var(--vp-font-family-mono); font-size: .8rem; line-height: 1.55; color: var(--vp-c-text-1); }
 .demo code { font: inherit; background: none; padding: 0; white-space: pre; }

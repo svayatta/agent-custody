@@ -22,7 +22,7 @@
       <path d="M430 177 H590" class="edge" marker-end="url(#ah)" /><text x="510" y="170" class="lbl">only if permitted</text>
       <!-- row two: receipt, log, checkpoints, verifier -->
       <path d="M340 224 V262" class="edge" marker-end="url(#ah)" /><text x="348" y="248" class="lbl" text-anchor="start">one per call, allowed or denied</text>
-      <g class="node receipt"><rect x="250" y="262" width="180" height="50" rx="6" /><text x="340" y="284">Signed receipt</text><text x="340" y="302" class="sub">who · what · saw · did · depended</text></g>
+      <g class="node receipt"><rect x="250" y="262" width="180" height="50" rx="6" /><text x="340" y="284">Signed receipt</text><text x="340" y="302" class="sub">who, what, saw, did, depended</text></g>
       <path d="M430 287 H510" class="edge" marker-end="url(#ah)" /><text x="470" y="280" class="lbl">hash</text>
       <g class="node"><rect x="510" y="262" width="110" height="50" rx="6" /><text x="565" y="284">Merkle log</text><text x="565" y="302" class="sub">signed heads</text></g>
       <path d="M620 287 H660" class="edge" marker-end="url(#ah)" />
