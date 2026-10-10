@@ -2,7 +2,7 @@
 
 ```bash
 pip install agent-custody            # the sidecar client and the memory client
-pip install "agent-custody[langchain]"  # plus one adapter: langchain, openai-agents, crewai, claude-agent-sdk
+pip install "agent-custody[langchain]"  # plus one adapter: langchain, openai-agents, crewai, claude-agent-sdk, adk
 ```
 
 Python 3.10 or later. The package talks to the [sidecar](./sidecar) for receipts and to the memory server over MCP for beliefs; it holds no key and signs nothing itself.
@@ -40,6 +40,7 @@ except PolicyDeniedError as e:
 | `agent_custody.crewai` | `wrap_tools(client, tools)` | enforce: one `CustodyTool` per tool, same name, description, and schema; `_run` decides, runs, records; a denial is returned as `Denied by policy: … (receipt …)` |
 | `agent_custody.claude_agent_sdk` | `claude_hook(client)` | the async hook callable `(input_data, tool_use_id, context) -> dict` for the Claude Agent SDK; `handle_hook_event(client, input_data)` is the same for any host that passes the hook JSON. Same semantics as [Claude Code](./claude-code) |
 | `agent_custody.hermes` | `hermes_hooks(client)` → `{"pre_tool_call", "post_tool_call"}` | Hermes Agent plugin hooks: `pre_tool_call(tool_name, args, task_id, **kwargs)` returns `{"action": "block", "message": "agent-custody: … (receipt …)"}` on a policy deny after recording the denial, `None` otherwise; `post_tool_call(tool_name, args, result, task_id, duration_ms, **kwargs)` records the call. `register_hermes(ctx, client)` registers both with `ctx.register_hook`; `register(ctx)` is the plugin entry, reading `sidecar_url` from the plugin's settings |
+| `agent_custody.adk` | `adk_callbacks(client)` → `{"before_tool_callback", "after_tool_callback"}` | Google ADK callbacks, for `LlmAgent(..., **adk_callbacks(client))`: `before_tool_callback(tool, args, tool_context)` returns `{"error": "agent-custody: … (receipt …)", "agent-custody/receipt": "…"}` on an enforced policy deny after recording the denial, which skips the tool and shows the model the receipt, `None` otherwise; `after_tool_callback(tool, args, tool_context, tool_response)` records the executed call (the response as JSON when it is JSON, else as text) and returns `None`, skipping the denial dict it recognises. The session is ADK's `invocation_id` and `function_call_id`. Extra `adk` (`google-adk[a2a]`). Delegations over A2A are not tool calls; the gateway's `--a2a` front covers them |
 
 ## `MemoryClient`
 

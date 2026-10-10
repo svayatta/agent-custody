@@ -10,6 +10,7 @@ Two commands, one per package. Both run on plain Node 22 or later. Exit code 0 o
 | `grant --key <principal.key> --principal <id> --agent <id> --scopes <a,b> [--ttl-hours 24] [--agent-key <agent.pub>] --out <file>` | a signed delegation | [gateway](./gateway#grants) |
 | `delegate --key <agent.key> --parent <grant.json> --agent <sub> --scopes <a,b> [--ttl-hours N] [--agent-key <sub.pub>] --out <file>` | a narrower grant for a sub-agent | [gateway](./gateway#delegation-chains) |
 | `gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]` | the gateway over stdio, or shared over HTTP | [gateway](./gateway#running-it) |
+| `gateway --config <gateway.json> --a2a [--port 8790] [--host 127.0.0.1]` | the gateway as an A2A agent in front of the config's one `a2a` upstream | [gateway](./gateway#running-it) |
 | `hook [--config <sdk.json>]` | the Claude Code hook; the event on stdin | [Claude Code](./claude-code) |
 | `serve --config <sdk.json> [--port 8788] [--host 127.0.0.1]` | the sidecar | [sidecar](./sidecar) |
 | `verify <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--log-key <pub> \| --log-url <url>] [--log-id <id>] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--json]` | checks one receipt | [verify](./verify#verify) |

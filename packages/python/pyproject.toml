@@ -1,6 +1,6 @@
 [project]
 name = "agent-custody"
-version = "0.6.18"
+version = "0.6.19"
 description = "Signed, verifiable receipts for AI agent tool calls, from Python, through the agent-custody sidecar"
 readme = "README.md"
 license = "Apache-2.0"
@@ -12,7 +12,8 @@ langchain = ["langchain-core>=0.3"]
 openai-agents = ["openai-agents>=0.1"]
 crewai = ["crewai>=1.0"]
 memory = ["mcp>=1.0"]
-test = ["pytest>=8", "langchain-core>=0.3", "openai-agents>=0.1", "crewai>=1.0", "mcp>=1.0"]
+adk = ["google-adk[a2a]>=2.0"]
+test = ["pytest>=8", "langchain-core>=0.3", "openai-agents>=0.1", "crewai>=1.0", "mcp>=1.0", "google-adk[a2a]>=2.0"]
 
 [build-system]
 requires = ["hatchling"]

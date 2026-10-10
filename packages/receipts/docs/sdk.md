@@ -180,6 +180,22 @@ The harness also ships `@deepseek-ai/dsh-hooks-claude-code`, a bridge that runs 
 
 [packages/python/agent_custody/hermes.py](../../python/agent_custody/hermes.py), through the sidecar like every Python adapter. Hermes runs Python plugins in the agent's process and fires `pre_tool_call(tool_name, args, task_id, **kwargs)`, which may return `{"action": "block", "message": …}`, and `post_tool_call(tool_name, args, result, task_id, duration_ms, **kwargs)`. The plugin is the directory [packages/python/hermes-plugin](../../python/hermes-plugin/): a `plugin.yaml` declaring both hooks and a `sidecar_url` setting, and an `__init__.py` that is one line, `from agent_custody.hermes import register`. Copy it to `~/.hermes/plugins/agent-custody/`, `pip install agent-custody`, start the sidecar, `hermes plugins enable agent-custody`. A denied call is blocked before it runs with the receipt id in the message; an allowed one gets no action, so Hermes's own guardrails and approvals still apply; every completed call is recorded with the Hermes `task_id` as the receipt's session. `hermes_hooks(client)` returns the two callables; `register_hermes(ctx, client)` registers them on a plugin context.
 
+## Google ADK
+
+[packages/python/agent_custody/adk.py](../../python/agent_custody/adk.py), through the sidecar like every Python adapter. ADK runs `before_tool_callback(tool, args, tool_context)` before every tool call, and a dict returned there skips the tool and becomes its result; `after_tool_callback(tool, args, tool_context, tool_response)` runs after the tool and may replace the response. `adk_callbacks(client)` returns both, keyed by the `LlmAgent` fields they go in:
+
+```python
+from google.adk.agents import LlmAgent
+from agent_custody import Client
+from agent_custody.adk import adk_callbacks
+
+agent = LlmAgent(name="billing", model="gemini-2.5-flash", tools=[...], **adk_callbacks(Client()))
+```
+
+`pip install "agent-custody[adk]"` brings in `google-adk[a2a]`. The before callback evaluates the policy: on an enforced deny it records the denial receipt and returns `{"error": "agent-custody: <reason> (receipt <id>)", "agent-custody/receipt": "<id>"}`, so ADK skips the tool and the model sees the receipt as the tool's result; on allow, or with no policy, it returns `None` and the tool runs. If the denial receipt cannot be recorded the call is still skipped. The after callback records the executed call, the result as JSON when it is JSON and as text otherwise, and returns `None`, leaving the response as it was; it recognises the denial dict by its receipt key and does not record it a second time. ADK's `invocation_id` and `function_call_id` are the receipt's session. In observe mode a deny is recorded and the tool runs, as with every adapter. Tested in `tests/test_adk.py` against ADK's own runner with a scripted model and a tool named `stripe.refund`.
+
+A delegation an ADK agent makes to another agent over A2A, through `RemoteA2aAgent`, is not a tool call and does not pass through these callbacks. Point the `RemoteA2aAgent` at the gateway's A2A front instead, `agent-custody gateway --a2a`, in [usage.md](usage.md#the-gateway-as-an-a2a-agent): every delegation is then a receipted, policy-checked call, and a refused one never reaches the remote agent. `tests/test_adk_a2a.py` runs that with ADK's own `to_a2a` on the remote side.
+
 ## Any other framework: wrap the function
 
 Every agent framework ends up calling a function. Wrap it.
@@ -220,6 +236,7 @@ const bundle = await issuer.record({ tool, args, model, session }, { status: "ex
 | OpenAI Agents SDK | `wrapTools` | `observeRunner` |
 | Vercel AI SDK | `wrapTools` | wrap with a policy-less issuer |
 | LangChain / LangGraph | `tool(issuer.wrap(...))` | `ReceiptCallbackHandler` |
+| Google ADK (Python) | `adk_callbacks`: `before_tool_callback` skips the tool | `after_tool_callback` |
 | anything else | `issuer.wrap` | `issuer.record` |
 
 Record-only adapters evaluate no policy on purpose. A receipt that said "policy: deny" next to "execution: executed" would fail verification, and the verifier would be right: that is not a receipt, that is a finding. Enforce, or observe, but do not pretend.

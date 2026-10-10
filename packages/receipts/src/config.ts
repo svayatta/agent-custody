@@ -36,10 +36,25 @@ const RestUpstreamSchema = z.object({
 });
 export type RestUpstreamConfig = z.infer<typeof RestUpstreamSchema>;
 
+/** Another agent, reached over the A2A protocol, as an upstream. Its agent card is fetched at startup; the gateway offers `<prefix>.send`, which delegates a task to it, and `<prefix>.card`, a read of the card for use as a fact. */
+const A2aUpstreamSchema = z.object({
+  /** the agent's base URL (its card is at /.well-known/agent-card.json) or the card's URL itself */
+  url: z.string().url(),
+  headers: z.record(z.string(), z.string()).optional(),
+  /** header name to environment variable, as for a REST upstream */
+  headerEnv: z.record(z.string(), z.string().min(1)).optional(),
+  /** how long one delegated task may take, streamed or not; default two minutes */
+  timeoutMs: z.number().int().positive().default(120_000),
+  /** the tool names are `<prefix>.send` and `<prefix>.card`; default "a2a". Give each A2A upstream its own prefix. */
+  prefix: z.string().min(1).regex(/^[A-Za-z0-9_-]+$/).default("a2a"),
+});
+export type A2aUpstreamConfig = z.infer<typeof A2aUpstreamSchema>;
+
 const UpstreamSchema = z.union([
   z.object({ command: z.string(), args: z.array(z.string()).default([]), env: z.record(z.string(), z.string()).optional() }),
   z.object({ url: z.string().url(), tokenEnv: z.string().min(1).optional() }),
   z.object({ rest: RestUpstreamSchema }),
+  z.object({ a2a: A2aUpstreamSchema }),
 ]);
 export type UpstreamConfig = z.infer<typeof UpstreamSchema>;
 

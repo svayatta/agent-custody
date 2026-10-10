@@ -3,10 +3,12 @@
 import json
 import re
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 from agent_custody import Client, denies
 from agent_custody.claude_agent_sdk import handle_hook_event
+from agent_custody.adk import adk_callbacks
 from agent_custody.hermes import hermes_hooks
 from conftest import POLICY, RECEIPTS, receipt_count, verify
 
@@ -35,6 +37,7 @@ def test_observe_mode_records_the_deny_and_never_blocks(observe_sidecar):
     assert out == "refunded" and ran == [{"amount": 999999}]
     assert handle_hook_event(client, {"hook_event_name": "PreToolUse", "tool_name": "stripe.refund", "tool_input": {"amount": 999999}}) == {}
     assert hermes_hooks(client)["pre_tool_call"]("stripe.refund", {"amount": 999999}, "t1") is None
+    assert adk_callbacks(client)["before_tool_callback"](SimpleNamespace(name="stripe.refund"), {"amount": 999999}, SimpleNamespace(invocation_id="i1", function_call_id="c1")) is None
     # the receipt the wrap wrote says deny, not enforced, executed, and the reference verifier accepts it
     assert receipt_count(observe_sidecar) >= 1
     rid = sorted(observe_sidecar["receipts"].glob("*.json"))[0].stem
