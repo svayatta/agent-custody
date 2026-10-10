@@ -16,6 +16,7 @@ import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
+import { a2aUpstream } from "./a2a.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
 
@@ -131,6 +132,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     let client: UpstreamClient;
     if ("rest" in u) {
       client = restUpstream(name, u.rest);
+    } else if ("a2a" in u) {
+      client = a2aUpstream(name, u.a2a);
     } else if ("url" in u) {
       client = new Client({ name: "agent-custody-gateway", version: GATEWAY_VERSION });
       const token = u.tokenEnv ? process.env[u.tokenEnv] : undefined;

@@ -4,15 +4,15 @@ Chain of custody for AI agents: a signed receipt for every tool call, checkable 
 
 Two producers, one receipt format, one verifier.
 
-- **The gateway** is an MCP proxy between an agent and the systems it can affect. For every tool call, allowed or denied, it checks a delegation grant signed by the human principal, gathers the facts the policy needs by calling upstream itself, evaluates a Cedar policy that fails closed, forwards the call only on allow, and emits a signed receipt appended to a Merkle transparency log.
-- **The SDK** is an interceptor inside the agent's own process, hooked into the framework's tool-call callbacks: Claude Code, the Claude Agent SDK, the OpenAI Agents SDK, the Vercel AI SDK, OpenClaw, DeepSeek Harness, Hermes, LangChain, or any function you wrap. It reaches everything the gateway cannot see and issues the same receipts, labelled as self-reported.
+- **The gateway** is an MCP proxy between an agent and the systems it can affect: MCP servers, REST APIs described as tools, and other agents it delegates to over A2A. For every tool call, allowed or denied, it checks a delegation grant signed by the human principal, gathers the facts the policy needs by calling upstream itself, evaluates a Cedar policy that fails closed, forwards the call only on allow, and emits a signed receipt appended to a Merkle transparency log.
+- **The SDK** is an interceptor inside the agent's own process, hooked into the framework's tool-call callbacks: Claude Code, the Claude Agent SDK, the OpenAI Agents SDK, the Vercel AI SDK, OpenClaw, DeepSeek Harness, Hermes, Google ADK, LangChain, or any function you wrap. It reaches everything the gateway cannot see and issues the same receipts, labelled as self-reported.
 
 Anyone holding the public keys can verify a receipt offline. The agent is not trusted. The layer around it is, and the receipt says exactly how far that trust extends, starting with who issued it.
 
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
-- [Tutorials](docs/tutorials.md): twenty runnable examples, one per aspect of the code, all executed by the test suite
-- [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop
-- [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin through the Python package, and wrapping tool functions in anything else
+- [Tutorials](docs/tutorials.md): twenty-five runnable examples, one per aspect of the code, all executed by the test suite
+- [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop, and the gateway as an A2A agent between agents that delegate to each other
+- [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin and Google ADK callbacks through the Python package, and wrapping tool functions in anything else
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
 - [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, the EU AI Act, and UK GDPR, with what none of them claims
@@ -47,7 +47,7 @@ const bundle = JSON.parse(readFileSync("receipts/<id>.json", "utf8"));
 verifyBundle(bundle, { issuerKeys: [loadPublicKey("keys/app.pub")], logFile: "log.jsonl" }).ok;   // true
 ```
 
-Framework hooks and adapters, including Claude Code, the OpenAI Agents SDK, the Vercel AI SDK, LangChain, OpenClaw, DeepSeek Harness and Hermes, are in [docs/sdk.md](docs/sdk.md). To enforce rather than record, put the gateway between the agent and its tools: `npx agent-custody gateway --config gateway.json`, set up in [docs/usage.md](docs/usage.md). The gateway is listed in the [MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.svayatta/agent-custody`; its entry is [server.json](server.json), published after each npm release by running the `mcp-registry` workflow from the Actions tab (GitHub OIDC, no token).
+Framework hooks and adapters, including Claude Code, the OpenAI Agents SDK, the Vercel AI SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes and Google ADK, are in [docs/sdk.md](docs/sdk.md). To enforce rather than record, put the gateway between the agent and its tools: `npx agent-custody gateway --config gateway.json`, set up in [docs/usage.md](docs/usage.md); between an agent and the agents it delegates to over A2A, `--a2a` serves the gateway as an A2A agent itself. The gateway is listed in the [MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.svayatta/agent-custody`; its entry is [server.json](server.json), published after each npm release by running the `mcp-registry` workflow from the Actions tab (GitHub OIDC, no token).
 
 ## How it fits together
 
@@ -110,11 +110,13 @@ Every receipt names its issuer, and the verifier prints what that issuer kind is
 | OpenClaw | SDK | `registerOpenClaw` / `openclawHooks`: `before_tool_call` deny | `after_tool_call` | OpenClaw's documented hook contract, in the plugin's process |
 | DeepSeek Harness | SDK | the module is the plugin: `tools/pre-execute` deny | `tools/post-execute` | the harness's tool waterfall types, driven as the harness drives them |
 | Hermes Agent | sidecar + [Python package](../python/README.md) | `agent_custody.hermes`: `pre_tool_call` block | `post_tool_call` | the documented hook contract, against a live sidecar |
+| Google ADK | sidecar + [Python package](../python/README.md) | `adk_callbacks`: `before_tool_callback` skips | `after_tool_callback` | the real package, ADK's runner with a scripted model |
 | anything else | SDK | `issuer.wrap(name, fn)` | `issuer.record` | plain functions |
 | Python: LangChain, OpenAI Agents SDK, CrewAI, Claude Agent SDK | sidecar + [Python package](../python/README.md) | `wrap_tools` (OpenAI Agents, CrewAI), `claude_hook` PreToolUse deny, `client.wrap` | `ReceiptCallbackHandler` | the real Python packages, receipts checked by this verifier |
 | Go, Java, Rust, any language with HTTP | sidecar | decide then record | record | [examples/languages](examples/languages), each run against a live sidecar |
 | any MCP host in any language: Claude Agent SDK Python, OpenAI Agents Python | gateway | yes | | the gateway is an MCP server; [usage.md](docs/usage.md#python-hosts) |
 | any REST API, as tools the agent reaches through the gateway | gateway, `rest` upstream | yes | | a stand-in HTTP API; [usage.md](docs/usage.md#setup-step-by-step) |
+| any agent reached over A2A (Google ADK `RemoteA2aAgent`, or any A2A client) | gateway, `a2a` upstream and `gateway --a2a` | yes | | stand-in A2A agents in both wire formats; ADK's own `to_a2a` and `RemoteA2aAgent` in the Python suite; [usage.md](docs/usage.md#the-gateway-as-an-a2a-agent) |
 
 The framework packages are optional peer dependencies. Each adapter imports only from its own package.
 
@@ -179,7 +181,7 @@ Every field carries a provenance label. This is the design decision that matters
 bun install                              # from the repository root, once for the workspace
 cd packages/receipts
 node scripts/demo.ts                     # gateway: keys, grant, policy, four tool calls, verification, a tampering attempt; then the SDK wrapping the same tool
-node examples/01-keys-and-signing.ts     # first of eighteen step-by-step examples, see docs/tutorials.md
+node examples/01-keys-and-signing.ts     # first of twenty-five step-by-step examples, see docs/tutorials.md
 bun run test                             # this package; `bun run test` at the root runs every package
 ```
 
@@ -252,6 +254,7 @@ src/sidecar.ts     the SDK issuer behind a local HTTP API, for agents in other l
 src/otel.ts        OpenTelemetry export: one OTLP/HTTP span per receipt, after the receipt, no SDK dependency
 src/splunk.ts      Splunk export: one HTTP Event Collector event per receipt, token from the environment, beside or instead of otel
 src/rest.ts        the REST connector: an HTTP API described as tools, standing where an MCP upstream stands
+src/a2a.ts         agents delegating to agents: a remote A2A agent as an upstream, and the gateway serving A2A itself in front of it
 src/upstream.ts    attested execution: an upstream signs its result for the receipt; the verifier checks it with the upstream key
 vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them
 src/verify.ts      offline verification, the human-readable report, and the audit that a later log extends an earlier one
@@ -260,7 +263,7 @@ src/retention.ts   pruning the log: leaves become their hashes, bundles are remo
 src/index.ts       the package's public surface; adapters are exported on ./sdk/<framework> subpaths
 tsconfig.build.json  emits dist/ (JavaScript plus declarations) for consumers; the repo itself runs the .ts directly
 scripts/           fake Stripe upstream (signs its results with --key), a second fake upstream, fixture builders for gateway and SDK, demo
-examples/          eighteen runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
+examples/          twenty-five runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
 test/              unit tests per module, end-to-end gateway test, SDK and hook tests,
                    adapter tests against the real packages, and a test that runs every policy in docs/policies.md
 docs/              tutorials, usage (gateway), sdk, policies, verification
@@ -306,12 +309,13 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 - Splunk export: with `splunk` in either config, every receipt is also one event at the HTTP Event Collector, with the receipt id, tool, agent, principal, status, decision, and log position as searchable fields and the token from the environment; the same best-effort rule.
 - The REST connector: a plain HTTP API described as tools in the gateway config, credentials from the environment, so an agent's direct API calls become receipted, policy-checked tool calls through the gateway.
 - Pre-commit authorization for consequential tools: named in `precommit`, a call is signed and logged before it is forwarded, withheld if the log will not take it, and its receipt carries the committed authorization with proof that it precedes the execution.
+- Agent-to-agent delegation under custody: the A2A upstream and the gateway's A2A front; receipts per delegation with the delegate's card as a fact. A Google ADK `RemoteA2aAgent`, or any A2A client, is pointed at the gateway and a refused delegation comes back as a rejected task the delegate never saw. The delegate does not yet countersign its answer; the receipt attests what the gateway sent and observed, not what the delegate did with it.
 
 **Next, in the order it pays off**
 
 1. Run the witness for log.agent-custody.dev on a machine and under an account that is not ours, and require it in the welcome sheet. The code is done; what it needs is a second operator. [Issue #6](https://github.com/svayatta/agent-custody/issues/6).
 2. Post-quantum signatures: ML-DSA beside Ed25519 in the same DSSE envelope, hybrid by default when a PQ key is present, in every signed artefact and in the browser verifier. [Issue #11](https://github.com/svayatta/agent-custody/issues/11).
-3. Receiver-attested receipts for agent-to-agent calls.
+3. Receiver attestation for agent-to-agent calls: the delegate signs its answer for the receipt, as a signing upstream does today.
 4. A TEE-hosted signer, then SD-JWT redaction, then ZK proofs of policy compliance. Not before.
 
 A Python SDK follows the same shape once the TypeScript adapters have settled.

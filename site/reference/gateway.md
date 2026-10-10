@@ -27,7 +27,7 @@ A separate process between the agent and its tools. The agent connects to it as 
 | field | type | meaning |
 | --- | --- | --- |
 | `identity.keyFile` | path | the gateway's Ed25519 private key; signs every receipt. From `agent-custody keygen` |
-| `upstream` | one of three shapes | `{ command, args?, env? }` spawns an MCP server over stdio; `{ url, tokenEnv? }` connects to an MCP server over Streamable HTTP with a bearer token from the environment; `{ rest: {...} }` describes a plain HTTP API as tools, below |
+| `upstream` | one of four shapes | `{ command, args?, env? }` spawns an MCP server over stdio; `{ url, tokenEnv? }` connects to an MCP server over Streamable HTTP with a bearer token from the environment; `{ rest: {...} }` describes a plain HTTP API as tools; `{ a2a: {...} }` is another agent reached over the A2A protocol, both below |
 | `upstreams` | array of the above, each with `name` | several upstreams behind one gateway; each tool name must belong to exactly one, checked at startup. Exactly one of `upstream` or `upstreams` |
 | `grantFile` | path, *optional* | the signed delegation the stdio gateway serves. Not needed over HTTP, where each connection presents its own |
 | `trustedPrincipalKeys` | paths | public keys of principals whose grants are accepted; matched by keyid |
@@ -57,6 +57,27 @@ A separate process between the agent and its tools. The agent connects to it as 
 ```
 
 `{name}` segments in `path` are filled from the call's arguments; the remaining arguments go to the query string on GET and DELETE and to a JSON body otherwise, or `query` names the ones for the query and `body: "none"` sends no body. The response body is the tool result, JSON kept as JSON; a non-2xx status is a failed execution with the API's answer in the receipt.
+
+### An A2A agent as an upstream
+
+```json
+{ "a2a": {
+  "url": "https://docs-agent.internal",
+  "headerEnv": { "authorization": "DOCS_AGENT_BEARER" },
+  "headers": { "accept": "application/json" },
+  "timeoutMs": 120000,
+  "prefix": "docs"
+} }
+```
+
+`url` is the agent's base URL, whose card the gateway fetches at startup from `/.well-known/agent-card.json` or `/.well-known/agent.json`, or the card's own URL when it ends in `.json`. `headers` and `headerEnv` are as for a REST upstream; `timeoutMs` is how long one delegated task may take, streamed or not, default 120000; `prefix` names the tools, default `a2a`, one per A2A upstream. The card decides the wire format: A2A 1.0 (`supportedInterfaces`, `SendMessage`, `ROLE_USER`) or 0.3 (`url`, `message/send`, `kind`). The upstream offers two tools:
+
+| tool | arguments | result |
+| --- | --- | --- |
+| `<prefix>.send` | `text` (the task; the gateway builds the message) or `message` (a full A2A message, forwarded as is); optional `taskId`, `contextId`, `configuration`, `metadata` | the agent's task or message, as JSON text. A streamed delegation is relayed after the agent finishes, the events in `_meta["agent-custody/a2a-stream"]` and the final task as the result; a JSON-RPC error from the agent is `isError: true` with the error, recorded as `failed` |
+| `<prefix>.card` | none | the agent card, fetched afresh; name it in `facts` (`{ "name": "card", "tool": "docs.card", "args": {}, "forTools": ["docs.send"] }`) so a policy reads `context.facts.card.name` |
+
+Programmatically: `a2aUpstream(name, cfg, { fetch?, env? })` returns the upstream client with `resolved(): Promise<ResolvedCard>`; `fetchAgentCard(url, headers, fetch, timeoutMs): Promise<{ card, cardUrl, endpoint, legacy }>` is the lookup it uses; `textOf(message)` joins a message's text parts, which is what a policy reads as `context.args.text`.
 
 ## Grants
 
@@ -117,6 +138,36 @@ new StreamableHTTPClientTransport(new URL(running.url), { requestInit: { headers
 ```
 
 `host.open(grantEnvelope): Gateway` opens a session by hand; `createGateway(cfg): Promise<Gateway>` is the single-grant form. A `Gateway` has `agentId`, `delegation`, `listTools(): Promise<Tool[]>`, `handleCall({ name, arguments, _meta? }): Promise<CallToolResult>`, and `close()`.
+
+**As an A2A agent.** The gateway speaks A2A itself in front of the config's one `a2a` upstream (exactly one is required, or the command refuses to start). An A2A client, Google ADK's `RemoteA2aAgent` for one, is given the gateway's card URL instead of the remote agent's.
+
+```bash
+agent-custody gateway --config gateway.json --a2a --port 8790 --host 127.0.0.1
+```
+
+| route | meaning |
+| --- | --- |
+| `GET /.well-known/agent-card.json`, `GET /.well-known/agent.json` | the remote agent's card with the gateway's own address as its endpoint (`supportedInterfaces[0].url` on a 1.0 card, `url` on a 0.3 card) and its `signatures` removed, since they signed a card that named another address |
+| `POST /` | JSON-RPC. `SendMessage` and `SendStreamingMessage` (0.3: `message/send`, `message/stream`) become a `<prefix>.send` call; every other method (`GetTask`, `CancelTask`, the push notification configs) is forwarded to the remote agent as it is, with the `a2a-version` header the client sent |
+| `POST /message:send`, `POST /message:stream` | the 1.0 HTTP+JSON binding of the same two methods, the request in the body and the task or message answered without the JSON-RPC wrapper |
+| `GET /health` | `{ "ok": true, "agent": "document_agent", "keyid": "9d44…" }` |
+
+A delegation runs under the grant in `grantFile` or, when the request carries one, the grant in `Authorization: Bearer <base64url envelope>` or `X-Agent-Custody-Grant`, as for `--http`; one session per distinct grant. Without a `grantFile` a grant header is required, and a request without one, or with an envelope that does not verify, gets `403` with the reason. `<prefix>.send` receives `text` (the message's text parts joined), `message`, `method`, and the `taskId`, `contextId`, `configuration`, and `metadata` the request carried, so a policy reads `context.args.text`.
+
+What the client gets back, in the remote agent's wire format:
+
+| outcome | answer |
+| --- | --- |
+| allowed | the remote agent's task or message, with `metadata["agent-custody/receipt"]` set to the receipt id; a stream is relayed after the remote agent finishes, each event carrying the key |
+| denied by scope or policy, or withheld because the log refused the pre-commit | a task in state `TASK_STATE_REJECTED` (0.3: `rejected`) with the request's `taskId` and `contextId` or fresh ones, the status message `agent-custody: <reason> (receipt <id>)`, and the receipt id in `metadata`; nothing reached the remote agent |
+| the remote agent could not be reached | a task in state `TASK_STATE_FAILED` (0.3: `failed`), the same shape |
+| the remote agent answered a JSON-RPC error | that error, with `data.receipt` set to the receipt id; the receipt records the call as `failed` |
+
+```json
+{ "jsonrpc": "2.0", "id": "1", "result": { "id": "0f3c…", "contextId": "7a1e…", "status": { "state": "TASK_STATE_REJECTED", "message": { "role": "ROLE_AGENT", "messageId": "…", "parts": [{ "text": "agent-custody: Denied by policy: no permit policy matched (receipt 36c85dc9-…)" }] }, "timestamp": "2026-10-10T09:27:31.401Z" }, "metadata": { "agent-custody/receipt": "36c85dc9-43c1-46a9-9be7-9210210a7aa1" } } }
+```
+
+From JavaScript, `serveA2a(host, cfg.a2a, { port, host?, grant?, log? }): Promise<{ url, close() }>` is the same server; `A2A_CARD_PATH`, `A2A_RECEIPT_METADATA_KEY` (`"agent-custody/receipt"`), and `A2A_STREAM_META_KEY` (`"agent-custody/a2a-stream"`) are the constants. Example 25 in the repository runs it in front of a stand-in agent.
 
 ## What the agent sees
 

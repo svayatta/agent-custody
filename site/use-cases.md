@@ -109,4 +109,6 @@ No runnable example yet; the knowledge-base agent in [example 23](https://github
 
 The agent is unchanged. The gateway holds the credentials, fetches the facts, decides, and signs. The log holds hashes only. The verifier needs public keys and nothing else. And every policy above can run in observe mode first, recording what it would have refused without refusing anything, until the team is ready to turn it on.
 
+The same gateway sits between agents that delegate to each other over A2A: it serves the remote agent's card at its own address, and every delegation is a receipted, policy-checked call that a refused task never reaches, as in [example 25](https://github.com/svayatta/agent-custody/blob/main/packages/receipts/examples/25-a2a-delegation.ts).
+
 If your case is not here, the [FAQ](/faq) says what an integration looks like, and the quickest way to find out is a twenty-minute call: [contact](/contact).

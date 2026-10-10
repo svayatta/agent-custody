@@ -102,6 +102,20 @@ Each records the framework's tool calls through the issuer. Enforce or observe, 
 | `@agent-custody/receipts/sdk/deepseek-harness` | `deepseekHarnessHooks(issuer)` → `{ preExecute, postExecute }` | `preExecute(exec, next)` returns `{ kind: "deny", reason }` on an enforced policy deny after issuing the denial receipt, else `next()`; `postExecute(exec, result, next)` records the executed (`content`/`value`) or failed (`error`) call, then `next()`. `exec` is the harness's `{ name, arguments, callId, agent }` |
 | `@agent-custody/receipts/sdk/deepseek-harness` | `registerDeepSeekHarness(ctx, issuer)` | calls `ctx.on` for both events |
 
+## Agents over A2A
+
+Exported from `@agent-custody/receipts` beside the gateway. They belong to the gateway, not the in-process issuer, and are listed here with the other exports; the behaviour is on the [gateway](./gateway#an-a2a-agent-as-an-upstream) page.
+
+| export | signature | what it does |
+| --- | --- | --- |
+| `a2aUpstream` | `(name, cfg: A2aUpstreamConfig, { fetch?, env? }?)` → upstream client with `resolved(): Promise<ResolvedCard>` | a remote agent as an upstream: `<prefix>.send` delegates a task, `<prefix>.card` reads its card |
+| `fetchAgentCard` | `(url, headers, fetch, timeoutMs): Promise<ResolvedCard>` | fetches the card from a base URL or a card URL; `ResolvedCard` is `{ card: AgentCard, cardUrl, endpoint, legacy }`, `legacy` true for a 0.3 card |
+| `serveA2a` | `(host: GatewayHost, cfg: A2aUpstreamConfig, { port, host?, grant?, log? }: A2aServerOptions): Promise<RunningA2aServer>` | the gateway as an A2A agent; `RunningA2aServer` is `{ url, close() }` |
+| `textOf` | `(message) => string` | a message's text parts joined, what a policy reads as `context.args.text` |
+| `A2A_CARD_PATH`, `A2A_RECEIPT_METADATA_KEY`, `A2A_STREAM_META_KEY` | `"/.well-known/agent-card.json"`, `"agent-custody/receipt"`, `"agent-custody/a2a-stream"` | the card path, the metadata key an answered task or message names its receipt under, and the `_meta` key a `.send` result carries a relayed stream's events under |
+
+Types: `AgentCard`, `ResolvedCard`, `A2aServerOptions`, `RunningA2aServer`.
+
 ## The log client
 
 `httpLog(url, { token?, hashOnly?, retries? = 3, timeoutMs? = 10000, fetch? })` is what the gateway and SDK use for a remote log: `POST <url>append` with `{ leaf }` or `{ leafHash }`, retrying 429 and 5xx with backoff and honouring `Retry-After`. `fileLog(path, key)` is the local one. Both are `LogSink`s: `append(leaf): Promise<{ inclusion, treeHead }>`. `openLog(config, key)` picks from a config.

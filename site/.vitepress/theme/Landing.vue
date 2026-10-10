@@ -64,7 +64,7 @@ const rules = [
             <a class="btn primary" href="https://app.agent-custody.dev/#register">Create a free account</a>
             <a class="btn" href="https://github.com/svayatta/agent-custody">View the source on GitHub</a>
           </p>
-          <p class="fine">Open source, Apache-2.0. The hosted log is free to ten thousand appends a month. Works with Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, Python, and any MCP host.</p>
+          <p class="fine">Open source, Apache-2.0. The hosted log is free to ten thousand appends a month. Works with Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, Google ADK, Python, and any MCP host.</p>
         </div>
 
         <figure class="slip" aria-label="A receipt: a £50,000 refund the policy refused before it reached the payment provider.">
@@ -220,7 +220,7 @@ npx agent-custody verify receipts/&lt;id&gt;.json \
       <section id="go" class="block">
         <h2>Where to go next</h2>
         <dl class="ledger doors">
-          <div><dt><a href="/guide/getting-started">Try it</a></dt><dd>Pick a stack: Claude Code, OpenAI Agents, LangChain, Vercel AI, OpenClaw, DeepSeek Harness, Hermes, Python. Ten minutes to a receipt that verifies in the browser. The SDK path records the agent's own word.</dd></div>
+          <div><dt><a href="/guide/getting-started">Try it</a></dt><dd>Pick a stack: Claude Code, OpenAI Agents, LangChain, Vercel AI, OpenClaw, DeepSeek Harness, Hermes, Google ADK, Python. Ten minutes to a receipt that verifies in the browser. The SDK path records the agent's own word.</dd></div>
           <div><dt><a href="/receipts/usage">Make it evidence</a></dt><dd>The gateway, a signed grant, and a log run by someone else. For calls that move money or touch production. The hosted log is free to ten thousand appends a month.</dd></div>
           <div><dt><a href="/security">For security review</a></dt><dd>The questionnaire with every no left as a no, the threat model, the compliance mapping, and the FAQ on where the data goes. Dated, and honest about the witness.</dd></div>
         </dl>

@@ -3,7 +3,7 @@ import { hostname, userInfo } from "node:os";
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { loadConfig, loadSdkConfig } from "./config.ts";
+import { loadConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
 import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
 import type { Envelope } from "./crypto.ts";
 import { createDelegation, decodeDelegation, delegateFrom } from "./delegation.ts";
@@ -15,6 +15,7 @@ import { connectSigner, fetchLogKeys, localSigner, serveSigner, type RetiredKey,
 import { fetchWitnessKeys, Witness } from "./witness.ts";
 import { checkLog, formatLogCheck } from "./log-check.ts";
 import { serveHttp } from "./gateway-http.ts";
+import { serveA2a } from "./a2a.ts";
 import { PortalStore, sendFollowUps, servePortal, type MailOptions, type OAuthOptions, type StripeOptions } from "./portal.ts";
 import { exportLog, formatExport } from "./log-export.ts";
 import { CheckpointPublisher, fileResolver, type LogResolver } from "./log-sink.ts";
@@ -176,8 +177,24 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "gateway": {
-      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, http: { type: "boolean", default: false }, port: { type: "string", default: "8790" }, host: { type: "string", default: "127.0.0.1" }, "idle-minutes": { type: "string", default: "30" } } });
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, http: { type: "boolean", default: false }, a2a: { type: "boolean", default: false }, port: { type: "string", default: "8790" }, host: { type: "string", default: "127.0.0.1" }, "idle-minutes": { type: "string", default: "30" } } });
       if (!values.config) throw new Error("gateway needs --config");
+      if (values.a2a) {
+        // The gateway as an A2A agent: the config's one A2A upstream is what it fronts; the grant file is the default
+        // session, and a request may present its own grant in the same header the HTTP gateway takes.
+        const cfg = loadConfig(values.config);
+        const candidates = (cfg.upstreams ?? (cfg.upstream ? [cfg.upstream] : [])).filter((u) => "a2a" in u);
+        if (candidates.length !== 1) throw new Error("gateway --a2a needs exactly one { a2a: ... } upstream in the config");
+        const a2a = (candidates[0] as { a2a: A2aUpstreamConfig }).a2a;
+        const host = await createGatewayHost(cfg);
+        const grant = cfg.grantFile ? (JSON.parse(readFileSync(cfg.grantFile, "utf8")) as Envelope) : undefined;
+        const running = await serveA2a(host, a2a, { port: Number(values.port), host: values.host, ...(grant ? { grant } : {}) });
+        console.error(`agent-custody gateway (a2a): ${running.url} keyid=${host.keyid} fronting ${a2a.url} as ${a2a.prefix}.send; card at ${running.url}/.well-known/agent-card.json`);
+        await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+        await running.close();
+        await host.close();
+        return 0;
+      }
       if (values.http) {
         const host = await createGatewayHost(loadConfig(values.config));
         const running = await serveHttp(host, { port: Number(values.port), host: values.host, idleMs: Number(values["idle-minutes"]) * 60_000 });

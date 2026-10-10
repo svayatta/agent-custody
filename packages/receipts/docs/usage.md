@@ -101,6 +101,20 @@ An upstream need not be an MCP server. A plain HTTP API is described as tools:
 
 `{name}` segments in `path` are filled from the call's arguments; the remaining arguments go to the query string on GET and DELETE and to a JSON body otherwise, or `query` names the ones that go to the query and `body: "none"` sends no body. `headers` are sent as written; `headerEnv` maps a header to an environment variable read once at startup, so the credential is never in the file and never reaches the agent, and a missing variable fails at startup. The response body is the tool result, JSON kept as JSON, and a non-2xx status is a failed execution with the API's answer in the receipt. Everything else is unchanged: the tools appear in the grant's scopes, `facts` may name a REST tool for a lookup, `precommit` applies, and each call has a receipt. `rest` can be one of several `upstreams` beside MCP servers. This is how an agent's direct HTTP calls come under custody: they become tool calls through the gateway. Tutorial 17 runs one against a stand-in API.
 
+Another agent is an upstream too. An agent that speaks the A2A protocol publishes an agent card and takes tasks as messages; described as an upstream, delegating to it becomes a tool call:
+
+```json
+  "upstream": {
+    "a2a": {
+      "url": "https://docs-agent.internal",
+      "headerEnv": { "authorization": "DOCS_AGENT_BEARER" },
+      "prefix": "docs"
+    }
+  }
+```
+
+At startup the gateway fetches the agent's card from `<url>/.well-known/agent-card.json` (or `/.well-known/agent.json`, or `url` itself when it ends in `.json`) and offers two tools. `<prefix>.send` delegates a task: `text` is the task as text and the gateway builds the A2A message from it, or `message` is a full A2A message forwarded as it is; `taskId`, `contextId`, `configuration`, and `metadata` are optional and pass through. `<prefix>.card` reads the card, which is how a policy decides on the agent the gateway is actually talking to: `"facts": [{ "name": "card", "tool": "docs.card", "args": {}, "forTools": ["docs.send"] }]` puts it under `context.facts.card`, fetched by the gateway, and `context.args.text` is the task. The card says which wire format the agent speaks, A2A 1.0 (`SendMessage`, `supportedInterfaces`) or 0.3 (`message/send`, `url`), and the gateway speaks that one. The result is the agent's task or message; a streamed delegation is relayed once the agent has finished, and the receipt records the task's final state. A JSON-RPC error from the agent is a failed execution with the error in the receipt. `prefix` defaults to `a2a` (give each A2A upstream its own), `timeoutMs` to 120000, and `headers` and `headerEnv` work as for a REST upstream. `precommit: ["docs.send"]` logs the authorization before the task goes out, as for any consequential tool. An agent that delegates over A2A does not call `docs.send` itself; it reads a card and sends messages, which is what the gateway's A2A front, [below](#the-gateway-as-an-a2a-agent), is for. Tutorial 25 runs both against a stand-in agent.
+
 `logFile` is the local Merkle log, with tree heads signed by the gateway's own key. To log to a server the operator does not control, replace it with `log`:
 
 ```json
@@ -130,6 +144,17 @@ You will not normally run this by hand. The agent host spawns it, as below.
 ## One gateway for many agents, over HTTP
 
 `agent-custody gateway --config gateway.json --http --port 8790` serves the same gateway as an MCP server over Streamable HTTP at `/mcp`, and every connection presents its own grant: the delegation envelope, base64url-encoded, as `Authorization: Bearer <value>` or `X-Agent-Custody-Grant` on the initialize request. The gateway verifies it against `trustedPrincipalKeys` and its validity window, and opens a session for exactly that grant; a grant signed by a stranger, an expired one, or none at all gets 403 with the reason and no session (403 rather than 401, because MCP clients treat 401 as an OAuth challenge and hide the body). Sessions share the key, the policy, the upstreams, the log, and the fact lookups; each has its own tools (the scopes its grant names), its own receipts (its own principal and agent, attested), and its own consumed facts. `grantFile` in the config is then optional and ignored. A session ends when the client terminates it or after `--idle-minutes` (default 30) without a request; `GET /health` reports the live count and the gateway's key id. The transport is plain HTTP: bind to loopback, a private network, or put TLS in front. From JavaScript, `grantHeader(envelope)` builds the header value; from any language it is `base64url(JSON.stringify(envelope))`. Tutorial 20 runs two agents against one gateway.
+
+## The gateway as an A2A agent
+
+`agent-custody gateway --config gateway.json --a2a --port 8790 --host 127.0.0.1` serves the gateway as an A2A agent itself, in front of the config's one `a2a` upstream (exactly one is required). An agent that delegates over A2A is pointed at the gateway instead of at the remote agent and needs no other change. With Google ADK:
+
+```python
+from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
+docs = RemoteA2aAgent(name="document_agent", agent_card="http://127.0.0.1:8790/.well-known/agent-card.json")
+```
+
+The gateway serves the remote agent's card at `/.well-known/agent-card.json` (and `/.well-known/agent.json`) with its own address as the endpoint; the card's `signatures` are dropped, since they signed a card that named another address. `POST /` takes JSON-RPC. `SendMessage` and `SendStreamingMessage` (0.3: `message/send` and `message/stream`; the 1.0 HTTP+JSON binding at `POST /message:send` and `POST /message:stream` as well) become a `<prefix>.send` call under the grant in `grantFile`, or under the grant the request presents in `Authorization: Bearer` or `X-Agent-Custody-Grant`, base64url, exactly as for `--http`; every other method, `GetTask`, `CancelTask`, the push notification configs, is forwarded to the remote agent untouched. An allowed delegation answers with the remote agent's task or message with `metadata["agent-custody/receipt"]` set to the receipt id, on every event of a stream too. A refused one answers a task in state `TASK_STATE_REJECTED` (0.3: `rejected`) whose status message reads `agent-custody: <reason> (receipt <id>)`, and nothing reached the remote agent; a delegation the log would not pre-commit is rejected the same way. A remote agent the gateway could not reach is a task in `TASK_STATE_FAILED`; a JSON-RPC error the remote agent answered is relayed as a JSON-RPC error with the receipt id under `error.data.receipt`, and the receipt records the call as failed. `GET /health` reports the fronted agent's name and the gateway's key id. ADK 2.x with a2a-sdk 1.x speaks A2A 1.0 and streams by default; both are handled. Tutorial 25 is the whole thing: a stand-in document agent, the gateway in front of it, an engagement agent delegating twice, one allowed and one refused because the task names a privileged matter, both receipts verified.
 
 ## Wiring it into an agent host
 

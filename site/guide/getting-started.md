@@ -4,7 +4,7 @@ Two paths. The **SDK path** records what the agent's own process reports: the qu
 
 ## Pick your stack
 
-Install the package, make a key and a config once, then add the lines for your framework: Claude Code, the Claude Agent SDK, the OpenAI Agents SDK, LangChain, Vercel AI, OpenClaw, DeepSeek Harness, Hermes, or plain Python. Each produces a receipt in `receipts/` that [the browser verifier](/verify) checks with the `.pub` file.
+Install the package, make a key and a config once, then add the lines for your framework: Claude Code, the Claude Agent SDK, the OpenAI Agents SDK, LangChain, Vercel AI, OpenClaw, DeepSeek Harness, Hermes, Google ADK, or plain Python. Each produces a receipt in `receipts/` that [the browser verifier](/verify) checks with the `.pub` file.
 
 ```bash
 npm install @agent-custody/receipts && npx agent-custody keygen --dir keys --name app
@@ -84,6 +84,15 @@ provides_hooks: [pre_tool_call, post_tool_call]
 config_schema:
   sidecar_url: { type: str, default: "http://127.0.0.1:8791" }
 # then: pip install agent-custody && hermes plugins enable agent-custody
+```
+
+```python [Google ADK]
+# pip install "agent-custody[adk]"; the sidecar is `npx agent-custody serve --config sdk.json`
+from google.adk.agents import LlmAgent
+from agent_custody import Client
+from agent_custody.adk import adk_callbacks
+
+agent = LlmAgent(name="billing", model="gemini-2.5-flash", tools=[refund, lookup], **adk_callbacks(Client()))   # a denied call is skipped; the model sees the receipt
 ```
 
 ```python [Python]
