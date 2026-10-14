@@ -34,7 +34,7 @@ Two commands, one per package. Both run on plain Node 22 or later. Exit code 0 o
 | command | what it does | page |
 | --- | --- | --- |
 | `serve --ledger <path> [--allow-direct] [--key <memory.key>] [--forget-key-env NAME] [--retention '<space>=<ISO duration>,…']` | the memory server over stdio | [memory](./memory#running-the-server) |
-| `serve --ledger <path> --http [--port 8790] [--host] [--token-env NAME] [--allow-direct]` | the same over HTTP, shared | [memory](./memory#running-the-server) |
+| `serve --ledger <path> --http [--port 8790] [--host] [--token-env NAME] [--direct-token-env NAME] [--allow-direct]` | the same over HTTP, shared | [memory](./memory#running-the-server) |
 | `sweep --via <gateway.json> --reason <text> [--before <ISO>] [--space <space>] [--no-digest]` | retention as a receipted call | [state tools](./state-tools#sweep-and-export) |
 | `sweep --ledger <path> --before <ISO> --reason <text> [--space] [--actor] [--forget-key-env NAME] [--no-digest]` | retention on the ledger alone | [state tools](./state-tools#sweep-and-export) |
 | `eval [--scenarios <file>] [--baseline] [--json] [--sign <key> --out <report>]`, `eval --verify <report> --key <pub>` | the memory-mutation evals | [state tools](./state-tools#eval) |

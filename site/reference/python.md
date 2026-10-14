@@ -44,7 +44,7 @@ except PolicyDeniedError as e:
 
 ## `MemoryClient`
 
-The memory tools over MCP, against a memory server started with `agent-custody-memory serve --http`. Writes made this way are `claimed` and quarantined until a gateway confirms them; that is the honest position of an SDK-only agent.
+The memory tools over MCP, against a memory server started with `agent-custody-memory serve --http`, with the direct-writer token (`--direct-token-env`), not the gateway token. Writes made this way are `claimed` and quarantined until a gateway confirms them; that is the honest position of an SDK-only agent.
 
 ```python
 from agent_custody.memory import MemoryClient, MemoryError

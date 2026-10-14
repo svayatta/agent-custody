@@ -397,6 +397,28 @@ permit(principal, action == Action::"memory.write", resource) when { context.arg
 });
 
 describe("retention windows and the receipted sweep trigger", () => {
+  it("concurrent forget and sweep calls each record their own actor and receipt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "memory-concurrent-"));
+    const file = join(dir, "ledger.jsonl");
+    const seed = new Ledger(file);
+    const one = (await seed.assert({ subject: "p:1", predicate: "email", value: "a@x", space: "user:a", actor: "x" })).fact.factId;
+    const two = (await seed.assert({ subject: "p:2", predicate: "email", value: "b@x", space: "user:b", actor: "x" })).fact.factId;
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await createMemoryServer(new Ledger(file)).connect(a);
+    const c = new Client({ name: "t", version: "0" });
+    await c.connect(b);
+    const meta = (agent: string, receipt: string) => ({ "agent-custody/agent": agent, [RECEIPT_META_KEY]: receipt });
+    const results = await Promise.all([
+      c.callTool({ name: "memory.forget", arguments: { factId: one, reason: "request" }, _meta: meta("agent-a", "receipt-a") }),
+      c.callTool({ name: "memory.sweep", arguments: { before: new Date(Date.now() + 60_000).toISOString(), space: "user:b", reason: "retention" }, _meta: meta("agent-b", "receipt-b") }),
+    ]);
+    expect(results.map((r) => r.isError)).toEqual([undefined, undefined]);
+    const forgetOf = async (factId: string) => (await new Ledger(file).history(factId)).find((e) => e.kind === "forget") as any;
+    expect(await forgetOf(one)).toMatchObject({ actor: "agent-a", source: { receiptId: "receipt-a" } });
+    expect(await forgetOf(two)).toMatchObject({ actor: "agent-b", source: { receiptId: "receipt-b" } });
+    await c.close();
+  });
+
   it("a sweep with no cutoff uses the server's retention windows per space", async () => {
     const dir = mkdtempSync(join(tmpdir(), "memory-retention-"));
     const file = join(dir, "ledger.jsonl");

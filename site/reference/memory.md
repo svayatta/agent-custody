@@ -6,12 +6,12 @@
 
 ```bash
 agent-custody-memory serve --ledger ledger.sqlite [--key memory.key] [--forget-key-env FORGET_KEY] [--retention 'org=P365D,team:*=P90D'] [--allow-direct]
-agent-custody-memory serve --ledger postgres://… --http --port 8790 --host 127.0.0.1 --token-env MEMORY_TOKEN
+agent-custody-memory serve --ledger postgres://… --http --port 8790 --host 127.0.0.1 --token-env MEMORY_TOKEN [--direct-token-env MEMORY_DIRECT_TOKEN]
 ```
 
-Over stdio it is the gateway's upstream (`"upstream": { "command": "agent-custody-memory", "args": ["serve", "--ledger", "ledger.sqlite"] }`); over HTTP several gateways share one ledger (`"upstream": { "url": "http://memory:8790/mcp", "tokenEnv": "MEMORY_TOKEN" }`). The ledger is a JSONL file, SQLite when the path ends in `.sqlite` or `.db`, or a `postgres://` URL (needs the `pg` package; `?table=` names the table). By default the server refuses calls that did not come through the gateway; `--allow-direct` accepts them as `claimed` and quarantines what they write. `--key` signs every result for its receipt, so memory executions verify as attested. `--forget-key-env` keys forgotten values' digests with a secret held outside the ledger.
+Over stdio it is the gateway's upstream (`"upstream": { "command": "agent-custody-memory", "args": ["serve", "--ledger", "ledger.sqlite"] }`); over HTTP several gateways share one ledger (`"upstream": { "url": "http://memory:8790/mcp", "tokenEnv": "MEMORY_TOKEN" }`). The ledger is a JSONL file, SQLite when the path ends in `.sqlite` or `.db`, or a `postgres://` URL (needs the `pg` package; `?table=` names the table). By default the server refuses calls that did not come through the gateway; `--allow-direct` accepts them as `claimed` and quarantines what they write. `--key` signs every result for its receipt, so memory executions verify as attested. `--forget-key-env` keys forgotten values' digests with a secret held outside the ledger. Over HTTP, `--token-env` is the gateways' token and `--direct-token-env` the direct writers' token; the two must differ. The server reads the receipt, agent, and observed keys from `_meta` only for a caller with the gateway token, and drops them for every other caller. With no token, no caller is a gateway.
 
-In code: `createMemoryServer(ledger, { requireGateway?, stores?, identity?, retention?, verify?: { attempts?, delayMs? } }): Server` (an MCP `Server` to connect to any transport) and `serveMemoryHttp(ledger, { port, host?, tokens?, ...same })`.
+In code: `createMemoryServer(ledger, { requireGateway?, trustMeta? = true, stores?, identity?, retention?, verify?: { attempts?, delayMs? } }): Server` (an MCP `Server` to connect to any transport; `trustMeta: false` drops the privileged `_meta` keys) and `serveMemoryHttp(ledger, { port, host?, tokens?, directTokens?, ...same })`, where `tokens` are gateway tokens and `directTokens` are direct-writer tokens.
 
 ## The tools
 
