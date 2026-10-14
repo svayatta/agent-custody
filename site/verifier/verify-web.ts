@@ -206,10 +206,25 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   } else {
     add("principal is claimed, not attested", p.principal.provenance === "claimed", "no signed delegation in this receipt");
   }
-  const argsDigest = await digestOf(p.request.args);
-  add("request args digest", argsDigest === p.request.argsDigest && st.subject[0]?.digest.sha256 === p.request.argsDigest);
+  // Private evidence (mirrors src/verify.ts): a withheld part is committed to by its digest in the signed statement; the
+  // browser recomputes only what the receipt carries in clear, and says when it could not.
+  const isCommitment = (v: any) => !!v && typeof v === "object" && !Array.isArray(v) && (v.$custody === "withheld" || v.$custody === "encrypted");
+  const withheldIn = (view: any): string[] => (isCommitment(view) ? ["*"] : view && typeof view === "object" && !Array.isArray(view) ? Object.keys(view).filter((k) => isCommitment(view[k])) : []);
+  const withheldNote = (c: { mode: string; withheld: string[] }) => `committed, not recomputed: ${c.withheld.length === 1 && c.withheld[0] === "*" ? "the value is" : `${c.withheld.length} field(s) are`} withheld (${c.mode}); ${c.mode === "encrypted" ? "give the capture key or " : ""}disclose them with the command-line verifier to recompute`;
+  const subjectOk = st.subject[0]?.digest.sha256 === p.request.argsDigest;
+  const argsWithheld = withheldIn(p.request.args).length > 0;
+  if (argsWithheld) add("request args digest", subjectOk, withheldNote(p.request.capture ?? { mode: "digest", withheld: withheldIn(p.request.args) }));
+  else add("request args digest", (await digestOf(p.request.args)) === p.request.argsDigest && subjectOk);
+  const executedOrFailed = p.execution.status === "executed" || p.execution.status === "failed";
+  const resultWithheld = executedOrFailed && withheldIn(p.execution.result).length > 0;
+  if (executedOrFailed) {
+    if (resultWithheld) add("result digest", true, withheldNote(p.execution.capture ?? { mode: "digest", withheld: withheldIn(p.execution.result) }));
+    else add("result digest", (await digestOf(p.execution.result)) === p.execution.resultDigest);
+  }
   const isProvider = (v: any) => !!v && (v.provider === "stripe-webhook" || v.provider === "github-delivery") && typeof v.rawBody === "string";
-  if ((p.execution.status === "executed" || p.execution.status === "failed") && p.execution.upstream && isProvider(p.execution.upstream)) {
+  if (executedOrFailed && p.execution.upstream && resultWithheld && (opts.providerSecrets || (opts.upstreamKeys?.length ?? 0) > 0)) {
+    add("upstream signature not checked", true, "the result is withheld; disclose it with the command-line verifier to check the upstream's evidence against it");
+  } else if ((p.execution.status === "executed" || p.execution.status === "failed") && p.execution.upstream && isProvider(p.execution.upstream)) {
     if (opts.providerSecrets) {
       const u = await checkProvider(p.execution.upstream, opts.providerSecrets, p.timestamp, p.execution.result);
       add("upstream signature (provider secret)", u.ok, u.detail);

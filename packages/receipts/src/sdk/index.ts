@@ -1,6 +1,7 @@
 // The interceptor SDK: issues receipts from inside the agent's own process.
 // Everything it records is "claimed", because the issuer shares a process with the agent. The receipt says so.
 import { randomUUID } from "node:crypto";
+import { captureArgs, captureKeyFrom, captureResult, ruleFor } from "../capture.ts";
 import { readFileSync } from "node:fs";
 import type { SdkConfig } from "../config.ts";
 import { digestOf, loadPrivateKey } from "../crypto.ts";
@@ -57,6 +58,10 @@ export class PolicyDeniedError extends Error {
 
 export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
   const key = loadPrivateKey(cfg.identity.keyFile);
+  const captureKey = cfg.captureKeyEnv ? captureKeyFrom(process.env[cfg.captureKeyEnv] ?? (() => { throw new Error(`capture key: environment variable ${cfg.captureKeyEnv} is not set`); })()) : undefined;
+  for (const [tool, rule] of Object.entries(cfg.capture ?? {})) {
+    for (const side of [rule.args, rule.result]) if (side?.mode === "encrypted" && !captureKey) throw new Error(`capture for ${tool} uses mode encrypted, which needs captureKeyEnv`);
+  }
   const issuer = createIssuer(key, cfg.receiptsDir, openLog(cfg, key), { exporter: openExporter(cfg) });
   const policyText = cfg.policyFile ? readFileSync(cfg.policyFile, "utf8") : null;
 
@@ -67,12 +72,15 @@ export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
   };
 
   function record(ev: ToolEvent, outcome: Outcome, policy: PolicyDecision | null = null): Promise<ReceiptBundle> {
+    const rule = ruleFor(cfg.capture, ev.tool);
+    const argsCaptured = captureArgs(ev.args, rule?.args, captureKey);
+    const resultCaptured = outcome.status === "executed" || outcome.status === "failed" ? captureResult(outcome.result, rule?.result, captureKey) : null;
     const execution: ReceiptPredicate["execution"] =
       outcome.status === "denied"
         ? { status: "denied", reason: outcome.reason, provenance: "claimed" }
         : outcome.status === "error"
           ? { status: "error", error: outcome.error, provenance: "claimed" }
-          : { status: outcome.status, result: outcome.result, resultDigest: digestOf(outcome.result), provenance: "claimed" };
+          : { status: outcome.status, result: resultCaptured!.view, resultDigest: digestOf(outcome.result), provenance: "claimed", ...(resultCaptured!.note ? { capture: resultCaptured!.note } : {}) };
     return issuer.issue({
       receiptId: randomUUID(),
       timestamp: new Date().toISOString(),
@@ -82,7 +90,7 @@ export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
       session: { id: ev.session?.id ?? null, toolUseId: ev.session?.toolUseId ?? null, provenance: "claimed" },
       model: { id: ev.model ?? null, provenance: "claimed" },
       tool: { name: ev.tool, provenance: "claimed" },
-      request: { args: ev.args, argsDigest: digestOf(ev.args), provenance: "claimed" },
+      request: { args: argsCaptured.view, argsDigest: digestOf(ev.args), provenance: "claimed", ...(argsCaptured.note ? { capture: argsCaptured.note } : {}) },
       facts: {},
       policy: policy ? { ...policy, provenance: "claimed" } : null,
       execution,

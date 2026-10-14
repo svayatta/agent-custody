@@ -10,6 +10,11 @@ const OtelSchema = z.object({ url: z.string().url(), headersEnv: z.record(z.stri
 const SplunkSchema = z.object({ url: z.string().url(), tokenEnv: z.string().min(1), index: z.string().min(1).optional(), source: z.string().min(1).optional(), sourcetype: z.string().min(1).optional(), host: z.string().min(1).optional() });
 const hasOneLog = (c: { logFile?: string | undefined; log?: unknown }) => (c.logFile ? 1 : 0) + (c.log ? 1 : 0) === 1;
 
+/** What a receipt carries of one side of a call: everything, commitments only, or commitments with the value encrypted under the customer's key; `clear` names the top-level fields kept in clear either way. */
+const CaptureSideSchema = z.object({ mode: z.enum(["clear", "digest", "encrypted"]), clear: z.array(z.string().min(1)).optional() });
+/** Per tool (or "*"): how the arguments, the result, and the facts are captured. Digests and signatures are always over the whole call. */
+const CaptureSchema = z.record(z.string().min(1), z.object({ args: CaptureSideSchema.optional(), result: CaptureSideSchema.optional(), facts: CaptureSideSchema.optional() }));
+
 /** One REST endpoint offered to the agent as a tool. `{name}` segments in the path come from the call's arguments; the rest go to the query on GET and DELETE, or to a JSON body otherwise. */
 const RestToolSchema = z.object({
   name: z.string().min(1),
@@ -89,6 +94,10 @@ export const GatewayConfigSchema = z.object({
   precommit: z.array(z.string().min(1)).default([]),
   /** a JSON file listing digests of revoked grant envelopes (`agent-custody revoke` appends to it); re-read whenever it changes, checked on every call */
   revokedGrants: z.string().min(1).optional(),
+  /** private evidence: what the receipt file carries of each tool's arguments, result, and facts */
+  capture: CaptureSchema.optional(),
+  /** the environment variable holding the 32-byte key (hex or base64) that encrypts withheld fields in mode encrypted; read at startup, never in the file */
+  captureKeyEnv: z.string().min(1).optional(),
   /**
    * "enforce" (the default when absent) denies what the policy denies. "observe" forwards every call the grant allows and records the
    * decision the policy would have made, with `enforced: false` on the receipt: the way to run a new policy against
@@ -139,6 +148,9 @@ export const SdkConfigSchema = z.object({
   splunk: SplunkSchema.optional(),
   /** free-text label of the host framework, e.g. "claude-code", "openai-agents" */
   framework: z.string().optional(),
+  /** private evidence, as for the gateway */
+  capture: CaptureSchema.optional(),
+  captureKeyEnv: z.string().min(1).optional(),
 }).refine(hasOneLog, oneLog);
 export type SdkConfig = z.infer<typeof SdkConfigSchema>;
 

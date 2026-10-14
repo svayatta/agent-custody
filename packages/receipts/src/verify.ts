@@ -1,5 +1,6 @@
 // Independent verification of a receipt bundle. Needs only public keys, and optionally a copy of the log.
 import { canonicalize, digestOf, dsseVerifiers, dsseVerify, type Envelope, type PublicKeyRef } from "./crypto.ts";
+import { restore, type CaptureNote, type Restored } from "./capture.ts";
 import { delegationHasParent, delegationValidAt, describeChain, verifyDelegation } from "./delegation.ts";
 import { leafHash, MerkleLog, verifyConsistency, verifyInclusion } from "./log.ts";
 import { checkProvider, checkUpstream, contentDigest, isProviderAttestation, type ProviderSecrets } from "./upstream.ts";
@@ -25,6 +26,10 @@ export interface VerifyOptions {
   logFile?: string;
   /** If given, every tree head in the bundle must name this log, so a head from another tenant's log cannot be presented as this one's. */
   logId?: string;
+  /** the withheld values, as `agent-custody reveal` writes them or the party that holds them hands them over: the digests are then recomputed */
+  disclosed?: { args?: Record<string, unknown>; result?: unknown };
+  /** the customer's capture key: encrypted fields are revealed and the digests recomputed */
+  captureKey?: Buffer;
 }
 
 export interface VerifyResult {
@@ -83,17 +88,43 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     add("principal is claimed, not attested", p.principal.provenance === "claimed", "no signed delegation in this receipt");
   }
 
-  add("request args digest", digestOf(p.request.args) === p.request.argsDigest && st.subject[0]?.digest.sha256 === p.request.argsDigest);
+  // Private evidence: a withheld part is committed to by its digest in the signed statement. It is recomputed when the
+  // receipt carries the values, when they are disclosed, or when the capture key reveals them; otherwise the check
+  // passes as a commitment and says so.
+  const subjectOk = st.subject[0]?.digest.sha256 === p.request.argsDigest;
+  const withheldNote = (c: CaptureNote) => `committed, not recomputed: ${c.withheld.length === 1 && c.withheld[0] === "*" ? "the value is" : `${c.withheld.length} field(s) are`} withheld (${c.mode}); ${c.mode === "encrypted" ? "give the capture key or " : ""}disclose them to recompute`;
+  let argsBack: Restored | null = null;
+  try {
+    argsBack = p.request.capture ? restore(p.request.args, opts.disclosed?.args, opts.captureKey) : { value: p.request.args, how: "clear" };
+    if (argsBack) add("request args digest", digestOf(argsBack.value) === p.request.argsDigest && subjectOk, argsBack.how === "clear" ? undefined : `recomputed from ${argsBack.how} values`);
+    else add("request args digest", subjectOk, withheldNote(p.request.capture!));
+  } catch (e) {
+    add("request args digest", false, e instanceof Error ? e.message : String(e));
+  }
+  let resultBack: Restored | null = null;
+  if (p.execution.status === "executed" || p.execution.status === "failed") {
+    try {
+      resultBack = p.execution.capture ? restore(p.execution.result, opts.disclosed?.result, opts.captureKey) : { value: p.execution.result, how: "clear" };
+      if (resultBack) add("result digest", digestOf(resultBack.value) === p.execution.resultDigest, resultBack.how === "clear" ? undefined : `recomputed from ${resultBack.how} values`);
+      else add("result digest", true, withheldNote(p.execution.capture!));
+    } catch (e) {
+      add("result digest", false, e instanceof Error ? e.message : String(e));
+    }
+  }
   if ((p.execution.status === "executed" || p.execution.status === "failed") && p.execution.upstream) {
-    const result = p.execution.result as { content: unknown; isError?: boolean };
+    const result = resultBack?.value as { content: unknown; isError?: boolean } | undefined;
     if (isProviderAttestation(p.execution.upstream)) {
-      if (opts.providerSecrets) {
-        const u = checkProvider(p.execution.upstream, opts.providerSecrets, { timestamp: p.timestamp, result });
+      if (opts.providerSecrets && !result) add("upstream signature not checked", true, "the result is withheld; disclose it or give the capture key to check the provider's delivery against it");
+      else if (opts.providerSecrets) {
+        const u = checkProvider(p.execution.upstream, opts.providerSecrets, { timestamp: p.timestamp, result: result! });
         add("upstream signature (provider secret)", u.ok, u.ok ? u.keyid : u.error);
       }
     } else if ((opts.upstreamKeys?.length ?? 0) > 0) {
-      const u = checkUpstream(p.execution.upstream.envelope, opts.upstreamKeys!, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: contentDigest(result) });
-      add("upstream signature (upstream key)", u.ok, u.ok ? `keyid ${short(u.keyid)}` : u.error);
+      if (!result) add("upstream signature not checked", true, "the result is withheld; disclose it or give the capture key to check the upstream's signature against it");
+      else {
+        const u = checkUpstream(p.execution.upstream.envelope, opts.upstreamKeys!, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: contentDigest(result) });
+        add("upstream signature (upstream key)", u.ok, u.ok ? `keyid ${short(u.keyid)}` : u.error);
+      }
     }
   }
   if (p.policy) {
