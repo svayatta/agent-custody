@@ -282,6 +282,11 @@ describe("the gateway as an A2A agent in front of a 1.0 agent", () => {
     expect(refused.result.status.message.parts[0]!.text).toMatch(/not in the delegation scopes/);
     const stranger = await rpc("SendMessage", message("x"), { authorization: "Bearer bm90LWEtZ3JhbnQ" });
     expect(stranger.status).toBe(403);
+    // reads and cancels carry no receipt but still need a grant in force: an expired one cannot cancel a task (issue #97)
+    const expired = createDelegation(loadPrivateKey(fx.principalKey), { version: "0.1", principal: "engagement_lead_12", agent: "reader-agent", scopes: ["docs.send"], issuedAt: new Date(now - 7200_000).toISOString(), expiresAt: new Date(now - 3600_000).toISOString() });
+    const late = await rpc("CancelTask", { id: "task-9" }, { authorization: `Bearer ${grantHeader(expired)}` });
+    expect(late.status).toBe(403);
+    expect(late.text).toMatch(/validity window/);
   });
 });
 

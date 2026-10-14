@@ -550,9 +550,18 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         if (!who?.startsWith("verify:")) return page(400, "Link not valid", "This verification link is not valid or has expired. Sign in and ask for a new one from the account page.");
         const u = await store.user(who.slice("verify:".length));
         if (!u) return page(400, "Link not valid", "This verification link belongs to no account.");
-        await store.markEmailVerified(u.id);
-        log(`agent-custody portal: ${u.email} verified their address`);
-        return page(200, "Email verified", `${esc(u.email)} is verified. <a href="/">Continue to your account</a>.`);
+        // Opening the link proves nothing: an attacker may have registered the address, and its owner may click the link. Only the account's own session confirms it, through POST /api/verify-email.
+        const token = url.searchParams.get("token")!;
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'" });
+        return void res.end(`<!doctype html><meta charset="utf-8"><title>Confirm your address</title><p style="font:15px system-ui;padding:2rem" id="m">Confirming ${esc(u.email)}...</p><script>
+fetch("/api/verify-email", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: ${JSON.stringify(token).replace(/</g, "\\u003c")} }) }).then(async (r) => {
+  const b = await r.json().catch(() => ({}));
+  const m = document.getElementById("m");
+  if (r.ok) m.innerHTML = "Your address is confirmed. <a href='/'>Continue to your account</a>.";
+  else if (r.status === 401) m.innerHTML = "Sign in to this account with its password first, then open the link again. <a href='/'>Sign in</a>.";
+  else m.textContent = b.error || "The address was not confirmed.";
+});
+</script>`);
       }
       // ---- sign in through a provider: the OAuth web flow, state in a short-lived signed cookie ----
       const provider = /^\/auth\/(github|google)(\/callback)?$/.exec(url.pathname);
@@ -607,9 +616,9 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         const linkTo = /^oauth:[a-z]+:link:([^:]+):/.exec(stateUser)?.[1];
         let user: PortalUser;
         if (linkTo) {
-          // linking: the account proved itself with its session, so the provider's email need not match; when it does, it also confirms the address
+          // linking: the signed state records the session that started it (the Strict cookie does not come back from the provider), so the provider's email need not match; when it does, it also confirms the address
           const owner = await store.user(linkTo);
-          if (!owner || owner.id !== userId) return json(401, { error: "the session that started the link is not the one that finished it; sign in and try again" }, { "set-cookie": stateCookie(null) });
+          if (!owner) return json(401, { error: "the account that started the link no longer exists" }, { "set-cookie": stateCookie(null) });
           await store.linkIdentity(name, subject, email, owner.id);
           if (email === owner.email) await store.markEmailVerified(owner.id);
           log(`agent-custody portal: ${owner.email} linked ${name}`);
@@ -620,7 +629,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         } catch (e) {
           if (!(e instanceof UnverifiedAccountError)) throw e;
           log(`agent-custody portal: ${name} sign-in for ${email} refused: the password account has not verified its address`);
-          return page(409, "Sign in with your password", `An account with the address ${esc(email)} already exists and has not verified it. <a href="/">Sign in with its password</a>, then link ${name === "github" ? "GitHub" : "Google"} from the account page; or verify the address with the link we sent, and sign in with ${name === "github" ? "GitHub" : "Google"} again.`, { "set-cookie": stateCookie(null) });
+          return page(409, "Sign in with your password", `An account with the address ${esc(email)} already exists. <a href="/">Sign in with its password</a>, then link ${name === "github" ? "GitHub" : "Google"} from the account page.`, { "set-cookie": stateCookie(null) });
         }
         log(`agent-custody portal: ${email} signed in with ${name}`);
         // A page, not a redirect: the session cookie is SameSite=Strict, and a redirect that started at the provider
@@ -644,6 +653,14 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       if (req.method !== "GET" && !(req.headers["content-type"] ?? "").startsWith("application/json")) return json(415, { error: "expected a JSON body" });
       const tenantId = await store.tenantOf(user.id);
       const account = async () => ({ emailVerified: !!user.emailVerifiedAt, identities: await store.identities(user.id), providers: (["github", "google"] as const).filter((p) => !!o.oauth?.[p]), mail: !!o.mail });
+      if (req.method === "POST" && url.pathname === "/api/verify-email") {
+        const who = readSession(o.secret, String((await jsonBody()).token ?? ""));
+        if (!who?.startsWith("verify:")) return json(400, { error: "this verification link is not valid or has expired" });
+        if (who.slice("verify:".length) !== user.id) return json(403, { error: "this link belongs to another account; sign in to the account it was sent for" });
+        await store.markEmailVerified(user.id);
+        log(`agent-custody portal: ${user.email} verified their address`);
+        return json(200, { ok: true, emailVerified: true });
+      }
       if (req.method === "POST" && url.pathname === "/api/verify-email/resend") {
         if (user.emailVerifiedAt) return json(200, { ok: true, emailVerified: true });
         if (!o.mail) return json(503, { error: "mail is not configured on this portal" });

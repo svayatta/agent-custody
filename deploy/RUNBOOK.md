@@ -105,7 +105,7 @@ docker compose --profile public restart signer log
 curl -s https://log.example.com/.well-known/agent-custody-log.json      # the new keyid first, the old one after it
 ```
 
-Then tell tenants the new key id and the date; verifiers that pin by `--log-url` pick it up on their next fetch, and verifiers holding a `--log-key` file need the new one. Keep the retired private key offline or destroy it; nothing needs it again. Rotate on a schedule you state in your terms (yearly is reasonable), and immediately on any suspicion of the host.
+Then tell tenants the new key id and the date; verifiers that pin by `--log-url` pick it up on their next fetch, and verifiers holding a `--log-key` file need the new one. Gateways that pin the key in `log.keys` (required with `precommit`) refuse every append signed by the new key, so tell tenants before the switch to add the new `.pub` beside the old one; a gateway that fetched the keys on first use needs a restart. Keep the retired private key offline or destroy it; nothing needs it again. Rotate on a schedule you state in your terms (yearly is reasonable), and immediately on any suspicion of the host.
 
 **A leaked admin token.** Set a new `ADMIN_TOKEN` in `.env`, `docker compose --profile public up -d log`. Then read the Activity list on the admin page, or `log-admin audit`: every tenant and token change carries who made it and from which address, so anything you did not do stands out; revoke it and disable the tenant. Appends made through a token the attacker minted are hashes in that tenant's log, worthless to them and harmless to others.
 

@@ -1,7 +1,7 @@
 // The MCP gateway: sits between an agent and its upstreams, MCP servers or REST APIs, enforces scope + Cedar policy,
 // and emits a signed, logged receipt for every tool call, allowed or denied.
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -10,7 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { FactConfig, GatewayConfig, UpstreamConfig } from "./config.ts";
 import { digestOf, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
-import { delegationValidAt, verifyDelegation, type Delegation } from "./delegation.ts";
+import { delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { createIssuer } from "./issue.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
@@ -40,7 +40,7 @@ export interface CallParams {
 export interface Gateway {
   agentId: string;
   delegation: Delegation;
-  /** sha256 over the canonical grant envelope: what `revoke` names */
+  /** sha256 over the grant's signed payload (`grantDigest` in delegation.ts): what `revoke` names */
   grantDigest: string;
   /** null while the grant is in force at `at` (default now); otherwise why it is not: "has expired", "is not yet valid", "has been revoked" */
   grantProblem(at?: string): string | null;
@@ -115,6 +115,13 @@ export interface GatewayHost {
   close(): Promise<void>;
 }
 
+/** Writes the revocation list whole, by rename, so a gateway re-reading it never sees half a file. */
+export function writeRevokedGrants(path: string, digests: string[]): void {
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(digests, null, 2) + "\n");
+  renameSync(tmp, path);
+}
+
 export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOptions = {}): Promise<GatewayHost> {
   const gatewayKey = loadPrivateKey(cfg.identity.keyFile);
   const trusted = cfg.trustedPrincipalKeys.map(loadPublicKey);
@@ -134,14 +141,16 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   // whenever the file changes. Checked when a session opens and again on every call, so revocation takes effect on
   // the next call of a running session, without a key rotation.
   const revokedSet = new Set<string>();
-  let revokedSeen = -1;
+  let revokedSeen = "";
   const reloadRevoked = () => {
     if (!cfg.revokedGrants) return;
     if (!existsSync(cfg.revokedGrants)) {
-      if (revokedSeen !== -2) { revokedSet.clear(); revokedSeen = -2; }
+      if (revokedSeen !== "absent") { revokedSet.clear(); revokedSeen = "absent"; }
       return;
     }
-    const m = statSync(cfg.revokedGrants).mtimeMs;
+    // inode as well as mtime: `revoke` replaces the file by rename, so two writes in one mtime tick are still seen
+    const st = statSync(cfg.revokedGrants);
+    const m = `${st.ino}:${st.mtimeMs}:${st.size}`;
     if (m === revokedSeen) return;
     const list = JSON.parse(readFileSync(cfg.revokedGrants, "utf8")) as unknown;
     if (!Array.isArray(list)) throw new Error(`${cfg.revokedGrants}: expected a JSON array of grant digests`);
@@ -152,10 +161,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   const revoke = (digest: string) => {
     reloadRevoked();
     revokedSet.add(digest);
-    if (cfg.revokedGrants) {
-      writeFileSync(cfg.revokedGrants, JSON.stringify([...revokedSet], null, 2) + "\n");
-      revokedSeen = statSync(cfg.revokedGrants).mtimeMs;
-    }
+    if (cfg.revokedGrants) writeRevokedGrants(cfg.revokedGrants, [...revokedSet]);
   };
 
   // One host, as many upstreams as the agents' jobs need. Each tool name belongs to exactly one upstream, decided at
@@ -217,13 +223,19 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     if (!delegationValidAt(grant.delegation, new Date().toISOString())) throw new Error("delegation grant is outside its validity window");
     const delegation = grant.delegation;
     const principalKeyid = grant.keyid;
-    const grantDigest = digestOf(grantEnvelope);
+    const chainDigests = grantChainDigests(grantEnvelope);
+    const grantDigest = chainDigests[0]!;
     reloadRevoked();
-    if (revokedSet.has(grantDigest)) throw new Error("delegation grant has been revoked");
+    if (chainDigests.some((d) => revokedSet.has(d))) throw new Error("delegation grant has been revoked");
     /** Why the grant is not in force at `at`, or null. Asked on every call, and again just before a forward. */
     const grantProblem = (at: string = new Date().toISOString()): string | null => {
-      reloadRevoked();
-      if (revokedSet.has(grantDigest)) return "has been revoked";
+      try {
+        reloadRevoked();
+      } catch (e) {
+        // fail closed: a revocation list that cannot be read revokes everything until it can
+        return `cannot be checked against the revocation list (${e instanceof Error ? e.message : String(e)})`;
+      }
+      if (chainDigests.some((d) => revokedSet.has(d))) return "has been revoked";
       if (!delegationValidAt(delegation, at)) return Date.parse(at) < Date.parse(delegation.issuedAt) ? "is not yet valid" : "has expired";
       return null;
     };

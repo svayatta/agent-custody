@@ -9,8 +9,8 @@ import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { loadConfig } from "../src/config.ts";
-import { loadPublicKey, type Envelope } from "../src/crypto.ts";
-import { decodeDelegation } from "../src/delegation.ts";
+import { generateKeyPair, loadPrivateKey, loadPublicKey, publicKeyToPem, type Envelope } from "../src/crypto.ts";
+import { createDelegation, decodeDelegation, delegateFrom } from "../src/delegation.ts";
 import { createGateway, createGatewayHost, RECEIPT_META_KEY } from "../src/gateway.ts";
 import { grantHeader, serveHttp } from "../src/gateway-http.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
@@ -97,6 +97,56 @@ describe("the grant on every call", () => {
       expect(text(no)).toMatch(/delegation grant has been revoked/);
       expect(() => host.open(grant)).toThrow(/has been revoked/);
       expect(host.revoked()).toEqual([session.grantDigest]);
+    } finally {
+      await host.close();
+    }
+  });
+
+  it("a revoked grant stays revoked when the agent repacks its envelope, and every grant delegated from it is revoked too", async () => {
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "grant-revoke-bypass-")));
+    withConfig(fx, (cfg) => {
+      cfg.revokedGrants = "revoked.json";
+    });
+    const host = await createGatewayHost(loadConfig(fx.configFile));
+    const agent = generateKeyPair();
+    const now = Date.now();
+    const root = createDelegation(loadPrivateKey(join(fx.dir, "keys", "principal.key")), {
+      version: "0.1",
+      principal: "user_456",
+      agent: "support-agent",
+      scopes: ["customer.lookup", "stripe.refund"],
+      issuedAt: new Date(now - 1000).toISOString(),
+      expiresAt: new Date(now + 3_600_000).toISOString(),
+      agentKey: publicKeyToPem(agent.publicKey),
+    });
+    const child = delegateFrom(root, agent, { agent: "lookup-only", scopes: ["customer.lookup"] });
+    try {
+      const childSession = host.open(child);
+      host.revoke(host.open(root).grantDigest);
+      // extra signatures or fields leave the signed payload, and so the digest, unchanged
+      expect(() => host.open({ ...root, signatures: [...root.signatures, { keyid: "x", sig: "AA==" }] })).toThrow(/has been revoked/);
+      expect(() => host.open({ ...root, note: 1 } as Envelope)).toThrow(/has been revoked/);
+      // a child delegated before the revocation, or minted after it, falls with its parent
+      expect(childSession.grantProblem()).toBe("has been revoked");
+      expect(() => host.open(delegateFrom(root, agent, { agent: "fresh", scopes: ["customer.lookup"] }))).toThrow(/has been revoked/);
+    } finally {
+      await host.close();
+    }
+  });
+
+  it("a revocation list that cannot be read denies every call with a receipt, and the gateway keeps running", async () => {
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "grant-revoke-bad-")));
+    withConfig(fx, (cfg) => {
+      cfg.revokedGrants = "revoked.json";
+    });
+    const host = await createGatewayHost(loadConfig(fx.configFile));
+    try {
+      const session = host.open(JSON.parse(readFileSync(join(fx.dir, "grant.json"), "utf8")) as Envelope);
+      writeFileSync(join(fx.dir, "revoked.json"), '["abc');
+      const no = await session.handleCall({ name: "customer.lookup", arguments: { customer_id: "cust_123" } });
+      expect(no.isError).toBe(true);
+      expect(text(no)).toMatch(/cannot be checked against the revocation list/);
+      expect((await receiptOf(fx, String(no._meta![RECEIPT_META_KEY]))).execution.status).toBe("denied");
     } finally {
       await host.close();
     }

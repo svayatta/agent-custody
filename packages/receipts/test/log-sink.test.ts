@@ -135,6 +135,10 @@ describe("HTTP log sink", () => {
     cfg.log = { url: badUrl };
     cfg.precommit = ["stripe.refund"];
     writeFileSync(fx.configFile, JSON.stringify(cfg));
+    // a key fetched from the log itself would vouch for whatever the log signs, so precommit needs the keys pinned
+    expect(() => loadConfig(fx.configFile)).toThrow(/precommit with a remote log needs log\.keys/);
+    cfg.log.keys = [writeKeyPair(logKeyRef, join(fx.dir, "keys"), "log").pubFile];
+    writeFileSync(fx.configFile, JSON.stringify(cfg));
     const gw = await createGateway(loadConfig(fx.configFile));
     try {
       // the authorization is withheld, and the receipt that would record the withholding cannot be logged either: the

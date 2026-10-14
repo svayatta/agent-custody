@@ -361,7 +361,18 @@ export async function serveA2a(host: GatewayHost, cfg: A2aUpstreamConfig, opts: 
     const method = restSend ?? (typeof parsed.method === "string" ? parsed.method : "");
     const id = restSend ? null : (parsed.id as string | number | null | undefined) ?? null;
     const params = (restSend ? parsed : (parsed.params as Record<string, unknown> | undefined)) ?? {};
-    if (!SEND_METHODS.has(method) && !STREAM_METHODS.has(method)) return forward(req, res, body);
+    if (!SEND_METHODS.has(method) && !STREAM_METHODS.has(method)) {
+      // reads and cancels carry no receipt, but they still need a grant in force (issue #97)
+      let problem: string | null;
+      try {
+        const p = session(req).grantProblem();
+        problem = p && `the grant ${p}`;
+      } catch (e) {
+        problem = e instanceof Error ? e.message : String(e);
+      }
+      if (problem) return sendBody(res, 403, "application/json", JSON.stringify(restSend ? { error: problem } : { jsonrpc: "2.0", id, error: { code: -32000, message: problem } }));
+      return forward(req, res, body);
+    }
 
     const legacy = LEGACY_METHODS.has(method);
     const stream = STREAM_METHODS.has(method);

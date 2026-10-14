@@ -322,7 +322,8 @@ describe("email verification and account linking (issue #103)", () => {
     const start = await fetch(new URL(`auth/github${link ? "?link=1" : ""}`, portal.url), { redirect: "manual", headers: cookie ? { cookie } : {} });
     if (start.status !== 302) return { status: start.status, setCookies: [] as string[], text: await start.text() };
     const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
-    const cb = await fetch(new URL(`auth/github/callback?code=gh-code&state=${state}`, portal.url), { headers: { cookie: `custody_oauth=${state}${cookie ? `; ${cookie}` : ""}` } });
+    // the callback is a cross-site redirect: the Strict session cookie is not sent, only the state cookie
+    const cb = await fetch(new URL(`auth/github/callback?code=gh-code&state=${state}`, portal.url), { headers: { cookie: `custody_oauth=${state}` } });
     return { status: cb.status, setCookies: cb.headers.getSetCookie(), text: await cb.text() };
   };
 
@@ -336,12 +337,26 @@ describe("email verification and account linking (issue #103)", () => {
     gh = { id: 777, email: "Vera@Example.com" };
     const refused = await ghSignIn();
     expect(refused.status).toBe(409);
-    expect(refused.text).toMatch(/has not verified it/);
+    expect(refused.text).toMatch(/Sign in with its password/);
+    expect(refused.text).not.toMatch(/verify the address/);
     expect(refused.setCookies.find((c) => c.startsWith("custody_session="))).toBeUndefined();
-    // a bad link does nothing; the real one verifies the address
+    // a bad link does nothing
     expect((await fetch(new URL("verify-email?token=nope", portal.url))).status).toBe(400);
+    // the attack path: the victim opens the link the attacker's registration caused to be mailed; with no session of the account it verifies nothing
     const link = verifyLinkFor("vera@example.com");
-    expect((await fetch(new URL(link.pathname + link.search, portal.url))).status).toBe(200);
+    const opened = await fetch(new URL(link.pathname + link.search, portal.url));
+    expect(opened.status).toBe(200);
+    const token = link.searchParams.get("token")!;
+    const post = (cookie?: string) => fetch(new URL("api/verify-email", portal.url), { method: "POST", headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) }, body: JSON.stringify({ token }) });
+    expect((await post()).status).toBe(401);
+    expect((await b.call("GET", "/api/me")).json).toMatchObject({ emailVerified: false });
+    expect((await ghSignIn()).status).toBe(409);
+    // another account's session does not verify it either
+    const other = browser();
+    await other.call("POST", "/api/login", { email: "dana@example.com", password: "a-long-enough-password" });
+    expect((await post(other.cookieValue())).status).toBe(403);
+    // the owner's own session does
+    expect((await post(b.cookieValue())).status).toBe(200);
     expect((await b.call("GET", "/api/me")).json).toMatchObject({ emailVerified: true });
     // now the provider sign-in links to the verified account and signs it in: same account, no second one
     const ok = await ghSignIn();
