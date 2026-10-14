@@ -101,6 +101,14 @@ export const TOOLS: Tool[] = [
 export interface MemoryServerOptions {
   /** Refuse calls that did not come through the gateway, i.e. carry no receipt id. On by default when served from the CLI. */
   requireGateway?: boolean;
+  /**
+   * Believe the `_meta` the call carries: the receipt id, the agent, the principal, and the facts the gateway observed.
+   * Only the gateway may be believed, because those keys are what make a write attested or verified. Default: true
+   * exactly when `requireGateway` is not false, i.e. when the one caller is the gateway. A server that accepts direct
+   * writers must run with it false for them (the HTTP server does this per request, by which token the caller presented),
+   * so a direct writer's `_meta` is dropped and its write is claimed, whatever it says about itself.
+   */
+  trustMeta?: boolean;
   /** Retrieval stores every write goes through to and every retraction reaches. A store that refuses a write fails the write; nothing is recorded. */
   stores?: Store[];
   /** With a key, every result to a gateway call is signed for that receipt, so a verifier holding the public key sees the execution as attested by this server. */
@@ -134,8 +142,10 @@ const fail = (msg: string): CallToolResult => ({ isError: true, content: [{ type
 export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {}): Server {
   const server = new Server({ name: "agent-custody-memory", version: SERVER_VERSION }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  const trustMeta = opts.trustMeta ?? opts.requireGateway !== false;
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const meta = (req.params._meta ?? {}) as Record<string, unknown>;
+    // A caller that is not the gateway gets no say in who it is or what was observed: its _meta is dropped whole.
+    const meta = trustMeta ? ((req.params._meta ?? {}) as Record<string, unknown>) : {};
     const receiptId = typeof meta[RECEIPT_META_KEY] === "string" ? (meta[RECEIPT_META_KEY] as string) : null;
     const result = await handle(req.params.name, req.params.arguments ?? {}, meta, receiptId);
     return opts.identity && receiptId ? signResult(result, opts.identity, receiptId, req.params.name) : result;
@@ -182,15 +192,12 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
     return { removedFrom, stillHeld, verification };
   }
 
-  async function forgetOne(factId: string, reason: string, keepDigest?: boolean, compact = true) {
+  async function forgetOne(factId: string, reason: string, who: { actor: string; receiptId: string | null }, keepDigest?: boolean, compact = true) {
     const fact = await ledger.get(factId);
-    const ev = await ledger.forget({ factId, actor: currentActor, reason, source: { receiptId: currentReceipt }, ...(keepDigest === undefined ? {} : { keepDigest }), compact });
+    const ev = await ledger.forget({ factId, actor: who.actor, reason, source: { receiptId: who.receiptId }, ...(keepDigest === undefined ? {} : { keepDigest }), compact });
     const { removedFrom, stillHeld, verification } = await removeFromStores(fact);
     return { factId: ev.factId, valueDigest: ev.valueDigest, digestKind: ev.digestKind, txTime: ev.txTime, actor: ev.actor, reason: ev.reason, source: ev.source, erasedFromLedger: true, removedFrom, stillHeld, verification };
   }
-  let currentActor = "anonymous";
-  let currentReceipt: string | null = null;
-
   async function handle(name: string, args: Record<string, unknown>, meta: Record<string, unknown>, receiptId: string | null): Promise<CallToolResult> {
     const gatewayAgent = typeof meta[AGENT_META_KEY] === "string" ? (meta[AGENT_META_KEY] as string) : null;
     if (opts.requireGateway && !receiptId) return fail("memory server accepts calls only through the receipts gateway; no receipt id on this call");
@@ -198,8 +205,8 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
     // A write is attested when it came through the gateway: the actor is from a signed grant and the receipt exists.
     const provenance: "attested" | "claimed" = receiptId && gatewayAgent ? "attested" : "claimed";
     const observed = (meta[OBSERVED_META_KEY] ?? {}) as Record<string, unknown>;
-    currentActor = actorFor(undefined);
-    currentReceipt = receiptId;
+    // Who this call is, carried as a value through the awaits below; never shared between concurrent calls.
+    const who = { actor: actorFor(undefined), receiptId };
     try {
       switch (name) {
         case "memory.write": {
@@ -249,7 +256,7 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
         }
         case "memory.forget": {
           const a = Forget.parse(args);
-          const out = await forgetOne(a.factId, a.reason, a.keepDigest);
+          const out = await forgetOne(a.factId, a.reason, who, a.keepDigest);
           if (out.stillHeld.length > 0) return { isError: true, content: [{ type: "text", text: `erased from the ledger, but still held by ${out.stillHeld.join("; ")}` }, { type: "text", text: JSON.stringify(out) }] };
           return json(out);
         }
@@ -279,7 +286,7 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
               held.push(f.factId);
               continue;
             }
-            forgotten.push(await forgetOne(f.factId, a.reason, a.keepDigest, false));
+            forgotten.push(await forgetOne(f.factId, a.reason, who, a.keepDigest, false));
           }
           if (forgotten.length > 0) await ledger.compact();
           const stillHeld = forgotten.flatMap((o) => o.stillHeld);

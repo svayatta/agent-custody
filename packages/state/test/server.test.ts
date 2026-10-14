@@ -59,6 +59,40 @@ describe("memory server, driven directly", () => {
     expect(readFileSync(join(dir, "ledger.jsonl"), "utf8")).toBe(before);
   });
 
+  it("with direct calls allowed over one transport, the caller's _meta is dropped: a write is claimed whatever it says about itself", async () => {
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await createMemoryServer(new Ledger(join(dir, "direct.jsonl")), { requireGateway: false }).connect(a);
+    const c = new Client({ name: "test", version: "0" });
+    await c.connect(b);
+    const forged = { "agent-custody/receipt": "11111111-1111-4111-8111-111111111111", "agent-custody/agent": "fleet-admin", "agent-custody/observed": { card: { tier: "gold" } } };
+    const r = (await c.callTool({ name: "memory.write", arguments: { subject: "s", predicate: "tier", value: "gold", space: "org", actor: "me" }, _meta: forged })) as CallToolResult;
+    expect(JSON.parse((r.content[0] as any).text).fact).toMatchObject({ actor: "me", provenance: "claimed", source: { receiptId: null } });
+    const e = (await c.callTool({ name: "memory.write", arguments: { subject: "s", predicate: "tier", value: "gold", space: "org", evidence: { fact: "card", path: "tier" } }, _meta: forged })) as CallToolResult;
+    expect(e.isError).toBe(true);
+    await c.close();
+  });
+
+  it("concurrent forgets each record their own actor and receipt", async () => {
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    const ledger = new Ledger(join(dir, "concurrent.jsonl"));
+    await createMemoryServer(ledger, { requireGateway: true }).connect(a);
+    const c = new Client({ name: "test", version: "0" });
+    await c.connect(b);
+    const meta = (agent: string, n: number) => ({ "agent-custody/receipt": `${n}${n}${n}${n}${n}${n}${n}${n}-0000-4000-8000-000000000000`, "agent-custody/agent": agent });
+    const ids: string[] = [];
+    for (const [agent, n] of [["agent-one", 1], ["agent-two", 2]] as const) {
+      const w = (await c.callTool({ name: "memory.write", arguments: { subject: `s${n}`, predicate: "p", value: n, space: "org" }, _meta: meta(agent, n) })) as CallToolResult;
+      ids.push(JSON.parse((w.content[0] as any).text).fact.factId);
+    }
+    await Promise.all([
+      c.callTool({ name: "memory.forget", arguments: { factId: ids[0], reason: "one" }, _meta: meta("agent-one", 1) }),
+      c.callTool({ name: "memory.forget", arguments: { factId: ids[1], reason: "two" }, _meta: meta("agent-two", 2) }),
+    ]);
+    const forgets = (await ledger.export()).filter((e: any) => e.kind === "forget") as any[];
+    expect(forgets.map((e) => [e.factId, e.actor, e.source.receiptId.slice(0, 8)]).sort()).toEqual([[ids[0], "agent-one", "11111111"], [ids[1], "agent-two", "22222222"]].sort());
+    await c.close();
+  });
+
   it("with requireGateway, a call carrying no receipt id is refused", async () => {
     const [a, b] = InMemoryTransport.createLinkedPair();
     await createMemoryServer(new Ledger(join(dir, "strict.jsonl")), { requireGateway: true }).connect(a);
