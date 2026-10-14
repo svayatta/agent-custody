@@ -17,6 +17,7 @@ import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
+import { captureArgs, captureKeyFrom, captureResult, captureValue, ruleFor } from "./capture.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
 
@@ -128,6 +129,11 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   const policyText = readFileSync(cfg.policyFile, "utf8");
   const pDigest = policyDigest(policyText);
   const issuer = createIssuer(gatewayKey, cfg.receiptsDir, options.log ?? openLog(cfg, gatewayKey), { exporter: options.exporter ?? openExporter(cfg) });
+  // Private evidence: the key that encrypts withheld fields, read once; a rule in mode encrypted without it is a config error.
+  const captureKey = cfg.captureKeyEnv ? captureKeyFrom(process.env[cfg.captureKeyEnv] ?? (() => { throw new Error(`capture key: environment variable ${cfg.captureKeyEnv} is not set`); })()) : undefined;
+  for (const [tool, rule] of Object.entries(cfg.capture ?? {})) {
+    for (const side of [rule.args, rule.result, rule.facts]) if (side?.mode === "encrypted" && !captureKey) throw new Error(`capture for ${tool} uses mode encrypted, which needs captureKeyEnv`);
+  }
   const precommit = new Set(cfg.precommit);
   const consequential = (tool: string) => precommit.has("*") || precommit.has(tool);
   // A fact lookup runs before the policy can decide, because the policy decides on it. It is therefore a read the
@@ -261,6 +267,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       let facts: Record<string, FactRecord> = {};
       let policy: PolicyDecision;
       let execution: ReceiptPredicate["execution"] | undefined;
+      /** what the upstream answered, in full: the agent gets this; the receipt gets the captured view */
+      let forwarded: CallToolResult | undefined;
       let authorization: AuthorizationBundle | undefined;
 
       // The grant is enforced in every mode: a call outside its scopes, or after it expired or was revoked, is denied
@@ -289,6 +297,13 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       if (cfg.mode === "observe" && !problem && inScope) policy = { ...policy, enforced: false };
       const forward = policy.decision === "allow" || policy.enforced === false;
 
+      // Private evidence: the digests are over the whole call; the receipt carries the views the capture rule allows.
+      const rule = ruleFor(cfg.capture, tool);
+      const argsCaptured = captureArgs(args, rule?.args, captureKey);
+      const factsView = Object.fromEntries(Object.entries(facts).map(([k, f]) => {
+        const c = captureValue(f.value, rule?.facts, captureKey);
+        return [k, { ...f, value: c.view, ...(c.note ? { capture: c.note } : {}) }];
+      })) as typeof facts;
       const head = {
         receiptId,
         timestamp,
@@ -297,8 +312,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         agent: { id: delegation.agent, provenance: "attested" as const },
         delegation: { envelope: grantEnvelope, provenance: "attested" as const },
         tool: { name: tool, provenance: "observed" as const, ...(owner.has(tool) && upstreamConfigs.length > 1 ? { upstream: owner.get(tool)! } : {}) },
-        request: { args, argsDigest: digestOf(args), provenance: "claimed" as const },
-        facts,
+        request: { args: argsCaptured.view, argsDigest: digestOf(args), provenance: "claimed" as const, ...(argsCaptured.note ? { capture: argsCaptured.note } : {}) },
+        facts: factsView,
         consumed: { factIds: consumedNow, provenance: "observed" as const },
       };
 
@@ -327,7 +342,9 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
           const observed = Object.fromEntries(Object.entries(facts).map(([k, f]) => [k, f.value]));
           const result = await callUpstream(tool, args, { ...upstreamMeta, [OBSERVED_META_KEY]: observed });
           const evidence = upstreamEvidenceOf(result);
-          execution = { status: result.isError ? "failed" : "executed", result, resultDigest: digestOf(result), provenance: "observed", ...(evidence ? { upstream: evidence } : {}) };
+          const captured = captureResult(result, rule?.result, captureKey);
+          forwarded = result;
+          execution = { status: result.isError ? "failed" : "executed", result: captured.view, resultDigest: digestOf(result), provenance: "observed", ...(evidence ? { upstream: evidence } : {}), ...(captured.note ? { capture: captured.note } : {}) };
           noteServedFacts(result);
         } catch (e) {
           execution = { status: "error", error: String(e instanceof Error ? e.message : e), provenance: "observed" };
@@ -355,7 +372,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         case "withheld":
           return refuse(`Not executed: ${execution.reason}`);
         default: {
-          const result = execution.result as CallToolResult;
+          const result = forwarded ?? (execution.result as CallToolResult);
           return { ...result, _meta: { ...result._meta, ...meta } };
         }
       }

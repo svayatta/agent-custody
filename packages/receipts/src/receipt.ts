@@ -1,5 +1,6 @@
 // The receipt: an in-toto Statement whose predicate records one tool call with per-field provenance.
 import type { Envelope } from "./crypto.ts";
+import type { CaptureNote } from "./capture.ts";
 import type { InclusionProof } from "./log.ts";
 import type { PolicyDecision } from "./policy.ts";
 import type { UpstreamEvidence } from "./upstream.ts";
@@ -28,7 +29,9 @@ export type IssuerKind = "gateway" | "sdk";
 export interface FactRecord {
   tool: string;
   args: Record<string, unknown>;
+  /** the value as recorded; with `capture`, a view with commitments where fields were withheld */
   value: unknown;
+  capture?: CaptureNote;
   resultDigest: string;
   provenance: "observed";
 }
@@ -46,7 +49,8 @@ export interface ReceiptPredicate {
   model: { id: string | null; provenance: "claimed" };
   /** upstream names which of several upstreams served the tool; absent when the gateway has one */
   tool: { name: string; provenance: Provenance; upstream?: string };
-  request: { args: Record<string, unknown>; argsDigest: string; provenance: "claimed" };
+  /** `args` is the view the receipt carries; `argsDigest` is over the whole call's arguments. With `capture`, withheld fields hold commitments in the view. */
+  request: { args: Record<string, unknown>; argsDigest: string; provenance: "claimed"; capture?: CaptureNote };
   facts: Record<string, FactRecord>;
   /**
    * Fact ids the agent had been shown, through this gateway, by the time of this call: every id an upstream declared
@@ -66,9 +70,11 @@ export interface ReceiptPredicate {
   execution:
     | {
         status: "executed" | "failed";
+        /** the view the receipt carries; `resultDigest` is over the whole result */
         result: unknown;
         resultDigest: string;
         provenance: Provenance;
+        capture?: CaptureNote;
         /** an upstream's own signature over what it returned, bound to this receipt and checked with the upstream's key; or a provider's delivery, checked with the provider's shared secret */
         upstream?: UpstreamEvidence;
       }

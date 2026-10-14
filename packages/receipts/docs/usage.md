@@ -141,6 +141,42 @@ node src/cli.ts gateway --config ./gateway.json
 
 You will not normally run this by hand. The agent host spawns it, as below.
 
+## Private evidence
+
+A receipt carries the call as it happened: the arguments, the result, and the facts the policy decided on. Some of that a reviewer has no business seeing: the note on a refund with the caller's phone number, the customer record the policy read, the provider's full answer. `capture` in the config says, per tool, what the receipt file carries of each part:
+
+```json
+  "capture": {
+    "stripe.refund": {
+      "args": { "mode": "encrypted", "clear": ["customer_id", "amount"] },
+      "result": { "mode": "digest" },
+      "facts": { "mode": "encrypted" }
+    },
+    "*": { "facts": { "mode": "digest" } }
+  },
+  "captureKeyEnv": "AGENT_CUSTODY_CAPTURE_KEY"
+```
+
+A rule names a tool, or `"*"` for every tool without a rule of its own, and gives a side for the arguments, the result, and the facts, each with a `mode`:
+
+- `clear`, the default: the receipt carries the value, as before.
+- `digest`: every top-level field not listed in `clear` is withheld, and a commitment stands in its place, `{ "$custody": "withheld", "sha256": "<sha256 over a random salt and the canonical value>", "salt": "<hex>" }`. Whoever holds the value can later show it, and the commitment proves it is the value the receipt was made over.
+- `encrypted`: the same commitment, carrying the value as well under a 32-byte key you hold, `{ "$custody": "encrypted", "alg": "A256GCM", "keyid", "iv", "ciphertext", "tag", "sha256", "salt" }`. The key is read at startup from the environment variable `captureKeyEnv` names, 64 hex characters or base64, never from the file; a rule in mode `encrypted` without it fails at startup. `keyid` is the sha256 of the key, so a reviewer knows which key reveals a field.
+
+`clear` lists the top-level fields kept in clear in either mode; a value that is not a plain object is withheld whole. On a result, `isError` and `_meta` stay in clear whatever the rule says, since the metadata carries an upstream's signature. Facts are captured field by field, as arguments are. The same two fields work in the SDK config.
+
+What changes is the receipt file and nothing else. The policy decides on the real values, the agent gets the real result, and the digests and the signature are over the whole call. On the receipt, `request.args` is the view, `request.argsDigest` is still the digest of the full arguments, and `request.capture: { "mode", "withheld": ["reason"] }` says what is withheld (`["*"]` when the whole value is). The same for `execution.result`, `execution.resultDigest`, and `execution.capture`, and for each fact's `value` and `capture` beside its unchanged `resultDigest`. The receipt format stays v0.2; the fields are optional.
+
+A reviewer verifies such a receipt three ways:
+
+- With the receipt alone, every signature and proof checks as before. `request args digest` and `result digest` pass as committed, with the detail "committed, not recomputed: N field(s) are withheld (mode); give the capture key or disclose them to recompute", because the signed statement carries the digest. With an upstream key or a provider secret and a withheld result, `upstream signature not checked` passes with a note in place of the signature check.
+- With the key: `agent-custody verify ... --capture-key-env AGENT_CUSTODY_CAPTURE_KEY` decrypts every encrypted field, checks each against its commitment, and recomputes the digests and the upstream's signature from the real values.
+- With a disclosure: `agent-custody verify ... --disclose disclosure.json` does the same from a file `{ "receiptId", "args"?, "result"? }` holding the withheld values. A disclosure that contradicts a commitment fails the check with the field named.
+
+`agent-custody reveal receipts/<id>.json --capture-key-env AGENT_CUSTODY_CAPTURE_KEY --out disclosure.json` writes that disclosure from the key: `{ receiptId, args, result?, facts? }`, every encrypted part decrypted and checked against its commitment. A part withheld as a digest only carries no value to reveal; it is left out, and the command says so. Hand the file to the reviewer with the receipt.
+
+The limits. A commitment covers a top-level field, so a field is withheld whole, not in part; put what a reviewer may see in fields of its own. A `digest`-only part can be recomputed only by whoever holds the value. The verifier cannot tell a redacted receipt from a complete one beyond the capture note; what it establishes is that whatever is shown, disclosed, or decrypted is the value the signed digest was made over. Nothing here changes what the log receives: a remote log run with `hashOnly` gets leaf hashes, as before, and the exporters carry digests only. The browser verifier at agent-custody.dev/verify reports the committed case and takes no key or disclosure; use the command-line verifier for those. Tutorial 26 runs the refund above end to end.
+
 ## One gateway for many agents, over HTTP
 
 `agent-custody gateway --config gateway.json --http --port 8790` serves the same gateway as an MCP server over Streamable HTTP at `/mcp`, and every connection presents its own grant: the delegation envelope, base64url-encoded, as `Authorization: Bearer <value>` or `X-Agent-Custody-Grant` on the initialize request. The gateway verifies it against `trustedPrincipalKeys` and its validity window, and opens a session for exactly that grant; a grant signed by a stranger, an expired one, or none at all gets 403 with the reason and no session (403 rather than 401, because MCP clients treat 401 as an OAuth challenge and hide the body). Sessions share the key, the policy, the upstreams, the log, and the fact lookups; each has its own tools (the scopes its grant names), its own receipts (its own principal and agent, attested), and its own consumed facts. `grantFile` in the config is then optional and ignored. A session ends when the client terminates it or after `--idle-minutes` (default 30) without a request; `GET /health` reports the live count and the gateway's key id. The transport is plain HTTP: bind to loopback, a private network, or put TLS in front. From JavaScript, `grantHeader(envelope)` builds the header value; from any language it is `base64url(JSON.stringify(envelope))`. Tutorial 20 runs two agents against one gateway.

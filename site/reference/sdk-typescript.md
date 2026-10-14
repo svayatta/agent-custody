@@ -35,6 +35,7 @@ const issuer = createSdkIssuer(loadSdkConfig("sdk.json"));
 | `logFile` or `log` | exactly one: a local Merkle log, or a remote one as in the [gateway config](./gateway#the-config-file) |
 | `framework` | *optional* free-text label, recorded on `issuer.framework` |
 | `otel`, `splunk` | *optional* [exporters](./gateway#exporters) |
+| `capture`, `captureKeyEnv` | *optional* [private evidence](./gateway#private-evidence), as for the gateway: what the receipt file carries of each tool's arguments and result, and the environment variable holding the key that encrypts withheld fields |
 
 ## `SdkIssuer`
 
@@ -115,6 +116,23 @@ Exported from `@agent-custody/receipts` beside the gateway. They belong to the g
 | `A2A_CARD_PATH`, `A2A_RECEIPT_METADATA_KEY`, `A2A_STREAM_META_KEY` | `"/.well-known/agent-card.json"`, `"agent-custody/receipt"`, `"agent-custody/a2a-stream"` | the card path, the metadata key an answered task or message names its receipt under, and the `_meta` key a `.send` result carries a relayed stream's events under |
 
 Types: `AgentCard`, `ResolvedCard`, `A2aServerOptions`, `RunningA2aServer`.
+
+## Private evidence
+
+Exported from `@agent-custody/receipts`. The gateway and `createSdkIssuer` apply them from the config, and the verifier uses them to restore the values; the behaviour is on the [gateway](./gateway#private-evidence) and [verify](./verify#reveal) pages.
+
+| export | signature | what it does |
+| --- | --- | --- |
+| `captureArgs`, `captureResult` | `(value, side: CaptureSide \| undefined, key?: Buffer)` → `{ view, note?: CaptureNote }` | the view a receipt carries of the arguments or the result under a side's rule, and the note saying what is withheld; `captureResult` keeps `isError` and `_meta` in clear. `captureValue(value, side, key?, alwaysClear?)` is the general form |
+| `withhold` | `(value, key?: Buffer) => Commitment` | a commitment over a random salt and the canonical value; with a key, the value under AES-256-GCM beside it |
+| `checkCommitment` | `(c: Commitment, value) => boolean` | true when `value` is what the commitment was made over |
+| `reveal` | `(c: Commitment, key: Buffer) => unknown` | the value behind an encrypted commitment, checked against it; throws for a `withheld` commitment or a key that is not the one it was encrypted under |
+| `restore` | `(view, disclosed?, key?: Buffer) => Restored \| null` | the full value behind a view, `{ value, how: "clear" \| "disclosed" \| "decrypted" }`, or `null` when it cannot be had; throws when a disclosure or the key contradicts a commitment |
+| `isCommitment`, `commitmentsIn` | `(v) => boolean`, `(view) => Record<string, Commitment>` | whether a value is a commitment; the commitments in a view by field, `{ "*": c }` when the whole value is one |
+| `captureKeyFrom`, `captureKeyId` | `(text) => Buffer`, `(key) => string` | the 32-byte key from its hex or base64 form; the sha256 of a key, which an encrypted commitment carries as `keyid` |
+| `ruleFor` | `(capture: CaptureConfig \| undefined, tool) => CaptureRule \| undefined` | the tool's rule, or the `"*"` rule |
+
+Types: `CaptureMode`, `CaptureSide`, `CaptureRule`, `CaptureConfig`, `CaptureNote`, `Withheld`, `Encrypted`, `Commitment`, `Restored`.
 
 ## The log client
 

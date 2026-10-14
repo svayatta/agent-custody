@@ -97,6 +97,26 @@ const protoCall = await pgwProto.handleCall({ name: "stripe.refund", arguments: 
 await pgwProto.close();
 addCase({ name: "gateway-executed-proto-key", description: "The call's arguments carry an own property named __proto__. The receipt records it and the args digest covers it (a canonicaliser that loses the key fails the digest check).", bundle: bundleFile(protoFx.receiptsDir, String(protoCall._meta?.[RECEIPT_META_KEY])), issuerKeys: ["proto-gateway"], principalKeys: ["proto-principal"], logKeys: [], log: logLines(protoFx.logFile) });
 
+// ---- private evidence: the receipt carries commitments where the capture rule withholds; the digests are over the whole call ----
+process.env.VECTORS_CAPTURE_KEY = "9f1c2e3d4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff0";
+const capFx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-capture-")));
+key("capture-gateway", capFx.gatewayPub);
+key("capture-principal", capFx.principalPub);
+key("capture-upstream", capFx.upstreamPub);
+{
+  const cfg = JSON.parse(readFileSync(capFx.configFile, "utf8"));
+  cfg.capture = { "stripe.refund": { args: { mode: "encrypted", clear: ["customer_id", "amount"] }, result: { mode: "digest" }, facts: { mode: "encrypted" } } };
+  cfg.captureKeyEnv = "VECTORS_CAPTURE_KEY";
+  writeFileSync(capFx.configFile, JSON.stringify(cfg));
+}
+const capGw = await createGateway(loadConfig(capFx.configFile));
+const privateCall = await capGw.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500, reason: "customer called from +44 20 7946 0000" } });
+await capGw.close();
+const privateBundle = bundleFile(capFx.receiptsDir, String(privateCall._meta?.[RECEIPT_META_KEY]));
+const CAP = { issuerKeys: ["capture-gateway"], principalKeys: ["capture-principal"], logKeys: [] as string[] };
+addCase({ name: "gateway-executed-private", description: "A refund whose capture rule withholds the note (encrypted), the provider's answer (digest), and the customer record (encrypted): the receipt carries commitments, the digests are over the whole call, and without the key or a disclosure the verifier passes them as committed, not recomputed, and does not check the upstream's signature.", bundle: privateBundle, ...CAP, upstreamKeys: ["capture-upstream"], log: logLines(capFx.logFile) });
+addCase({ name: "resigned-result-digest", description: "The executed receipt's result edited without updating resultDigest, re-signed with the gateway key. The result digest check fails.", bundle: resigned(executed, gatewayKey, (st) => { (st.predicate.execution as { result: { content: { text: string }[] } }).result.content[0]!.text = "{\"status\":\"refunded twice\"}"; }), ...G, log: glog });
+
 // ---- a call refused because the grant had expired: the denial is a true record, issued outside the window ----
 const efx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-expired-")), 1200);
 key("expired-gateway", efx.gatewayPub);

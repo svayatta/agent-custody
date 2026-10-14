@@ -7,11 +7,11 @@ Two producers, one receipt format, one verifier.
 - **The gateway** is an MCP proxy between an agent and the systems it can affect: MCP servers, REST APIs described as tools, and other agents it delegates to over A2A. For every tool call, allowed or denied, it checks a delegation grant signed by the human principal, gathers the facts the policy needs by calling upstream itself, evaluates a Cedar policy that fails closed, forwards the call only on allow, and emits a signed receipt appended to a Merkle transparency log.
 - **The SDK** is an interceptor inside the agent's own process, hooked into the framework's tool-call callbacks: Claude Code, the Claude Agent SDK, the OpenAI Agents SDK, the Vercel AI SDK, OpenClaw, DeepSeek Harness, Hermes, Google ADK, LangChain, or any function you wrap. It reaches everything the gateway cannot see and issues the same receipts, labelled as self-reported.
 
-Anyone holding the public keys can verify a receipt offline. The agent is not trusted. The layer around it is, and the receipt says exactly how far that trust extends, starting with who issued it.
+Anyone holding the public keys can verify a receipt offline. The agent is not trusted. The layer around it is, and the receipt says exactly how far that trust extends, starting with who issued it. What the receipt file carries of a call is a choice per tool: a field can be withheld as a commitment or encrypted under your key, and the verifier recomputes the digests when it is shown the values.
 
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
-- [Tutorials](docs/tutorials.md): twenty-five runnable examples, one per aspect of the code, all executed by the test suite
-- [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop, and the gateway as an A2A agent between agents that delegate to each other
+- [Tutorials](docs/tutorials.md): twenty-six runnable examples, one per aspect of the code, all executed by the test suite
+- [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop, and the gateway as an A2A agent between agents that delegate to each other, and private evidence: what the receipt file carries of each call
 - [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin and Google ADK callbacks through the Python package, and wrapping tool functions in anything else
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
@@ -181,7 +181,7 @@ Every field carries a provenance label. This is the design decision that matters
 bun install                              # from the repository root, once for the workspace
 cd packages/receipts
 node scripts/demo.ts                     # gateway: keys, grant, policy, four tool calls, verification, a tampering attempt; then the SDK wrapping the same tool
-node examples/01-keys-and-signing.ts     # first of twenty-five step-by-step examples, see docs/tutorials.md
+node examples/01-keys-and-signing.ts     # first of twenty-six step-by-step examples, see docs/tutorials.md
 bun run test                             # this package; `bun run test` at the root runs every package
 ```
 
@@ -256,14 +256,15 @@ src/splunk.ts      Splunk export: one HTTP Event Collector event per receipt, to
 src/rest.ts        the REST connector: an HTTP API described as tools, standing where an MCP upstream stands
 src/a2a.ts         agents delegating to agents: a remote A2A agent as an upstream, and the gateway serving A2A itself in front of it
 src/upstream.ts    attested execution: an upstream signs its result for the receipt; the verifier checks it with the upstream key
+src/capture.ts     private evidence: per-tool capture rules, withheld fields as salted commitments or encrypted under the customer's key, restore and reveal
 vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them
 src/verify.ts      offline verification, the human-readable report, and the audit that a later log extends an earlier one
-src/cli.ts         keygen, grant, gateway, hook, serve, log, prune, verify, audit
+src/cli.ts         keygen, grant, gateway, hook, serve, log, prune, verify, reveal, audit
 src/retention.ts   pruning the log: leaves become their hashes, bundles are removed, proofs survive
 src/index.ts       the package's public surface; adapters are exported on ./sdk/<framework> subpaths
 tsconfig.build.json  emits dist/ (JavaScript plus declarations) for consumers; the repo itself runs the .ts directly
 scripts/           fake Stripe upstream (signs its results with --key), a second fake upstream, fixture builders for gateway and SDK, demo
-examples/          twenty-five runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
+examples/          twenty-six runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
 test/              unit tests per module, end-to-end gateway test, SDK and hook tests,
                    adapter tests against the real packages, and a test that runs every policy in docs/policies.md
 docs/              tutorials, usage (gateway), sdk, policies, verification
@@ -311,6 +312,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 - Pre-commit authorization for consequential tools: named in `precommit`, a call is signed and logged before it is forwarded, withheld if the log will not take it, and its receipt carries the committed authorization with proof that it precedes the execution.
 - The grant on every call (issue #97): expiry and revocation are checked on every call and again before the forward, in every mode, on the MCP, HTTP, and A2A fronts; `agent-custody revoke` revokes a grant and every grant delegated from it. The remote log's answer is verified against pinned keys before a pre-committed call goes upstream (issue #99). The portal verifies an address only from the account's own session before a provider sign-in can link to it (issue #103).
 - Agent-to-agent delegation under custody: the A2A upstream and the gateway's A2A front; receipts per delegation with the delegate's card as a fact. A Google ADK `RemoteA2aAgent`, or any A2A client, is pointed at the gateway and a refused delegation comes back as a rejected task the delegate never saw. The delegate does not yet countersign its answer; the receipt attests what the gateway sent and observed, not what the delegate did with it.
+- Private evidence: per-tool capture rules, withheld fields as commitments, encrypted under the customer's key, revealed and recomputed by the verifier.
 
 **Next, in the order it pays off**
 

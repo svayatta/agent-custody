@@ -35,6 +35,8 @@ A separate process between the agent and its tools. The agent connects to it as 
 | `facts` | array | lookups the gateway makes itself before deciding: `name` under `context.facts`, the upstream `tool` to call, `args` templates where `"$args.<key>"` copies the agent's argument, `forTools` the intercepted tools that trigger it, `optional` skips the lookup when the template's argument is absent |
 | `precommit` | array of tool names or `["*"]` | consequential tools: the authorization is logged before the call is forwarded, and the call is withheld if the log will not take it or answers with a head or proof that does not verify |
 | `revokedGrants` | path, *optional* | a JSON array of grant digests (sha256 over the grant's signed payload), re-read whenever the file changes and checked on every call against every link of the grant's chain; `agent-custody revoke` appends to it. A file that cannot be read denies every call |
+| `capture` | map of tool name or `"*"` to `{ args?, result?, facts? }`, *optional* | private evidence: what the receipt file carries of each tool's arguments, result, and facts. Each side is `{ "mode": "clear" \| "digest" \| "encrypted", "clear"?: [fields] }`: `clear` records the value (the default); `digest` withholds every top-level field not listed in `clear` and leaves a salted sha256 commitment in its place; `encrypted` does the same and carries the value encrypted under the capture key. Digests and signatures are always over the whole call, and the policy decides on the real values. [Below](#private-evidence) |
+| `captureKeyEnv` | environment variable name, *optional* | the 32-byte key (64 hex characters or base64) that encrypts withheld fields in mode `encrypted`, read at startup and never from the file; a rule in mode `encrypted` without it fails at startup |
 | `mode` | `"enforce"` (default) or `"observe"` | observe forwards every call the grant allows and records the decision the policy would have made, with `enforced: false` on the receipt; nothing is withheld, and a log that refuses an authorization is printed instead. The grant itself is enforced in both modes: out of scope, expired, or revoked is denied and never forwarded. The way to run a new policy against real traffic before turning it on |
 | `receiptsDir` | path | one `<receiptId>.json` per receipt, and `<receiptId>.authorization.json` for pre-committed calls |
 | `logFile` | path | a local Merkle log, one leaf per line. Exactly one of `logFile` or `log` |
@@ -79,6 +81,24 @@ A separate process between the agent and its tools. The agent connects to it as 
 | `<prefix>.card` | none | the agent card, fetched afresh; name it in `facts` (`{ "name": "card", "tool": "docs.card", "args": {}, "forTools": ["docs.send"] }`) so a policy reads `context.facts.card.name` |
 
 Programmatically: `a2aUpstream(name, cfg, { fetch?, env? })` returns the upstream client with `resolved(): Promise<ResolvedCard>`; `fetchAgentCard(url, headers, fetch, timeoutMs): Promise<{ card, cardUrl, endpoint, legacy }>` is the lookup it uses; `textOf(message)` joins a message's text parts, which is what a policy reads as `context.args.text`.
+
+### Private evidence
+
+```json
+"capture": {
+  "stripe.refund": {
+    "args": { "mode": "encrypted", "clear": ["customer_id", "amount"] },
+    "result": { "mode": "digest" },
+    "facts": { "mode": "encrypted" }
+  },
+  "*": { "facts": { "mode": "digest" } }
+},
+"captureKeyEnv": "AGENT_CUSTODY_CAPTURE_KEY"
+```
+
+A rule names a tool, or `"*"` for every tool without a rule of its own. Each side (`args`, `result`, `facts`) has a `mode` and, in `digest` or `encrypted` mode, the top-level fields to keep in `clear`; a value that is not a plain object is withheld whole. On a result, `isError` and `_meta` stay in clear whatever the rule says, since the metadata carries an upstream's signature. Facts are captured field by field, as arguments are. The policy decides on the real values and the agent gets the real result; only the receipt file carries the view.
+
+A withheld field holds a commitment, `{ "$custody": "withheld", "sha256": "<sha256 over a random 16-byte salt and the canonical value>", "salt": "<hex>" }`, or in mode `encrypted` `{ "$custody": "encrypted", "alg": "A256GCM", "keyid": "<sha256 of the key>", "iv", "ciphertext", "tag", "sha256", "salt" }` with the value under AES-256-GCM. On the receipt, `request.args` is the view and `request.capture: { "mode", "withheld": ["reason"] }` says what is withheld (`["*"]` when the whole value is); `request.argsDigest` stays the digest of the full arguments. The same for `execution.result`, `execution.resultDigest`, and `execution.capture`, and for each fact's `value` and `capture` beside its unchanged `resultDigest`. The fields are optional; the format stays v0.2. A verifier recomputes the digests when given the key or a disclosure and passes them as committed otherwise; `agent-custody reveal` writes the disclosure from the key. Both are on the [verify](./verify#reveal) page.
 
 ## Grants
 
@@ -245,7 +265,7 @@ The statement inside `envelope.payload` is an in-toto Statement whose predicate 
 }
 ```
 
-`execution` is one of `{ status: "executed" | "failed", result, resultDigest, upstream? }`, `{ status: "denied", reason }`, `{ status: "withheld", reason }`, or `{ status: "error", error }`. `tool.upstream` appears when several upstreams are configured. Every check a verifier runs on this is listed under [verify](./verify).
+`execution` is one of `{ status: "executed" | "failed", result, resultDigest, upstream? }`, `{ status: "denied", reason }`, `{ status: "withheld", reason }`, or `{ status: "error", error }`. `tool.upstream` appears when several upstreams are configured. Under a [capture rule](#private-evidence), `request.args`, `execution.result`, and a fact's `value` hold commitments in place of withheld fields, with a `capture` note beside each. Every check a verifier runs on this is listed under [verify](./verify).
 
 ## Exporters
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { hostname, userInfo } from "node:os";
+import { captureKeyFrom, restore } from "./capture.ts";
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -23,7 +24,7 @@ import type { AdminOptions } from "./log-admin.ts";
 import { createRequire } from "node:module";
 import { pruneLog } from "./retention.ts";
 import { serveSidecar } from "./sidecar.ts";
-import { TREEHEAD_TYPE, type ReceiptBundle, type TreeHead } from "./receipt.ts";
+import { TREEHEAD_TYPE, type ReceiptBundle, type TreeHead, type ReceiptStatement } from "./receipt.ts";
 import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
 import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
@@ -43,6 +44,8 @@ const USAGE = `agent-custody <command>
                                                    --agent-key names the agent's own key in the grant, so the agent may delegate
   delegate --key <agent.key> --parent <grant.json> --agent <sub-agent> --scopes <a,b> [--ttl-hours N] [--agent-key <sub.pub>] --out <file>
                                                    a narrower grant for a sub-agent, signed by the agent the parent names; the parent travels inside
+  reveal <bundle> --capture-key-env NAME [--out <file>]   the values a receipt withheld (capture mode encrypted), as a disclosure file
+                                                   for verify --disclose; needs the customer's capture key
   revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them
   gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]
@@ -463,6 +466,8 @@ async function main(argv: string[]): Promise<number> {
           "stripe-secret-env": { type: "string" },
           "github-secret-env": { type: "string" },
           log: { type: "string" },
+          disclose: { type: "string" },
+          "capture-key-env": { type: "string" },
           json: { type: "boolean", default: false },
         },
       });
@@ -470,6 +475,8 @@ async function main(argv: string[]): Promise<number> {
       const issuerKeyFiles = [...(values["issuer-key"] ?? []), ...(values["gateway-key"] ?? [])];
       if (!file || issuerKeyFiles.length === 0) throw new Error("verify needs <bundle> --issuer-key (alias --gateway-key)");
       const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
+      const captureKey = values["capture-key-env"] ? captureKeyFrom(secretFrom(values["capture-key-env"])) : undefined;
+      const disclosed = values.disclose ? (JSON.parse(readFileSync(values.disclose, "utf8")) as { args?: Record<string, unknown>; result?: unknown }) : undefined;
       const fetchedLogKeys = values["log-url"] ? (await fetchLogKeys(values["log-url"])).keys : [];
       const logKeys = [...(values["log-key"] ?? []).map(loadPublicKey), ...fetchedLogKeys];
       const result = verifyBundle(bundle, {
@@ -480,9 +487,42 @@ async function main(argv: string[]): Promise<number> {
         ...(values["upstream-key"] ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}),
         ...(values["stripe-secret-env"] || values["github-secret-env"] ? { providerSecrets: { ...(values["stripe-secret-env"] ? { stripe: secretFrom(values["stripe-secret-env"]) } : {}), ...(values["github-secret-env"] ? { github: secretFrom(values["github-secret-env"]) } : {}) } } : {}),
         ...(values.log ? { logFile: values.log } : {}),
+        ...(captureKey ? { captureKey } : {}),
+        ...(disclosed ? { disclosed } : {}),
       });
       console.log(values.json ? JSON.stringify(result, null, 2) : formatReport(result));
       return result.ok ? 0 : 1;
+    }
+    case "reveal": {
+      // The values a receipt withheld, under the customer's key, as a disclosure file: hand it to a reviewer with the
+      // receipt, and `verify --disclose` recomputes every digest from it.
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { "capture-key-env": { type: "string" }, out: { type: "string" } } });
+      const file = positionals[0];
+      if (!file || !values["capture-key-env"]) throw new Error("reveal needs <bundle> --capture-key-env NAME [--out disclosure.json]");
+      const key = captureKeyFrom(secretFrom(values["capture-key-env"]));
+      const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
+      const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as ReceiptStatement).predicate;
+      // a part withheld as a digest only carries no value to reveal; it is left out, and said so
+      const notRevealed: string[] = [];
+      const back = (name: string, view: unknown): unknown => {
+        const r = restore(view, undefined, key);
+        if (!r) notRevealed.push(name);
+        return r?.value;
+      };
+      const args = back("args", p.request.args);
+      const result = p.execution.status === "executed" || p.execution.status === "failed" ? back("result", p.execution.result) : undefined;
+      const facts = Object.fromEntries(Object.entries(p.facts).map(([k, f]) => [k, back(`fact ${k}`, f.value)]).filter(([, v]) => v !== undefined));
+      const disclosure = { receiptId: p.receiptId, ...(args !== undefined ? { args } : {}), ...(result !== undefined ? { result } : {}), ...(Object.keys(facts).length ? { facts } : {}) };
+      const text = JSON.stringify(disclosure, null, 2);
+      const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them.` : "";
+      if (values.out) {
+        writeFileSync(values.out, text);
+        console.log(`disclosure for receipt ${p.receiptId} written to ${values.out}; verify it with --disclose ${values.out}.${note}`);
+      } else {
+        console.log(text);
+        if (note) console.error(note.trim());
+      }
+      return 0;
     }
     case "audit": {
       const { values } = parseArgs({
