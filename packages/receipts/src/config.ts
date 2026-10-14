@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 /** Where receipts are logged: a local file, or a log reached over HTTP whose bearer token comes from an environment variable. */
-const LogSchema = z.object({ url: z.string().url(), tokenEnv: z.string().min(1).optional(), /** send leaf hashes only; the log never holds the receipt. Use it for any log run by someone else */ hashOnly: z.boolean().optional(), /** milliseconds one append may take before the log counts as unreachable; default 10000 */ timeoutMs: z.number().int().positive().optional() });
+const LogSchema = z.object({ url: z.string().url(), tokenEnv: z.string().min(1).optional(), /** send leaf hashes only; the log never holds the receipt. Use it for any log run by someone else */ hashOnly: z.boolean().optional(), /** milliseconds one append may take before the log counts as unreachable; default 10000 */ timeoutMs: z.number().int().positive().optional(), /** the log's public key files; every append's answer is checked against them before a call is forwarded. Without them the log's key document is fetched once and pinned. */ keys: z.array(z.string().min(1)).optional(), /** the id the log must write into every tree head; an answer for another log is refused */ logId: z.string().min(1).optional() });
 const oneLog = { message: "exactly one of logFile or log is required" };
 /** Optional OpenTelemetry export: every receipt also becomes a span at this OTLP/HTTP collector, after it is issued. Never on the evidence path. */
 const OtelSchema = z.object({ url: z.string().url(), headersEnv: z.record(z.string(), z.string().min(1)).optional(), serviceName: z.string().min(1).optional() });
@@ -87,6 +87,8 @@ export const GatewayConfigSchema = z.object({
    * authorization to the log and refuses the call if the log will not take it. Evidence then precedes the side effect.
    */
   precommit: z.array(z.string().min(1)).default([]),
+  /** a JSON file listing digests of revoked grant envelopes (`agent-custody revoke` appends to it); re-read whenever it changes, checked on every call */
+  revokedGrants: z.string().min(1).optional(),
   /**
    * "enforce" (the default when absent) denies what the policy denies. "observe" forwards every call the grant allows and records the
    * decision the policy would have made, with `enforced: false` on the receipt: the way to run a new policy against
@@ -116,6 +118,8 @@ export function loadConfig(path: string): GatewayConfig {
     policyFile: r(cfg.policyFile),
     receiptsDir: r(cfg.receiptsDir),
     ...(cfg.logFile ? { logFile: r(cfg.logFile) } : {}),
+    ...(cfg.log?.keys ? { log: { ...cfg.log, keys: cfg.log.keys.map(r) } } : {}),
+    ...(cfg.revokedGrants ? { revokedGrants: r(cfg.revokedGrants) } : {}),
   };
 }
 

@@ -19,13 +19,15 @@ let log: RunningLog;
 let portal: RunningPortal;
 const stripeCalls: { path: string; body: URLSearchParams }[] = [];
 const mails: { to: string[]; subject: string; text: string; from: string }[] = [];
+/** who GitHub says the signed-in user is; a test changes it to play another person */
+let gh = { id: 4242, email: "Octo@Example.com" };
 // GitHub's and Google's endpoints, stood in: a code becomes a token, a token becomes a subject and a verified email
 const oauthFetch: typeof fetch = async (url, init) => {
   const u = String(url);
   const j = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   if (u === "https://github.com/login/oauth/access_token") { const b = JSON.parse(String(init?.body)); return j(b.code === "gh-code" && b.client_secret === "gh_secret" ? { access_token: "gh-token" } : { error: "bad_verification_code" }); }
-  if (u === "https://api.github.com/user") return j({ id: 4242, login: "octo" });
-  if (u === "https://api.github.com/user/emails") return j([{ email: "old@example.com", primary: false, verified: false }, { email: "Octo@Example.com", primary: true, verified: true }]);
+  if (u === "https://api.github.com/user") return j({ id: gh.id, login: "octo" });
+  if (u === "https://api.github.com/user/emails") return j([{ email: "old@example.com", primary: false, verified: false }, { email: gh.email, primary: true, verified: true }]);
   if (u === "https://oauth2.googleapis.com/token") { const b = new URLSearchParams(String(init?.body)); const claims = Buffer.from(JSON.stringify({ sub: "g-1", email: "Gina@Example.com", email_verified: true })).toString("base64url"); return j(b.get("code") === "g-code" ? { id_token: `h.${claims}.s` } : { error: "invalid_grant" }); }
   return new Response("not stood in: " + u, { status: 500 });
 };
@@ -96,7 +98,8 @@ describe("the tenant portal", () => {
 
     // one email to the person with the sheet and never the key, one to the operator with the contact details
     await new Promise((r) => setTimeout(r, 50));
-    expect(mails.map((m) => [m.to[0], m.subject])).toEqual([["dana@example.com", 'Your agent-custody log "acme" is ready'], ["sales@example.test", "New registration: Acme Ltd (acme)"]]);
+    expect(mails.map((m) => [m.to[0], m.subject])).toEqual([["dana@example.com", 'Your agent-custody log "acme" is ready'], ["sales@example.test", "New registration: Acme Ltd (acme)"], ["dana@example.com", "Verify your email address for agent-custody"]]);
+    expect(mails[2]!.text).toMatch(/verify-email\?token=/);
     expect(mails[0]!.text).toContain("t/acme/");
     expect(mails[0]!.text).toContain("Hello Dana Ortiz");
     expect(mails[0]!.text).not.toContain(r.json.token);
@@ -246,7 +249,7 @@ describe("two-step registration and provider sign-in", () => {
     const b = browser();
     const r = await b.call("POST", "/api/register", { email: "Two@Example.com", password: "a-long-enough-password" });
     expect(r.status).toBe(200);
-    expect(r.json).toEqual({ email: "two@example.com", tenant: null });
+    expect(r.json).toEqual({ email: "two@example.com", tenant: null, emailVerified: false });
     expect((await b.call("GET", "/api/me")).json).toMatchObject({ email: "two@example.com", tenant: null, profile: { name: null, company: null } });
     expect((await b.call("GET", "/api/overview")).status).toBe(409);
     expect((await b.call("POST", "/api/onboard", { tenant: "twoco", company: "Two Co" })).status).toBe(400); // a name is needed
@@ -310,6 +313,62 @@ describe("two-step registration and provider sign-in", () => {
     const page = await (await fetch(portal.url)).text();
     expect(page).toContain('["github","google"]');
     expect(page).toContain('id="onboardForm"');
+  });
+});
+
+describe("email verification and account linking (issue #103)", () => {
+  const verifyLinkFor = (email: string) => { const m = [...mails].reverse().find((x) => x.to[0] === email && /Verify your email/.test(x.subject))!; return new URL(/(https?:\S+verify-email\?token=\S+)/.exec(m.text)![1]!); };
+  const ghSignIn = async (cookie?: string, link = false) => {
+    const start = await fetch(new URL(`auth/github${link ? "?link=1" : ""}`, portal.url), { redirect: "manual", headers: cookie ? { cookie } : {} });
+    if (start.status !== 302) return { status: start.status, setCookies: [] as string[], text: await start.text() };
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    const cb = await fetch(new URL(`auth/github/callback?code=gh-code&state=${state}`, portal.url), { headers: { cookie: `custody_oauth=${state}${cookie ? `; ${cookie}` : ""}` } });
+    return { status: cb.status, setCookies: cb.headers.getSetCookie(), text: await cb.text() };
+  };
+
+  it("a password account is unverified until its link is used; a provider sign-in for that address is refused and links only once the address is verified", async () => {
+    const b = browser();
+    expect((await b.call("POST", "/api/register", { email: "vera@example.com", password: "a-long-enough-password" })).json).toEqual({ email: "vera@example.com", tenant: null, emailVerified: false });
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await b.call("GET", "/api/me")).json).toMatchObject({ emailVerified: false, identities: [], providers: ["github", "google"], mail: true });
+    const uid = readSession(SECRET, b.cookieValue().split("=")[1]!);
+    // an attacker-shaped situation: GitHub vouches for vera@example.com, but the password account never verified it
+    gh = { id: 777, email: "Vera@Example.com" };
+    const refused = await ghSignIn();
+    expect(refused.status).toBe(409);
+    expect(refused.text).toMatch(/has not verified it/);
+    expect(refused.setCookies.find((c) => c.startsWith("custody_session="))).toBeUndefined();
+    // a bad link does nothing; the real one verifies the address
+    expect((await fetch(new URL("verify-email?token=nope", portal.url))).status).toBe(400);
+    const link = verifyLinkFor("vera@example.com");
+    expect((await fetch(new URL(link.pathname + link.search, portal.url))).status).toBe(200);
+    expect((await b.call("GET", "/api/me")).json).toMatchObject({ emailVerified: true });
+    // now the provider sign-in links to the verified account and signs it in: same account, no second one
+    const ok = await ghSignIn();
+    expect(ok.status).toBe(200);
+    const session = ok.setCookies.find((c) => c.startsWith("custody_session="))!.split(";")[0]!;
+    expect(readSession(SECRET, session.split("=")[1]!)).toBe(uid);
+    // resend is a no-op once verified
+    expect((await b.call("POST", "/api/verify-email/resend", {})).json).toEqual({ ok: true, emailVerified: true });
+    gh = { id: 4242, email: "Octo@Example.com" };
+  });
+
+  it("a signed-in account links a provider from its session even when the provider's email differs, and that identity then signs into the same account", async () => {
+    // the verified account from the previous test, signed in with its password (a sixth registration would hit the throttle)
+    const b = browser();
+    expect((await b.call("POST", "/api/login", { email: "vera@example.com", password: "a-long-enough-password" })).status).toBe(200);
+    const uid = readSession(SECRET, b.cookieValue().split("=")[1]!);
+    gh = { id: 888, email: "Someone@Else.com" };
+    expect((await ghSignIn(undefined, true)).status).toBe(401); // linking needs a session
+    const linked = await ghSignIn(b.cookieValue(), true);
+    expect(linked.status, linked.text).toBe(200);
+    expect(linked.text).toMatch(/GitHub is linked to vera@example.com/);
+    expect((await b.call("GET", "/api/me")).json).toMatchObject({ identities: ["github"], emailVerified: true });
+    const again = await ghSignIn();
+    expect(again.status).toBe(200);
+    const session = again.setCookies.find((c) => c.startsWith("custody_session="))!.split(";")[0]!;
+    expect(readSession(SECRET, session.split("=")[1]!)).toBe(uid);
+    gh = { id: 4242, email: "Octo@Example.com" };
   });
 });
 

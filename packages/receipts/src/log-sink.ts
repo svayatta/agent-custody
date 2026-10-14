@@ -6,11 +6,11 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { dsseSign, type Envelope, type KeyPair } from "./crypto.ts";
+import { dsseSign, dsseVerify, loadPublicKey, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
 import { createHash } from "node:crypto";
-import { leafHash, MerkleLog, type InclusionProof } from "./log.ts";
+import { leafHash, MerkleLog, verifyInclusion, type InclusionProof } from "./log.ts";
 import { type AuditEntry, type QuotaState, fileBackend, RateLimiter, type LogBackend, type PostgresTenancy, type RateLimitOptions , type PolicyRecord } from "./log-store.ts";
-import { localSigner, type Signer } from "./signer.ts";
+import { fetchLogKeys, localSigner, type Signer } from "./signer.ts";
 import type { Checkpoint, CheckpointStore } from "./checkpoints.ts";
 import { adminRoutes, type AdminOptions } from "./log-admin.ts";
 import { TREEHEAD_TYPE, type TreeHead } from "./receipt.ts";
@@ -65,18 +65,37 @@ export interface HttpLogOptions {
   retries?: number;
   /** how long one append may take before it counts as unreachable; default 10000. A log that accepts and never answers must not hold a call forever. */
   timeoutMs?: number;
+  /** the log's public keys, pinned: the tree head in every append's answer must be signed by one of them. Without them, the key document at the log's /.well-known/agent-custody-log.json is fetched on first use and pinned for the life of the sink. */
+  keys?: PublicKeyRef[];
+  /** the id the log must write into every tree head; an answer naming another log, or none, is refused */
+  logId?: string;
   fetch?: typeof fetch;
 }
 
 /**
  * A log reached over HTTP: POST <url>/append with {leaf} or {leafHash}, expecting a LogAppend back. A 429 or a 5xx
  * is retried a few times with backoff, honouring Retry-After; anything else, or the last failure, is the caller's.
+ *
+ * The answer is not taken on trust. Before it is returned, and so before a pre-committed call is forwarded, the tree
+ * head must verify against the log's pinned keys, name the expected log, match the proof's size, and the inclusion
+ * proof must place this very leaf under the signed root. A log that answers with anything else has refused the append.
  */
 export function httpLog(url: string, opts: HttpLogOptions = {}): LogSink {
   const f = opts.fetch ?? fetch;
   const base = url.endsWith("/") ? url : `${url}/`;
   const attempts = opts.retries ?? 3;
   const timeoutMs = opts.timeoutMs ?? 10_000;
+  let pinned: Promise<PublicKeyRef[]> | null = opts.keys?.length ? Promise.resolve(opts.keys) : null;
+  const keys = () => (pinned ??= fetchLogKeys(base, f).then((r) => r.keys).catch((e) => { pinned = null; throw new Error(`log ${url}: its keys could not be fetched to check the append, and none are configured: ${e instanceof Error ? e.message : String(e)}`); }));
+  const checked = async (entry: LogAppend, leaf: string): Promise<LogAppend> => {
+    const th = dsseVerify(entry.treeHead, await keys());
+    if (!th.ok || entry.treeHead.payloadType !== TREEHEAD_TYPE) throw new Error(`log ${url} answered with a tree head that does not verify against its keys${th.ok ? " (wrong payload type)" : `: ${th.error}`}`);
+    const head = th.payload as TreeHead;
+    if (opts.logId !== undefined && head.log !== opts.logId) throw new Error(`log ${url} signed a tree head for log "${head.log ?? ""}", not "${opts.logId}"`);
+    if (head.treeSize !== entry.inclusion.treeSize) throw new Error(`log ${url} answered with a tree head of size ${head.treeSize} and a proof for size ${entry.inclusion.treeSize}`);
+    if (!verifyInclusion(leafHash(leaf), entry.inclusion, head.rootHash)) throw new Error(`log ${url} answered with an inclusion proof that does not place this leaf under the signed root`);
+    return entry;
+  };
   return {
     kind: "http",
     where: url,
@@ -99,7 +118,7 @@ export function httpLog(url: string, opts: HttpLogOptions = {}): LogSink {
         if (res.ok) {
           const body = (await res.json()) as Partial<LogAppend>;
           if (!body.inclusion || !body.treeHead) throw new Error(`log ${url} returned a malformed append result`);
-          return body as LogAppend;
+          return checked(body as LogAppend, leaf);
         }
         last = `log ${url} refused the append: ${res.status} ${(await res.text()).slice(0, 200)}`;
         if (res.status !== 429 && res.status < 500) break;
@@ -115,7 +134,7 @@ export function httpLog(url: string, opts: HttpLogOptions = {}): LogSink {
 
 export interface LogConfig {
   logFile?: string | undefined;
-  log?: { url: string; tokenEnv?: string | undefined; hashOnly?: boolean | undefined; timeoutMs?: number | undefined } | undefined;
+  log?: { url: string; tokenEnv?: string | undefined; hashOnly?: boolean | undefined; timeoutMs?: number | undefined; keys?: string[] | undefined; logId?: string | undefined } | undefined;
 }
 
 /** The sink a config asks for: a remote log when `log` is set, otherwise the local file. */
@@ -123,7 +142,7 @@ export function openLog(cfg: LogConfig, key: KeyPair): LogSink {
   if (cfg.log) {
     const token = cfg.log.tokenEnv ? process.env[cfg.log.tokenEnv] : undefined;
     if (cfg.log.tokenEnv && !token) throw new Error(`log token: environment variable ${cfg.log.tokenEnv} is not set`);
-    return httpLog(cfg.log.url, { ...(token === undefined ? {} : { token }), ...(cfg.log.hashOnly ? { hashOnly: true } : {}), ...(cfg.log.timeoutMs ? { timeoutMs: cfg.log.timeoutMs } : {}) });
+    return httpLog(cfg.log.url, { ...(token === undefined ? {} : { token }), ...(cfg.log.hashOnly ? { hashOnly: true } : {}), ...(cfg.log.timeoutMs ? { timeoutMs: cfg.log.timeoutMs } : {}), ...(cfg.log.keys ? { keys: cfg.log.keys.map(loadPublicKey) } : {}), ...(cfg.log.logId ? { logId: cfg.log.logId } : {}) });
   }
   if (!cfg.logFile) throw new Error("config needs logFile or log.url");
   return fileLog(cfg.logFile, key);

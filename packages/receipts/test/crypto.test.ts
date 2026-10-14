@@ -1,10 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { canonicalize, digestOf, dsseSign, dsseVerify, generateKeyPair } from "../src/crypto.ts";
+import { canonicalize, digestOf, dsseSign, dsseVerify, generateKeyPair  } from "../src/crypto.ts";
 
 describe("canonicalize", () => {
   it("is independent of key order and drops undefined, so digests are stable", () => {
     expect(canonicalize({ b: 1, a: { d: undefined, c: [3, { z: 1, y: 2 }] } })).toBe('{"a":{"c":[3,{"y":2,"z":1}]},"b":1}');
     expect(digestOf({ a: 1, b: 2 })).toBe(digestOf({ b: 2, a: 1 }));
+  });
+});
+
+describe("canonicalize with special keys", () => {
+  it("keeps an own property named __proto__, as JSON.parse produces it, so the digest covers what was sent", () => {
+    const args = JSON.parse('{"amount":1,"__proto__":{"polluted":true},"constructor":"c"}') as Record<string, unknown>;
+    const text = canonicalize(args);
+    expect(text).toContain('"__proto__":{"polluted":true}');
+    expect(text).toContain('"constructor":"c"');
+    expect(JSON.parse(text)).toEqual(args);
+    expect(digestOf(args)).not.toBe(digestOf({ amount: 1, constructor: "c" }));
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
 

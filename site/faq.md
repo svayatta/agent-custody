@@ -59,7 +59,7 @@ Yes. Set `"mode": "observe"` in the gateway or SDK config. Every call the grant 
 
 ## Why trust the enforcer?
 
-Three reasons, none of them "trust us". The gateway and the verifier are open source under Apache-2.0; read them. Policies are Cedar, the authorization language AWS built and formally verified, evaluated by its own engine; we do not interpret policies ourselves. And every receipt carries the SHA-256 of the policy text that decided it, so a verifier knows exactly which rules were in force, and the receipt format is published with 29 conformance vectors any second implementation must pass. The verifier's report also says what a receipt does not prove: an SDK receipt is the agent's own word, tamper-evident after issue, and the report prints that sentence.
+Three reasons, none of them "trust us". The gateway and the verifier are open source under Apache-2.0; read them. Policies are Cedar, the authorization language AWS built and formally verified, evaluated by its own engine; we do not interpret policies ourselves. And every receipt carries the SHA-256 of the policy text that decided it, so a verifier knows exactly which rules were in force, and the receipt format is published with 31 conformance vectors any second implementation must pass. The verifier's report also says what a receipt does not prove: an SDK receipt is the agent's own word, tamper-evident after issue, and the report prints that sentence.
 
 ## How fast is it?
 

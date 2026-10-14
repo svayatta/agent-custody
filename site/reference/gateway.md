@@ -33,11 +33,12 @@ A separate process between the agent and its tools. The agent connects to it as 
 | `trustedPrincipalKeys` | paths | public keys of principals whose grants are accepted; matched by keyid |
 | `policyFile` | path | the Cedar policy; its SHA-256 is in every receipt |
 | `facts` | array | lookups the gateway makes itself before deciding: `name` under `context.facts`, the upstream `tool` to call, `args` templates where `"$args.<key>"` copies the agent's argument, `forTools` the intercepted tools that trigger it, `optional` skips the lookup when the template's argument is absent |
-| `precommit` | array of tool names or `["*"]` | consequential tools: the authorization is logged before the call is forwarded, and the call is withheld if the log will not take it |
-| `mode` | `"enforce"` (default) or `"observe"` | observe forwards every call the grant allows and records the decision the policy would have made, with `enforced: false` on the receipt; nothing is withheld, and a log that refuses an authorization is printed instead. The way to run a new policy against real traffic before turning it on |
+| `precommit` | array of tool names or `["*"]` | consequential tools: the authorization is logged before the call is forwarded, and the call is withheld if the log will not take it or answers with a head or proof that does not verify |
+| `revokedGrants` | path, *optional* | a JSON array of grant digests, re-read whenever the file changes and checked on every call; `agent-custody revoke` appends to it |
+| `mode` | `"enforce"` (default) or `"observe"` | observe forwards every call the grant allows and records the decision the policy would have made, with `enforced: false` on the receipt; nothing is withheld, and a log that refuses an authorization is printed instead. The grant itself is enforced in both modes: out of scope, expired, or revoked is denied and never forwarded. The way to run a new policy against real traffic before turning it on |
 | `receiptsDir` | path | one `<receiptId>.json` per receipt, and `<receiptId>.authorization.json` for pre-committed calls |
 | `logFile` | path | a local Merkle log, one leaf per line. Exactly one of `logFile` or `log` |
-| `log` | `{ url, tokenEnv?, hashOnly?, timeoutMs? }` | a remote log: the tenant's append URL, the bearer token's environment variable, `hashOnly: true` to send only the leaf hash (use it for any log run by someone else), and how long one append may take, default 10000 ms |
+| `log` | `{ url, tokenEnv?, hashOnly?, timeoutMs?, keys?, logId? }` | a remote log: the tenant's append URL, the bearer token's environment variable, `hashOnly: true` to send only the leaf hash (use it for any log run by someone else), how long one append may take (default 10000 ms), the log's public key files to pin (without them its key document is fetched once and pinned), and the id its tree heads must carry. Every append's answer is verified against them before a pre-committed call is forwarded |
 | `otel` | *optional* | OpenTelemetry export, one span per receipt, after the receipt, never on its path |
 | `splunk` | *optional* | Splunk HTTP Event Collector export, one event per receipt, the token from the environment |
 
@@ -106,6 +107,8 @@ agent-custody delegate --key keys/agent.key --parent grant.json --agent refunder
 `delegateFrom(parentEnvelope, agentKeyPair, { agent, scopes, issuedAt?, expiresAt?, agentKey? }): Envelope` refuses, before signing, a scope the parent lacks or a window outside the parent's. The verifier walks the chain to a trusted principal key, three delegations deep at most: every link signed by the key its parent names, no scope the parent lacks, a window inside the parent's, the same principal throughout. A receipt issued under a chained grant names the sub-agent as `agent`, the principal as `principal`, and carries the whole chain in `delegation.envelope`.
 
 ## Running it
+
+The grant is checked on every call, in every mode, and again just before the forward; over HTTP a session whose grant has expired or been revoked is closed on its next request with `403` and must initialize again with a current grant. `Gateway.grantProblem(at?)` says why a grant is not in force (`"has expired"`, `"is not yet valid"`, `"has been revoked"`), `Gateway.grantDigest` is what `GatewayHost.revoke(digest)` and `agent-custody revoke` name, and `GatewayHost.revoked()` lists them.
 
 **One agent, over stdio.** The agent's MCP host spawns the gateway; the config's `grantFile` is the grant.
 

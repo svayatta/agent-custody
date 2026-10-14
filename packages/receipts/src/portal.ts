@@ -70,6 +70,17 @@ export interface PortalUser {
   id: string;
   email: string;
   createdAt: string;
+  /** when the address was confirmed: by a verification link, or by a provider that vouched for it; null until then */
+  emailVerifiedAt?: string | null;
+}
+
+/** A provider sign-in whose verified email belongs to a password account that never verified its address: refused, never linked (issue #103). */
+export class UnverifiedAccountError extends Error {
+  email: string;
+  constructor(email: string) {
+    super(`an account with the address ${email} exists but has not verified it; sign in with its password, then link the provider from the account page`);
+    this.email = email;
+  }
 }
 
 const ident = (s: string) => {
@@ -102,6 +113,8 @@ export class PortalStore {
         for (const c of PROFILE_COLUMNS) await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS ${c} TEXT`);
         // when the founder's note went out, so it goes once
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS followed_up_at TIMESTAMPTZ`);
+        // when the address was confirmed; a provider sign-in links to a password account only once this is set
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ`);
         // a provider identity linked to an account: GitHub or Google's stable subject, and the verified email it gave
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}identities (provider TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES ${p}users(id), email TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (provider, subject))`);
       })();
@@ -128,9 +141,25 @@ export class PortalStore {
   }
   async userByEmail(email: string): Promise<PortalUser | null> {
     await this.init();
-    const rows = (await this.client.query(`SELECT id, email, created_at FROM ${this.p}users WHERE email = $1`, [email])).rows as Record<string, unknown>[];
-    const r = rows[0];
-    return r ? { id: String(r.id), email: String(r.email), createdAt: new Date(r.created_at as string).toISOString() } : null;
+    const rows = (await this.client.query(`SELECT id, email, created_at, email_verified_at FROM ${this.p}users WHERE email = $1`, [email])).rows as Record<string, unknown>[];
+    return rows[0] ? PortalStore.asUser(rows[0]) : null;
+  }
+  private static asUser(r: Record<string, unknown>): PortalUser {
+    return { id: String(r.id), email: String(r.email), createdAt: new Date(r.created_at as string).toISOString(), emailVerifiedAt: r.email_verified_at ? new Date(r.email_verified_at as string).toISOString() : null };
+  }
+  async markEmailVerified(userId: string, at = new Date()): Promise<void> {
+    await this.init();
+    await this.client.query(`UPDATE ${this.p}users SET email_verified_at = COALESCE(email_verified_at, $2) WHERE id = $1`, [userId, at.toISOString()]);
+  }
+  /** Links a provider identity to a signed-in account: the account proved itself with its session, so the provider's email need not match. */
+  async linkIdentity(provider: string, subject: string, email: string, userId: string): Promise<void> {
+    await this.init();
+    await this.client.query(`INSERT INTO ${this.p}identities (provider, subject, user_id, email) VALUES ($1, $2, $3, $4) ON CONFLICT (provider, subject) DO UPDATE SET user_id = EXCLUDED.user_id, email = EXCLUDED.email`, [provider, subject, userId, email]);
+  }
+  async identities(userId: string): Promise<string[]> {
+    await this.init();
+    const rows = (await this.client.query(`SELECT DISTINCT provider FROM ${this.p}identities WHERE user_id = $1 ORDER BY provider`, [userId])).rows as { provider: string }[];
+    return rows.map((r) => r.provider);
   }
   /** the account's profile, for the onboarding screen and the operator's note */
   async profile(userId: string): Promise<Profile> {
@@ -159,8 +188,11 @@ export class PortalStore {
     await this.client.query(`UPDATE ${this.p}users SET name = $2, company = $3, role = $4, phone = $5, telegram = $6 WHERE id = $1`, [userId, profile.name ?? null, profile.company ?? null, profile.role ?? null, profile.phone ?? null, profile.telegram ?? null]);
   }
   /**
-   * The account behind a provider sign-in: the linked one, else the account with that verified email (linked from
-   * now on), else a new account with a random password nobody knows. The provider's email must be verified.
+   * The account behind a provider sign-in: the linked one; else the account with that email, linked from now on, but
+   * only if that account has verified its address (otherwise anyone could register a victim's address with a
+   * password, wait for the victim to sign in with Google, and keep password access to the merged account: issue
+   * #103; the refusal is UnverifiedAccountError); else a new account with a random password nobody knows, its address
+   * counted as verified because the provider vouched for it. The provider's email must be verified.
    */
   async findOrCreateOAuthUser(provider: string, subject: string, email: string): Promise<PortalUser> {
     await this.init();
@@ -170,8 +202,12 @@ export class PortalStore {
       if (u) return u;
     }
     let user = await this.userByEmail(email);
-    if (!user) user = await this.createUser(email, randomBytes(32).toString("hex"));
-    await this.client.query(`INSERT INTO ${this.p}identities (provider, subject, user_id, email) VALUES ($1, $2, $3, $4) ON CONFLICT (provider, subject) DO UPDATE SET user_id = EXCLUDED.user_id, email = EXCLUDED.email`, [provider, subject, user.id, email]);
+    if (user && !user.emailVerifiedAt) throw new UnverifiedAccountError(email);
+    if (!user) {
+      user = await this.createUser(email, randomBytes(32).toString("hex"));
+      await this.markEmailVerified(user.id);
+    }
+    await this.linkIdentity(provider, subject, email, user.id);
     return user;
   }
   async authenticate(email: string, password: string): Promise<PortalUser | null> {
@@ -183,9 +219,8 @@ export class PortalStore {
   }
   async user(id: string): Promise<PortalUser | null> {
     await this.init();
-    const rows = (await this.client.query(`SELECT id, email, created_at FROM ${this.p}users WHERE id = $1`, [id])).rows as Record<string, unknown>[];
-    const r = rows[0];
-    return r ? { id: String(r.id), email: String(r.email), createdAt: new Date(r.created_at as string).toISOString() } : null;
+    const rows = (await this.client.query(`SELECT id, email, created_at, email_verified_at FROM ${this.p}users WHERE id = $1`, [id])).rows as Record<string, unknown>[];
+    return rows[0] ? PortalStore.asUser(rows[0]) : null;
   }
   async addMember(userId: string, tenantId: string): Promise<void> {
     await this.init();
@@ -356,6 +391,13 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   const portalBase = (o.portalUrl ?? "http://localhost/").replace(/\/?$/, "/");
   // Mail is best effort and off the request path: a provider outage is logged, never a failed registration.
   const send = async (m: { to: string; subject: string; text: string }) => { if (o.mail) await deliverMail(o.mail, m, log); };
+  /** The verification link: a signed, single-purpose token good for a day. Until it is used, a provider sign-in for this address will not link to the account. */
+  const verificationMail = (u: PortalUser) => ({
+    to: u.email,
+    subject: "Verify your email address for agent-custody",
+    text: ["Hello,", "", "Please confirm this address for your agent-custody account by opening the link below. It is good for 24 hours.", "", `${portalBase}verify-email?token=${signSession(o.secret, `verify:${u.id}`, 86_400_000)}`, "", "If you did not create an account, ignore this mail; nothing was created in your name that works without it.", "", "agent-custody"].join("\n"),
+  });
+
   const welcomeMail = (to: string, name: string, tenant: string, logId: string) => send({ to, subject: `Your agent-custody log "${tenant}" is ready`, text: [
     `Hello ${name},`, "",
     `Your tenant "${tenant}" is live on the hosted log. Your API key was shown once when you registered and is not in this email; if it is gone, mint another under API keys at ${portalBase}.`, "",
@@ -389,6 +431,11 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
       res.end(JSON.stringify(body));
     };
+    const page = (status: number, title: string, body: string, headers: Record<string, string | string[]> = {}) => {
+      res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'", ...headers });
+      res.end(`<!doctype html><meta charset="utf-8"><title>${title}</title><p style="font:15px system-ui;padding:2rem">${body}</p>`);
+    };
+    const esc = (v: string) => v.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
     const setCookie = (value: string | null) => `${cookieName}=${value ?? ""}; Path=/; HttpOnly; SameSite=Strict${o.trustProxy ? "; Secure" : ""}; Max-Age=${value ? 14 * 86_400 : 0}`;
     const cookies = Object.fromEntries((req.headers.cookie ?? "").split(";").map((c) => c.trim().split("=") as [string, string]).filter(([k]) => k));
     const userId = readSession(o.secret, cookies[cookieName]);
@@ -493,9 +540,19 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
           return json(409, { error: e instanceof Error ? e.message : String(e) });
         }
         const cookie = { "set-cookie": setCookie(signSession(o.secret, user.id)) };
-        if (!parsed) { log(`agent-custody portal: ${email} created an account`); return json(200, { email, tenant: null }, cookie); }
+        if (!parsed) { log(`agent-custody portal: ${email} created an account`); void send(verificationMail(user)); return json(200, { email, tenant: null, emailVerified: false }, cookie); }
         const r = await onboard(user, parsed);
+        void send(verificationMail(user));
         return json(r.status, r.body, cookie);
+      }
+      if (req.method === "GET" && url.pathname === "/verify-email") {
+        const who = readSession(o.secret, url.searchParams.get("token") ?? undefined);
+        if (!who?.startsWith("verify:")) return page(400, "Link not valid", "This verification link is not valid or has expired. Sign in and ask for a new one from the account page.");
+        const u = await store.user(who.slice("verify:".length));
+        if (!u) return page(400, "Link not valid", "This verification link belongs to no account.");
+        await store.markEmailVerified(u.id);
+        log(`agent-custody portal: ${u.email} verified their address`);
+        return page(200, "Email verified", `${esc(u.email)} is verified. <a href="/">Continue to your account</a>.`);
       }
       // ---- sign in through a provider: the OAuth web flow, state in a short-lived signed cookie ----
       const provider = /^\/auth\/(github|google)(\/callback)?$/.exec(url.pathname);
@@ -505,7 +562,10 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         const redirectUri = `${portalBase}auth/${name}/callback`;
         const stateCookie = (value: string | null) => `custody_oauth=${value ?? ""}; Path=/auth; HttpOnly; SameSite=Lax${o.trustProxy ? "; Secure" : ""}; Max-Age=${value ? 600 : 0}`;
         if (!provider[2]) {
-          const state = signSession(o.secret, `oauth:${name}:${randomBytes(16).toString("hex")}`, 600_000);
+          // ?link=1 from a signed-in session links the provider to that account instead of signing in; the state says so
+          const linking = url.searchParams.get("link") === "1";
+          if (linking && !userId) return json(401, { error: "sign in first, then link a provider from the account page" });
+          const state = signSession(o.secret, `oauth:${name}:${linking ? `link:${userId}:` : ""}${randomBytes(16).toString("hex")}`, 600_000);
           const authorize = name === "github"
             ? `https://github.com/login/oauth/authorize?${new URLSearchParams({ client_id: conf.clientId, redirect_uri: redirectUri, scope: "user:email", state })}`
             : `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({ client_id: conf.clientId, redirect_uri: redirectUri, response_type: "code", scope: "openid email", state, prompt: "select_account" })}`;
@@ -544,7 +604,24 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
           log(`agent-custody portal: ${name} sign-in failed: ${e instanceof Error ? e.message : String(e)}`);
           return json(502, { error: `${name === "github" ? "GitHub" : "Google"} sign-in failed: ${e instanceof Error ? e.message : String(e)}` }, { "set-cookie": stateCookie(null) });
         }
-        const user = await store.findOrCreateOAuthUser(name, subject, email);
+        const linkTo = /^oauth:[a-z]+:link:([^:]+):/.exec(stateUser)?.[1];
+        let user: PortalUser;
+        if (linkTo) {
+          // linking: the account proved itself with its session, so the provider's email need not match; when it does, it also confirms the address
+          const owner = await store.user(linkTo);
+          if (!owner || owner.id !== userId) return json(401, { error: "the session that started the link is not the one that finished it; sign in and try again" }, { "set-cookie": stateCookie(null) });
+          await store.linkIdentity(name, subject, email, owner.id);
+          if (email === owner.email) await store.markEmailVerified(owner.id);
+          log(`agent-custody portal: ${owner.email} linked ${name}`);
+          return page(200, "Linked", `${name === "github" ? "GitHub" : "Google"} is linked to ${esc(owner.email)}. <a href="/">Continue</a>.`, { "set-cookie": stateCookie(null) });
+        }
+        try {
+          user = await store.findOrCreateOAuthUser(name, subject, email);
+        } catch (e) {
+          if (!(e instanceof UnverifiedAccountError)) throw e;
+          log(`agent-custody portal: ${name} sign-in for ${email} refused: the password account has not verified its address`);
+          return page(409, "Sign in with your password", `An account with the address ${esc(email)} already exists and has not verified it. <a href="/">Sign in with its password</a>, then link ${name === "github" ? "GitHub" : "Google"} from the account page; or verify the address with the link we sent, and sign in with ${name === "github" ? "GitHub" : "Google"} again.`, { "set-cookie": stateCookie(null) });
+        }
         log(`agent-custody portal: ${email} signed in with ${name}`);
         // A page, not a redirect: the session cookie is SameSite=Strict, and a redirect that started at the provider
         // would not carry it. The page's own navigation to / does.
@@ -566,7 +643,14 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       if (!user) return json(401, { error: "sign in first" });
       if (req.method !== "GET" && !(req.headers["content-type"] ?? "").startsWith("application/json")) return json(415, { error: "expected a JSON body" });
       const tenantId = await store.tenantOf(user.id);
-      if (req.method === "GET" && url.pathname === "/api/me" && !tenantId) return json(200, { email: user.email, tenant: null, profile: await store.profile(user.id), billing: !!o.stripe });
+      const account = async () => ({ emailVerified: !!user.emailVerifiedAt, identities: await store.identities(user.id), providers: (["github", "google"] as const).filter((p) => !!o.oauth?.[p]), mail: !!o.mail });
+      if (req.method === "POST" && url.pathname === "/api/verify-email/resend") {
+        if (user.emailVerifiedAt) return json(200, { ok: true, emailVerified: true });
+        if (!o.mail) return json(503, { error: "mail is not configured on this portal" });
+        void send(verificationMail(user));
+        return json(200, { ok: true, emailVerified: false });
+      }
+      if (req.method === "GET" && url.pathname === "/api/me" && !tenantId) return json(200, { email: user.email, tenant: null, profile: await store.profile(user.id), billing: !!o.stripe, ...(await account()) });
       if (req.method === "POST" && url.pathname === "/api/onboard") {
         const p = await parseOnboarding(await jsonBody());
         if ("status" in p) return json(p.status, p.body);
@@ -579,7 +663,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
 
       if (req.method === "GET" && url.pathname === "/api/me") {
         const q = await o.tenancy.quota(tenantId);
-        return json(200, { email: user.email, tenant: tenantId, logId: tenant.logId, plan: q.plan, used: q.used, quota: q.quota, disabled: !!tenant.disabledAt, billing: !!o.stripe });
+        return json(200, { email: user.email, tenant: tenantId, logId: tenant.logId, plan: q.plan, used: q.used, quota: q.quota, disabled: !!tenant.disabledAt, billing: !!o.stripe, ...(await account()) });
       }
       if (req.method === "GET" && url.pathname === "/api/overview") {
         const q = await o.tenancy.quota(tenantId);
@@ -699,6 +783,7 @@ const PORTAL_PAGE = `<!doctype html>
   .top .who { color: var(--ink2); font-size: .9rem; margin-left: .5rem; }
   button.theme { background: transparent; color: var(--ink2); border: 1px solid var(--line); padding: .25rem .6rem; font-size: .8rem; border-radius: 4px; } button.theme:hover { color: var(--ink); }
   .pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font: 600 .72rem/1.6 var(--mono); letter-spacing: .06em; text-transform: uppercase; background: var(--accent-bg); color: var(--accent); }
+  .notice { margin: 0 auto; max-width: 72rem; padding: .6rem 1.5rem; font-size: .9rem; color: var(--ink); background: var(--accent-bg); border-bottom: 1px solid var(--line); } .notice a, .notice button { margin-left: .6rem; } .notice button { font: inherit; background: none; border: 1px solid var(--line); border-radius: 4px; padding: .1rem .5rem; color: var(--ink); cursor: pointer; }
   .layout { display: grid; grid-template-columns: 15rem 1fr; min-height: calc(100vh - 3.3rem); }
   nav { border-right: 1px solid var(--line); background: var(--panel); padding: 1rem 0; }
   nav .group { font: 600 .68rem/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); padding: 1rem 1.25rem .35rem; }
@@ -748,6 +833,7 @@ const PORTAL_PAGE = `<!doctype html>
   @media (max-width: 48rem) { .layout { grid-template-columns: 1fr; } nav { display: flex; flex-wrap: wrap; padding: .3rem; border-right: 0; border-bottom: 1px solid var(--line); } nav .group { display: none; } nav a { border-left: 0; border-bottom: 3px solid transparent; } nav a.on { border-bottom-color: var(--accent); } }
 </style>
 <div class="top"><a class="brand" href="https://agent-custody.dev/"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links"><a href="https://agent-custody.dev/guide/getting-started">Guide</a><a href="https://docs.agent-custody.dev/reference/">Docs</a><a href="https://agent-custody.dev/verify">Verify a receipt</a></span><span class="who" id="who"></span><button class="theme" id="themeToggle" type="button">Dark mode</button></div>
+<div id="notice" class="notice" hidden></div>
 <section id="auth" class="auth" hidden>
   <h1 id="authTitle">Sign in</h1>
   <div id="providers" class="providers" hidden></div>
@@ -945,10 +1031,21 @@ const PORTAL_PAGE = `<!doctype html>
   const enter = async () => {
     try {
       const me = await api("GET", "/api/me");
+      accountNotice(me);
       if (me.tenant === null) { $("onboardWho").textContent = me.email; if (me.profile) { for (const k of ["name", "company", "role", "phone", "telegram"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
       $("who").textContent = me.email; show("app"); await load(); view((location.hash || "#overview").slice(1) || "overview");
     }
     catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) $("authSwap").click(); } else { show("app"); $("who").textContent = err.message; } }
+  };
+  const accountNotice = (me) => {
+    const parts = [];
+    if (me.emailVerified === false && me.mail) parts.push("Verify your email address: we sent a link to " + me.email + ". <button type=button id=resendVerify>Send it again</button>");
+    const unlinked = (me.providers || []).filter((p) => !(me.identities || []).includes(p));
+    if (unlinked.length) parts.push("Sign in faster next time:" + unlinked.map((p) => "<a href='/auth/" + p + "?link=1'>Link " + (p === "github" ? "GitHub" : "Google") + "</a>").join(""));
+    $("notice").innerHTML = parts.join(" &middot; ");
+    $("notice").hidden = parts.length === 0;
+    const b = document.getElementById("resendVerify");
+    if (b) b.onclick = async () => { b.disabled = true; try { await api("POST", "/api/verify-email/resend", {}); b.textContent = "Sent"; } catch (e) { b.textContent = e.message; } };
   };
   const sha256hex = async (text) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
   const loadPolicies = async () => {

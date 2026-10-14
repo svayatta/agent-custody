@@ -125,6 +125,12 @@ export async function serveHttp(host: GatewayHost, opts: HttpGatewayOptions): Pr
       const sid = req.headers["mcp-session-id"];
       const existing = typeof sid === "string" ? sessions.get(sid) : undefined;
       if (existing) {
+        // the grant is checked again on every request of a session; an expired or revoked one ends the session here
+        const problem = existing.gateway.grantProblem();
+        if (problem) {
+          await closeSession(sid as string, `grant ${problem}`);
+          return rpcError(res, 403, `the grant for this session ${problem}; initialize again with a current grant`);
+        }
         existing.lastSeen = Date.now();
         const body = req.method === "POST" ? await readBody(req) : undefined;
         await existing.transport.handleRequest(req, res, body);
@@ -143,7 +149,13 @@ export async function serveHttp(host: GatewayHost, opts: HttpGatewayOptions): Pr
   const server: HttpServer = createServer((req, res) => void handler(req, res));
   const reaper = setInterval(() => {
     const cutoff = Date.now() - idleMs;
-    for (const [id, s] of sessions) if (s.lastSeen < cutoff) void closeSession(id, "idle");
+    for (const [id, s] of sessions) {
+      if (s.lastSeen < cutoff) void closeSession(id, "idle");
+      else {
+        const problem = s.gateway.grantProblem();
+        if (problem) void closeSession(id, `grant ${problem}`);
+      }
+    }
   }, Math.min(idleMs, 60_000));
   reaper.unref?.();
 

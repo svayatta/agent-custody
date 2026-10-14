@@ -87,6 +87,25 @@ const glog = logLines(gfx.logFile);
 const G = { issuerKeys: ["gateway"], principalKeys: ["principal"], logKeys: [] as string[] };
 
 addCase({ name: "gateway-executed", description: "An in-policy refund through the gateway: delegation attested, facts observed, executed. Every check passes with the log.", bundle: executed, ...G, log: glog });
+
+// ---- arguments with special keys: an own property named __proto__ is in the digest, as it was in the call ----
+const protoFx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-proto-")));
+key("proto-gateway", protoFx.gatewayPub);
+key("proto-principal", protoFx.principalPub);
+const pgwProto = await createGateway(loadConfig(protoFx.configFile));
+const protoCall = await pgwProto.handleCall({ name: "stripe.refund", arguments: JSON.parse('{"customer_id":"cust_123","amount":2500,"__proto__":{"polluted":true}}') as Record<string, unknown> });
+await pgwProto.close();
+addCase({ name: "gateway-executed-proto-key", description: "The call's arguments carry an own property named __proto__. The receipt records it and the args digest covers it (a canonicaliser that loses the key fails the digest check).", bundle: bundleFile(protoFx.receiptsDir, String(protoCall._meta?.[RECEIPT_META_KEY])), issuerKeys: ["proto-gateway"], principalKeys: ["proto-principal"], logKeys: [], log: logLines(protoFx.logFile) });
+
+// ---- a call refused because the grant had expired: the denial is a true record, issued outside the window ----
+const efx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-expired-")), 1200);
+key("expired-gateway", efx.gatewayPub);
+key("expired-principal", efx.principalPub);
+const egw = await createGateway(loadConfig(efx.configFile));
+await new Promise((r) => setTimeout(r, 1400));
+const expiredCall = await egw.handleCall({ name: "customer.lookup", arguments: { customer_id: "cust_123" } });
+await egw.close();
+addCase({ name: "gateway-denied-expired-grant", description: "The session's grant expired before this call; the gateway denied it and issued the receipt after the window. Denied, so the validity check passes with a note; an executed receipt timestamped outside the window would not.", bundle: bundleFile(efx.receiptsDir, String(expiredCall._meta?.[RECEIPT_META_KEY])), issuerKeys: ["expired-gateway"], principalKeys: ["expired-principal"], logKeys: [], log: logLines(efx.logFile) });
 addCase({ name: "gateway-denied", description: "An over-limit refund denied by policy. The receipt exists, execution is denied, and every check passes.", bundle: deniedBundle, ...G, log: glog });
 addCase({ name: "gateway-executed-upstream-attested", description: "The executed receipt verified with the upstream's key as well: the upstream signed its result for this receipt, so the execution is attested, not only observed.", bundle: executed, ...G, upstreamKeys: ["upstream"], log: glog });
 addCase({ name: "gateway-executed-upstream-wrong-key", description: "The same receipt with the principal's key offered as the upstream key. The upstream signature check fails; everything else passes.", bundle: executed, ...G, upstreamKeys: ["principal"], log: glog });

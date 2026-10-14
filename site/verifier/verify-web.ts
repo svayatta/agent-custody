@@ -26,7 +26,8 @@ const sha256 = async (data: Bytes): Promise<Bytes> => new Uint8Array(await subtl
 export function canonicalize(value: unknown): string {
   const sort = (v: unknown): unknown => {
     if (Array.isArray(v)) return v.map(sort);
-    if (v && typeof v === "object") { const o: Record<string, unknown> = {}; for (const k of Object.keys(v as object).sort()) { const x = (v as any)[k]; if (x !== undefined) o[k] = sort(x); } return o; }
+    // null-prototype, so an own property named __proto__ survives (mirrors src/crypto.ts)
+    if (v && typeof v === "object") { const o: Record<string, unknown> = Object.create(null); for (const k of Object.keys(v as object).sort()) { const x = (v as any)[k]; if (x !== undefined) o[k] = sort(x); } return o; }
     return v;
   };
   return JSON.stringify(sort(value));
@@ -195,9 +196,11 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
       const principalKeyid = p.principal.provenance === "attested" ? p.principal.keyid : null;
       add("delegation binds principal and agent", d.principal === p.principal.id && d.agent === p.agent.id && del.keyid === principalKeyid);
       const at = Date.parse(p.timestamp);
-      add("delegation valid at receipt time", !Number.isNaN(at) && Date.parse(d.issuedAt) <= at && at <= Date.parse(d.expiresAt), `${d.issuedAt} .. ${d.expiresAt}`);
       const inScope = d.scopes.includes(p.tool.name);
       const executed = p.execution.status === "executed" || p.execution.status === "failed";
+      // mirrors src/verify.ts: a call refused after the grant ran out is a true record; only an executed call must sit inside the window
+      const valid = !Number.isNaN(at) && Date.parse(d.issuedAt) <= at && at <= Date.parse(d.expiresAt);
+      add("delegation valid at receipt time", valid || !executed, valid ? `${d.issuedAt} .. ${d.expiresAt}` : `${d.issuedAt} .. ${d.expiresAt}; the call was ${p.execution.status}, so the grant need not have been in force`);
       add("executed tool within delegated scope", !executed || inScope, inScope ? p.tool.name : `${p.tool.name} not in [${d.scopes.join(", ")}]`);
     }
   } else {

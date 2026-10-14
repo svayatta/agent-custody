@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { hostname, userInfo } from "node:os";
 import { parseArgs } from "node:util";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { loadConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
-import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
+import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair, digestOf } from "./crypto.ts";
 import type { Envelope } from "./crypto.ts";
 import { createDelegation, decodeDelegation, delegateFrom } from "./delegation.ts";
 import { createGateway, createGatewayHost, serveStdio } from "./gateway.ts";
@@ -43,6 +43,8 @@ const USAGE = `agent-custody <command>
                                                    --agent-key names the agent's own key in the grant, so the agent may delegate
   delegate --key <agent.key> --parent <grant.json> --agent <sub-agent> --scopes <a,b> [--ttl-hours N] [--agent-key <sub.pub>] --out <file>
                                                    a narrower grant for a sub-agent, signed by the agent the parent names; the parent travels inside
+  revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
+                                                   session under it refuses its next call, and no new session opens for it
   gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]
                                                    stdio: one gateway for the grant the config names. --http: one shared gateway, MCP over
                                                    Streamable HTTP at /mcp, each connection presenting its own grant as Authorization: Bearer
@@ -174,6 +176,20 @@ async function main(argv: string[]): Promise<number> {
       writeFileSync(values.out, JSON.stringify(env, null, 2));
       const chain = decodeDelegation(env)!;
       console.log(`delegated to ${chain.agent}: scopes [${chain.scopes.join(", ")}] until ${chain.expiresAt}, under ${decodeDelegation(parent)!.agent}'s grant from ${chain.principal}`);
+      return 0;
+    }
+    case "revoke": {
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, grant: { type: "string" } } });
+      if (!values.config || !values.grant) throw new Error("revoke needs --config and --grant");
+      const cfg = loadConfig(values.config);
+      if (!cfg.revokedGrants) throw new Error("revoke needs revokedGrants in the config: the file the gateway re-reads on every call");
+      const envelope = JSON.parse(readFileSync(values.grant, "utf8")) as Envelope;
+      const chain = decodeDelegation(envelope);
+      if (!chain) throw new Error(`${values.grant} is not a delegation grant`);
+      const digest = digestOf(envelope);
+      const list = existsSync(cfg.revokedGrants) ? (JSON.parse(readFileSync(cfg.revokedGrants, "utf8")) as string[]) : [];
+      if (!list.includes(digest)) writeFileSync(cfg.revokedGrants, JSON.stringify([...list, digest], null, 2) + "\n");
+      console.log(`revoked ${chain.agent}'s grant from ${chain.principal} (${digest.slice(0, 12)}…): ${cfg.revokedGrants} now lists ${list.includes(digest) ? list.length : list.length + 1} grant(s); a running gateway refuses it on its next call`);
       return 0;
     }
     case "gateway": {
