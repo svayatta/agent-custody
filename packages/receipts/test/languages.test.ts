@@ -8,13 +8,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildSdkFixture, type SdkFixture } from "../scripts/fixture.ts";
 
 const dir = resolve(import.meta.dirname, "..", "examples", "languages");
-const has = (bin: string) => spawnSync("which", [bin]).status === 0;
+// Run the toolchain, not `which`: macOS ships a `java` stub that is on the PATH with no runtime behind it.
+const has = (probe: string[]) => spawnSync(probe[0]!, probe.slice(1)).status === 0;
 
-const languages: { name: string; bin: string; cmd: string[]; cwd: string }[] = [
-  { name: "python", bin: "python3", cmd: ["python3", "main.py"], cwd: join(dir, "python") },
-  { name: "go", bin: "go", cmd: ["go", "run", "."], cwd: join(dir, "go") },
-  { name: "java", bin: "java", cmd: ["java", "Receipt.java"], cwd: join(dir, "java") },
-  { name: "rust", bin: "cargo", cmd: ["cargo", "run", "--quiet"], cwd: join(dir, "rust") },
+const languages: { name: string; probe: string[]; cmd: string[]; cwd: string }[] = [
+  { name: "python", probe: ["python3", "--version"], cmd: ["python3", "main.py"], cwd: join(dir, "python") },
+  { name: "go", probe: ["go", "version"], cmd: ["go", "run", "."], cwd: join(dir, "go") },
+  { name: "java", probe: ["java", "-version"], cmd: ["java", "Receipt.java"], cwd: join(dir, "java") },
+  { name: "rust", probe: ["cargo", "--version"], cmd: ["cargo", "run", "--quiet"], cwd: join(dir, "rust") },
 ];
 
 describe("language examples against the sidecar", () => {
@@ -39,8 +40,8 @@ describe("language examples against the sidecar", () => {
   });
 
   for (const l of languages) {
-    const run = has(l.bin) ? it : it.skip;
-    run(`${l.name}${has(l.bin) ? "" : ` (skipped: ${l.bin} not installed)`}`, () => {
+    const run = has(l.probe) ? it : it.skip;
+    run(`${l.name}${has(l.probe) ? "" : ` (skipped: ${l.probe[0]} not runnable)`}`, () => {
       const before = readdirSync(fx.receiptsDir).length;
       const r = spawnSync(l.cmd[0]!, l.cmd.slice(1), { cwd: l.cwd, encoding: "utf8", timeout: 240_000, env: { ...process.env, SIDECAR_URL: url } });
       expect(r.status, `${l.name}\n${r.stderr}`).toBe(0);

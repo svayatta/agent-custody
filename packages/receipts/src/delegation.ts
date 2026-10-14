@@ -6,7 +6,7 @@
 // parent's, and the principal is the same throughout. The receipt then names the sub-agent as the agent and the
 // principal as the principal, exactly as with a direct grant, and the whole chain travels inside the receipt.
 import { z } from "zod";
-import { dsseSign, dsseVerify, publicKeyFromPem, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
+import { dsseSign, dsseVerify, publicKeyFromPem, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
 
 export const DELEGATION_TYPE = "application/vnd.agent-custody.delegation+json";
 /** the longest chain a verifier walks: the principal's grant and up to three delegations below it */
@@ -126,6 +126,21 @@ export function verifyDelegation(env: Envelope, trustedPrincipals: PublicKeyRef[
 }
 
 /** True when `at` (ISO) lies inside the grant's validity window. */
+/**
+ * What names a grant for revocation: sha256 over the payload its signature covers. Extra signatures or envelope fields
+ * leave it unchanged, so an agent cannot get a revoked grant past the list by repacking the envelope.
+ */
+export function grantDigest(env: Envelope): string {
+  return sha256Hex(Buffer.from(env.payload, "base64"));
+}
+
+/** The digest of every link from this grant up to the principal's own, leaf first: revoking any link revokes the grants below it. */
+export function grantChainDigests(env: Envelope): string[] {
+  const out: string[] = [];
+  for (let e: Envelope | undefined = env; e && out.length <= MAX_DELEGATION_DEPTH; e = decodeDelegation(e)?.parent) out.push(grantDigest(e));
+  return out;
+}
+
 export function delegationValidAt(d: Delegation, at: string): boolean {
   const t = Date.parse(at);
   return t >= Date.parse(d.issuedAt) && t <= Date.parse(d.expiresAt);

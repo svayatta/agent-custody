@@ -24,7 +24,7 @@ Two rules keep the answers honest. First, say which producer made the receipt: a
 | criterion | what it asks | what answers it |
 | --- | --- | --- |
 | CC6.1, logical access | access to systems is restricted to authorized users | the delegation grant: a human-signed statement of which agent may call which tools, for how long, embedded in every gateway receipt and re-checked by the verifier |
-| CC6.3, authorization changes | access is granted, modified, and removed by authorized parties | grants have validity windows and are signed by a principal key the gateway is configured to trust; a new grant is a new signed file, a revoked one expires |
+| CC6.3, authorization changes | access is granted, modified, and removed by authorized parties | grants have validity windows and are signed by a principal key the gateway is configured to trust; a new grant is a new signed file; `agent-custody revoke` revokes a grant, and every session under it or under a grant delegated from it refuses its next call |
 | CC7.2, monitoring for anomalies | the entity monitors system components for anomalies | every call has a receipt, allowed or denied, and `explain` answers who, why, and what depended on it; the OpenTelemetry and Splunk exports carry each receipt into the existing SIEM |
 | CC7.3, evaluation of security events | events are evaluated to determine whether they are incidents | the action pack: one receipt with every downstream receipt, verifiable by the evaluator without access to the system |
 | CC7.4, incident response | incidents are contained and remediated | blast radius names every action and belief that depended on a wrong fact; retract and forget are receipted calls, so the remediation has its own evidence |

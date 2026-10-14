@@ -72,7 +72,7 @@ execution       observed    executed
 | delegation signature (principal key) | the embedded grant was signed by a key you trust as a principal | a grant the principal never issued |
 | delegation chain to the principal | only when the grant embeds a parent: every link is signed by the key its parent names, holds no scope its parent lacks, sits inside its parent's window, and names the same principal, up to three delegations deep | a sub-agent given more than its delegator had, a link signed by the wrong key, a chain that never reaches a trusted principal |
 | delegation binds principal and agent | the grant names the same principal and agent the receipt names, and the principal keyid matches | a valid grant for someone else, spliced in |
-| delegation valid at receipt time | the receipt's timestamp is inside the grant's window | expired or not-yet-valid authority |
+| delegation valid at receipt time | the receipt's timestamp is inside the grant's window; a call the gateway refused after the grant ran out passes with a note, since only an executed call must sit inside the window | expired or not-yet-valid authority behind an executed call |
 | executed tool within delegated scope | if the tool ran, the grant covered it. Denied calls pass this check by construction | a gateway that forwarded out of scope |
 | principal is claimed, not attested | SDK receipts only: there is no delegation, so the principal is a config string and is labelled as such | an SDK receipt pretending to an attested principal |
 | request args digest | the args in the predicate hash to the digest in the subject | edited arguments |
