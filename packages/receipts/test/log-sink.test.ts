@@ -1,10 +1,16 @@
+import { createServer } from "node:http";
 // A remote log exists so the operator cannot rewrite history. These tests pin what that buys and what it costs.
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadSdkConfig } from "../src/config.ts";
-import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "../src/crypto.ts";
+import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair, dsseSign, dsseVerify, publicKeyFromPem, publicKeyToPem } from "../src/crypto.ts";
+import { MerkleLog } from "../src/log.ts";
+import { createGateway } from "../src/gateway.ts";
+import { loadConfig } from "../src/config.ts";
+import { buildFixture } from "../scripts/fixture.ts";
+import { TREEHEAD_TYPE } from "../src/receipt.ts";
 import { httpLog, serveLog, type RunningLog } from "../src/log-sink.ts";
 import { createSdkIssuer } from "../src/sdk/index.ts";
 import { auditExtends, verifyBundle } from "../src/verify.ts";
@@ -78,6 +84,69 @@ describe("HTTP log sink", () => {
   it("the sink surfaces a malformed log reply instead of writing a bundle around it", async () => {
     const sink = httpLog("http://log.invalid/", { fetch: async () => new Response(JSON.stringify({ nonsense: true }), { status: 200 }) });
     await expect(sink.append("leaf")).rejects.toThrow(/malformed/);
+  });
+
+  it("an append whose answer does not verify is refused: a head signed by a stranger, a proof under a wrong root, a head for another log; a good answer passes with the keys fetched from the log itself", async () => {
+    // a stand-in log that keeps a real Merkle log and answers however it is told to
+    const stranger = generateKeyPair();
+    const honest = generateKeyPair();
+    const mlog = new MerkleLog(join(dir, "standin.jsonl"));
+    let mode: "good" | "stranger" | "wrong-root" | "other-log" = "good";
+    const standIn: typeof fetch = async (url) => {
+      const u = String(url);
+      if (u.endsWith("/.well-known/agent-custody-log.json")) return new Response(JSON.stringify({ keys: [{ keyid: honest.keyid, publicKeyPem: publicKeyToPem(honest.publicKey) }] }), { status: 200 });
+      const e = mlog.append(`leaf-${mlog.size}`);
+      const head = { treeSize: e.treeSize, rootHash: mode === "wrong-root" ? "00".repeat(32) : e.rootHash, timestamp: new Date().toISOString(), log: mode === "other-log" ? "someone-else" : "the-log" };
+      return new Response(JSON.stringify({ inclusion: { leafIndex: e.leafIndex, treeSize: e.treeSize, hashes: e.hashes }, treeHead: dsseSign(TREEHEAD_TYPE, head, mode === "stranger" ? stranger : honest) }), { status: 200 });
+    };
+    // the stand-in appends its own leaf text, so a sink that hashes what it sent will only match when it sends the same
+    const sinkFor = (opts: Record<string, unknown> = {}) => httpLog("http://standin.invalid/", { fetch: standIn, logId: "the-log", ...opts });
+    mode = "stranger";
+    await expect(sinkFor({ keys: [honest] }).append("leaf-0")).rejects.toThrow(/does not verify against its keys/);
+    mode = "wrong-root";
+    await expect(sinkFor({ keys: [honest] }).append("leaf-1")).rejects.toThrow(/does not place this leaf under the signed root/);
+    mode = "other-log";
+    await expect(sinkFor({ keys: [honest] }).append("leaf-2")).rejects.toThrow(/for log "someone-else", not "the-log"/);
+    mode = "good";
+    const entry = await sinkFor().append("leaf-3");
+    expect(entry.inclusion.leafIndex).toBe(3);
+    expect(dsseVerify(entry.treeHead, [honest]).ok).toBe(true);
+  });
+
+  it("a pre-committed call is withheld, not forwarded, when the log's answer does not verify", async () => {
+    const stranger = generateKeyPair();
+    const mlog = new MerkleLog(join(dir, "standin-gw.jsonl"));
+    const bad = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        if (req.url?.endsWith("/.well-known/agent-custody-log.json")) { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ keys: [{ keyid: logKeyRef.keyid, publicKeyPem: publicKeyToPem(logKeyRef.publicKey) }] })); }
+        const e = mlog.append(body);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ inclusion: { leafIndex: e.leafIndex, treeSize: e.treeSize, hashes: e.hashes }, treeHead: dsseSign(TREEHEAD_TYPE, { treeSize: e.treeSize, rootHash: e.rootHash, timestamp: new Date().toISOString() }, stranger) }));
+      });
+    });
+    const logKeyRef = generateKeyPair();
+    await new Promise<void>((r) => bad.listen(0, "127.0.0.1", r));
+    const badUrl = `http://127.0.0.1:${(bad.address() as { port: number }).port}/`;
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "badlog-")));
+    const cfg = JSON.parse(readFileSync(fx.configFile, "utf8"));
+    delete cfg.logFile;
+    cfg.log = { url: badUrl };
+    cfg.precommit = ["stripe.refund"];
+    writeFileSync(fx.configFile, JSON.stringify(cfg));
+    const gw = await createGateway(loadConfig(fx.configFile));
+    try {
+      // the authorization is withheld, and the receipt that would record the withholding cannot be logged either: the
+      // call fails loudly, nothing was forwarded, and nothing was written as if the log had accepted it
+      await expect(gw.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500 } })).rejects.toThrow(/does not verify against its keys/);
+      expect(existsSync(fx.receiptsDir) ? readdirSync(fx.receiptsDir) : []).toEqual([]);
+      // the stand-in took both leaves, the authorization and then the receipt; the gateway believed neither answer
+      expect(mlog.size).toBe(2);
+    } finally {
+      await gw.close();
+      bad.close();
+    }
   });
 
   it("config demands exactly one of logFile and log", () => {

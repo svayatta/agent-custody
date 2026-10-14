@@ -9,6 +9,7 @@ Two commands, one per package. Both run on plain Node 22 or later. Exit code 0 o
 | `keygen --dir <dir> --name <name>` | an Ed25519 key pair as `<name>.key` and `<name>.pub`; prints the keyid | [SDK](./sdk-typescript#keys) |
 | `grant --key <principal.key> --principal <id> --agent <id> --scopes <a,b> [--ttl-hours 24] [--agent-key <agent.pub>] --out <file>` | a signed delegation | [gateway](./gateway#grants) |
 | `delegate --key <agent.key> --parent <grant.json> --agent <sub> --scopes <a,b> [--ttl-hours N] [--agent-key <sub.pub>] --out <file>` | a narrower grant for a sub-agent | [gateway](./gateway#delegation-chains) |
+| `revoke --config <gateway.json> --grant <grant.json>` | appends the grant's digest to the config's `revokedGrants` file; a running gateway refuses it on the next call | [gateway](./gateway#running-it) |
 | `gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]` | the gateway over stdio, or shared over HTTP | [gateway](./gateway#running-it) |
 | `gateway --config <gateway.json> --a2a [--port 8790] [--host 127.0.0.1]` | the gateway as an A2A agent in front of the config's one `a2a` upstream | [gateway](./gateway#running-it) |
 | `hook [--config <sdk.json>]` | the Claude Code hook; the event on stdin | [Claude Code](./claude-code) |

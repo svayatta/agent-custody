@@ -12,7 +12,9 @@ export function canonicalize(value: unknown): string {
 function sortKeys(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(sortKeys);
   if (v && typeof v === "object") {
-    const out: Record<string, unknown> = {};
+    // A null-prototype object: an own property named __proto__ (which JSON.parse produces) stays a property here,
+    // where on a plain object the assignment would set the prototype and the key would vanish from the digest.
+    const out: Record<string, unknown> = Object.create(null);
     for (const k of Object.keys(v as object).sort()) {
       const x = (v as Record<string, unknown>)[k];
       if (x !== undefined) out[k] = sortKeys(x);

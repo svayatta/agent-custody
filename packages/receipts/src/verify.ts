@@ -72,9 +72,11 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
       const d = del.delegation;
       const principalKeyid = p.principal.provenance === "attested" ? p.principal.keyid : null;
       add("delegation binds principal and agent", d.principal === p.principal.id && d.agent === p.agent.id && del.keyid === principalKeyid);
-      add("delegation valid at receipt time", delegationValidAt(d, p.timestamp), `${d.issuedAt} .. ${d.expiresAt}`);
       const inScope = d.scopes.includes(p.tool.name);
       const executed = p.execution.status === "executed" || p.execution.status === "failed";
+      // a call the gateway refused after the grant ran out is still a true record; only an executed call has to sit inside the window
+      const valid = delegationValidAt(d, p.timestamp);
+      add("delegation valid at receipt time", valid || !executed, valid ? `${d.issuedAt} .. ${d.expiresAt}` : `${d.issuedAt} .. ${d.expiresAt}; the call was ${p.execution.status}, so the grant need not have been in force`);
       add("executed tool within delegated scope", !executed || inScope, inScope ? p.tool.name : `${p.tool.name} not in [${d.scopes.join(", ")}]`);
     }
   } else {
