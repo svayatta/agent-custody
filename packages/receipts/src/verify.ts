@@ -84,6 +84,9 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   }
 
   add("request args digest", digestOf(p.request.args) === p.request.argsDigest && st.subject[0]?.digest.sha256 === p.request.argsDigest);
+  if (p.execution.status === "executed" || p.execution.status === "failed") {
+    add("execution result digest", p.execution.result !== undefined && digestOf(p.execution.result) === p.execution.resultDigest);
+  }
   if ((p.execution.status === "executed" || p.execution.status === "failed") && p.execution.upstream) {
     const result = p.execution.result as { content: unknown; isError?: boolean };
     if (isProviderAttestation(p.execution.upstream)) {

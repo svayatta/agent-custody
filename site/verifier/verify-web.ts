@@ -208,6 +208,9 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   }
   const argsDigest = await digestOf(p.request.args);
   add("request args digest", argsDigest === p.request.argsDigest && st.subject[0]?.digest.sha256 === p.request.argsDigest);
+  if (p.execution.status === "executed" || p.execution.status === "failed") {
+    add("execution result digest", p.execution.result !== undefined && (await digestOf(p.execution.result)) === p.execution.resultDigest);
+  }
   const isProvider = (v: any) => !!v && (v.provider === "stripe-webhook" || v.provider === "github-delivery") && typeof v.rawBody === "string";
   if ((p.execution.status === "executed" || p.execution.status === "failed") && p.execution.upstream && isProvider(p.execution.upstream)) {
     if (opts.providerSecrets) {
