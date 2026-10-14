@@ -56,8 +56,8 @@ def memory_server():
     """The shared memory server over HTTP, accepting direct writers under their own token, as an SDK-only Python agent would reach it."""
     node = shutil.which("node")
     d = Path(tempfile.mkdtemp(prefix="agent-custody-memory-"))
-    env = dict(os.environ, MEMORY_TOKEN="py-secret")
-    p = subprocess.Popen([node, str(STATE / "src/cli.ts"), "serve", "--ledger", str(d / "ledger.jsonl"), "--http", "--port", "0", "--allow-direct", "--direct-token-env", "MEMORY_TOKEN"], stderr=subprocess.PIPE, text=True, env=env)
+    env = dict(os.environ, MEMORY_TOKEN="gateway-secret", MEMORY_DIRECT_TOKEN="py-secret")
+    p = subprocess.Popen([node, str(STATE / "src/cli.ts"), "serve", "--ledger", str(d / "ledger.jsonl"), "--http", "--port", "0", "--token-env", "MEMORY_TOKEN", "--allow-direct", "--direct-token-env", "MEMORY_DIRECT_TOKEN"], stderr=subprocess.PIPE, text=True, env=env)
     # the address is on the startup line; warnings may precede or follow it, so read until it appears
     lines = []
     m = None

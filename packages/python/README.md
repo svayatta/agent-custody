@@ -21,7 +21,7 @@ Adapters, each tested against the real package: `agent_custody.langchain.Receipt
 **The memory tools.** `agent_custody.memory.MemoryClient` (extra `memory`) talks to the shared memory server from `@agent-custody/state` over MCP: write, read, retract, history. Writes from here are `claimed`, quarantined until a gateway confirms them, and reads leave quarantined facts out unless asked; that is the honest position of an agent that did not go through the gateway.
 
 ```python
-async with MemoryClient("http://127.0.0.1:8790/mcp", token=os.environ["MEMORY_TOKEN"]) as memory:
+async with MemoryClient("http://127.0.0.1:8790/mcp", token=os.environ["MEMORY_DIRECT_TOKEN"]) as memory:
     await memory.write("acct:42", "plan", "pro", space="team:support", actor="py-agent")
     await memory.read(subject="acct:42", include_claimed=True)
 ```

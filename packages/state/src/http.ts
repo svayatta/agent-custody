@@ -17,8 +17,8 @@ import { createMemoryServer, type MemoryServerOptions } from "./server.ts";
 export interface MemoryHttpOptions extends MemoryServerOptions {
   port: number;
   host?: string;
-  /** the gateways' bearer tokens: a caller presenting one is believed about receipts, agents, and observed facts. When no tokens of either kind are set, anyone who can reach the port is taken for a gateway; bind to loopback. */
-  tokens?: string[];
+  /** the gateways' bearer tokens: a caller presenting one is believed about receipts, agents, and observed facts. At least one is required; a server without one would take any caller for a gateway. */
+  tokens: string[];
   /** direct writers' bearer tokens: a caller presenting one is a direct writer, its `_meta` is dropped, and what it writes is claimed. Required when `requireGateway` is false. */
   directTokens?: string[];
 }
@@ -31,12 +31,12 @@ export interface RunningMemoryServer {
 export function memoryHttpHandler(ledger: Ledger, opts: MemoryHttpOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const tokens = opts.tokens ?? [];
   const directTokens = opts.directTokens ?? [];
+  if (tokens.length === 0) throw new Error("memory server: a gateway token is required (tokens); without one, any caller that reaches the port could name its own receipt and agent");
   if (opts.requireGateway === false && directTokens.length === 0) throw new Error("memory server: direct writers need their own tokens (directTokens); a direct writer holding a gateway token could attest its own writes");
   if (tokens.some((t) => directTokens.includes(t))) throw new Error("memory server: a token cannot be both a gateway token and a direct token");
   const matches = (list: string[], given: Buffer) => list.some((t) => Buffer.from(t).length === given.length && timingSafeEqual(Buffer.from(t), given));
   /** Which kind of caller this is, by the token it presented; null when it presented none that is known. */
   const callerOf = (req: IncomingMessage): "gateway" | "direct" | null => {
-    if (tokens.length === 0 && directTokens.length === 0) return "gateway";
     const h = req.headers.authorization ?? "";
     const given = Buffer.from(h.startsWith("Bearer ") ? h.slice(7) : "");
     if (matches(tokens, given)) return "gateway";

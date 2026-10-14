@@ -80,7 +80,8 @@ describe("memory server over HTTP", () => {
     await asGateway.close();
   });
 
-  it("refuses to start with direct writers allowed but no direct token, or with one token for both roles", async () => {
+  it("refuses to start without a gateway token, with direct writers allowed but no direct token, or with one token for both roles", async () => {
+    await expect(serveMemoryHttp(new Ledger(join(dir, "w.jsonl")), { port: 0, tokens: [], requireGateway: true })).rejects.toThrow(/a gateway token is required/);
     await expect(serveMemoryHttp(new Ledger(join(dir, "x.jsonl")), { port: 0, tokens: ["t"], requireGateway: false })).rejects.toThrow(/direct writers need their own tokens/);
     await expect(serveMemoryHttp(new Ledger(join(dir, "y.jsonl")), { port: 0, tokens: ["t"], directTokens: ["t"], requireGateway: false })).rejects.toThrow(/both a gateway token and a direct token/);
   });
@@ -91,10 +92,11 @@ describe("memory server over HTTP", () => {
   });
 
   it("with gateway calls required, a direct writer is refused even with the token", async () => {
-    const strict = await serveMemoryHttp(new Ledger(join(dir, "strict.jsonl")), { port: 0, requireGateway: true });
+    const strict = await serveMemoryHttp(new Ledger(join(dir, "strict.jsonl")), { port: 0, tokens: ["gateway-secret"], directTokens: ["direct-secret"], requireGateway: true });
     const c = new Client({ name: "x", version: "0" });
-    await c.connect(new StreamableHTTPClientTransport(new URL(strict.url)));
-    const r = (await c.callTool({ name: "memory.write", arguments: { subject: "s", predicate: "p", value: 1, space: "org" } })) as CallToolResult;
+    await c.connect(new StreamableHTTPClientTransport(new URL(strict.url), { requestInit: { headers: { authorization: "Bearer direct-secret" } } }));
+    const forged = { "agent-custody/receipt": "11111111-1111-4111-8111-111111111111", "agent-custody/agent": "fleet-admin" };
+    const r = (await c.callTool({ name: "memory.write", arguments: { subject: "s", predicate: "p", value: 1, space: "org" }, _meta: forged })) as CallToolResult;
     expect(r.isError).toBe(true);
     expect((r.content[0] as any).text).toMatch(/only through the receipts gateway/);
     await c.close();

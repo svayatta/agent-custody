@@ -44,7 +44,7 @@ const USAGE = `agent-custody-memory <command>
                                                    the memory server over stdio; run it as the receipts gateway's upstream.
                                                    --key signs every result for its receipt, so executions verify as attested by this server.
                                                    By default it refuses calls that did not come through the gateway.
-  serve --ledger <ledger.jsonl> --http [--port 8790] [--host 127.0.0.1] [--token-env NAME] [--allow-direct --direct-token-env NAME]
+  serve --ledger <ledger.jsonl> --http [--port 8790] [--host 127.0.0.1] --token-env NAME [--allow-direct --direct-token-env NAME]
                                                    the same server shared over HTTP: several gateways, one ledger. --token-env is the
                                                    gateways' token; direct writers get their own under --direct-token-env and are never
                                                    believed about receipts or agents, whatever their calls carry.
@@ -94,13 +94,14 @@ async function main(argv: string[]): Promise<number> {
       const retention = values.retention ? parseRetention(values.retention) : undefined;
       const common = { requireGateway: !values["allow-direct"], ...(identity ? { identity } : {}), ...(retention ? { retention } : {}) };
       if (values.http) {
-        const token = values["token-env"] ? process.env[values["token-env"]] : undefined;
-        if (values["token-env"] && !token) throw new Error(`serve: environment variable ${values["token-env"]} is not set`);
+        if (!values["token-env"]) throw new Error("serve --http needs --token-env: the gateways' token is what tells a gateway from any other caller");
+        const token = process.env[values["token-env"]];
+        if (!token) throw new Error(`serve: environment variable ${values["token-env"]} is not set`);
         const directToken = values["direct-token-env"] ? process.env[values["direct-token-env"]] : undefined;
         if (values["direct-token-env"] && !directToken) throw new Error(`serve: environment variable ${values["direct-token-env"]} is not set`);
         if (values["allow-direct"] && !directToken) throw new Error("serve --http --allow-direct needs --direct-token-env: direct writers present their own token, never the gateways'");
-        const running = await serveMemoryHttp(ledger, { port: Number(values.port), host: values.host, ...common, ...(token ? { tokens: [token] } : {}), ...(directToken ? { directTokens: [directToken] } : {}) });
-        console.error(`agent-custody-memory: ${running.url} ledger=${values.ledger} events=${await ledger.count()} ${token ? "gateway token required" : "open to gateways"} ${values["allow-direct"] ? "direct writers with their own token" : "gateway calls only"}`);
+        const running = await serveMemoryHttp(ledger, { port: Number(values.port), host: values.host, ...common, tokens: [token], ...(directToken ? { directTokens: [directToken] } : {}) });
+        console.error(`agent-custody-memory: ${running.url} ledger=${values.ledger} events=${await ledger.count()} gateway token required ${values["allow-direct"] ? "direct writers with their own token" : "gateway calls only"}`);
         if (digestWarning) console.error(digestWarning);
         await new Promise<void>((resolve) => process.once("SIGINT", resolve));
         await running.close();
