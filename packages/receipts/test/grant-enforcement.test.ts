@@ -10,6 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { loadConfig } from "../src/config.ts";
 import { loadPublicKey, type Envelope } from "../src/crypto.ts";
+import { decodeDelegation } from "../src/delegation.ts";
 import { createGateway, createGatewayHost, RECEIPT_META_KEY } from "../src/gateway.ts";
 import { grantHeader, serveHttp } from "../src/gateway-http.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
@@ -18,6 +19,8 @@ import { buildFixture, type Fixture } from "../scripts/fixture.ts";
 
 const decode = (b: ReceiptBundle) => JSON.parse(Buffer.from(b.envelope.payload, "base64").toString()) as ReceiptStatement;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** waits until the grant has expired, however long startup took under load */
+const untilExpired = (expiresAt: string) => sleep(Math.max(0, Date.parse(expiresAt) - Date.now() + 300));
 const text = (r: { content: { type: string; text?: string }[] }) => (r.content[0] as { text: string }).text;
 const receiptOf = async (fx: Fixture, id: string) => {
   const bundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${id}.json`), "utf8")) as ReceiptBundle;
@@ -33,13 +36,13 @@ const withConfig = (fx: Fixture, edit: (cfg: Record<string, unknown>) => void) =
 
 describe("the grant on every call", () => {
   it("a session whose grant expires refuses its next call with a denial receipt, and the verifier accepts the receipt", async () => {
-    const fx = buildFixture(mkdtempSync(join(tmpdir(), "grant-expiry-")), 1500);
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "grant-expiry-")), 8000);
     const gw = await createGateway(loadConfig(fx.configFile));
     try {
       const ok = await gw.handleCall({ name: "customer.lookup", arguments: { customer_id: "cust_123" } });
       expect(ok.isError).toBeFalsy();
       expect(gw.grantProblem()).toBeNull();
-      await sleep(1700);
+      await untilExpired(gw.delegation.expiresAt);
       expect(gw.grantProblem()).toBe("has expired");
       const no = await gw.handleCall({ name: "customer.lookup", arguments: { customer_id: "cust_123" } });
       expect(no.isError).toBe(true);
@@ -50,7 +53,7 @@ describe("the grant on every call", () => {
     } finally {
       await gw.close();
     }
-  }, 15_000);
+  }, 25_000);
 
   it("observe mode suspends the policy, not the grant: a tool outside the scopes is denied and never forwarded", async () => {
     const fx = buildFixture(mkdtempSync(join(tmpdir(), "grant-observe-")));
@@ -122,7 +125,7 @@ describe("the grant on every call", () => {
   });
 
   it("over HTTP, a session under a grant that expired is closed and the request refused with 403; the session id resumes nothing", async () => {
-    const fx = buildFixture(mkdtempSync(join(tmpdir(), "grant-http-")), 1500);
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "grant-http-")), 8000);
     const host = await createGatewayHost(loadConfig(fx.configFile));
     const running = await serveHttp(host, { port: 0, log: () => {} });
     const grant = JSON.parse(readFileSync(join(fx.dir, "grant.json"), "utf8")) as Envelope;
@@ -131,7 +134,7 @@ describe("the grant on every call", () => {
       await client.connect(new StreamableHTTPClientTransport(new URL(running.url), { requestInit: { headers: { authorization: `Bearer ${grantHeader(grant)}` } } }));
       expect((await client.listTools()).tools.length).toBeGreaterThan(0);
       expect(running.sessions()).toHaveLength(1);
-      await sleep(1700);
+      await untilExpired(decodeDelegation(grant)!.expiresAt);
       await expect(client.callTool({ name: "customer.lookup", arguments: { customer_id: "cust_123" } })).rejects.toThrow(/403|has expired/);
       expect(running.sessions()).toHaveLength(0);
     } finally {
@@ -139,5 +142,5 @@ describe("the grant on every call", () => {
       await running.close();
       await host.close();
     }
-  }, 15_000);
+  }, 25_000);
 });
