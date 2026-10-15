@@ -236,8 +236,8 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   const resultOnlyNote = resultNote ? { ...resultNote, withheld: resultNote.withheld.filter((w) => w !== "upstream.rawBody") } : undefined;
   const resultWithheld = !!resultOnlyNote && (resultOnlyNote.whole || resultOnlyNote.withheld.length > 0);
   if (executedOrFailed) {
-    if (resultWithheld) { const problem = noteProblem(p.execution.result, resultOnlyNote!); add("result digest", !problem, problem ?? withheldNote(resultOnlyNote!)); }
-    else add("result digest", (await digestOf(p.execution.result)) === p.execution.resultDigest);
+    if (resultWithheld) { const problem = noteProblem(p.execution.result, resultOnlyNote!); add("execution result digest", !problem, problem ?? withheldNote(resultOnlyNote!)); }
+    else add("execution result digest", (await digestOf(p.execution.result)) === p.execution.resultDigest);
   }
   const isProvider = (v: any) => !!v && (v.provider === "stripe-webhook" || v.provider === "github-delivery") && (typeof v.rawBody === "string" || isCommitment(v.rawBody));
   const bodyWithheld = executedOrFailed && p.execution.upstream && isProvider(p.execution.upstream) && isCommitment((p.execution.upstream as any).rawBody);

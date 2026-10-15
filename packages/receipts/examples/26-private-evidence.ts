@@ -49,7 +49,7 @@ console.log("   the receipt file contains none of: the phone number, the card, t
 step(3, "a reviewer without the key verifies it: every signature and proof checks, the withheld parts are committed, not recomputed");
 const opts = { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], upstreamKeys: [loadPublicKey(fx.upstreamPub)], logFile: fx.logFile };
 const bare = verifyBundle(bundle, opts);
-console.log(formatReport(bare).split("\n").filter((l) => /args digest|result digest|upstream signature|RESULT/.test(l)).map((l) => `   ${l}`).join("\n"));
+console.log(formatReport(bare).split("\n").filter((l) => /args digest|execution result digest|upstream signature|RESULT/.test(l)).map((l) => `   ${l}`).join("\n"));
 
 step(4, "with the customer's key, agent-custody reveal writes the disclosure, and verify --disclose recomputes every digest from it");
 const cli = join(import.meta.dirname, "..", "src", "cli.ts");
@@ -62,7 +62,7 @@ console.log(`   revealed reason: ${JSON.stringify(disclosure.args.reason)}`);
 console.log(`   revealed customer record: ${JSON.stringify(disclosure.facts.customer)}`);
 const verified = spawnSync(process.execPath, [cli, "verify", file, "--issuer-key", fx.gatewayPub, "--principal-key", fx.principalPub, "--upstream-key", fx.upstreamPub, "--log", fx.logFile, "--capture-key-env", "EXAMPLE_CAPTURE_KEY"], { encoding: "utf8" });
 if (verified.status !== 0) throw new Error(verified.stdout + verified.stderr);
-console.log(verified.stdout.split("\n").filter((l) => /args digest|result digest|upstream signature|RESULT/.test(l)).map((l) => `   ${l}`).join("\n"));
+console.log(verified.stdout.split("\n").filter((l) => /args digest|execution result digest|upstream signature|RESULT/.test(l)).map((l) => `   ${l}`).join("\n"));
 
 step(5, "a disclosure that lies about the note fails the commitment");
 const lie = verifyBundle(bundle, { ...opts, disclosed: { args: { ...args, reason: "a different note" } } });

@@ -151,11 +151,11 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
           resultBack = { ...restored, value: { ...v, _meta: { ...(v._meta ?? {}), [UPSTREAM_SIG_META_KEY]: { ...(evidence as object), rawBody: body } } } };
         }
       } else resultBack = restored;
-      if (bodyError) add("result digest", false, bodyError);
-      else if (resultBack) add("result digest", digestOf(resultBack.value) === p.execution.resultDigest, resultBack.how === "clear" ? undefined : `recomputed from ${resultBack.how} values`);
-      else add("result digest", true, withheldNote(resultOnlyNote && (resultOnlyNote.whole || resultOnlyNote.withheld.length) ? resultOnlyNote : { mode: resultNote!.mode, withheld: ["upstream.rawBody"] }));
+      if (bodyError) add("execution result digest", false, bodyError);
+      else if (resultBack) add("execution result digest", digestOf(resultBack.value) === p.execution.resultDigest, resultBack.how === "clear" ? undefined : `recomputed from ${resultBack.how} values`);
+      else add("execution result digest", true, withheldNote(resultOnlyNote && (resultOnlyNote.whole || resultOnlyNote.withheld.length) ? resultOnlyNote : { mode: resultNote!.mode, withheld: ["upstream.rawBody"] }));
     } catch (e) {
-      add("result digest", false, errorOf(e));
+      add("execution result digest", false, errorOf(e));
     }
   }
   if ((p.execution.status === "executed" || p.execution.status === "failed") && evidence) {

@@ -39,6 +39,7 @@ PASS  delegation binds principal and agent
 PASS  delegation valid at receipt time  (2026-09-04T13:06:20.074Z .. 2026-09-04T14:06:21.074Z)
 PASS  executed tool within delegated scope  (stripe.refund)
 PASS  request args digest
+PASS  execution result digest
 PASS  policy decision consistent with execution  (allow -> executed)
 PASS  no policy errors on an allow
 PASS  tree head signature
@@ -78,7 +79,7 @@ execution       observed    executed
 | executed tool within delegated scope | if the tool ran, the grant covered it. Denied calls pass this check by construction | a gateway that forwarded out of scope |
 | principal is claimed, not attested | SDK receipts only: there is no delegation, so the principal is a config string and is labelled as such | an SDK receipt pretending to an attested principal |
 | request args digest | the args in the predicate hash to the digest in the subject. Recomputed when the arguments are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when fields are withheld and neither is given, it passes as committed, the detail saying "committed, not recomputed" and how many fields are withheld | edited arguments, or a disclosure that contradicts a commitment |
-| result digest | executed and failed calls: the result in the predicate hashes to `execution.resultDigest`, under the same rules as the arguments; a provider delivery withheld with the result is restored first, since the digest covered it | an edited result, or a disclosure or key that does not match the commitment, or a capture note naming a field that is not a commitment |
+| execution result digest | executed and failed calls: the result in the predicate hashes to `execution.resultDigest`, under the same rules as the arguments; a provider delivery withheld with the result is restored first, since the digest covered it | an edited result, or a disclosure or key that does not match the commitment, or a capture note naming a field that is not a commitment |
 | fact `<name>` value, fact `<name>` args | only for a captured fact: its commitments hold against the disclosed or decrypted value, or pass as committed when neither is given | a disclosure that lies about a fact the policy decided on |
 | upstream signature not checked | only when the result is withheld and an upstream key or provider secret was given: the signature cannot be checked against a result the verifier cannot see, so the line passes with a note in place of the signature check; disclose the result or give the key to run it | nothing; it is a note |
 | policy decision consistent with execution | allow went with executed or failed; an enforced deny went with denied; a deny carrying `enforced: false` (observe mode) went with anything but denied, and the detail says "observe mode, not enforced". Skipped when no policy was evaluated | an issuer that executed after a deny |
@@ -94,7 +95,7 @@ execution       observed    executed
 | log inclusion proof | this exact envelope is a leaf of the tree with that root | receipt never logged, or logged then changed |
 | log file root matches tree head | recomputing the root from your copy of the log at that size gives the same value | your log copy and the issuer's history diverge: deletion, reordering, or edit |
 
-Gateway receipts run seventeen checks, eighteen with a log file, one more (`result digest`) when the call was executed or failed, and five more when the tool was committed before it ran (`precommit` in the gateway config). SDK receipts run fewer, because there is no delegation to check, and the report says so on the `principal is claimed` line. A receipt issued to a sub-agent under a delegation chain runs one more, `delegation chain to the principal`.
+Gateway receipts run seventeen checks, eighteen with a log file, one more (`execution result digest`) when the call was executed or failed, and five more when the tool was committed before it ran (`precommit` in the gateway config). SDK receipts run fewer, because there is no delegation to check, and the report says so on the `principal is claimed` line. A receipt issued to a sub-agent under a delegation chain runs one more, `delegation chain to the principal`.
 
 ## What a verified receipt lets you conclude
 

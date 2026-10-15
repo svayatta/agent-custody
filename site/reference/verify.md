@@ -43,7 +43,7 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | executed tool within delegated scope | if the tool ran, the grant covered it |
 | principal is claimed, not attested | SDK receipts: the principal is a config string and labelled so |
 | request args digest | the arguments match their digest and the statement's subject: recomputed when they are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when fields are withheld and neither is given it passes as committed, the detail saying "committed, not recomputed" and how many fields are withheld; a disclosure that contradicts a commitment fails it with the field named |
-| result digest | executed and failed calls: the result matches `execution.resultDigest`, under the same rules; a provider delivery withheld with the result is restored first |
+| execution result digest | executed and failed calls: the result matches `execution.resultDigest`, under the same rules; a provider delivery withheld with the result is restored first |
 | fact `<name>` value, fact `<name>` args | a captured fact's commitments hold against the disclosed or decrypted value, or pass as committed when neither is given |
 | upstream signature (upstream key), upstream signature (provider secret) | the upstream's signature over the result verifies when a key is given; a Stripe or GitHub delivery verifies when its secret is given |
 | upstream signature not checked | only when the result is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |

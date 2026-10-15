@@ -109,6 +109,10 @@ export class PortalStore {
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}members (user_id TEXT NOT NULL REFERENCES ${p}users(id), tenant_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'owner', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (user_id, tenant_id))`);
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}billing (tenant_id TEXT PRIMARY KEY, customer_id TEXT, subscription_id TEXT, status TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+        // the Stripe `created` time (unix seconds) of the event that set the billing state; an older event does not move it back
+        await this.client.query(`ALTER TABLE ${p}billing ADD COLUMN IF NOT EXISTS event_created BIGINT`);
+        // the Stripe event ids already applied; a redelivery of one is ignored
+        await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}stripe_events (id TEXT PRIMARY KEY, received_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
         // who the account belongs to: added after the first tenants registered, so the columns are optional
         for (const c of PROFILE_COLUMNS) await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS ${c} TEXT`);
         // when the founder's note went out, so it goes once
@@ -232,19 +236,29 @@ export class PortalStore {
     const rows = (await this.client.query(`SELECT tenant_id FROM ${this.p}members WHERE user_id = $1 ORDER BY created_at LIMIT 1`, [userId])).rows as { tenant_id: string }[];
     return rows[0]?.tenant_id ?? null;
   }
-  async setBilling(tenantId: string, b: { customerId?: string | null; subscriptionId?: string | null; status: string }): Promise<void> {
+  async setBilling(tenantId: string, b: { customerId?: string | null; subscriptionId?: string | null; status: string; eventCreated?: number }): Promise<void> {
     await this.init();
     await this.client.query(
-      `INSERT INTO ${this.p}billing (tenant_id, customer_id, subscription_id, status, updated_at) VALUES ($1, $2, $3, $4, now())
-       ON CONFLICT (tenant_id) DO UPDATE SET customer_id = COALESCE(EXCLUDED.customer_id, ${this.p}billing.customer_id), subscription_id = COALESCE(EXCLUDED.subscription_id, ${this.p}billing.subscription_id), status = EXCLUDED.status, updated_at = now()`,
-      [tenantId, b.customerId ?? null, b.subscriptionId ?? null, b.status],
+      `INSERT INTO ${this.p}billing (tenant_id, customer_id, subscription_id, status, event_created, updated_at) VALUES ($1, $2, $3, $4, $5, now())
+       ON CONFLICT (tenant_id) DO UPDATE SET customer_id = COALESCE(EXCLUDED.customer_id, ${this.p}billing.customer_id), subscription_id = COALESCE(EXCLUDED.subscription_id, ${this.p}billing.subscription_id), status = EXCLUDED.status, event_created = COALESCE(EXCLUDED.event_created, ${this.p}billing.event_created), updated_at = now()`,
+      [tenantId, b.customerId ?? null, b.subscriptionId ?? null, b.status, b.eventCreated ?? null],
     );
   }
-  async billing(tenantId: string): Promise<{ customerId: string | null; subscriptionId: string | null; status: string } | null> {
+  async billing(tenantId: string): Promise<{ customerId: string | null; subscriptionId: string | null; status: string; eventCreated: number | null } | null> {
     await this.init();
-    const rows = (await this.client.query(`SELECT customer_id, subscription_id, status FROM ${this.p}billing WHERE tenant_id = $1`, [tenantId])).rows as Record<string, unknown>[];
+    const rows = (await this.client.query(`SELECT customer_id, subscription_id, status, event_created FROM ${this.p}billing WHERE tenant_id = $1`, [tenantId])).rows as Record<string, unknown>[];
     const r = rows[0];
-    return r ? { customerId: r.customer_id ? String(r.customer_id) : null, subscriptionId: r.subscription_id ? String(r.subscription_id) : null, status: String(r.status) } : null;
+    return r ? { customerId: r.customer_id ? String(r.customer_id) : null, subscriptionId: r.subscription_id ? String(r.subscription_id) : null, status: String(r.status), eventCreated: r.event_created == null ? null : Number(r.event_created) } : null;
+  }
+  /** Has this Stripe event id been applied already? */
+  async stripeEventSeen(id: string): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`SELECT 1 FROM ${this.p}stripe_events WHERE id = $1`, [id])).rows.length > 0;
+  }
+  /** Records a Stripe event id as applied, after it was applied, so a failure before this point lets Stripe's retry through. */
+  async noteStripeEvent(id: string): Promise<void> {
+    await this.init();
+    await this.client.query(`INSERT INTO ${this.p}stripe_events (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, [id]);
   }
   /** Every portal registration with its tenant and billing state, oldest first: what the operator's admin page lists. */
   async registrations(): Promise<({ tenantId: string; email: string; registeredAt: string; billing: string | null } & Profile)[]> {
@@ -467,25 +481,31 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         if (!o.stripe) return json(503, { error: "billing is not configured" });
         const raw = await rawBody();
         if (!verifyStripeSignature(req.headers["stripe-signature"] as string | undefined, raw, o.stripe.webhookSecret)) return json(400, { error: "bad signature" });
-        const event = JSON.parse(raw) as { type: string; data: { object: Record<string, unknown> } };
+        const event = JSON.parse(raw) as { id?: unknown; created?: unknown; type: string; data: { object: Record<string, unknown> } };
+        if (typeof event.id !== "string" || !event.id || typeof event.created !== "number") return json(400, { error: "an event needs an id and a created time" });
+        // Stripe delivers at least once and in no set order: a repeat is ignored by its id, and an event older than the
+        // one that set the stored state is ignored by its created time, so neither moves the plan back (issue #105)
+        if (await store.stripeEventSeen(event.id)) return json(200, { received: true, duplicate: true });
         const obj = event.data.object;
-        if (event.type === "checkout.session.completed") {
-          const tenant = String(obj.client_reference_id ?? "");
-          if (tenant && (await o.tenancy.tenant(tenant))) {
-            await store.setBilling(tenant, { customerId: obj.customer ? String(obj.customer) : null, subscriptionId: obj.subscription ? String(obj.subscription) : null, status: "active" });
-            await o.tenancy.setPlan(tenant, "team", "stripe:checkout");
-            log(`agent-custody portal: tenant ${tenant} moved to team by checkout ${String(obj.id ?? "")}`);
-          }
-        } else if (event.type === "customer.subscription.deleted" || event.type === "customer.subscription.updated") {
-          const tenant = await store.tenantBySubscription(String(obj.id ?? ""));
-          if (tenant) {
-            const status = event.type === "customer.subscription.deleted" ? "canceled" : String(obj.status ?? "unknown");
-            await store.setBilling(tenant, { status });
-            const plan: Plan = status === "active" || status === "trialing" || status === "past_due" ? "team" : "free";
-            const current = (await o.tenancy.tenant(tenant))?.plan;
-            if (current !== "enterprise" && current !== plan) await o.tenancy.setPlan(tenant, plan, `stripe:${event.type}`);
-          }
+        const checkout = event.type === "checkout.session.completed";
+        const subscription = event.type === "customer.subscription.deleted" || event.type === "customer.subscription.updated";
+        const ref = String(obj.client_reference_id ?? "");
+        const tenant = checkout ? (ref && (await o.tenancy.tenant(ref)) ? ref : null) : subscription ? await store.tenantBySubscription(String(obj.id ?? "")) : null;
+        const stored = tenant ? (await store.billing(tenant))?.eventCreated : null;
+        if (tenant && stored != null && event.created < stored) {
+          log(`agent-custody portal: ignored ${event.type} ${event.id} for tenant ${tenant}: older than the stored billing state`);
+        } else if (tenant && checkout) {
+          await store.setBilling(tenant, { customerId: obj.customer ? String(obj.customer) : null, subscriptionId: obj.subscription ? String(obj.subscription) : null, status: "active", eventCreated: event.created });
+          await o.tenancy.setPlan(tenant, "team", "stripe:checkout");
+          log(`agent-custody portal: tenant ${tenant} moved to team by checkout ${String(obj.id ?? "")}`);
+        } else if (tenant) {
+          const status = event.type === "customer.subscription.deleted" ? "canceled" : String(obj.status ?? "unknown");
+          await store.setBilling(tenant, { status, eventCreated: event.created });
+          const plan: Plan = status === "active" || status === "trialing" || status === "past_due" ? "team" : "free";
+          const current = (await o.tenancy.tenant(tenant))?.plan;
+          if (current !== "enterprise" && current !== plan) await o.tenancy.setPlan(tenant, plan, `stripe:${event.type}`);
         }
+        await store.noteStripeEvent(event.id);
         return json(200, { received: true });
       }
 

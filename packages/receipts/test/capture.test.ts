@@ -175,7 +175,7 @@ describe("private evidence through the gateway", () => {
     const bare = verifyBundle(bundle, opts);
     expect(bare.ok, formatReport(bare)).toBe(true);
     expect(check("request args digest", bare).detail).toMatch(/committed, not recomputed: 1 field\(s\) are withheld \(encrypted\)/);
-    expect(check("result digest", bare).detail).toMatch(/committed, not recomputed/);
+    expect(check("execution result digest", bare).detail).toMatch(/committed, not recomputed/);
     expect(check("upstream signature not checked", bare)).toBeDefined();
     expect(bare.checks.find((c) => c.name === "upstream signature (upstream key)")).toBeUndefined();
 
@@ -184,7 +184,7 @@ describe("private evidence through the gateway", () => {
     expect(check("request args digest", withKey).detail).toBe("recomputed from decrypted values");
     expect(check("fact customer value", withKey).detail).toMatch(/hold against the decrypted value/);
     // the result was withheld as a digest, not encrypted: the key cannot bring it back
-    expect(check("result digest", withKey).detail).toMatch(/committed, not recomputed/);
+    expect(check("execution result digest", withKey).detail).toMatch(/committed, not recomputed/);
 
     const p = decode(bundle).predicate;
     const fullResult = JSON.parse((r.content[0] as { text: string }).text) as { refund_id: string };
@@ -195,7 +195,7 @@ describe("private evidence through the gateway", () => {
     const withDisclosure = verifyBundle(bundle, { ...opts, disclosed });
     expect(withDisclosure.ok, formatReport(withDisclosure)).toBe(true);
     expect(check("request args digest", withDisclosure).detail).toBe("recomputed from disclosed values");
-    expect(check("result digest", withDisclosure).detail).toBe("recomputed from disclosed values");
+    expect(check("execution result digest", withDisclosure).detail).toBe("recomputed from disclosed values");
     expect(check("upstream signature (provider secret)", withDisclosure).ok).toBe(true);
     expect(fullResult.refund_id).toMatch(/^re_/);
 
@@ -234,10 +234,10 @@ describe("private evidence through the SDK", () => {
     const o = { issuerKeys: [loadPublicKey(fx.appPub)], principalKeys: [], logFile: fx.logFile };
     const bare = verifyBundle(bundle, o);
     expect(bare.ok, formatReport(bare)).toBe(true);
-    expect(check("result digest", bare).detail).toMatch(/2 field\(s\) are withheld \(encrypted\)/);
+    expect(check("execution result digest", bare).detail).toMatch(/2 field\(s\) are withheld \(encrypted\)/);
     const full = verifyBundle(bundle, { ...o, captureKey: key });
     expect(full.ok).toBe(true);
-    expect(check("result digest", full).detail).toBe("recomputed from decrypted values");
+    expect(check("execution result digest", full).detail).toBe("recomputed from decrypted values");
     delete process.env.TEST_CAPTURE_KEY;
   });
 });

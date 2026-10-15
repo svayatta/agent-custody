@@ -45,7 +45,7 @@ The gateway's log client retries a 429 three times with backoff and then fails t
 | `POST /api/policies/<id>/remove` | `{}` | `{ "removed": true\|false }`; receipts keep their digests, only the name goes |
 | `POST /api/checkout` | `{}` | `{ "url": "https://checkout.stripe.com/…" }`; `409` if not on `free`; `503` when billing is not configured |
 | `POST /api/billing-portal` | `{}` | `{ "url": "https://billing.stripe.com/…" }` |
-| `POST /stripe/webhook` | Stripe's event, `Stripe-Signature` header | `{ "received": true }`; `400` on a bad or stale signature |
+| `POST /stripe/webhook` | Stripe's event, `Stripe-Signature` header | `{ "received": true }`; `{ "received": true, "duplicate": true }` for an event id applied already; `400` on a bad or stale signature, or an event without `id` and `created`. An event whose `created` is older than the event that set the stored billing state is acknowledged and not applied |
 | `GET /health` | | `{ "ok": true, "stripe": true\|false }` |
 
 Every write needs `Content-Type: application/json`; the cookie is `HttpOnly; SameSite=Strict`. Every action is in the tenant's audit trail as `portal:<email>`, and plan changes made by Stripe as `stripe:<event>`.
