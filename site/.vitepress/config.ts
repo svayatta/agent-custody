@@ -25,7 +25,7 @@ export default withMermaid(
     title: "agent-custody",
     description: "Proof of what your AI agents did: every tool call becomes signed evidence of who authorized it, what the agent saw, what it did, and what depended on it, verifiable by anyone with the public keys.",
     srcDir: "..",
-    srcExclude: ["deploy/**", "site/verifier/**", "**/node_modules/**", "**/dist/**", "**/examples-out/**", "**/demo-out/**", "**/.venv/**", "**/target/**", "CLAUDE.md", "SECURITY.md", "packages/receipts/examples/**", "packages/state/examples/**", "packages/python/tests/**", "site/README.md"],
+    srcExclude: ["deploy/**", "site/verifier/**", "**/node_modules/**", "**/dist/**", "**/examples-out/**", "**/demo-out/**", "**/.venv/**", "**/target/**", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md", "packages/receipts/examples/**", "packages/state/examples/**", "packages/python/tests/**", "site/README.md"],
     rewrites: {
       "site/index.md": "index.md",
       "site/verify.md": "verify.md",
