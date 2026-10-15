@@ -17,6 +17,12 @@ import { buildFixture, buildSdkFixture, type Fixture } from "../scripts/fixture.
 
 const decode = (b: ReceiptBundle) => JSON.parse(Buffer.from(b.envelope.payload, "base64").toString()) as ReceiptStatement;
 const bundleOf2 = (fx: Fixture, r: { _meta?: Record<string, unknown> }) => JSON.parse(readFileSync(join(fx.receiptsDir, `${String(r._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
+/** Everything a receipt file says, decoded: the statement, the authorization inside it, and the rest. A leak check on the base64 file alone proves nothing. */
+const leakText = (b: ReceiptBundle): string => {
+  const statement = Buffer.from(b.envelope.payload, "base64").toString();
+  const auth = (JSON.parse(statement) as ReceiptStatement).predicate.authorization;
+  return statement + (auth ? Buffer.from(auth.envelope.payload, "base64").toString() : "") + JSON.stringify(b);
+};
 const KEY_HEX = randomBytes(32).toString("hex");
 const key = captureKeyFrom(KEY_HEX);
 const check = (name: string, r: ReturnType<typeof verifyBundle>) => r.checks.find((c) => c.name === name)!;
@@ -87,6 +93,7 @@ describe("commitments", () => {
 describe("private evidence through the gateway", () => {
   let fx: Fixture;
   let gw: Gateway;
+  let gwClear: Gateway;
   let opts: VerifyOptions;
   const bundleOf = (r: { _meta?: Record<string, unknown> }) => JSON.parse(readFileSync(join(fx.receiptsDir, `${String(r._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
   beforeAll(async () => {
@@ -102,10 +109,14 @@ describe("private evidence through the gateway", () => {
     cfg.upstream.args.push("--webhook-secret", WEBHOOK_SECRET);
     writeFileSync(fx.configFile, JSON.stringify(cfg));
     gw = await createGateway(loadConfig(fx.configFile));
+    const clearCfg = { ...cfg, capture: {}, receiptsDir: "receipts-clear", logFile: "log-clear.jsonl" };
+    writeFileSync(join(fx.dir, "gateway-clear.json"), JSON.stringify(clearCfg));
+    gwClear = await createGateway(loadConfig(join(fx.dir, "gateway-clear.json")));
     opts = { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], upstreamKeys: [loadPublicKey(fx.upstreamPub)], providerSecrets: { stripe: WEBHOOK_SECRET }, logFile: fx.logFile };
   });
   afterAll(async () => {
     await gw.close();
+    await gwClear.close();
     delete process.env.TEST_CAPTURE_KEY;
   });
 
@@ -116,8 +127,11 @@ describe("private evidence through the gateway", () => {
     // the agent still gets the real result
     expect((r.content[0] as { text: string }).text).toContain("succeeded");
     const bundle = bundleOf(r);
-    const file = JSON.stringify(bundle);
+    const file = leakText(bundle);
     expect(file).not.toMatch(/7946|4242|called from/);
+    // and without a rule the same call would show them, so the check can fail
+    const clearCall = await gwClear.handleCall({ name: "stripe.refund", arguments: args });
+    expect(leakText(JSON.parse(readFileSync(join(fx.dir, "receipts-clear", `${String(clearCall._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle)).toMatch(/7946/);
     const p = decode(bundle).predicate;
     expect(p.request.args).toMatchObject({ customer_id: "cust_123", amount: 2500 });
     expect(isCommitment(p.request.args.reason)).toBe(true);
@@ -157,7 +171,7 @@ describe("private evidence through the gateway", () => {
       expect(isCommitment(p.request.args.customer_id)).toBe(true);
       expect(isCommitment(p.facts.customer!.args.customer_id)).toBe(true);
       expect(p.facts.customer!.argsCapture).toEqual({ mode: "digest", withheld: ["customer_id"] });
-      expect(readFileSync(join(fx2.receiptsDir, `${String(r._meta![RECEIPT_META_KEY])}.json`), "utf8")).not.toContain("cust_123");
+      expect(leakText(bundleOf2(fx2, r))).not.toContain("cust_123");
       const v = verifyBundle(bundleOf2(fx2, r), { issuerKeys: [loadPublicKey(fx2.gatewayPub)], principalKeys: [loadPublicKey(fx2.principalPub)], logFile: fx2.logFile });
       expect(v.ok, formatReport(v)).toBe(true);
       expect(check("fact customer args", v).detail).toMatch(/committed, not recomputed/);
@@ -208,6 +222,47 @@ describe("private evidence through the gateway", () => {
     expect(check("fact customer value", factLie).detail).toMatch(/does not match/);
   });
 
+  it("a fact argument is withheld by the call argument it copies, whatever it is called, and a constant stays in clear", async () => {
+    const fx3 = buildFixture(mkdtempSync(join(tmpdir(), "capture-factsrc-")));
+    const cfg = JSON.parse(readFileSync(fx3.configFile, "utf8"));
+    cfg.facts = [{ name: "customer", tool: "customer.lookup", args: { customer_id: "$args.account_ref", mode: "full" }, forTools: ["stripe.refund"] }];
+    cfg.capture = { "*": { args: { mode: "digest", clear: ["customer_id", "amount"] } } };
+    writeFileSync(fx3.configFile, JSON.stringify(cfg));
+    const gw3 = await createGateway(loadConfig(fx3.configFile));
+    try {
+      const r = await gw3.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", account_ref: "cust_123", amount: 2500 } });
+      expect(r.isError).toBeFalsy();
+      const p = decode(bundleOf2(fx3, r)).predicate;
+      expect(p.request.args.customer_id).toBe("cust_123");
+      expect(isCommitment(p.request.args.account_ref)).toBe(true);
+      // the lookup's customer_id came from account_ref, which is withheld: so it is withheld too, under its own name
+      expect(isCommitment(p.facts.customer!.args.customer_id)).toBe(true);
+      expect(p.facts.customer!.args.mode).toBe("full");
+      expect(p.facts.customer!.argsCapture).toEqual({ mode: "digest", withheld: ["customer_id"] });
+    } finally {
+      await gw3.close();
+    }
+  });
+
+  it("the answer of a failed lookup stays out of the receipt under a private rule", async () => {
+    const fx4 = buildFixture(mkdtempSync(join(tmpdir(), "capture-lookupfail-")));
+    const cfg = JSON.parse(readFileSync(fx4.configFile, "utf8"));
+    cfg.capture = { "*": { args: { mode: "digest", clear: ["amount"] } } };
+    writeFileSync(fx4.configFile, JSON.stringify(cfg));
+    const gw4 = await createGateway(loadConfig(fx4.configFile));
+    try {
+      const r = await gw4.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_SECRET_777", amount: 2500 } });
+      expect(r.isError).toBe(true);
+      const bundle = bundleOf2(fx4, r);
+      const p = decode(bundle).predicate;
+      expect(p.execution.status).toBe("denied");
+      expect(p.policy!.errors.join(" ")).toMatch(/lookup via customer.lookup failed \(the answer is withheld under the capture rule\)/);
+      expect(leakText(bundle)).not.toContain("cust_SECRET_777");
+    } finally {
+      await gw4.close();
+    }
+  });
+
   it("a rule in mode encrypted without a key, or a key variable that is not set, fails at startup", async () => {
     const fx2 = buildFixture(mkdtempSync(join(tmpdir(), "capture-nokey-")));
     const cfg = JSON.parse(readFileSync(fx2.configFile, "utf8"));
@@ -230,7 +285,7 @@ describe("private evidence through the SDK", () => {
     writeFileSync(fx.configFile, JSON.stringify(cfg));
     const sdk = createSdkIssuer(loadSdkConfig(fx.configFile));
     const bundle = await sdk.record({ tool: "stripe.refund", args: { amount: 900, customer_id: "cust_9" } }, { status: "executed", result: { refund_id: "re_9", card_last4: "4242" } });
-    expect(JSON.stringify(bundle)).not.toMatch(/cust_9|4242/);
+    expect(leakText(bundle)).not.toMatch(/cust_9|4242/);
     const o = { issuerKeys: [loadPublicKey(fx.appPub)], principalKeys: [], logFile: fx.logFile };
     const bare = verifyBundle(bundle, o);
     expect(bare.ok, formatReport(bare)).toBe(true);

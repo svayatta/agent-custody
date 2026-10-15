@@ -140,7 +140,10 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     }
   }
   const resultOnlyNote = resultNote ? { ...resultNote, withheld: resultNote.withheld.filter((w) => w !== "upstream.rawBody") } : undefined;
-  if (p.execution.status === "executed" || p.execution.status === "failed") {
+  // the note's "upstream.rawBody" is held to the same rule as a field: the evidence must carry the commitment it names
+  const bodyNoteProblem = bodyWithheld && !(evidence && isProviderAttestation(evidence) && isCommitment(evidence.rawBody)) ? "the capture note says the delivery body is withheld, but the receipt carries no commitment for it" : null;
+  if (bodyNoteProblem) add("execution result digest", false, bodyNoteProblem);
+  else if (p.execution.status === "executed" || p.execution.status === "failed") {
     try {
       const restored = restore(p.execution.result, resultOnlyNote && (resultOnlyNote.whole || resultOnlyNote.withheld.length) ? resultOnlyNote : undefined, opts.disclosed?.result, opts.captureKey);
       if (restored && bodyWithheld) {

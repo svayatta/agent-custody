@@ -41,9 +41,12 @@ const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString())
 console.log(`   the agent got: ${(r.content[0] as { text: string }).text}`);
 console.log(`   the receipt carries: args ${JSON.stringify(Object.fromEntries(Object.entries(p.request.args).map(([k, v]) => [k, typeof v === "object" ? `<${(v as { $custody: string }).$custody}>` : v])))}`);
 console.log(`   withheld: args ${JSON.stringify(p.request.capture)}, result ${JSON.stringify((p.execution as { capture?: unknown }).capture)}, fact customer ${JSON.stringify(p.facts.customer!.capture)}`);
-const text = readFileSync(file, "utf8");
+// the statement is base64 inside the file: a leak check reads it decoded, the authorization inside it too
+const statement = Buffer.from(bundle.envelope.payload, "base64").toString();
+const authorization = p.authorization ? Buffer.from(p.authorization.envelope.payload, "base64").toString() : "";
+const text = statement + authorization + readFileSync(file, "utf8");
 const leaks = ["7946", "4242", "called from", '"plan":"pro"', "succeeded"].filter((s) => text.includes(s));
-if (leaks.length) throw new Error(`the receipt file still carries ${leaks.join(", ")}`);
+if (leaks.length) throw new Error(`the receipt still carries ${leaks.join(", ")}`);
 console.log("   the receipt file contains none of: the phone number, the card, the note, the customer record, the provider's answer");
 
 step(3, "a reviewer without the key verifies it: every signature and proof checks, the withheld parts are committed, not recomputed");

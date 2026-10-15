@@ -235,12 +235,16 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   const resultNote = executedOrFailed ? (p.execution.capture as Note | undefined) : undefined;
   const resultOnlyNote = resultNote ? { ...resultNote, withheld: resultNote.withheld.filter((w) => w !== "upstream.rawBody") } : undefined;
   const resultWithheld = !!resultOnlyNote && (resultOnlyNote.whole || resultOnlyNote.withheld.length > 0);
+  const isProvider = (v: any) => !!v && (v.provider === "stripe-webhook" || v.provider === "github-delivery") && (typeof v.rawBody === "string" || isCommitment(v.rawBody));
+  // whether the delivery body is withheld is read from the signed note, as for every field, and the evidence must bear it out
+  const bodyWithheld = !!resultNote?.withheld.includes("upstream.rawBody");
+  const bodyNoteProblem = bodyWithheld && !(executedOrFailed && p.execution.upstream && isProvider(p.execution.upstream) && isCommitment((p.execution.upstream as any).rawBody)) ? "the capture note says the delivery body is withheld, but the receipt carries no commitment for it" : null;
   if (executedOrFailed) {
-    if (resultWithheld) { const problem = noteProblem(p.execution.result, resultOnlyNote!); add("execution result digest", !problem, problem ?? withheldNote(resultOnlyNote!)); }
+    if (bodyNoteProblem) add("execution result digest", false, bodyNoteProblem);
+    else if (resultWithheld) { const problem = noteProblem(p.execution.result, resultOnlyNote!); add("execution result digest", !problem, problem ?? withheldNote(resultOnlyNote!)); }
+    else if (bodyWithheld) add("execution result digest", true, withheldNote({ mode: resultNote!.mode, withheld: ["upstream.rawBody"] }));
     else add("execution result digest", (await digestOf(p.execution.result)) === p.execution.resultDigest);
   }
-  const isProvider = (v: any) => !!v && (v.provider === "stripe-webhook" || v.provider === "github-delivery") && (typeof v.rawBody === "string" || isCommitment(v.rawBody));
-  const bodyWithheld = executedOrFailed && p.execution.upstream && isProvider(p.execution.upstream) && isCommitment((p.execution.upstream as any).rawBody);
   if (executedOrFailed && p.execution.upstream && (resultWithheld || bodyWithheld) && (opts.providerSecrets || (opts.upstreamKeys?.length ?? 0) > 0)) {
     add("upstream signature not checked", true, "the result is withheld; disclose it with the command-line verifier to check the upstream's evidence against it");
   } else if ((p.execution.status === "executed" || p.execution.status === "failed") && p.execution.upstream && isProvider(p.execution.upstream)) {

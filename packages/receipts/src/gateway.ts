@@ -17,7 +17,7 @@ import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
-import { captureArgs, captureKeyFrom, captureResult, captureValue, ruleFor, withhold } from "./capture.ts";
+import { captureArgs, captureKeyFrom, captureResult, captureValue, ruleFor, withhold, type CaptureSide } from "./capture.ts";
 import { isProviderAttestation, UPSTREAM_SIG_META_KEY } from "./upstream.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
@@ -218,7 +218,12 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       if (fargs === null) continue;
       // Lookups carry the same metadata as the forwarded call: they are the gateway acting for this receipt.
       const result = await callUpstream(f.tool, fargs, meta);
-      if (result.isError) throw new Error(`fact "${f.name}" lookup via ${f.tool} failed: ${JSON.stringify(extractValue(result))}`);
+      if (result.isError) {
+        // Under a private rule the answer of a failed lookup is not recorded either: it would land in policy.errors in clear.
+        const r = ruleFor(cfg.capture, tool);
+        const privateRule = (r?.args?.mode ?? "clear") !== "clear" || (r?.facts?.mode ?? "clear") !== "clear";
+        throw new Error(privateRule ? `fact "${f.name}" lookup via ${f.tool} failed (the answer is withheld under the capture rule)` : `fact "${f.name}" lookup via ${f.tool} failed: ${JSON.stringify(extractValue(result))}`);
+      }
       facts[f.name] = { tool: f.tool, args: fargs, value: extractValue(result), resultDigest: digestOf(result), provenance: "observed" };
     }
     return facts;
@@ -303,9 +308,19 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       const argsCaptured = captureArgs(args, rule?.args, captureKey);
       // A fact's value follows the facts rule; its lookup arguments follow the call's args rule, because they are copied
       // from the call: a field withheld from the request must not reappear through the lookup that used it.
+      // A fact argument is kept in clear only when its template is a constant or copies a call argument that is in
+      // clear; the rule's `clear` names call arguments, and a fact argument may carry one under another name.
+      const factArgsSide = (name: string): CaptureSide | undefined => {
+        const side = rule?.args;
+        if (!side || side.mode === "clear") return undefined;
+        const template = cfg.facts.find((x: FactConfig) => x.name === name)?.args ?? {};
+        const clear = new Set(side.clear ?? []);
+        const keep = Object.entries(template).filter(([, v]) => !v.startsWith("$args.") || clear.has(v.slice("$args.".length))).map(([k]) => k);
+        return { mode: side.mode, clear: keep };
+      };
       const factsView = Object.fromEntries(Object.entries(facts).map(([k, f]) => {
         const c = captureValue(f.value, rule?.facts, captureKey);
-        const a = captureArgs(f.args, rule?.args, captureKey);
+        const a = captureArgs(f.args, factArgsSide(k), captureKey);
         return [k, { ...f, args: a.view, value: c.view, ...(c.note ? { capture: c.note } : {}), ...(a.note ? { argsCapture: a.note } : {}) }];
       })) as typeof facts;
       const head = {
