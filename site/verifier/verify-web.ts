@@ -213,7 +213,9 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   // The note decides, never the shape of the data: a path it names must hold a commitment (else the check fails), and
   // commitment-shaped data it does not name is ordinary data, inside the digest.
   // a commitment is one only when it carries what a verifier checks: the sha256 and the salt, and for an encrypted one the fields the key needs
-  const isCommitment = (v: any) => !!v && typeof v === "object" && !Array.isArray(v) && /^[0-9a-f]{64}$/.test(v.sha256) && (v.$custody === "withheld" || (v.$custody === "encrypted" && v.alg === "A256GCM" && /^[0-9a-f]{64}$/.test(v.keyid) && [v.iv, v.ciphertext, v.tag].every((f: unknown) => typeof f === "string" && f.length > 0 && /^[A-Za-z0-9+/]+=*$/.test(f))));
+  // a string check before each pattern: RegExp.test coerces, and an array of one hex string is not a hash
+  const hex64 = (v: unknown) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+  const isCommitment = (v: any) => !!v && typeof v === "object" && !Array.isArray(v) && hex64(v.sha256) && (v.$custody === "withheld" || (v.$custody === "encrypted" && v.alg === "A256GCM" && hex64(v.keyid) && [v.iv, v.ciphertext, v.tag].every((f: unknown) => typeof f === "string" && f.length > 0 && /^[A-Za-z0-9+/]+=*$/.test(f))));
   type Path = string[];
   const note = p.capture as { mode: string; withheld: Path[] } | undefined;
   const under = (w: Path, prefix: Path) => prefix.length <= w.length && prefix.every((s, i) => w[i] === s);
@@ -261,16 +263,22 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
     add(`withheld ${pathText(w)}`, ok, ok ? committedNote([w]) : `the capture note says ${pathText(w)} is withheld, but the receipt carries no commitment for it`);
   }
   const isProvider = (v: any) => !!v && (v.provider === "stripe-webhook" || v.provider === "github-delivery") && (typeof v.rawBody === "string" || isCommitment(v.rawBody)) && typeof v.signature === "string" && typeof v.bind === "string";
+  // a check is skipped only for a part the signed note declares withheld; a part that is simply not there, or commitment-shaped without the note saying so, fails
+  const declared = (path: Path) => (note?.withheld ?? []).some((w) => JSON.stringify(w) === JSON.stringify(path));
   if (executedOrFailed && p.execution.upstream && isProvider(p.execution.upstream)) {
     if (opts.providerSecrets) {
-      if (!resultInClear || typeof p.execution.upstream.rawBody !== "string") add("upstream signature not checked", true, "the result or the delivery body is withheld; disclose them with the command-line verifier to check the provider's delivery");
+      if (!resultInClear || declared(["execution", "upstream", "rawBody"])) add("upstream signature not checked", true, "the result or the delivery body is withheld; disclose them with the command-line verifier to check the provider's delivery");
+      else if (typeof p.execution.upstream.rawBody !== "string") add("upstream signature (provider secret)", false, "the receipt carries no delivery body to check, and the capture note does not say it is withheld");
       else {
         const u = await checkProvider(p.execution.upstream, opts.providerSecrets, p.timestamp, p.execution.result);
         add("upstream signature (provider secret)", u.ok, u.detail);
       }
     }
   } else if (executedOrFailed && p.execution.upstream && (opts.upstreamKeys?.length ?? 0) > 0) {
-    if (!resultInClear || isCommitment(p.execution.upstream.envelope)) add("upstream signature not checked", true, "the result or the upstream's signature is withheld; disclose them with the command-line verifier to check the signature against the result");
+    const env = p.execution.upstream.envelope;
+    const wellFormed = !!env && typeof env === "object" && typeof env.payload === "string" && Array.isArray(env.signatures);
+    if (!resultInClear || declared(["execution", "upstream", "envelope"])) add("upstream signature not checked", true, "the result or the upstream's signature is withheld; disclose them with the command-line verifier to check the signature against the result");
+    else if (!wellFormed) add("upstream signature (upstream key)", false, "the receipt carries no upstream envelope to check, and the capture note does not say it is withheld");
     else {
       const u = await dsseVerify(p.execution.upstream.envelope, opts.upstreamKeys!);
       let ok = u.ok && p.execution.upstream.envelope.payloadType === UPSTREAM_TYPE;

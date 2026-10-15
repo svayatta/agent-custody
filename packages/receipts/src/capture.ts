@@ -1,7 +1,7 @@
 // Private evidence: what a receipt records of a call, decided in one place. The signature and the digests are over
 // the whole call as it happened; what the receipt file carries in clear is a choice, made per tool in the config, and
 // applied by the issuer to the whole statement just before it is signed (`privateView`). A fixed list of structural
-// paths stays in clear: ids, key ids, timestamps, the tool name, the grant, the digests and their salts, the decision
+// paths stays in clear: ids, key ids, timestamps, the tool name, the grant, the digests, the decision
 // and the ids of the policies behind it, the status, the provenance fields, and the note itself. Every other value
 // under a private rule leaves a commitment in its place, sha256 over a random salt and the canonical value, so a
 // reviewer who is later shown the value and the salt can check it belongs; an encrypted commitment carries both as
@@ -63,7 +63,7 @@ export interface Encrypted {
   sha256: string;
 }
 export type Commitment = Withheld | Encrypted;
-/** What a disclosure carries at a withheld path: the value and the salt the commitment was made with. Without `value`, only the salt, for the holder to fill in. */
+/** What a disclosure carries at a withheld path: the value and the salt the commitment was made with. Without `value` it is unfinished (`reveal --include-salts` writes it so for the holder to fill in) and fails verification. */
 export interface Disclosed {
   $custody: "disclosed";
   salt: string;
@@ -349,9 +349,15 @@ export function restorePaths<P>(predicate: P, note: CaptureNote | undefined, dis
       continue;
     }
     const d = disclosed === undefined ? undefined : getAt(disclosed, path);
-    if (d !== undefined && !(isDisclosed(d) && !("value" in d))) {
+    if (d !== undefined) {
       if (!isDisclosed(d)) {
         r.problems.push({ path, error: `the disclosed ${pathText(path)} must be { "$custody": "disclosed", "salt", "value" }, as agent-custody reveal writes it; a value alone cannot be checked` });
+        continue;
+      }
+      // a salt without its value is what reveal --include-salts writes for the holder to complete: handed over as it
+      // is, it would let a reviewer confirm guesses, so an unfinished disclosure fails rather than passes as committed
+      if (!("value" in d)) {
+        r.problems.push({ path, error: `the disclosed ${pathText(path)} carries a salt but no value; fill in the value or remove the entry, since a salt alone lets a reviewer confirm guesses` });
         continue;
       }
       if (!checkCommitment(c, d.value, d.salt)) {

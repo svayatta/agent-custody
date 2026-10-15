@@ -2,7 +2,8 @@
 // (the issuer's view of the whole statement), the digests and signatures are over the whole call, salted, and the
 // verifier recomputes them when the values are in clear, disclosed, or revealed with the customer's key, and says
 // "committed, not recomputed" when they are not.
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -107,8 +108,8 @@ describe("the view of a statement under a rule", () => {
     // a value alone, without its salt, cannot be checked and is said so
     const bare = restorePaths(v, v.capture, { request: { args: { reason: p.request.args.reason } } });
     expect(bare.problems[0]!.error).toMatch(/must be \{ "\$custody": "disclosed", "salt", "value" \}/);
-    // a salt alone, as reveal writes for a value it cannot decrypt, leaves the path withheld
-    expect(restorePaths(v, v.capture, { request: { args: { reason: { $custody: "disclosed", salt: salts[pathKey(["request", "args", "reason"])] } } } }).missing).toHaveLength(3);
+    // a salt alone, as reveal --include-salts writes for the holder to complete, is an unfinished disclosure and fails rather than passing as committed
+    expect(restorePaths(v, v.capture, { request: { args: { reason: { $custody: "disclosed", salt: salts[pathKey(["request", "args", "reason"])] } } } }).problems[0]!.error).toMatch(/carries a salt but no value/);
     const enc = privateView(p, { args: { mode: "encrypted", clear: ["amount"] } }, key).predicate;
     const dec = restorePaths(enc, enc.capture, undefined, key);
     expect(dec.missing).toEqual([]);
@@ -246,9 +247,11 @@ describe("private evidence through the gateway", () => {
     expect(p.capture!.mode).toBe("encrypted");
     const paths = withheldPaths(p);
     expect(paths).toContain("request.args.reason");
-    // the digest is salted from the field salts the issuer kept beside the receipt, never in it
+    // the digest is salted from the field salts the issuer kept beside the receipt, never in it, for the owner alone
     expect(file).not.toMatch(/"salt"/);
     const salts = saltsOf(fx.receiptsDir, p.receiptId);
+    expect(statSync(join(fx.receiptsDir, SALTS_DIR, `${p.receiptId}.json`)).mode & 0o777).toBe(0o600);
+    expect(statSync(join(fx.receiptsDir, SALTS_DIR)).mode & 0o777).toBe(0o700);
     expect(p.request.argsDigest).toBe(digestOf(args, saltFor(p.capture, salts, ["request", "args"])));
     expect(p.request.argsDigest).not.toBe(digestOf(args));
     expect(p.execution.status).toBe("executed");
@@ -501,6 +504,34 @@ describe("private evidence through the gateway", () => {
     } finally {
       await gw8.close();
     }
+  });
+
+  it("reveal writes the salts of values it cannot reveal only when asked, and a file carrying a salt without its value does not verify", async () => {
+    const r = await gw.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2700, reason: "fraud" } });
+    const bundle = bundleOf(r);
+    const p = decode(bundle).predicate;
+    const file = join(fx.receiptsDir, `${p.receiptId}.json`);
+    const cli = join(import.meta.dirname, "..", "src", "cli.ts");
+    const run = (...extra: string[]) => spawnSync(process.execPath, [cli, "reveal", file, "--capture-key-env", "TEST_CAPTURE_KEY", ...extra], { encoding: "utf8", env: { ...process.env, TEST_CAPTURE_KEY: KEY_HEX } });
+    // by default: the encrypted values with their salts, nothing for the digest-only ones but their names
+    const plain = run();
+    expect(plain.status, plain.stderr).toBe(0);
+    const disclosure = JSON.parse(plain.stdout) as Record<string, unknown>;
+    expect(getAt(disclosure, ["request", "args", "reason"])).toMatchObject({ $custody: "disclosed", value: "fraud" });
+    expect(getAt(disclosure, ["execution", "result", "content"])).toBeUndefined();
+    expect(plain.stderr).toMatch(/Not revealed.*execution.result.content.*--include-salts/s);
+    const ok = verifyBundle(bundle, { ...opts, disclosed: disclosure });
+    expect(ok.ok, formatReport(ok)).toBe(true);
+    expect(check("request args digest", ok).detail).toBe("recomputed from disclosed values");
+    // asked for: the salts go in, and the file fails until the holder fills in the values
+    const withSalts = run("--include-salts");
+    expect(withSalts.status, withSalts.stderr).toBe(0);
+    const unfinished = JSON.parse(withSalts.stdout) as Record<string, unknown>;
+    expect(getAt(unfinished, ["execution", "result", "content"])).toEqual({ $custody: "disclosed", salt: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    expect(withSalts.stderr).toMatch(/do not hand it over unfinished/);
+    const refused = verifyBundle(bundle, { ...opts, disclosed: unfinished });
+    expect(refused.ok).toBe(false);
+    expect(check("execution result digest", refused).detail).toMatch(/carries a salt but no value/);
   });
 
   it("a rule in mode encrypted without a key, or a key variable that is not set, fails at startup", async () => {

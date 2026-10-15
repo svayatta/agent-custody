@@ -42,8 +42,9 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
    */
   const keepSalts = (receiptId: string, salts: Record<string, string>) => {
     if (!Object.keys(salts).length) return;
-    mkdirSync(join(receiptsDir, SALTS_DIR), { recursive: true });
-    writeFileSync(join(receiptsDir, SALTS_DIR, `${receiptId}.json`), JSON.stringify({ receiptId, salts }, null, 2));
+    // as private as a key file: the owner alone
+    mkdirSync(join(receiptsDir, SALTS_DIR), { recursive: true, mode: 0o700 });
+    writeFileSync(join(receiptsDir, SALTS_DIR, `${receiptId}.json`), JSON.stringify({ receiptId, salts }, null, 2), { mode: 0o600 });
   };
   return {
     keyid: key.keyid,

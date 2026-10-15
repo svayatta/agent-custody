@@ -153,22 +153,28 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   }
   const evidence = executedOrFailed && "upstream" in p.execution ? p.execution.upstream : undefined;
   if (executedOrFailed && evidence) {
-    // the evidence as restored: the delivery body or the signed envelope may have been withheld with the result
+    // The evidence as restored: the delivery body or the signed envelope may have been withheld with the result. A
+    // check is skipped only for a part the signed note declares withheld and the verifier could not restore; a body
+    // or an envelope that is simply not there, or commitment-shaped without the note saying so, fails the check.
     const restoredEvidence = (full.execution as { upstream?: { rawBody?: unknown; envelope?: unknown } }).upstream;
-    const body = isProviderAttestation(evidence) ? restoredEvidence?.rawBody : null;
-    const envelope = !isProviderAttestation(evidence) && restoredEvidence?.envelope && !isCommitment(restoredEvidence.envelope) ? (restoredEvidence.envelope as Envelope) : null;
+    const withheldStill = (path: string[]) => (note?.withheld ?? []).some((w) => pathKey(w) === pathKey(path)) && back.missing.some((w) => pathKey(w) === pathKey(path));
     if (isProviderAttestation(evidence)) {
       if (opts.providerSecrets) {
-        if (typeof body !== "string" || !result) add("upstream signature not checked", true, "the result or the delivery body is withheld; disclose them or give the capture key to check the provider's delivery");
+        const body = restoredEvidence?.rawBody;
+        if (!result || withheldStill(["execution", "upstream", "rawBody"])) add("upstream signature not checked", true, "the result or the delivery body is withheld; disclose them or give the capture key to check the provider's delivery");
+        else if (typeof body !== "string") add("upstream signature (provider secret)", false, "the receipt carries no delivery body to check, and the capture note does not say it is withheld");
         else {
           const u = checkProvider({ ...evidence, rawBody: body }, opts.providerSecrets, { timestamp: p.timestamp, result });
           add("upstream signature (provider secret)", u.ok, u.ok ? u.keyid : u.error);
         }
       }
     } else if ((opts.upstreamKeys?.length ?? 0) > 0) {
-      if (!result || !envelope) add("upstream signature not checked", true, "the result or the upstream's signature is withheld; disclose them or give the capture key to check the signature against the result");
+      const env = restoredEvidence?.envelope as Envelope | undefined;
+      const wellFormed = !!env && typeof env === "object" && typeof env.payload === "string" && Array.isArray(env.signatures);
+      if (!result || withheldStill(["execution", "upstream", "envelope"])) add("upstream signature not checked", true, "the result or the upstream's signature is withheld; disclose them or give the capture key to check the signature against the result");
+      else if (!wellFormed) add("upstream signature (upstream key)", false, "the receipt carries no upstream envelope to check, and the capture note does not say it is withheld");
       else {
-        const u = checkUpstream(envelope, opts.upstreamKeys!, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: contentDigest(result) });
+        const u = checkUpstream(env, opts.upstreamKeys!, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: contentDigest(result) });
         add("upstream signature (upstream key)", u.ok, u.ok ? `keyid ${short(u.keyid)}` : u.error);
       }
     }

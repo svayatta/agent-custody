@@ -67,6 +67,7 @@ agent-custody reveal receipts/<id>.json --capture-key-env AGENT_CUSTODY_CAPTURE_
 | --- | --- |
 | `--capture-key-env` | the environment variable holding the 32-byte key, 64 hex characters or base64; never the key itself |
 | `--out` | where to write the disclosure; without it, stdout |
+| `--include-salts` | also write the salt of every value the key cannot reveal, from the salts file beside the receipt, for the holder of the values to complete |
 
 Output: `{ "receiptId", … }` with every encrypted value decrypted, checked against its commitment, and written at its own path with the salt the commitment was made with:
 
@@ -74,7 +75,7 @@ Output: `{ "receiptId", … }` with every encrypted value decrypted, checked aga
 { "receiptId": "36c85dc9-…", "request": { "args": { "reason": { "$custody": "disclosed", "salt": "9f3a…", "value": "customer called from +44 20 7946 0000 about the card ending 4242" } } }, "facts": { "customer": { "value": { "id": { "$custody": "disclosed", "salt": "…", "value": "cust_123" }, "verified": { "$custody": "disclosed", "salt": "…", "value": true } } } } }
 ```
 
-A value withheld as a digest only carries nothing to reveal. When the issuer's salts file (`receipts/salts/<id>.json`) is beside the receipt, the command writes `{ "$custody": "disclosed", "salt" }` at each such path for the holder to add `value` to, and says which (`Not revealed, withheld without a value: execution.result.content, execution.result._meta; only the party that holds them can disclose them, by filling in "value" beside the salt written for each`); without the file it says where the salts would be. A key other than the one a value was encrypted under reveals nothing of it, and the path is listed the same way; a decrypted value that does not match its commitment is an error. Exit 0; with `--out` the command prints where the file went and the `verify --disclose` option that reads it. In code: `restorePaths(predicate, note, disclosed?, key?)` and `reveal(commitment, key)`, on the [SDK](./sdk-typescript#private-evidence) page.
+A value withheld as a digest only carries nothing to reveal, and the command says which paths (`Not revealed, withheld without a value: execution.result.content, execution.result._meta; only the party that holds them can disclose them; --include-salts writes their salts from receipts/salts/<id>.json for the holder to complete`). With `--include-salts` and the issuer's salts file beside the receipt, it writes `{ "$custody": "disclosed", "salt" }` at each such path for the holder to add `value` to; a file carrying a salt without a value fails verification, so it cannot be handed over unfinished. A key other than the one a value was encrypted under reveals nothing of it, and the path is listed the same way; a decrypted value that does not match its commitment is an error. Exit 0; with `--out` the command prints where the file went and the `verify --disclose` option that reads it. In code: `restorePaths(predicate, note, disclosed?, key?)` and `reveal(commitment, key)`, on the [SDK](./sdk-typescript#private-evidence) page.
 
 ## `audit`
 

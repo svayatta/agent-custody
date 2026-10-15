@@ -46,7 +46,7 @@ const USAGE = `agent-custody <command>
                                                    --agent-key names the agent's own key in the grant, so the agent may delegate
   delegate --key <agent.key> --parent <grant.json> --agent <sub-agent> --scopes <a,b> [--ttl-hours N] [--agent-key <sub.pub>] --out <file>
                                                    a narrower grant for a sub-agent, signed by the agent the parent names; the parent travels inside
-  reveal <bundle> --capture-key-env NAME [--out <file>]   the values a receipt withheld (capture mode encrypted), as a disclosure file
+  reveal <bundle> --capture-key-env NAME [--out <file>] [--include-salts]   the values a receipt withheld (capture mode encrypted), as a disclosure file
                                                    for verify --disclose; needs the customer's capture key
   revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them
@@ -498,28 +498,34 @@ async function main(argv: string[]): Promise<number> {
     case "reveal": {
       // The values a receipt withheld, under the customer's key, as a disclosure file: hand it to a reviewer with the
       // receipt, and `verify --disclose` recomputes every digest from it.
-      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { "capture-key-env": { type: "string" }, out: { type: "string" } } });
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { "capture-key-env": { type: "string" }, out: { type: "string" }, "include-salts": { type: "boolean" } } });
       const file = positionals[0];
-      if (!file || !values["capture-key-env"]) throw new Error("reveal needs <bundle> --capture-key-env NAME [--out disclosure.json]");
+      if (!file || !values["capture-key-env"]) throw new Error("reveal needs <bundle> --capture-key-env NAME [--out disclosure.json] [--include-salts]");
       const key = captureKeyFrom(secretFrom(values["capture-key-env"]));
       const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
       const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as ReceiptStatement).predicate;
-      // every withheld path the key reveals goes into the disclosure at its own path, value and salt; a path withheld
-      // as a digest only carries no value to reveal: with the issuer's salts file beside the receipt its salt goes in
-      // for the holder to add the value to, and either way it is said so
+      // Every withheld path the key reveals goes into the disclosure at its own path, value and salt. A path withheld
+      // as a digest only carries no value to reveal, and its salt is not written unless asked for (--include-salts):
+      // a salt beside no value would hand a reviewer the means to confirm guesses, and a file that carries one does
+      // not verify until the holder fills in the value.
       const back = restorePaths(p, p.capture, undefined, key);
       for (const x of back.problems) throw new Error(x.error);
       const saltsFile = join(dirname(file), SALTS_DIR, `${p.receiptId}.json`);
-      const kept = existsSync(saltsFile) ? (JSON.parse(readFileSync(saltsFile, "utf8")) as { salts?: Record<string, string> }).salts ?? {} : {};
+      const kept = values["include-salts"] && existsSync(saltsFile) ? (JSON.parse(readFileSync(saltsFile, "utf8")) as { salts?: Record<string, string> }).salts ?? {} : {};
       let disclosure: Record<string, unknown> = { receiptId: p.receiptId };
+      let saltsWritten = 0;
       for (const path of p.capture?.withheld ?? []) {
         const k = JSON.stringify(path);
         if (back.restored.has(k)) disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: back.salts.get(k), value: getAt(back.predicate, path) });
-        else if (kept[k]) disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: kept[k] });
+        else if (kept[k]) {
+          disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: kept[k] });
+          saltsWritten++;
+        }
       }
       const notRevealed = back.missing.map(pathText);
       const text = JSON.stringify(disclosure, null, 2);
-      const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them${Object.keys(kept).length ? ", by filling in \"value\" beside the salt written for each" : ` (their salts would be in ${saltsFile})`}.` : "";
+      const how = saltsWritten ? `; their salts are written in the file for the holder to add \"value\" beside, and the file does not verify until then: do not hand it over unfinished` : values["include-salts"] ? ` (no salts file at ${saltsFile})` : `; --include-salts writes their salts from ${saltsFile} for the holder to complete`;
+      const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them${how}.` : "";
       if (values.out) {
         writeFileSync(values.out, text);
         console.log(`disclosure for receipt ${p.receiptId} written to ${values.out}; verify it with --disclose ${values.out}.${note}`);

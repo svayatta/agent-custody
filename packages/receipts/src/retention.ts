@@ -8,6 +8,9 @@ import { join } from "node:path";
 import type { Envelope } from "./crypto.ts";
 import { leafHash } from "./log.ts";
 
+/** where the issuer keeps the salts behind a receipt's commitments, under the receipts directory; private, pruned with the receipt */
+export const SALTS_DIR = "salts";
+
 export interface PruneResult {
   pruned: { leafIndex: number; receiptId: string | null; timestamp: string | null }[];
   kept: number;
@@ -26,11 +29,9 @@ function receiptOf(leaf: string): { receiptId: string | null; timestamp: string 
 
 /**
  * Prunes every leaf whose receipt timestamp is before the cutoff. Leaves already pruned, and leaves that are not
- * receipts, are left as they are. Rewrites the log file in place and deletes the pruned receipts' bundle files.
+ * receipts, are left as they are. Rewrites the log file in place and deletes the pruned receipts' bundle files, and
+ * the salts the issuer kept for them.
  */
-/** where the issuer keeps the salts behind a receipt's commitments, under the receipts directory; private, pruned with the receipt */
-export const SALTS_DIR = "salts";
-
 export function pruneLog(logFile: string, before: string, receiptsDir?: string): PruneResult {
   const lines = readFileSync(logFile, "utf8").split("\n").filter((l) => l.trim());
   const out: string[] = [];
