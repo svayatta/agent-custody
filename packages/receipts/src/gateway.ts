@@ -211,22 +211,31 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     return (await upstreams.get(via)!.callTool({ name, arguments: args, ...(meta ? { _meta: meta } : {}) })) as CallToolResult;
   };
 
-  async function gatherFacts(tool: string, args: Record<string, unknown>, meta: Record<string, unknown>): Promise<Record<string, FactRecord>> {
+  /** The facts for a call, and the argument template of the fact config each one came from (two configs may share a name). */
+  async function gatherFacts(tool: string, args: Record<string, unknown>, meta: Record<string, unknown>): Promise<{ facts: Record<string, FactRecord>; templates: Record<string, Record<string, string>> }> {
     const facts: Record<string, FactRecord> = {};
+    const templates: Record<string, Record<string, string>> = {};
+    const r = ruleFor(cfg.capture, tool);
+    const privateRule = (r?.args?.mode ?? "clear") !== "clear" || (r?.facts?.mode ?? "clear") !== "clear";
     for (const f of cfg.facts.filter((f: FactConfig) => f.forTools.includes(tool))) {
       const fargs = resolveFactArgs(f.args, args, f.optional);
       if (fargs === null) continue;
       // Lookups carry the same metadata as the forwarded call: they are the gateway acting for this receipt.
-      const result = await callUpstream(f.tool, fargs, meta);
+      // Under a private rule the answer of a failed lookup is not recorded, whether the upstream marked the answer an
+      // error or threw one: either would land in policy.errors in clear.
+      let result: CallToolResult;
+      try {
+        result = await callUpstream(f.tool, fargs, meta);
+      } catch (e) {
+        throw new Error(privateRule ? `fact "${f.name}" lookup via ${f.tool} failed (the answer is withheld under the capture rule)` : `fact "${f.name}" lookup via ${f.tool} failed: ${String(e instanceof Error ? e.message : e)}`);
+      }
       if (result.isError) {
-        // Under a private rule the answer of a failed lookup is not recorded either: it would land in policy.errors in clear.
-        const r = ruleFor(cfg.capture, tool);
-        const privateRule = (r?.args?.mode ?? "clear") !== "clear" || (r?.facts?.mode ?? "clear") !== "clear";
         throw new Error(privateRule ? `fact "${f.name}" lookup via ${f.tool} failed (the answer is withheld under the capture rule)` : `fact "${f.name}" lookup via ${f.tool} failed: ${JSON.stringify(extractValue(result))}`);
       }
       facts[f.name] = { tool: f.tool, args: fargs, value: extractValue(result), resultDigest: digestOf(result), provenance: "observed" };
+      templates[f.name] = f.args;
     }
-    return facts;
+    return { facts, templates };
   }
 
   function open(grantEnvelope: Envelope): Gateway {
@@ -271,10 +280,13 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       const upstreamMeta = { [RECEIPT_META_KEY]: receiptId, [AGENT_META_KEY]: delegation.agent, [PRINCIPAL_META_KEY]: delegation.principal };
 
       let facts: Record<string, FactRecord> = {};
+      let factTemplates: Record<string, Record<string, string>> = {};
       let policy: PolicyDecision;
       let execution: ReceiptPredicate["execution"] | undefined;
       /** what the upstream answered, in full: the agent gets this; the receipt gets the captured view */
       let forwarded: CallToolResult | undefined;
+      /** what the upstream threw, in full: the agent gets this; under a private rule the receipt does not */
+      let thrown: string | undefined;
       let authorization: AuthorizationBundle | undefined;
 
       // The grant is enforced in every mode: a call outside its scopes, or after it expired or was revoked, is denied
@@ -287,7 +299,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         policy = { decision: "deny", reasons: [], errors: [`tool "${tool}" is not in the delegation scopes`], policyDigest: pDigest };
       } else {
         try {
-          facts = await gatherFacts(tool, args, upstreamMeta);
+          ({ facts, templates: factTemplates } = await gatherFacts(tool, args, upstreamMeta));
           const factValues = Object.fromEntries(Object.entries(facts).map(([k, f]) => [k, f.value]));
           policy = evaluate(policyText, {
             agentId: delegation.agent,
@@ -307,13 +319,14 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       const rule = ruleFor(cfg.capture, tool);
       const argsCaptured = captureArgs(args, rule?.args, captureKey);
       // A fact's value follows the facts rule; its lookup arguments follow the call's args rule, because they are copied
-      // from the call: a field withheld from the request must not reappear through the lookup that used it.
+      // from the call: a field withheld from the request must not reappear as the argument of the lookup that used it.
       // A fact argument is kept in clear only when its template is a constant or copies a call argument that is in
-      // clear; the rule's `clear` names call arguments, and a fact argument may carry one under another name.
+      // clear; the rule's `clear` names call arguments, and a fact argument may carry one under another name. The
+      // template is the one of the fact config that was used: fact names are not unique across tools.
       const factArgsSide = (name: string): CaptureSide | undefined => {
         const side = rule?.args;
         if (!side || side.mode === "clear") return undefined;
-        const template = cfg.facts.find((x: FactConfig) => x.name === name)?.args ?? {};
+        const template = factTemplates[name] ?? {};
         const clear = new Set(side.clear ?? []);
         const keep = Object.entries(template).filter(([, v]) => !v.startsWith("$args.") || clear.has(v.slice("$args.".length))).map(([k]) => k);
         return { mode: side.mode, clear: keep };
@@ -375,7 +388,11 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
           execution = { status: result.isError ? "failed" : "executed", result: captured.view, resultDigest: digestOf(result), provenance: "observed", ...(evidence ? { upstream: evidence } : {}), ...(captured.note ? { capture: captured.note } : {}) };
           noteServedFacts(result);
         } catch (e) {
-          execution = { status: "error", error: String(e instanceof Error ? e.message : e), provenance: "observed" };
+          // An error message is the upstream's answer in another form and may repeat the arguments: under a private
+          // rule for either it is not recorded. The agent still gets it.
+          thrown = String(e instanceof Error ? e.message : e);
+          const privateRule = (rule?.args?.mode ?? "clear") !== "clear" || (rule?.result?.mode ?? "clear") !== "clear";
+          execution = { status: "error", error: privateRule ? "the upstream reported an error (the message is withheld under the capture rule)" : thrown, provenance: "observed" };
         }
       } else {
         execution = { status: "denied", reason: [...policy.reasons, ...policy.errors].join("; ") || "no permit policy matched", provenance: "observed" };
@@ -396,7 +413,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         case "denied":
           return refuse(`Denied by policy: ${execution.reason}`);
         case "error":
-          return refuse(`Upstream error: ${execution.error}`);
+          return refuse(`Upstream error: ${thrown ?? execution.error}`);
         case "withheld":
           return refuse(`Not executed: ${execution.reason}`);
         default: {

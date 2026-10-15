@@ -96,6 +96,7 @@ describe("private evidence through the gateway", () => {
   let gwClear: Gateway;
   let opts: VerifyOptions;
   const bundleOf = (r: { _meta?: Record<string, unknown> }) => JSON.parse(readFileSync(join(fx.receiptsDir, `${String(r._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
+  const clearBundleOf = (r: { _meta?: Record<string, unknown> }) => JSON.parse(readFileSync(join(fx.dir, "receipts-clear", `${String(r._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
   beforeAll(async () => {
     process.env.TEST_CAPTURE_KEY = KEY_HEX;
     fx = buildFixture(mkdtempSync(join(tmpdir(), "capture-")));
@@ -260,6 +261,92 @@ describe("private evidence through the gateway", () => {
       expect(leakText(bundle)).not.toContain("cust_SECRET_777");
     } finally {
       await gw4.close();
+    }
+  });
+
+  it("a lookup that throws, as many MCP servers do on a failure, stays out of the receipt under a private rule, and is recorded in clear without one", async () => {
+    const fx5 = buildFixture(mkdtempSync(join(tmpdir(), "capture-lookupthrow-")));
+    const cfg = JSON.parse(readFileSync(fx5.configFile, "utf8"));
+    cfg.capture = { "*": { args: { mode: "digest", clear: ["amount"] } } };
+    writeFileSync(fx5.configFile, JSON.stringify(cfg));
+    const gw5 = await createGateway(loadConfig(fx5.configFile));
+    try {
+      const r = await gw5.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_throw_SECRET_777", amount: 2500 } });
+      expect(r.isError).toBe(true);
+      const bundle = bundleOf2(fx5, r);
+      const p = decode(bundle).predicate;
+      expect(p.execution.status).toBe("denied");
+      expect(p.policy!.errors).toEqual(['fact "customer" lookup via customer.lookup failed (the answer is withheld under the capture rule)']);
+      expect(leakText(bundle)).not.toContain("cust_throw_SECRET_777");
+    } finally {
+      await gw5.close();
+    }
+    // the same call through a gateway without a rule: the thrown message is the error, as before
+    const clear = await gwClear.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_throw_SECRET_777", amount: 2500 } });
+    expect(clear.isError).toBe(true);
+    expect(decode(clearBundleOf(clear)).predicate.policy!.errors[0]).toMatch(/lookup via customer.lookup failed: MCP error .*no customer cust_throw_SECRET_777/);
+  });
+
+  it("the message of a forwarded call that throws stays out of the receipt under a private rule; the agent still gets it", async () => {
+    const fx6 = buildFixture(mkdtempSync(join(tmpdir(), "capture-forwardthrow-")));
+    const cfg = JSON.parse(readFileSync(fx6.configFile, "utf8"));
+    cfg.capture = { "*": { args: { mode: "digest", clear: ["amount"] }, facts: { mode: "digest" } } };
+    writeFileSync(fx6.configFile, JSON.stringify(cfg));
+    const gw6 = await createGateway(loadConfig(fx6.configFile));
+    try {
+      const r = await gw6.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500, reason: "decline" } });
+      expect(r.isError).toBe(true);
+      expect((r.content[0] as { text: string }).text).toMatch(/Upstream error: MCP error .*refund declined for cust_123/);
+      const bundle = bundleOf2(fx6, r);
+      const p = decode(bundle).predicate;
+      expect(p.execution.status).toBe("error");
+      expect((p.execution as { error: string }).error).toBe("the upstream reported an error (the message is withheld under the capture rule)");
+      expect(isCommitment(p.request.args.customer_id)).toBe(true);
+      expect(leakText(bundle)).not.toContain("declined");
+      expect(leakText(bundle)).not.toContain("cust_123");
+      const v = verifyBundle(bundle, { issuerKeys: [loadPublicKey(fx6.gatewayPub)], principalKeys: [loadPublicKey(fx6.principalPub)], logFile: fx6.logFile });
+      expect(v.ok, v.checks.filter((c) => !c.ok).map((c) => c.name).join(", ")).toBe(true);
+    } finally {
+      await gw6.close();
+    }
+    // without a rule the message is recorded, as before
+    const clear = await gwClear.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500, reason: "decline" } });
+    expect((decode(clearBundleOf(clear)).predicate.execution as { error: string }).error).toMatch(/refund declined for cust_123/);
+  });
+
+  it("a fact's arguments follow the template of the fact config that was used, not the first config with that name", async () => {
+    // fact names are not unique: one `customer` fact for another tool copies a call argument that is in clear, and the
+    // `customer` fact for the refund copies one that is withheld; the receipt must withhold the lookup's argument
+    const configs = [
+      // across tools: the payout's fact comes first in the list
+      [
+        { name: "customer", tool: "customer.lookup", args: { customer_id: "$args.customer_id" }, forTools: ["stripe.payout"] },
+        { name: "customer", tool: "customer.lookup", args: { customer_id: "$args.account_ref" }, forTools: ["stripe.refund"] },
+      ],
+      // on the same tool: the later config wins the name, so its template is the one in force
+      [
+        { name: "customer", tool: "customer.lookup", args: { customer_id: "$args.customer_id" }, forTools: ["stripe.refund"] },
+        { name: "customer", tool: "customer.lookup", args: { customer_id: "$args.account_ref" }, forTools: ["stripe.refund"] },
+      ],
+    ];
+    for (const facts of configs) {
+      const fx7 = buildFixture(mkdtempSync(join(tmpdir(), "capture-factdup-")));
+      const cfg = JSON.parse(readFileSync(fx7.configFile, "utf8"));
+      cfg.facts = facts;
+      cfg.capture = { "*": { args: { mode: "digest", clear: ["customer_id", "amount"] } } };
+      writeFileSync(fx7.configFile, JSON.stringify(cfg));
+      const gw7 = await createGateway(loadConfig(fx7.configFile));
+      try {
+        const r = await gw7.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", account_ref: "cust_123", amount: 2500 } });
+        expect(r.isError).toBeFalsy();
+        const p = decode(bundleOf2(fx7, r)).predicate;
+        expect(p.request.args.customer_id).toBe("cust_123");
+        expect(isCommitment(p.request.args.account_ref)).toBe(true);
+        expect(isCommitment(p.facts.customer!.args.customer_id)).toBe(true);
+        expect(p.facts.customer!.argsCapture).toEqual({ mode: "digest", withheld: ["customer_id"] });
+      } finally {
+        await gw7.close();
+      }
     }
   });
 
