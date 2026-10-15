@@ -23,6 +23,7 @@ This file holds the rules for one area of the code at a time. The rules for ever
 
 - Test each framework adapter against the real package with a scripted model and no network. A hand-written stand-in alone is not sufficient. The Python tests follow the same rule: they run with `uv run --extra test pytest` against a sidecar started from `packages/receipts/src/cli.ts`, and the TypeScript verifier checks every receipt that they produce.
 - Drive each host's documented hook contract as the host drives it. The Claude Agent SDK adapter is the precedent.
+- An enforcing adapter blocks the call on a deny after it issues the denial receipt. It also blocks the call when it cannot issue the receipt. The OpenClaw `before_tool_call` hook in `src/sdk/openclaw.ts` is the reference.
 - A record-only adapter evaluates no policy. On one tool, an adapter enforces or observes, never both.
 - Every adapter calls `denies(policy)` (TypeScript in `sdk/index.ts`, Python in `agent_custody`) before it blocks, so that it never acts on a recorded deny. Observe mode stamps `enforced: false` on a Cedar `PolicyDecision` only. A grant denial (out of scope, expired, revoked) is enforced in every mode (issue #97).
 - DeepSeek Harness: `tools/pre-execute` returns `{ kind: "deny", reason }` or `next()`, never `allow`. `Config` is a zod schema, because Cordis requires Standard Schema. A post-execute for a tool that the policy denies records deny and executed, and verification fails. This is correct, because the pre gate runs first in the harness.
@@ -64,6 +65,7 @@ Web pages and the hosted log:
 - The review pages, the portal, and the admin page load no outside content. Each sends a content security policy that starts with `default-src 'none'`.
 - The review server has no authentication of its own and binds to `127.0.0.1` by default. Keep that default.
 - The portal session cookie is `HttpOnly; SameSite=Strict`, and every portal API write requires a JSON body. Together they stop a cross-site page from acting as the user.
+- The portal reads Google's id token without a signature check, because the token arrives from Google's token endpoint over TLS in the same code exchange. Do not read an id token from any other source this way.
 - The portal links a provider sign-in to a password account only when the account's email is verified (issue #103). The Stripe webhook checks `Stripe-Signature` and never touches an enterprise tenant. It ignores an event id that it applied already, and an event older than the last one applied (issue #105).
 - Every path under `/admin`, the page included, needs the admin token. The admin routes throttle failed attempts per address.
 - `Verifier.vue` fetches only receipt ids that match `^[0-9a-f-]{36}$`, and only files under `/custody/` on its own origin.
@@ -74,6 +76,7 @@ Web pages and the hosted log:
 ## Tests
 
 - Each package's `vitest.config.ts` sets a 30-second test budget and a 60-second hook budget, because tests spawn gateways and load PGlite. A test that needs longer says so in its own `it(..., ms)`.
+- `.githooks/pre-push` runs `bun run ci` before a push to main. Enable it once per clone with `git config core.hooksPath .githooks`. A fresh clone has no hook until you do this.
 - When a gate run and the pre-push hook run back to back, the second one runs under load. Do not pack or build while either runs.
 - Tests use `node:http` stand-ins, or real client packages against fake endpoints. Set `MEM0_TELEMETRY=false` so that the Mem0 client stays offline.
 - `packages/state/test/pgvector.test.ts` runs against the `pgvector/pgvector:pg16` image in Docker, and skips visibly when no daemon runs. PGlite 0.5.8 has no pgvector.

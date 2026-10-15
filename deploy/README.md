@@ -38,7 +38,7 @@ The volume at `/data` is the whole state: the log and the key. Back it up; a los
 - `docker-compose.yaml` and `k8s/` share the variables in the table above.
 - The profiles `public` (Caddy TLS and the docs site) and `file` (the file-backed log, no Postgres) are off by default. Their variables must stay optional, so that `docker compose config` passes without them.
 - Check with `docker compose -f deploy/docker-compose.yaml config -q` and `kubectl kustomize deploy/k8s`.
-- `.github/workflows/image.yml` pushes the image to ghcr.io on a `v*` tag or by hand (`gh workflow run image.yml -f version=X`). It uses `GITHUB_TOKEN`, never a personal token.
+- `.github/workflows/image.yml` pushes the image to ghcr.io on a `v*` tag or by hand (`gh workflow run image.yml -f version=X`). It uses `GITHUB_TOKEN`, never a personal token. It builds each architecture on a native runner (`ubuntu-24.04-arm` for arm64), then merges the digests into one tag. Do not merge these into one multi-arch job: npm under QEMU emulation dies with SIGILL.
 - The site build excludes `deploy/**`.
 
 ## One VM, docker compose
