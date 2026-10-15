@@ -144,7 +144,7 @@ bun run ci                          # everything the GitHub workflow runs; the p
 bun run demo                        # the receipts demo: keys, grant, policy, tool calls, verification, a tampering attempt
 ```
 
-Everything runs on plain Node 22 or later. No build step. Package-level commands, such as the CLI and the tutorials, run from inside that package's directory; each package README says how.
+Everything runs on plain Node 22 or later. No build step. Package-level commands, such as the CLI and the tutorials, run from inside that package's directory; each package README says how. [CONTRIBUTING.md](CONTRIBUTING.md) has the rules for a change, a release, and a publish.
 
 ## Layout
 

@@ -8,3 +8,20 @@ bun run site:build    # site/.vitepress/dist
 ```
 
 Relative links in the docs are rewritten at build time: links to markdown pages become site links, links to source files become links into the repository on GitHub.
+
+## Rules for site changes
+
+- `bun run site:build` must pass. It fails on dead links.
+- Root README sections that the site includes are fenced by `<!-- #region name -->` markers. Keep the markers.
+- `site/reference/` is written by hand, because TypeDoc does not support the workspace's TypeScript 7.
+- `site/security.md` is the vendor questionnaire. Keep it true, keep every "no" a no, and date it.
+- `site/faq.md` says where the data goes. Keep it true when recording or exporting changes.
+- `site/early-access.md` must stay honest: no independent witness runs yet (issue #6).
+- No test runs the Cedar rules on the landing page or in `site/use-cases.md`. Check each one against the Cedar evaluator by hand. In `use-cases.md`, write "no runnable example yet" rather than imply an example.
+- The landing page decodes its receipt card from the `gateway-denied` conformance vector at build time. Its measured numbers come from `packages/receipts/scripts/bench.ts`.
+- The landing page (`site/index.md`, rendered by `Landing.vue`) follows a design brief modelled on dunetrace.com: a centred hero, three actions with the film under them, and sections that each have one serif sentence as the heading and no eyebrow label. The headline is one statement in Source Serif 4, and the story is the lede. The page has its own top bar: Problem, How it works, Quick start, Pricing, FAQ, Writing, Docs, Sign in. The sections, in order: the problem with the receipt, how it works, what a policy can say, denied at runtime, not a trace, built for, measured numbers, quick start, where to go, writing. The page has one amber action. The visual design is in the header comment of `Landing.vue`.
+- The portal and admin pages stamp `data-theme` on `<html>` before paint, from `agent-custody-theme` in localStorage. Their dark tokens sit under both `:root:not([data-theme="light"])` in the media query and `:root[data-theme="dark"]`. Keep both selectors.
+- The logo is a receipt with a torn edge, two ledger lines, and a tick on the amber tile. The logo paths are in `site/public/logo.svg`, `favicon.svg` (a copy), the PNG icons (rendered with `rsvg-convert`), `wordmark.svg`, `Landing.vue`, the portal's header and `FAVICON`, and the Caddy `(favicon)` snippet. Change all of them together.
+- The promo video (`site/public/promo.mp4`, poster `promo-poster.jpg`) is narrated by the ElevenLabs voice Sarah. Its scenes, in order: the problem, the solution, the architecture (the same diagram as `Flow.vue`), and the refund story of `packages/receipts/scripts/demo.ts`, with illustrative characters as the proof. The agent actions in the problem scene are illustrative. Every receipt field, policy limit, and check name in the video comes from a real run of `bun run demo`. `promo.vtt` must match the narration word for word. Re-cut the video, with the same voice, when the demo's calls, policy, or verifier check names change.
+- Each blog piece in `site/blog/` ties to something runnable. Date it by hand. The blog has no feed.
+- `site/custody.md` shows the custody hook of this repository. `site/public/custody/` holds sample receipts, the public key, and the policy.
