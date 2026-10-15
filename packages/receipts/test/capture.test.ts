@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { captureKeyFrom, checkCommitment, digestSalt, getAt, isCommitment, pathKey, privateView, restorePaths, reveal, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
+import { captureKeyFrom, checkCommitment, digestSalt, getAt, isCommitment, pathKey, privateView, restorePaths, reveal, ruleFor, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
 import { sha256Hex } from "../src/crypto.ts";
 import { SALTS_DIR } from "../src/retention.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
@@ -32,8 +32,9 @@ const key = captureKeyFrom(KEY_HEX);
 const check = (name: string, r: ReturnType<typeof verifyBundle>) => r.checks.find((c) => c.name === name)!;
 const text = (r: { content: { type: string; text?: string }[] }) => (r.content[0] as { text: string }).text;
 const withheldPaths = (p: ReceiptPredicate) => (p.capture?.withheld ?? []).map((w) => w.join("."));
-/** the salts the issuer kept beside a receipt, never in it */
+/** the salts the issuer kept beside a receipt, never in it: those of digest-only commitments; an encrypted one's salt comes back with the key */
 const saltsOf = (receiptsDir: string, id: string) => (JSON.parse(readFileSync(join(receiptsDir, SALTS_DIR, `${id}.json`), "utf8")) as { salts: Record<string, string> }).salts;
+const allSalts = (receiptsDir: string, p: ReceiptPredicate, k?: Buffer) => ({ ...saltsOf(receiptsDir, p.receiptId), ...Object.fromEntries(restorePaths(p, p.capture, undefined, k).salts) });
 /** the salt a digest over `prefix` was made with, from the kept salts */
 const saltFor = (note: CaptureNote | undefined, salts: Record<string, string>, prefix: Path) => digestSalt((note?.withheld ?? []).filter((w) => prefix.every((s, i) => w[i] === s)).map((w) => salts[pathKey(w)]!));
 /** a disclosure as the holder of the values and the salts writes it: `{ $custody: "disclosed", salt, value }` at each withheld path the partial predicate covers */
@@ -176,6 +177,38 @@ describe("the view of a statement under a rule", () => {
     expect(r.missing).toEqual([]);
   });
 
+  it("a tool or a fact named like an inherited property is looked up by own property, a null is withheld, an incoming note is dropped, and a fact without its full result has its digest withheld", () => {
+    // the wildcard rule applies to a tool named constructor: an inherited member is not a rule
+    const rule = { "*": { args: { mode: "digest" as const, clear: ["amount"] } } };
+    for (const tool of ["constructor", "toString", "hasOwnProperty", "__proto__"]) expect(ruleFor(rule, tool)).toBe(rule["*"]);
+    expect(ruleFor({ constructor: { args: { mode: "clear" as const } } }, "constructor")!.args!.mode).toBe("clear");
+    expect(ruleFor({ stripe: {} }, "other")).toBeUndefined();
+    const p = predicate({
+      request: { args: { amount: 2500, reason: null, note: "n" }, argsDigest: "x", provenance: "claimed" },
+      facts: { constructor: { tool: "customer.lookup", args: { customer_id: "cust_123" }, value: { id: "cust_123" }, resultDigest: digestOf({ content: [] }), provenance: "observed" as const } },
+      capture: { mode: "digest", withheld: [["request", "args", "amount"]] },
+    });
+    const { predicate: v, salts } = privateView(p, rule["*"] ? { args: { mode: "digest", clear: ["amount"] } } : undefined);
+    // the note came from this view, not from the predicate; a null is a value and is withheld; the fact named constructor is handled by own property
+    // the result side was not set, so it is withheld too
+    expect(withheldPaths(v).sort()).toEqual(["request.args.reason", "request.args.note", "facts.constructor.value.id", "facts.constructor.args.customer_id", "facts.constructor.resultDigest", "execution.result.content", "execution.result._meta"].sort());
+    expect(v.request.args.amount).toBe(2500);
+    expect(isCommitment(getAt(v, ["facts", "constructor", "resultDigest"]))).toBe(true);
+    expect(Object.keys(salts)).toHaveLength(7);
+    // with the full lookup result given, the digest is salted instead
+    const given = privateView(p, { args: { mode: "digest", clear: ["amount"] } }, undefined, { factResults: { constructor: { content: [] } } }).predicate;
+    expect(typeof getAt(given, ["facts", "constructor", "resultDigest"])).toBe("string");
+    expect(getAt(given, ["facts", "constructor", "resultDigest"])).not.toBe(digestOf({ content: [] }));
+    // the receipt's view built on the authorization's carries the same commitments and salts for the shared parts
+    const auth = privateView({ ...p, execution: undefined } as unknown as ReceiptPredicate, { args: { mode: "digest", clear: ["amount"] } });
+    const after = privateView(p, { args: { mode: "digest", clear: ["amount"] } }, undefined, {}, auth);
+    expect(after.predicate.request).toEqual(auth.predicate.request);
+    expect(after.predicate.facts).toEqual(auth.predicate.facts);
+    expect(after.predicate.request.argsDigest).toBe(auth.predicate.request.argsDigest);
+    expect(withheldPaths(after.predicate)).toEqual([...withheldPaths(auth.predicate), "execution.result.content", "execution.result._meta"]);
+    for (const w of auth.predicate.capture!.withheld) expect(after.salts[pathKey(w)]).toBe(auth.salts[pathKey(w)]);
+  });
+
   it("a reviewer who can guess a withheld value cannot confirm the guess from the receipt, in either mode (issue #126)", () => {
     const args = { amount: 2500, reason: "fraud" };
     const guesses = ["fraud", "duplicate", "goodwill", "requested by customer"];
@@ -249,9 +282,14 @@ describe("private evidence through the gateway", () => {
     expect(paths).toContain("request.args.reason");
     // the digest is salted from the field salts the issuer kept beside the receipt, never in it, for the owner alone
     expect(file).not.toMatch(/"salt"/);
-    const salts = saltsOf(fx.receiptsDir, p.receiptId);
+    const kept = saltsOf(fx.receiptsDir, p.receiptId);
     expect(statSync(join(fx.receiptsDir, SALTS_DIR, `${p.receiptId}.json`)).mode & 0o777).toBe(0o600);
     expect(statSync(join(fx.receiptsDir, SALTS_DIR)).mode & 0o777).toBe(0o700);
+    // the file holds the salts of the digest-only commitments and none of the encrypted ones, whose salts the key alone recovers
+    const kinds = Object.fromEntries(p.capture!.withheld.map((w) => [pathKey(w), (getAt(p, w) as { $custody: string }).$custody]));
+    expect(Object.keys(kept).sort()).toEqual(Object.keys(kinds).filter((k) => kinds[k] === "withheld").sort());
+    expect(kinds[pathKey(["request", "args", "reason"])]).toBe("encrypted");
+    const salts = allSalts(fx.receiptsDir, p, key);
     expect(p.request.argsDigest).toBe(digestOf(args, saltFor(p.capture, salts, ["request", "args"])));
     expect(p.request.argsDigest).not.toBe(digestOf(args));
     expect(p.execution.status).toBe("executed");
@@ -324,7 +362,8 @@ describe("private evidence through the gateway", () => {
     const { "agent-custody/receipt": _receipt, ...originalMeta } = r._meta as Record<string, unknown>;
     const result = { ...r, _meta: originalMeta };
     const p = decode(bundle).predicate;
-    const salts = saltsOf(fx.receiptsDir, p.receiptId);
+    // the holder of the values discloses them with their salts: from the file for digest-only ones, from the key for encrypted ones
+    const salts = allSalts(fx.receiptsDir, p, key);
     const disclosed = disclose(p.capture, salts, { request: { args }, execution: { result, upstream: { rawBody: (originalMeta["agent-custody/upstream-signature"] as { rawBody: string }).rawBody } } });
     const withDisclosure = verifyBundle(bundle, { ...opts, disclosed });
     expect(withDisclosure.ok, formatReport(withDisclosure)).toBe(true);
@@ -532,6 +571,14 @@ describe("private evidence through the gateway", () => {
     const refused = verifyBundle(bundle, { ...opts, disclosed: unfinished });
     expect(refused.ok).toBe(false);
     expect(check("execution result digest", refused).detail).toMatch(/carries a salt but no value/);
+    // a receipt id from a bundle never becomes part of a path unchecked
+    const st = decode(bundle);
+    const forged = { ...bundle, envelope: { ...bundle.envelope, payload: Buffer.from(JSON.stringify({ ...st, predicate: { ...st.predicate, receiptId: "../../etc/passwd" } })).toString("base64") } };
+    const forgedFile = join(fx.dir, "forged.json");
+    writeFileSync(forgedFile, JSON.stringify(forged));
+    const bad = spawnSync(process.execPath, [cli, "reveal", forgedFile, "--capture-key-env", "TEST_CAPTURE_KEY", "--include-salts"], { encoding: "utf8", env: { ...process.env, TEST_CAPTURE_KEY: KEY_HEX } });
+    expect(bad.status).not.toBe(0);
+    expect(bad.stderr).toMatch(/not a valid id/);
   });
 
   it("a rule in mode encrypted without a key, or a key variable that is not set, fails at startup", async () => {

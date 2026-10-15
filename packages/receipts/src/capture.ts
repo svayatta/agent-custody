@@ -140,9 +140,13 @@ export function digestSalt(salts: string[]): string | undefined {
   return salts.length ? sha256Hex(Buffer.from(salts.join(""), "hex")) : undefined;
 }
 
+/** The tool's rule, else the "*" rule: by own property, so a tool named `constructor` or `toString` does not find an inherited member and fall through to clear. */
 export function ruleFor(capture: CaptureConfig | undefined, tool: string): CaptureRule | undefined {
-  return capture?.[tool] ?? capture?.["*"];
+  if (!capture) return undefined;
+  if (Object.hasOwn(capture, tool)) return capture[tool];
+  return Object.hasOwn(capture, "*") ? capture["*"] : undefined;
 }
+const ownOf = <T>(o: Record<string, T> | undefined, k: string): T | undefined => (o && Object.hasOwn(o, k) ? o[k] : undefined);
 
 /** The one mode a rule withholds in: encrypted when any side is, else digest; clear when no side is private. */
 export function ruleMode(rule: CaptureRule | undefined): CaptureMode {
@@ -229,13 +233,17 @@ export interface PrivateView<P> {
   salts: Record<string, string>;
 }
 
+/** The parts an authorization and its receipt share; the receipt's view takes them from the authorization's, commitments and salts alike. */
+const SHARED_WITH_AUTHORIZATION = ["request", "facts", "policy"];
+
 /**
  * The statement a receipt carries under a tool's rule: the predicate with every non-structural value withheld as the
  * rule says, the three digests salted from the field salts, and the note of what is withheld at `capture`. Under a
  * clear rule, the predicate itself and no salts. Applied by the issuer to every statement it signs, the authorization
- * included.
+ * included; given the authorization's view as `prior`, the receipt's view carries the same request, facts, and policy,
+ * so that the receipt still names the authorization and nothing is withheld twice.
  */
-export function privateView<P extends AuthorizationPredicate>(predicate: P, rule: CaptureRule | undefined, key?: Buffer, ctx: CaptureContext = {}): PrivateView<P> {
+export function privateView<P extends AuthorizationPredicate>(predicate: P, rule: CaptureRule | undefined, key?: Buffer, ctx: CaptureContext = {}, prior?: PrivateView<AuthorizationPredicate>): PrivateView<P> {
   const mode = ruleMode(rule);
   if (mode === "clear") return { predicate, salts: {} };
   if (mode === "encrypted" && !key) throw new Error("capture mode encrypted needs captureKeyEnv");
@@ -244,9 +252,19 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
   const withheld: Path[] = [];
   const salts: Record<string, string> = {};
   let out: Record<string, unknown> = plain(predicate as unknown as Record<string, unknown>);
+  // the note is this view's to write: one that came in with the predicate names nothing here
+  delete out.capture;
+  if (prior) {
+    for (const part of SHARED_WITH_AUTHORIZATION) if (own(prior.predicate as unknown as Record<string, unknown>, part)) out[part] = (prior.predicate as unknown as Record<string, unknown>)[part];
+    for (const w of prior.predicate.capture?.withheld ?? []) {
+      withheld.push(w);
+      const s = ownOf(prior.salts, pathKey(w));
+      if (s) salts[pathKey(w)] = s;
+    }
+  }
   const hide = (path: Path, value: unknown, withKey: Buffer | undefined) => {
-    // nothing and null carry nothing, so they stay as they are
-    if (value === undefined || value === null) return;
+    // nothing carries nothing; a null does (that a value was null), and is withheld like any other
+    if (value === undefined) return;
     const w = withhold(value, withKey);
     out = setAt(out, path, w.commitment);
     salts[pathKey(path)] = w.salt;
@@ -264,6 +282,9 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
   const factsSide = sideOf(rule, "facts", key);
   for (const [key_, value] of Object.entries(predicate as unknown as Record<string, unknown>)) {
     if (CLEAR_TOP.has(key_)) continue;
+    if (prior && SHARED_WITH_AUTHORIZATION.includes(key_)) continue;
+    // no policy was evaluated: structural, not a value
+    if (key_ === "policy" && value === null) continue;
     if (key_ === "request" && isObject(value)) {
       for (const [f, v] of Object.entries(value)) {
         if (f === "args") {
@@ -281,11 +302,15 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
           if (f === "value") {
             if (factsSide) object(["facts", name, "value"], v, factsSide);
           } else if (f === "args") {
-            if (argsSide) object(["facts", name, "args"], v, { clear: new Set(ctx.clearFactArgs?.[name] ?? []), key: argsSide.key });
+            if (argsSide) object(["facts", name, "args"], v, { clear: new Set(ownOf(ctx.clearFactArgs, name) ?? []), key: argsSide.key });
           } else if (!CLEAR_IN.fact.has(f)) hide(["facts", name, f], v, k);
         }
-        const full = ctx.factResults?.[name];
+        // the fact's digest is over the lookup's full result, which carries the value: salted from the fact's salts
+        // when the producer gave the full result, and withheld outright when it did not and the value is withheld,
+        // since an unsalted digest over a withheld value would confirm a guess
+        const full = ownOf(ctx.factResults, name);
         if (full !== undefined) out = setAt(out, ["facts", name, "resultDigest"], digest(full, ["facts", name]));
+        else if (withheld.some((w) => under(w, ["facts", name, "value"]))) hide(["facts", name, "resultDigest"], fact.resultDigest, k);
       }
     } else if (key_ === "policy" && isObject(value)) {
       for (const [f, v] of Object.entries(value)) {

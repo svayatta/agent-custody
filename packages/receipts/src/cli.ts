@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { hostname, userInfo } from "node:os";
 import { captureKeyFrom, getAt, pathText, restorePaths, setAt } from "./capture.ts";
-import { SALTS_DIR } from "./retention.ts";
+import { saltsFileFor } from "./retention.ts";
 import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -510,7 +510,8 @@ async function main(argv: string[]): Promise<number> {
       // not verify until the holder fills in the value.
       const back = restorePaths(p, p.capture, undefined, key);
       for (const x of back.problems) throw new Error(x.error);
-      const saltsFile = join(dirname(file), SALTS_DIR, `${p.receiptId}.json`);
+      // the id comes from the bundle: it is checked before it becomes part of a path
+      const saltsFile = saltsFileFor(dirname(file), p.receiptId);
       const kept = values["include-salts"] && existsSync(saltsFile) ? (JSON.parse(readFileSync(saltsFile, "utf8")) as { salts?: Record<string, string> }).salts ?? {} : {};
       let disclosure: Record<string, unknown> = { receiptId: p.receiptId };
       let saltsWritten = 0;

@@ -28,7 +28,6 @@ export function sha256Hex(data: string | Uint8Array): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-/** sha256 over the canonical JSON of a value. */
 /** sha256 over the canonical JSON of a value; with a salt (hex), over salt || canonical, so a digest over withheld values confirms no guess (issue #126). */
 export function digestOf(value: unknown, salt?: string): string {
   const canonical = Buffer.from(canonicalize(value), "utf8");
