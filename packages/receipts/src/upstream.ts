@@ -5,6 +5,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { digestOf, dsseSign, dsseVerify, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
+import { isCommitment, type Commitment } from "./capture.ts";
 
 export const UPSTREAM_SIG_META_KEY = "agent-custody/upstream-signature";
 export const UPSTREAM_TYPE = "application/vnd.agent-custody.upstream+json";
@@ -55,8 +56,8 @@ export function checkUpstream(envelope: Envelope, keys: PublicKeyRef[], expected
 
 export interface ProviderAttestation {
   provider: "stripe-webhook" | "github-delivery";
-  /** the delivery body exactly as received; the HMAC is over these bytes */
-  rawBody: string;
+  /** the delivery body exactly as received; the HMAC is over these bytes. Under a private result capture the receipt carries a commitment here instead, and the body is disclosed or revealed to check the delivery (capture.ts) */
+  rawBody: string | Commitment;
   /** Stripe: the Stripe-Signature header; GitHub: the X-Hub-Signature-256 header */
   signature: string;
   /** dot path into the parsed body whose value must appear in the receipt's result, e.g. data.object.id */
@@ -69,7 +70,7 @@ export type UpstreamEvidence = { envelope: Envelope } | ProviderAttestation;
 
 export function isProviderAttestation(v: unknown): v is ProviderAttestation {
   const p = v as Partial<ProviderAttestation> | null;
-  return !!p && (p.provider === "stripe-webhook" || p.provider === "github-delivery") && typeof p.rawBody === "string" && typeof p.signature === "string" && typeof p.bind === "string";
+  return !!p && (p.provider === "stripe-webhook" || p.provider === "github-delivery") && (typeof p.rawBody === "string" || isCommitment(p.rawBody)) && typeof p.signature === "string" && typeof p.bind === "string";
 }
 
 /** For upstreams wrapping a provider: attaches the provider's own delivery for this call. */
@@ -103,6 +104,7 @@ const pathValue = (body: unknown, path: string): unknown => path.split(".").redu
 
 /** Stripe: header `t=<unix>,v1=<hex>`, HMAC-SHA256 over `<t>.<rawBody>`; GitHub: header `sha256=<hex>` over rawBody. */
 export function checkProvider(att: ProviderAttestation, secrets: ProviderSecrets, ctx: ProviderCheckContext): UpstreamCheck {
+  if (typeof att.rawBody !== "string") return { ok: false, error: "the delivery body is withheld; disclose it or give the capture key" };
   const secret = att.provider === "stripe-webhook" ? secrets.stripe : secrets.github;
   if (!secret) return { ok: false, error: `no ${att.provider === "stripe-webhook" ? "Stripe" : "GitHub"} secret given` };
   const hmac = (data: string) => createHmac("sha256", secret).update(data).digest("hex");

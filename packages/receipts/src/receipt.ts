@@ -32,6 +32,8 @@ export interface FactRecord {
   /** the value as recorded; with `capture`, a view with commitments where fields were withheld */
   value: unknown;
   capture?: CaptureNote;
+  /** the lookup's arguments are captured under the call's `args` rule, since they are copied from the call; this says what is withheld in `args` */
+  argsCapture?: CaptureNote;
   resultDigest: string;
   provenance: "observed";
 }

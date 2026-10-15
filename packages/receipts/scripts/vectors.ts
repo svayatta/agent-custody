@@ -115,6 +115,14 @@ await capGw.close();
 const privateBundle = bundleFile(capFx.receiptsDir, String(privateCall._meta?.[RECEIPT_META_KEY]));
 const CAP = { issuerKeys: ["capture-gateway"], principalKeys: ["capture-principal"], logKeys: [] as string[] };
 addCase({ name: "gateway-executed-private", description: "A refund whose capture rule withholds the note (encrypted), the provider's answer (digest), and the customer record (encrypted): the receipt carries commitments, the digests are over the whole call, and without the key or a disclosure the verifier passes them as committed, not recomputed, and does not check the upstream's signature.", bundle: privateBundle, ...CAP, upstreamKeys: ["capture-upstream"], log: logLines(capFx.logFile) });
+// commitment-shaped data without a capture note is ordinary data: the digest covers it and a verifier must not take it for a withheld field
+const shapedFx = buildSdkFixture(mkdtempSync(join(tmpdir(), "vectors-shaped-")));
+key("shaped-app", shapedFx.appPub);
+const shapedSdk = createSdkIssuer(loadSdkConfig(shapedFx.configFile));
+const shapedBundle = await shapedSdk.record({ tool: "stripe.refund", args: { customer_id: "cust_123", amount: 100 } }, { status: "executed", result: { content: [{ type: "text", text: "{\"status\":\"succeeded\"}" }], extra: { $custody: "withheld", sha256: "00".repeat(32), salt: "00".repeat(16) } } });
+const shapedKey = loadPrivateKey(join(shapedFx.dir, "keys", "app.key"));
+addCase({ name: "sdk-custody-shaped-data-resigned", description: "An SDK receipt whose result carries data shaped like a commitment but no capture note, with the result edited and re-signed. The data is ordinary, the digest covers it, and the result digest check fails: a verifier must not skip a digest on the shape of the data.", bundle: resigned(shapedBundle, shapedKey, (st) => { (st.predicate.execution as { result: { content: { text: string }[] } }).result.content[0]!.text = "{\"status\":\"refunded twice\"}"; }), issuerKeys: ["shaped-app"], principalKeys: [], logKeys: [], log: logLines(shapedFx.logFile) });
+
 addCase({ name: "resigned-result-digest", description: "The executed receipt's result edited without updating resultDigest, re-signed with the gateway key. The result digest check fails.", bundle: resigned(executed, gatewayKey, (st) => { (st.predicate.execution as { result: { content: { text: string }[] } }).result.content[0]!.text = "{\"status\":\"refunded twice\"}"; }), ...G, log: glog });
 
 // ---- a call refused because the grant had expired: the denial is a true record, issued outside the window ----

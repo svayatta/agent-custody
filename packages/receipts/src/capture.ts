@@ -24,10 +24,16 @@ export interface CaptureRule {
 }
 /** by tool name, or "*" for every tool without a rule of its own */
 export type CaptureConfig = Record<string, CaptureRule>;
-/** On the receipt beside a captured part: how it was captured and which fields are withheld ("*" when the whole value is). */
+/**
+ * On the receipt beside a captured part: how it was captured and which fields are withheld. A value that was not a
+ * plain object is withheld whole, and `whole: true` says so; a field literally named "*" is just a field. The note is
+ * inside the signed statement, and a verifier trusts it, not the shape of the data: a field the note names must be a
+ * commitment, and commitment-shaped data the note does not name is ordinary data, in the digest like anything else.
+ */
 export interface CaptureNote {
   mode: "digest" | "encrypted";
   withheld: string[];
+  whole?: true;
 }
 
 export interface Withheld {
@@ -111,9 +117,10 @@ export function captureValue(value: unknown, side: CaptureSide | undefined, key?
   if (side.mode === "encrypted" && !key) throw new Error("capture mode encrypted needs captureKeyEnv");
   const k = side.mode === "encrypted" ? key : undefined;
   const mode = side.mode;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return { view: withhold(value, k), note: { mode, withheld: ["*"] } };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { view: withhold(value, k), note: { mode, withheld: ["*"], whole: true } };
   const keep = new Set([...(side.clear ?? []), ...alwaysClear]);
-  const view: Record<string, unknown> = {};
+  // a null-prototype object, so a field named __proto__ is recorded rather than setting the prototype (as canonicalize does)
+  const view: Record<string, unknown> = Object.create(null);
   const withheld: string[] = [];
   for (const [name, v] of Object.entries(value as Record<string, unknown>)) {
     if (keep.has(name)) view[name] = v;
@@ -127,38 +134,63 @@ export function captureValue(value: unknown, side: CaptureSide | undefined, key?
 export const captureArgs = (args: Record<string, unknown>, side: CaptureSide | undefined, key?: Buffer) => captureValue(args, side, key) as { view: Record<string, unknown>; note?: CaptureNote };
 export const captureResult = (result: unknown, side: CaptureSide | undefined, key?: Buffer) => captureValue(result, side, key, ALWAYS_CLEAR_IN_RESULT);
 
-/** The commitments in a view, by field; `{ "*": c }` when the whole value is one. */
-export function commitmentsIn(view: unknown): Record<string, Commitment> {
-  if (isCommitment(view)) return { "*": view };
-  if (!view || typeof view !== "object" || Array.isArray(view)) return {};
-  return Object.fromEntries(Object.entries(view as Record<string, unknown>).filter(([, v]) => isCommitment(v))) as Record<string, Commitment>;
+/**
+ * The commitments a capture note declares, read from the view: the whole value, or the named fields. Throws when the
+ * note names a field that is not a commitment in the view, which no honest issuer produces: a verifier must not skip
+ * a digest on the strength of a note the data does not bear out.
+ */
+export function commitmentsIn(view: unknown, note: CaptureNote): { whole: Commitment } | { fields: Record<string, Commitment> } {
+  if (note.whole) {
+    if (!isCommitment(view)) throw new Error("the capture note says the value is withheld whole, but the receipt carries no commitment");
+    return { whole: view };
+  }
+  if (!view || typeof view !== "object" || Array.isArray(view)) throw new Error("the capture note names withheld fields, but the receipt carries no object");
+  const fields: Record<string, Commitment> = Object.create(null);
+  for (const name of note.withheld) {
+    const v = (view as Record<string, unknown>)[name];
+    if (!isCommitment(v)) throw new Error(`the capture note says field "${name}" is withheld, but the receipt carries no commitment for it`);
+    fields[name] = v;
+  }
+  return { fields };
 }
 
 export type Restored = { value: unknown; how: "clear" | "disclosed" | "decrypted" };
 
+/** A copy with a null prototype, so a field named __proto__ stays a field through the spread. */
+const plain = (o: Record<string, unknown>, over: Record<string, unknown>): Record<string, unknown> => {
+  const out: Record<string, unknown> = Object.create(null);
+  for (const [k, v] of Object.entries(o)) out[k] = v;
+  for (const [k, v] of Object.entries(over)) out[k] = v;
+  return out;
+};
+
 /**
- * The full value behind a view: the view itself when nothing is withheld; the disclosed value when one is given and
- * every commitment in the view matches it; the decrypted value when the key is given and every withheld field is
- * encrypted under it. Null when the value cannot be had. Throws when a disclosure or a key contradicts a commitment.
+ * The full value behind a view, under its capture note: the view itself when there is no note; the disclosed value
+ * when one is given and every declared commitment matches it; the decrypted value when the key is given and every
+ * withheld field is encrypted under it. Null when the value cannot be had. Throws when the note does not match the
+ * data, or a disclosure or a key contradicts a commitment.
  */
-export function restore(view: unknown, disclosed?: unknown, key?: Buffer): Restored | null {
-  const cs = commitmentsIn(view);
-  const names = Object.keys(cs);
-  if (names.length === 0) return { value: view, how: "clear" };
-  if (disclosed !== undefined) {
-    if ("*" in cs) {
-      if (!checkCommitment(cs["*"]!, disclosed)) throw new Error("the disclosed value does not match the receipt's commitment");
+export function restore(view: unknown, note: CaptureNote | undefined, disclosed?: unknown, key?: Buffer): Restored | null {
+  if (!note) return { value: view, how: "clear" };
+  const cs = commitmentsIn(view, note);
+  if ("whole" in cs) {
+    if (disclosed !== undefined) {
+      if (!checkCommitment(cs.whole, disclosed)) throw new Error("the disclosed value does not match the receipt's commitment");
       return { value: disclosed, how: "disclosed" };
     }
+    if (key && cs.whole.$custody === "encrypted" && cs.whole.keyid === captureKeyId(key)) return { value: reveal(cs.whole, key), how: "decrypted" };
+    return null;
+  }
+  const names = Object.keys(cs.fields);
+  if (disclosed !== undefined) {
     const d = disclosed as Record<string, unknown>;
-    if (!d || typeof d !== "object") throw new Error("the disclosure must be an object with the withheld fields");
-    for (const name of names) if (!checkCommitment(cs[name]!, d[name])) throw new Error(`disclosed field "${name}" does not match the receipt's commitment`);
-    return { value: { ...(view as Record<string, unknown>), ...Object.fromEntries(names.map((n) => [n, d[n]])) }, how: "disclosed" };
+    if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("the disclosure must be an object with the withheld fields");
+    for (const name of names) if (!checkCommitment(cs.fields[name]!, d[name])) throw new Error(`disclosed field "${name}" does not match the receipt's commitment`);
+    return { value: plain(view as Record<string, unknown>, Object.fromEntries(names.map((n) => [n, d[n]]))), how: "disclosed" };
   }
   // the key reveals only what was encrypted under it; another key is not an error, the values simply stay withheld
-  if (key && names.every((n) => cs[n]!.$custody === "encrypted" && (cs[n] as Encrypted).keyid === captureKeyId(key))) {
-    if ("*" in cs) return { value: reveal(cs["*"]!, key), how: "decrypted" };
-    return { value: { ...(view as Record<string, unknown>), ...Object.fromEntries(names.map((n) => [n, reveal(cs[n]!, key)])) }, how: "decrypted" };
+  if (key && names.every((n) => cs.fields[n]!.$custody === "encrypted" && (cs.fields[n] as Encrypted).keyid === captureKeyId(key))) {
+    return { value: plain(view as Record<string, unknown>, Object.fromEntries(names.map((n) => [n, reveal(cs.fields[n]!, key)]))), how: "decrypted" };
   }
   return null;
 }

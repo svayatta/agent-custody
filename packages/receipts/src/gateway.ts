@@ -17,7 +17,8 @@ import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
-import { captureArgs, captureKeyFrom, captureResult, captureValue, ruleFor } from "./capture.ts";
+import { captureArgs, captureKeyFrom, captureResult, captureValue, ruleFor, withhold } from "./capture.ts";
+import { isProviderAttestation, UPSTREAM_SIG_META_KEY } from "./upstream.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
 
@@ -300,9 +301,12 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       // Private evidence: the digests are over the whole call; the receipt carries the views the capture rule allows.
       const rule = ruleFor(cfg.capture, tool);
       const argsCaptured = captureArgs(args, rule?.args, captureKey);
+      // A fact's value follows the facts rule; its lookup arguments follow the call's args rule, because they are copied
+      // from the call: a field withheld from the request must not reappear through the lookup that used it.
       const factsView = Object.fromEntries(Object.entries(facts).map(([k, f]) => {
         const c = captureValue(f.value, rule?.facts, captureKey);
-        return [k, { ...f, value: c.view, ...(c.note ? { capture: c.note } : {}) }];
+        const a = captureArgs(f.args, rule?.args, captureKey);
+        return [k, { ...f, args: a.view, value: c.view, ...(c.note ? { capture: c.note } : {}), ...(a.note ? { argsCapture: a.note } : {}) }];
       })) as typeof facts;
       const head = {
         receiptId,
@@ -341,9 +345,18 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
           // state, such as the memory server, cites the receipt as the source of what it stores.
           const observed = Object.fromEntries(Object.entries(facts).map(([k, f]) => [k, f.value]));
           const result = await callUpstream(tool, args, { ...upstreamMeta, [OBSERVED_META_KEY]: observed });
-          const evidence = upstreamEvidenceOf(result);
+          let evidence = upstreamEvidenceOf(result);
           const captured = captureResult(result, rule?.result, captureKey);
           forwarded = result;
+          if (captured.note && evidence && isProviderAttestation(evidence) && typeof evidence.rawBody === "string") {
+            // A provider's delivery is the result in another form: under a private result capture its body is withheld
+            // too, in the evidence and in the metadata copy, and a verifier gets it back the same way as the result.
+            evidence = { ...evidence, rawBody: withhold(evidence.rawBody, captured.note.mode === "encrypted" ? captureKey : undefined) };
+            const meta = { ...((captured.view as CallToolResult)._meta ?? {}) };
+            delete meta[UPSTREAM_SIG_META_KEY];
+            captured.view = { ...(captured.view as CallToolResult), _meta: meta };
+            captured.note = { ...captured.note, withheld: [...captured.note.withheld, "upstream.rawBody"] };
+          }
           execution = { status: result.isError ? "failed" : "executed", result: captured.view, resultDigest: digestOf(result), provenance: "observed", ...(evidence ? { upstream: evidence } : {}), ...(captured.note ? { capture: captured.note } : {}) };
           noteServedFacts(result);
         } catch (e) {

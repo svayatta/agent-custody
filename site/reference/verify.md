@@ -17,7 +17,7 @@ agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principa
 | `--upstream-key` | an upstream that signs its results; the execution then verifies as attested |
 | `--stripe-secret-env`, `--github-secret-env` | shared secrets for provider deliveries carried in the receipt |
 | `--log` | a copy of the log file; the root is recomputed at the receipt's tree size and compared |
-| `--disclose` | a disclosure file, `{ "receiptId", "args"?, "result"? }`, holding the values a capture rule withheld, as `reveal` writes it or as the party that holds them hands it over; each value is checked against its commitment and the digests are recomputed from it |
+| `--disclose` | a disclosure file, `{ "receiptId", "args"?, "result"?, "facts"?: { "<name>": { "value"?, "args"? } }, "upstreamRawBody"? }`, holding the values a capture rule withheld, as `reveal` writes it or as the party that holds them hands it over; each value is checked against its commitment and the digests are recomputed from it |
 | `--capture-key-env` | the environment variable holding the customer's capture key; encrypted fields are decrypted, checked against their commitments, and the digests recomputed |
 | `--json` | machine-readable output |
 
@@ -43,7 +43,8 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | executed tool within delegated scope | if the tool ran, the grant covered it |
 | principal is claimed, not attested | SDK receipts: the principal is a config string and labelled so |
 | request args digest | the arguments match their digest and the statement's subject: recomputed when they are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when fields are withheld and neither is given it passes as committed, the detail saying "committed, not recomputed" and how many fields are withheld; a disclosure that contradicts a commitment fails it with the field named |
-| result digest | executed and failed calls: the result matches `execution.resultDigest`, under the same rules |
+| result digest | executed and failed calls: the result matches `execution.resultDigest`, under the same rules; a provider delivery withheld with the result is restored first |
+| fact `<name>` value, fact `<name>` args | a captured fact's commitments hold against the disclosed or decrypted value, or pass as committed when neither is given |
 | upstream signature (upstream key), upstream signature (provider secret) | the upstream's signature over the result verifies when a key is given; a Stripe or GitHub delivery verifies when its secret is given |
 | upstream signature not checked | only when the result is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |
 | policy decision consistent with execution | an enforced `deny` never sits beside `executed`; a `deny` with `enforced: false` (observe mode) may, and the detail says so |

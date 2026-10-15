@@ -16,9 +16,11 @@ import { formatReport, verifyBundle, type VerifyOptions } from "../src/verify.ts
 import { buildFixture, buildSdkFixture, type Fixture } from "../scripts/fixture.ts";
 
 const decode = (b: ReceiptBundle) => JSON.parse(Buffer.from(b.envelope.payload, "base64").toString()) as ReceiptStatement;
+const bundleOf2 = (fx: Fixture, r: { _meta?: Record<string, unknown> }) => JSON.parse(readFileSync(join(fx.receiptsDir, `${String(r._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
 const KEY_HEX = randomBytes(32).toString("hex");
 const key = captureKeyFrom(KEY_HEX);
 const check = (name: string, r: ReturnType<typeof verifyBundle>) => r.checks.find((c) => c.name === name)!;
+const WEBHOOK_SECRET = "whsec_capture_test";
 
 describe("commitments", () => {
   it("withholds a value as a salted digest, optionally with the value encrypted under the key, and checks it back", () => {
@@ -43,18 +45,42 @@ describe("commitments", () => {
     expect(digest.note).toEqual({ mode: "digest", withheld: ["reason", "note"] });
     expect((digest.view as any).amount).toBe(2500);
     expect(JSON.stringify(digest.view)).not.toMatch(/7946|4242/);
-    expect(restore(digest.view)).toBeNull();
-    expect(restore(digest.view, args)!.value).toEqual(args);
-    expect(() => restore(digest.view, { ...args, reason: "something else" })).toThrow(/does not match/);
+    expect(restore(digest.view, digest.note)).toBeNull();
+    expect(restore(digest.view, digest.note, args)!.value).toEqual(args);
+    expect(() => restore(digest.view, digest.note, { ...args, reason: "something else" })).toThrow(/does not match/);
     const enc = captureValue(args, { mode: "encrypted", clear: ["amount"] }, key);
-    expect(restore(enc.view, undefined, key)).toEqual({ value: args, how: "decrypted" });
-    expect(restore(enc.view, undefined, captureKeyFrom(randomBytes(32).toString("hex")))).toBeNull();
+    expect(restore(enc.view, enc.note, undefined, key)).toEqual({ value: args, how: "decrypted" });
+    expect(restore(enc.view, enc.note, undefined, captureKeyFrom(randomBytes(32).toString("hex")))).toBeNull();
     const whole = captureValue("just a string", { mode: "digest" });
-    expect(whole.note).toEqual({ mode: "digest", withheld: ["*"] });
-    expect(restore(whole.view, "just a string")!.how).toBe("disclosed");
+    expect(whole.note).toEqual({ mode: "digest", withheld: ["*"], whole: true });
+    expect(restore(whole.view, whole.note, "just a string")!.how).toBe("disclosed");
+    // no note: the view is the value, whatever it looks like
+    expect(restore({ extra: { $custody: "withheld", sha256: "00", salt: "00" } }, undefined)).toEqual({ value: { extra: { $custody: "withheld", sha256: "00", salt: "00" } }, how: "clear" });
     expect(captureValue(args, { mode: "clear" })).toEqual({ view: args });
     expect(captureValue(args, undefined)).toEqual({ view: args });
     expect(() => captureValue(args, { mode: "encrypted" })).toThrow(/needs captureKeyEnv/);
+  });
+
+  it("keeps a field named __proto__ through capture and restoration, and a field literally named * is just a field", () => {
+    const args = JSON.parse('{"__proto__":{"secret":"review"},"amount":2500,"*":"star"}') as Record<string, unknown>;
+    const enc = captureValue(args, { mode: "encrypted", clear: ["amount"] }, key);
+    expect(enc.note).toEqual({ mode: "encrypted", withheld: ["__proto__", "*"] });
+    const persisted = JSON.parse(JSON.stringify(enc.view)) as Record<string, unknown>;
+    expect(isCommitment(persisted["__proto__"])).toBe(true);
+    expect(isCommitment(persisted["*"])).toBe(true);
+    const back = restore(persisted, enc.note, undefined, key)!;
+    expect(back.how).toBe("decrypted");
+    expect(JSON.parse(JSON.stringify(back.value))).toEqual(args);
+    expect(digestOf(back.value)).toBe(digestOf(args));
+    expect(restore(persisted, enc.note, args)!.how).toBe("disclosed");
+    expect(({} as Record<string, unknown>).secret).toBeUndefined();
+  });
+
+  it("the note decides what is withheld: a named field that is not a commitment is an error, and commitment-shaped data outside the note is data", () => {
+    expect(() => restore({ amount: 1 }, { mode: "digest", withheld: ["reason"] })).toThrow(/no commitment for it/);
+    expect(() => restore({ amount: 1 }, { mode: "digest", withheld: ["*"], whole: true })).toThrow(/withheld whole/);
+    const view = { amount: 1, extra: { $custody: "withheld", sha256: "00", salt: "00" } };
+    expect(restore(view, undefined)).toEqual({ value: view, how: "clear" });
   });
 });
 
@@ -72,9 +98,11 @@ describe("private evidence through the gateway", () => {
       "customer.lookup": { result: { mode: "digest" } },
     };
     cfg.captureKeyEnv = "TEST_CAPTURE_KEY";
+    // the fake provider also delivers a signed webhook for every refund, so the delivery body is in play
+    cfg.upstream.args.push("--webhook-secret", WEBHOOK_SECRET);
     writeFileSync(fx.configFile, JSON.stringify(cfg));
     gw = await createGateway(loadConfig(fx.configFile));
-    opts = { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], upstreamKeys: [loadPublicKey(fx.upstreamPub)], logFile: fx.logFile };
+    opts = { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], upstreamKeys: [loadPublicKey(fx.upstreamPub)], providerSecrets: { stripe: WEBHOOK_SECRET }, logFile: fx.logFile };
   });
   afterAll(async () => {
     await gw.close();
@@ -99,13 +127,45 @@ describe("private evidence through the gateway", () => {
     const ex = p.execution as { result: { content: unknown; isError?: boolean; _meta?: unknown }; capture?: unknown };
     expect(isCommitment(ex.result.content)).toBe(true);
     expect(ex.result._meta).toBeDefined();
-    expect(ex.capture).toEqual({ mode: "digest", withheld: ["content"] });
     // the fact the policy decided on is encrypted field by field: the policy saw it, the file does not show it
     const customer = p.facts.customer!.value as Record<string, unknown>;
     expect(Object.values(customer).every(isCommitment)).toBe(true);
     expect(p.facts.customer!.capture).toEqual({ mode: "encrypted", withheld: ["id", "email", "verified"] });
     expect(file).not.toContain('"plan":"pro"');
     expect(p.policy!.decision).toBe("allow");
+    // the lookup's arguments are copied from the call: the customer id is in clear there as in the request, and nothing else leaks through them
+    expect(p.facts.customer!.args).toEqual({ customer_id: "cust_123" });
+    expect(p.facts.customer!.argsCapture).toBeUndefined();
+    // the provider's delivery is withheld with the result: its body is a commitment in the evidence, and gone from the metadata copy
+    const up = (p.execution as { upstream: { rawBody: unknown; signature: string } }).upstream;
+    expect(isCommitment(up.rawBody)).toBe(true);
+    expect(typeof up.signature).toBe("string");
+    expect(ex.result._meta).not.toHaveProperty("agent-custody/upstream-signature");
+    expect(ex.capture).toEqual({ mode: "digest", withheld: ["content", "upstream.rawBody"] });
+    expect(file).not.toMatch(/refund_id|re_[0-9a-f]{8}/);
+  });
+
+  it("a field withheld from the request does not reappear through the lookup that used it", async () => {
+    const fx2 = buildFixture(mkdtempSync(join(tmpdir(), "capture-factargs-")));
+    const cfg = JSON.parse(readFileSync(fx2.configFile, "utf8"));
+    cfg.capture = { "*": { args: { mode: "digest" }, result: { mode: "digest" }, facts: { mode: "digest" } } };
+    writeFileSync(fx2.configFile, JSON.stringify(cfg));
+    const gw2 = await createGateway(loadConfig(fx2.configFile));
+    try {
+      const r = await gw2.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500 } });
+      const p = decode(bundleOf2(fx2, r)).predicate;
+      expect(isCommitment(p.request.args.customer_id)).toBe(true);
+      expect(isCommitment(p.facts.customer!.args.customer_id)).toBe(true);
+      expect(p.facts.customer!.argsCapture).toEqual({ mode: "digest", withheld: ["customer_id"] });
+      expect(readFileSync(join(fx2.receiptsDir, `${String(r._meta![RECEIPT_META_KEY])}.json`), "utf8")).not.toContain("cust_123");
+      const v = verifyBundle(bundleOf2(fx2, r), { issuerKeys: [loadPublicKey(fx2.gatewayPub)], principalKeys: [loadPublicKey(fx2.principalPub)], logFile: fx2.logFile });
+      expect(v.ok, formatReport(v)).toBe(true);
+      expect(check("fact customer args", v).detail).toMatch(/committed, not recomputed/);
+      const disclosed = verifyBundle(bundleOf2(fx2, r), { issuerKeys: [loadPublicKey(fx2.gatewayPub)], principalKeys: [loadPublicKey(fx2.principalPub)], logFile: fx2.logFile, disclosed: { facts: { customer: { args: { customer_id: "cust_123" } } } } });
+      expect(check("fact customer args", disclosed).detail).toMatch(/hold against the disclosed value/);
+    } finally {
+      await gw2.close();
+    }
   });
 
   it("verifies as committed without the values, in full with the key, in full with a disclosure, and refuses a disclosure that lies", async () => {
@@ -122,21 +182,30 @@ describe("private evidence through the gateway", () => {
     const withKey = verifyBundle(bundle, { ...opts, captureKey: key });
     expect(withKey.ok, formatReport(withKey)).toBe(true);
     expect(check("request args digest", withKey).detail).toBe("recomputed from decrypted values");
+    expect(check("fact customer value", withKey).detail).toMatch(/hold against the decrypted value/);
     // the result was withheld as a digest, not encrypted: the key cannot bring it back
     expect(check("result digest", withKey).detail).toMatch(/committed, not recomputed/);
 
     const p = decode(bundle).predicate;
-    const fullResult = JSON.parse((r.content[0] as { text: string }).text);
-    const disclosed = { args, result: { content: [{ type: "text", text: JSON.stringify(fullResult) }], _meta: (p.execution as { result: { _meta: unknown } }).result._meta } };
+    const fullResult = JSON.parse((r.content[0] as { text: string }).text) as { refund_id: string };
+    // the full result as the upstream sent it is what the agent received, less the receipt id the gateway adds
+    const { "agent-custody/receipt": _receipt, ...originalMeta } = r._meta as Record<string, unknown>;
+    const disclosed = { args, result: { ...r, _meta: originalMeta }, upstreamRawBody: (originalMeta["agent-custody/upstream-signature"] as { rawBody: string }).rawBody };
+    void p;
     const withDisclosure = verifyBundle(bundle, { ...opts, disclosed });
     expect(withDisclosure.ok, formatReport(withDisclosure)).toBe(true);
     expect(check("request args digest", withDisclosure).detail).toBe("recomputed from disclosed values");
     expect(check("result digest", withDisclosure).detail).toBe("recomputed from disclosed values");
-    expect(check("upstream signature (upstream key)", withDisclosure).ok).toBe(true);
+    expect(check("upstream signature (provider secret)", withDisclosure).ok).toBe(true);
+    expect(fullResult.refund_id).toMatch(/^re_/);
 
     const lie = verifyBundle(bundle, { ...opts, disclosed: { args: { ...args, amount: 2600, reason: "a different reason" } } });
     expect(lie.ok).toBe(false);
     expect(check("request args digest", lie).detail).toMatch(/"reason" does not match/);
+    // a disclosure that lies about the fact the policy decided on fails too, key or no key
+    const factLie = verifyBundle(bundle, { ...opts, captureKey: key, disclosed: { facts: { customer: { value: { id: "cust_999", email: "lie@example.com", verified: false } } } } });
+    expect(factLie.ok).toBe(false);
+    expect(check("fact customer value", factLie).detail).toMatch(/does not match/);
   });
 
   it("a rule in mode encrypted without a key, or a key variable that is not set, fails at startup", async () => {

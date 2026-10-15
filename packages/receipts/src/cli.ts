@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { hostname, userInfo } from "node:os";
-import { captureKeyFrom, restore } from "./capture.ts";
+import { captureKeyFrom, isCommitment, restore, type CaptureNote } from "./capture.ts";
+import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -504,15 +505,24 @@ async function main(argv: string[]): Promise<number> {
       const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as ReceiptStatement).predicate;
       // a part withheld as a digest only carries no value to reveal; it is left out, and said so
       const notRevealed: string[] = [];
-      const back = (name: string, view: unknown): unknown => {
-        const r = restore(view, undefined, key);
+      const back = (name: string, view: unknown, note: CaptureNote | undefined): unknown => {
+        if (!note) return undefined;
+        const r = restore(view, note, undefined, key);
         if (!r) notRevealed.push(name);
         return r?.value;
       };
-      const args = back("args", p.request.args);
-      const result = p.execution.status === "executed" || p.execution.status === "failed" ? back("result", p.execution.result) : undefined;
-      const facts = Object.fromEntries(Object.entries(p.facts).map(([k, f]) => [k, back(`fact ${k}`, f.value)]).filter(([, v]) => v !== undefined));
-      const disclosure = { receiptId: p.receiptId, ...(args !== undefined ? { args } : {}), ...(result !== undefined ? { result } : {}), ...(Object.keys(facts).length ? { facts } : {}) };
+      const args = back("args", p.request.args, p.request.capture);
+      const ex = p.execution.status === "executed" || p.execution.status === "failed" ? p.execution : null;
+      const resultNote = ex?.capture;
+      const result = ex ? back("result", ex.result, resultNote ? { ...resultNote, withheld: resultNote.withheld.filter((w: string) => w !== "upstream.rawBody") } : undefined) : undefined;
+      const evidence = ex?.upstream;
+      const upstreamRawBody = resultNote && evidence && isProviderAttestation(evidence) && isCommitment(evidence.rawBody) ? back("the provider's delivery body", evidence.rawBody, { mode: resultNote.mode, withheld: ["*"], whole: true }) : undefined;
+      const facts = Object.fromEntries(Object.entries(p.facts).map(([k, f]) => {
+        const value = back(`fact ${k}`, f.value, f.capture);
+        const fargs = back(`fact ${k} args`, f.args, f.argsCapture);
+        return [k, { ...(value !== undefined ? { value } : {}), ...(fargs !== undefined ? { args: fargs } : {}) }];
+      }).filter(([, v]) => Object.keys(v as object).length));
+      const disclosure = { receiptId: p.receiptId, ...(args !== undefined ? { args } : {}), ...(result !== undefined ? { result } : {}), ...(upstreamRawBody !== undefined ? { upstreamRawBody } : {}), ...(Object.keys(facts).length ? { facts } : {}) };
       const text = JSON.stringify(disclosure, null, 2);
       const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them.` : "";
       if (values.out) {
