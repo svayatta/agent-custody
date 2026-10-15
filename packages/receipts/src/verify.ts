@@ -153,7 +153,10 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   }
   const evidence = executedOrFailed && "upstream" in p.execution ? p.execution.upstream : undefined;
   if (executedOrFailed && evidence) {
-    const body = isProviderAttestation(evidence) ? (full.execution as { upstream?: { rawBody?: unknown } }).upstream?.rawBody : null;
+    // the evidence as restored: the delivery body or the signed envelope may have been withheld with the result
+    const restoredEvidence = (full.execution as { upstream?: { rawBody?: unknown; envelope?: unknown } }).upstream;
+    const body = isProviderAttestation(evidence) ? restoredEvidence?.rawBody : null;
+    const envelope = !isProviderAttestation(evidence) && restoredEvidence?.envelope && !isCommitment(restoredEvidence.envelope) ? (restoredEvidence.envelope as Envelope) : null;
     if (isProviderAttestation(evidence)) {
       if (opts.providerSecrets) {
         if (typeof body !== "string" || !result) add("upstream signature not checked", true, "the result or the delivery body is withheld; disclose them or give the capture key to check the provider's delivery");
@@ -163,9 +166,9 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
         }
       }
     } else if ((opts.upstreamKeys?.length ?? 0) > 0) {
-      if (!result) add("upstream signature not checked", true, "the result is withheld; disclose it or give the capture key to check the upstream's signature against it");
+      if (!result || !envelope) add("upstream signature not checked", true, "the result or the upstream's signature is withheld; disclose them or give the capture key to check the signature against the result");
       else {
-        const u = checkUpstream(evidence.envelope, opts.upstreamKeys!, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: contentDigest(result) });
+        const u = checkUpstream(envelope, opts.upstreamKeys!, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: contentDigest(result) });
         add("upstream signature (upstream key)", u.ok, u.ok ? `keyid ${short(u.keyid)}` : u.error);
       }
     }

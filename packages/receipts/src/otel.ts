@@ -68,7 +68,8 @@ export function spanFor(p: ReceiptPredicate, bundle: ReceiptBundle, serviceName:
                 startTimeUnixNano: start.toString(),
                 endTimeUnixNano: (end > start ? end : start).toString(),
                 attributes,
-                status: status === "executed" || status === "denied" || status === "withheld" ? { code: 1 } : { code: 2, message: status === "failed" ? "the upstream reported failure" : (p.execution as { error?: string }).error ?? status },
+                // Status.message is a string in OTLP; under a capture rule the error is a commitment, and the span says so
+                status: status === "executed" || status === "denied" || status === "withheld" ? { code: 1 } : { code: 2, message: status === "failed" ? "the upstream reported failure" : typeof (p.execution as { error?: unknown }).error === "string" ? ((p.execution as { error: string }).error) : (p.execution as { error?: unknown }).error ? "the upstream reported an error (withheld under the capture rule)" : status },
               },
             ],
           },

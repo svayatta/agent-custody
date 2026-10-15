@@ -66,7 +66,8 @@ export interface ProviderAttestation {
   deliveryId?: string;
 }
 
-export type UpstreamEvidence = { envelope: Envelope } | ProviderAttestation;
+/** under a private result rule the envelope, or the delivery body, is a commitment in the receipt, restored by the verifier with the result */
+export type UpstreamEvidence = { envelope: Envelope | Commitment } | ProviderAttestation;
 
 export function isProviderAttestation(v: unknown): v is ProviderAttestation {
   const p = v as Partial<ProviderAttestation> | null;

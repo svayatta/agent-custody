@@ -212,7 +212,8 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   // and says so; a digest over values the receipt carries in clear is recomputed, with the salt the statement carries.
   // The note decides, never the shape of the data: a path it names must hold a commitment (else the check fails), and
   // commitment-shaped data it does not name is ordinary data, inside the digest.
-  const isCommitment = (v: any) => !!v && typeof v === "object" && !Array.isArray(v) && (v.$custody === "withheld" || v.$custody === "encrypted");
+  // a commitment is one only when it carries what a verifier checks: the sha256 and the salt, and for an encrypted one the fields the key needs
+  const isCommitment = (v: any) => !!v && typeof v === "object" && !Array.isArray(v) && /^[0-9a-f]{64}$/.test(v.sha256) && /^[0-9a-f]{32}$/.test(v.salt) && (v.$custody === "withheld" || (v.$custody === "encrypted" && v.alg === "A256GCM" && /^[0-9a-f]{64}$/.test(v.keyid) && [v.iv, v.ciphertext, v.tag].every((f: unknown) => typeof f === "string" && f.length > 0 && /^[A-Za-z0-9+/]+=*$/.test(f))));
   type Path = string[];
   const note = p.capture as { mode: string; withheld: Path[] } | undefined;
   const under = (w: Path, prefix: Path) => prefix.length <= w.length && prefix.every((s, i) => w[i] === s);
@@ -269,7 +270,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
       }
     }
   } else if (executedOrFailed && p.execution.upstream && (opts.upstreamKeys?.length ?? 0) > 0) {
-    if (!resultInClear) add("upstream signature not checked", true, "the result is withheld; disclose it with the command-line verifier to check the upstream's signature against it");
+    if (!resultInClear || isCommitment(p.execution.upstream.envelope)) add("upstream signature not checked", true, "the result or the upstream's signature is withheld; disclose them with the command-line verifier to check the signature against the result");
     else {
       const u = await dsseVerify(p.execution.upstream.envelope, opts.upstreamKeys!);
       let ok = u.ok && p.execution.upstream.envelope.payloadType === UPSTREAM_TYPE;

@@ -21,39 +21,39 @@ import { buildFixture, buildSdkFixture } from "../scripts/fixture.ts";
 
 const CANARY = `CANARY_${randomBytes(8).toString("hex")}`;
 const decode = (b: ReceiptBundle) => JSON.parse(Buffer.from(b.envelope.payload, "base64").toString()) as ReceiptStatement;
-/** everything a receipt file says, decoded: the statement, the authorization inside it, and the rest */
-const bundleText = (b: ReceiptBundle): string => {
-  const statement = Buffer.from(b.envelope.payload, "base64").toString();
-  const auth = (JSON.parse(statement) as ReceiptStatement).predicate.authorization;
-  return statement + (auth ? Buffer.from(auth.envelope.payload, "base64").toString() : "") + JSON.stringify(b);
+/** the text with every base64 `payload` field decoded in place, applied until nothing is left encoded: the statement, the authorization and the upstream's envelope inside it, the grant */
+const decodeAll = (text: string): string => {
+  let out = text;
+  for (let i = 0; i < 4; i++) {
+    const next = out.replace(/"payload":\s*"([A-Za-z0-9+/=]+)"/g, (_m, b64: string) => `"payload":${JSON.stringify(Buffer.from(b64, "base64").toString())}`);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 };
+/** everything a receipt file says, decoded, nested payloads included */
+const bundleText = (b: ReceiptBundle): string => decodeAll(JSON.stringify(b));
 /** every file in the receipts directory and every log line, decoded */
-const onDisk = (receiptsDir: string, logFile: string): string => {
-  const files = readdirSync(receiptsDir).map((f) => readFileSync(join(receiptsDir, f), "utf8"));
-  const decoded = files.map((f) => {
-    const env = (JSON.parse(f) as { envelope: { payload: string } }).envelope;
-    return Buffer.from(env.payload, "base64").toString();
-  });
-  const log = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((line) => {
-    const leaf = JSON.parse(line) as { payload?: string; leaf?: string };
-    const env = leaf.payload ? leaf : (JSON.parse(leaf.leaf ?? "{}") as { payload?: string });
-    return env.payload ? Buffer.from(env.payload, "base64").toString() : line;
-  });
-  return [...files, ...decoded, ...log].join("\n");
-};
+const onDisk = (receiptsDir: string, logFile: string): string => decodeAll([...readdirSync(receiptsDir).map((f) => readFileSync(join(receiptsDir, f), "utf8")), readFileSync(logFile, "utf8")].join("\n"));
 /** an exporter that keeps what the issuer hands it, and what the two real exporters would send of it */
 const keepExports = () => {
   const seen: string[] = [];
+  const spans: unknown[] = [];
   return {
     seen,
+    spans,
     exporter: {
       where: "test",
       async exported(p: ReceiptPredicate, b: ReceiptBundle) {
-        seen.push(JSON.stringify(p), JSON.stringify(spanFor(p, b, "agent-custody")), JSON.stringify(hecEvent(p, b, { url: "https://splunk.example", tokenEnv: "X" })));
+        const span = spanFor(p, b, "agent-custody");
+        spans.push(span);
+        seen.push(JSON.stringify(p), JSON.stringify(span), JSON.stringify(hecEvent(p, b, { url: "https://splunk.example", tokenEnv: "X" })));
       },
     },
   };
 };
+/** the OTLP status of a span as exported: `message` is a string there, whatever the receipt holds */
+const statusOf = (span: unknown) => (span as { resourceSpans: { scopeSpans: { spans: { status: { code: number; message?: unknown } }[] }[] }[] }).resourceSpans[0]!.scopeSpans[0]!.spans[0]!.status;
 const withheldLog = (inner: LogSink): LogSink => ({
   kind: inner.kind,
   where: inner.where,
@@ -127,6 +127,13 @@ describe("the canary", () => {
       expect(onDisk(withheldDir, withheldLogFile), "a file on disk carries the canary").not.toContain(CANARY);
       expect(exports.seen.join("\n"), "an export carries the canary").not.toContain(CANARY);
       expect(exports.seen.length).toBe(calls.length * 3);
+      // the OTLP status message is a string, a fixed one where the error is a commitment
+      for (const span of exports.spans) expect(["string", "undefined"]).toContain(typeof statusOf(span).message);
+      expect(exports.spans.map((s) => statusOf(s).message)).toContain("the upstream reported an error (withheld under the capture rule)");
+      // the upstream's signed payload carried the id as an extra claim: the envelope is withheld with the result
+      const failed = calls.find((c) => c.name === "failed")!;
+      const failedBundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${String(failed.result._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
+      expect((decode(failedBundle).predicate.capture?.withheld ?? []).map((w) => w.join("."))).toContain("execution.upstream.envelope");
       // the agent got everything: the real answers, the real errors (a policy denial names the policy, not the arguments)
       expect(calls.filter((c) => (c.result as { content: { text: string }[] }).content[0]!.text.includes(CANARY)).map((c) => c.name)).toEqual(["executed", "failed", "thrown", "lookup isError", "lookup throws"]);
     } finally {
@@ -181,6 +188,9 @@ describe("the canary", () => {
       expect(bundleText(b)).not.toContain(CANARY);
       const v = verifyBundle(b, { issuerKeys: [loadPublicKey(fx.appPub)], principalKeys: [], logFile: fx.logFile });
       expect(v.ok, formatReport(v)).toBe(true);
+      const span = spanFor(decode(b).predicate, b, "agent-custody");
+      expect(JSON.stringify(span)).not.toContain(CANARY);
+      expect(["string", "undefined"]).toContain(typeof statusOf(span).message);
     }
     expect(onDisk(fx.receiptsDir, fx.logFile)).not.toContain(CANARY);
     // and the control

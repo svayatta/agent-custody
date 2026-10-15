@@ -9,7 +9,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { loadPrivateKey } from "../src/crypto.ts";
 import { RECEIPT_META_KEY } from "../src/gateway.ts";
-import { attachProviderAttestation, signResult, stripeSignature } from "../src/upstream.ts";
+import { dsseSign } from "../src/crypto.ts";
+import { attachProviderAttestation, contentDigest, stripeSignature, UPSTREAM_SIG_META_KEY, UPSTREAM_TYPE } from "../src/upstream.ts";
 
 const tools = [
   { name: "customer.lookup", description: "Look up a customer", inputSchema: { type: "object", properties: { customer_id: { type: "string" } }, required: ["customer_id"] } },
@@ -52,6 +53,11 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
     const rawBody = JSON.stringify({ id: `evt_${randomUUID().slice(0, 8)}`, type: "charge.refunded", data: { object: { id: `re_${randomUUID().slice(0, 8)}`, object: "refund", customer: args.customer_id, status: "succeeded" } } });
     return attachProviderAttestation(result, { provider: "stripe-webhook", rawBody, signature: stripeSignature(rawBody, webhookSecret, Math.floor(Date.now() / 1000)), bind: "data.object.id" });
   }
-  return signingKey && typeof receiptId === "string" ? signResult(result, signingKey, receiptId, params.name) : result;
+  // the signed payload carries an extra claim with the id, as an upstream may: a valid attestation that repeats the secret
+  if (signingKey && typeof receiptId === "string") {
+    const payload = { receiptId, tool: params.name, contentDigest: contentDigest(result), customer_id: args.customer_id };
+    return { ...result, _meta: { ...result._meta, [UPSTREAM_SIG_META_KEY]: dsseSign(UPSTREAM_TYPE, payload, signingKey) } };
+  }
+  return result;
 });
 await server.connect(new StdioServerTransport());

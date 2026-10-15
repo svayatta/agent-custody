@@ -72,8 +72,17 @@ export function captureKeyFrom(text: string): Buffer {
 export function captureKeyId(key: Buffer): string {
   return sha256Hex(key);
 }
+const HEX64 = /^[0-9a-f]{64}$/;
+const HEX32 = /^[0-9a-f]{32}$/;
+const B64 = /^[A-Za-z0-9+/]+=*$/;
+/** A well-formed commitment: the sha256 and the salt a verifier checks, and for an encrypted one the fields the key needs. A `$custody` tag alone is not one. */
 export function isCommitment(v: unknown): v is Commitment {
-  return !!v && typeof v === "object" && !Array.isArray(v) && ((v as { $custody?: unknown }).$custody === "withheld" || (v as { $custody?: unknown }).$custody === "encrypted");
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const c = v as Record<string, unknown>;
+  if (typeof c.sha256 !== "string" || !HEX64.test(c.sha256) || typeof c.salt !== "string" || !HEX32.test(c.salt)) return false;
+  if (c.$custody === "withheld") return true;
+  if (c.$custody !== "encrypted") return false;
+  return c.alg === "A256GCM" && typeof c.keyid === "string" && HEX64.test(c.keyid) && [c.iv, c.ciphertext, c.tag].every((f) => typeof f === "string" && (f as string).length > 0 && B64.test(f as string));
 }
 function commit(value: unknown, salt: Buffer): string {
   return sha256Hex(Buffer.concat([salt, Buffer.from(canonicalize(value), "utf8")]));
@@ -176,7 +185,7 @@ const CLEAR_IN = {
   fact: new Set(["tool", "resultDigest", "resultSalt", "provenance"]),
   policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]),
   execution: new Set(["status", "resultDigest", "resultSalt", "provenance"]),
-  upstream: new Set(["provider", "signature", "bind", "envelope"]),
+  upstream: new Set(["provider", "signature", "bind"]),
 };
 /** The result's error flag is its status, so it stays in clear; its metadata carries whatever an upstream put there, so it never does. */
 const RESULT_ALWAYS_CLEAR = new Set(["isError"]);
@@ -265,10 +274,11 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
         if (f === "result") {
           if (resultSide) object(["execution", "result"], v, resultSide, RESULT_ALWAYS_CLEAR, RESULT_NEVER_CLEAR);
         } else if (f === "upstream" && isObject(v)) {
-          // a provider's delivery is the result in another form: its body goes with the result; the signatures stay
+          // a provider's delivery and an upstream's signed envelope are the result in another form (the signed payload
+          // may carry any claim the upstream chose): both go with the result; a provider's signature and binding stay
           for (const [uf, uv] of Object.entries(v)) {
-            if (uf === "rawBody") {
-              if (resultSide) hide(["execution", "upstream", "rawBody"], uv, resultSide.key);
+            if (uf === "rawBody" || uf === "envelope") {
+              if (resultSide) hide(["execution", "upstream", uf], uv, resultSide.key);
             } else if (!CLEAR_IN.upstream.has(uf)) hide(["execution", "upstream", uf], uv, k);
           }
         } else if (!CLEAR_IN.execution.has(f)) hide(["execution", f], v, k);

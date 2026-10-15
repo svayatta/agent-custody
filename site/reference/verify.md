@@ -48,7 +48,7 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | fact `<name>` value, fact `<name>` args | a captured fact's commitments hold against the disclosed or decrypted value, or pass as committed when neither is given |
 | withheld `<path>` | every other path the capture note names (`execution.error`, `execution.reason`, `policy.errors`, `execution.upstream.rawBody`, a part added later): it holds a commitment, which holds against the disclosed or decrypted value when one is given |
 | upstream signature (upstream key), upstream signature (provider secret) | the upstream's signature over the result verifies when a key is given; a Stripe or GitHub delivery verifies when its secret is given |
-| upstream signature not checked | only when the result or the delivery body is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |
+| upstream signature not checked | only when the result, the delivery body, or the upstream's signed envelope is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |
 | policy decision consistent with execution | an enforced `deny` never sits beside `executed`; a `deny` with `enforced: false` (observe mode) may, and the detail says so |
 | authorization … (five checks) | pre-committed calls: the authorization verifies, names this call, was allowed, is included in the log, and precedes the receipt leaf |
 | tree head signature, tree head names the expected log | the head was signed by an issuer or log key, and by the log the verifier expected |
