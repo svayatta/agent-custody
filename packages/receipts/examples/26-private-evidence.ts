@@ -45,7 +45,8 @@ console.log(`   withheld (${p.capture!.mode}): ${p.capture!.withheld.map((w) => 
 const statement = Buffer.from(bundle.envelope.payload, "base64").toString();
 const authorization = p.authorization ? Buffer.from(p.authorization.envelope.payload, "base64").toString() : "";
 const text = statement + authorization + readFileSync(file, "utf8");
-const leaks = ["7946", "4242", "called from", '"plan":"pro"', "succeeded"].filter((s) => text.includes(s));
+// the sentinels carry a space or quotes: digits alone can appear by chance in the hex and base64 of salts, ciphertexts, and signatures
+const leaks = ["7946 0000", "ending 4242", "called from", '"plan":"pro"', "succeeded"].filter((s) => text.includes(s));
 if (leaks.length) throw new Error(`the receipt still carries ${leaks.join(", ")}`);
 console.log("   the receipt file contains none of: the phone number, the card, the note, the customer record, the provider's answer");
 

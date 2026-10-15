@@ -193,10 +193,10 @@ describe("private evidence through the gateway", () => {
     expect(text(r)).toContain("succeeded");
     const bundle = bundleOf(r);
     const file = leakText(bundle);
-    expect(file).not.toMatch(/7946|4242|called from/);
+    expect(file).not.toMatch(/7946 0000|ending 4242|called from/);
     // and without a rule the same call would show them, so the check can fail
     const clearCall = await gwClear.handleCall({ name: "stripe.refund", arguments: args });
-    expect(leakText(clearBundleOf(clearCall))).toMatch(/7946/);
+    expect(leakText(clearBundleOf(clearCall))).toMatch(/7946 0000/);
     const p = decode(bundle).predicate;
     expect(p.request.args).toMatchObject({ customer_id: "cust_123", amount: 2500 });
     expect(isCommitment(p.request.args.reason)).toBe(true);
