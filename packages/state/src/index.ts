@@ -2,15 +2,15 @@
 export { Ledger } from "./ledger.ts";
 export { JsonlStore, PostgresStore, SqliteStore, openStore, selectAbout, selectFor } from "./storage.ts";
 export type { EventQuery, EventStore, PostgresLike, PostgresOptions } from "./storage.ts";
-export type { AsOf, AssertEvent, AssertInput, ConfirmEvent, ConfirmInput, Fact, FactProvenance, DigestKind, ForgetEvent, ForgetInput, HoldEvent, HoldInput, LedgerEvent, SweepInput, RetractEvent, RetractInput, Source } from "./ledger.ts";
-export { AGENT_META_KEY, FACTS_META_KEY, OBSERVED_META_KEY, RECEIPT_META_KEY, SERVER_VERSION, TOOLS, createMemoryServer, durationMs, retentionCutoff, serveStdio } from "./server.ts";
+export type { AsOf, AssertEvent, AssertInput, ConfirmEvent, ConfirmInput, Fact, FactProvenance, DigestKind, ForgetEvent, ForgetInput, HoldEvent, HoldInput, LedgerEvent, RepairEvent, RepairInput, SweepInput, RetractEvent, RetractInput, Source } from "./ledger.ts";
+export { AGENT_META_KEY, FACTS_META_KEY, OBSERVED_META_KEY, RECEIPT_META_KEY, REPAIR_MIN_AGE_MS, SERVER_VERSION, TOOLS, createMemoryServer, durationMs, retentionCutoff, serveStdio } from "./server.ts";
 export type { MemoryServerOptions } from "./server.ts";
 export { SCENARIOS, formatReport, runAll, runScenario } from "./evals.ts";
 export type { MemoryUnderTest, Op, Report, Scenario, ScenarioScore } from "./evals.ts";
 export { ledgerUnderTest, overwriteStoreUnderTest } from "./evals-ledger.ts";
 export { EVAL_REPORT_TYPE, ScenarioFileSchema, loadScenarios, signReport, verifyReport } from "./evals-file.ts";
 export type { EvalReportPredicate, ReportCheck, ScenarioFile } from "./evals-file.ts";
-export { cogneeStore, factMetadata, factText, langgraphStore, lettaStore, mem0Store, pgvectorStore, zepStore } from "./stores.ts";
+export { cogneeStore, entryOf, factMetadata, factText, langgraphStore, lettaStore, mem0Store, pgvectorStore, zepStore } from "./stores.ts";
 export { blastRadius, formatBlastRadius, loadReceipts } from "./blast.ts";
 export { memoryHttpHandler, serveMemoryHttp } from "./http.ts";
 export { PACK_TYPE, buildPack, formatPack, signPack, verifyPack } from "./pack.ts";
@@ -21,4 +21,4 @@ export type { ActionPack, ActionPackCheck, ActionPackVerification, ReceiptKeys }
 export type { CustodyPack, PackCheck, PackVerification } from "./pack.ts";
 export type { MemoryHttpOptions, RunningMemoryServer } from "./http.ts";
 export type { BlastRadius, ReceiptSummary } from "./blast.ts";
-export type { CogneeOptions, LangGraphStoreLike, LangGraphStoreOptions, LettaLike, LettaOptions, Mem0Like, Mem0Options, PgLike, PgvectorOptions, RemovalOutcome, Store, ZepLike, ZepOptions } from "./stores.ts";
+export type { CogneeOptions, LangGraphStoreLike, LangGraphStoreOptions, LettaLike, LettaOptions, Mem0Like, Mem0Options, PgLike, PgvectorOptions, RemovalOutcome, Store, StoreEntry, ZepLike, ZepOptions } from "./stores.ts";

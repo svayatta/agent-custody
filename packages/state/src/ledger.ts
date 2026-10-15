@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { createHash, createHmac } from "node:crypto";
 import { openStore, type EventStore } from "./storage.ts";
+import type { RemovalOutcome } from "./stores.ts";
 
 /** Where a write came from. A receipt id means the write went through a receipts producer and can be verified there. */
 export interface Source {
@@ -106,7 +107,26 @@ export interface HoldEvent {
   source: Source;
 }
 
-export type LedgerEvent = AssertEvent | RetractEvent | ConfirmEvent | ForgetEvent | HoldEvent;
+/**
+ * A repair records the removal of a store entry that the ledger has no fact for: the stores were written, then the
+ * ledger append failed. The factId is the id in the entry's custody metadata, which no assert carries.
+ */
+export interface RepairEvent {
+  eventId: string;
+  kind: "repair";
+  txTime: string;
+  factId: string;
+  actor: string;
+  reason: string;
+  source: Source;
+  /** the store the entry was in, and the store's id for it */
+  store: string;
+  externalId: string;
+  /** what the store answered: the same outcomes a retraction or forget reports */
+  outcome: RemovalOutcome;
+}
+
+export type LedgerEvent = AssertEvent | RetractEvent | ConfirmEvent | ForgetEvent | HoldEvent | RepairEvent;
 
 export interface AssertInput {
   /** the fact's id, when the caller had to know it before the append, as the memory server does for its stores; default a fresh UUID */
@@ -146,6 +166,8 @@ export interface HoldInput {
   reason: string;
   source?: Source;
 }
+
+export type RepairInput = Omit<RepairEvent, "eventId" | "kind" | "txTime" | "source"> & { source?: Source };
 
 export interface SweepInput {
   /** every fact the ledger learned of before this instant is forgotten, unless held or already forgotten */
@@ -302,6 +324,14 @@ export class Ledger {
   async release(input: HoldInput): Promise<HoldEvent> {
     if (!(await this.held(input.factId))) throw new Error(`fact ${input.factId} is not on hold`);
     const event: HoldEvent = { eventId: randomUUID(), kind: "release", txTime: this.now().toISOString(), factId: input.factId, actor: input.actor, reason: input.reason, source: input.source ?? { receiptId: null } };
+    await this.store.append(event);
+    return event;
+  }
+
+  /** Records the removal of a store entry with no fact in the ledger. Refuses a fact id that the ledger knows. */
+  async repair(input: RepairInput): Promise<RepairEvent> {
+    if (await this.factById(input.factId)) throw new Error(`fact ${input.factId} is in the ledger; repair removes only entries the ledger has no fact for`);
+    const event: RepairEvent = { eventId: randomUUID(), kind: "repair", txTime: this.now().toISOString(), factId: input.factId, actor: input.actor, reason: input.reason, source: input.source ?? { receiptId: null }, store: input.store, externalId: input.externalId, outcome: input.outcome };
     await this.store.append(event);
     return event;
   }

@@ -67,12 +67,13 @@ agent-custody-memory eval --verify report.json --key eval.pub
 
 Report: `{ "scenarios": [{ "name", "reads", "staleReads", "contradictions", "blastRadius", "correctReads", "failures": [] }], "totals": {…} }`; `--baseline` scores a naive overwrite store beside the ledger; exit 1 if the ledger regresses. In code: `runAll(system, scenarios)`, `runScenario`, `formatReport`.
 
-## `sweep` and `export`
+## `sweep`, `repair`, and `export`
 
 ```bash
 agent-custody-memory sweep --via gateway.json --reason "90-day retention" [--before <ISO>] [--space team:support] [--no-digest]
 agent-custody-memory sweep --ledger ledger.sqlite --before <ISO> --reason "…" [--space …] [--actor …] [--forget-key-env NAME] [--no-digest]
+agent-custody-memory repair --via gateway.json --reason "ledger outage" [--before <ISO instant>]
 agent-custody-memory export --ledger ledger.sqlite --out ledger.jsonl
 ```
 
-`--via` runs `memory.sweep` through a gateway as the principal in its grant, so the sweep is a receipted call; put it on a timer. The ledger-only form is for ledgers with nothing in front of them. `export` writes the auditable JSONL of any ledger, one event per line, which is also the feed for a warehouse.
+`--via` runs `memory.sweep` through a gateway as the principal in its grant, so the sweep is a receipted call; put it on a timer. The ledger-only form is for ledgers with nothing in front of them. `repair --via` runs [`memory.repair`](./memory#memory-repair) through a gateway, so the repair is a receipted call. It removes the store entries that the ledger has no fact for, which a failed ledger append leaves behind, verifies each removal, and prints `{ before, repaired, unlisted, stillHeld, unrecorded }`. It removes only entries stored before the cutoff, the earlier of `--before` and ten minutes ago, so a write in progress is safe. It exits 1 when `stillHeld` or `unrecorded` is not empty. It needs a gateway because the stores are configured on the memory server. `export` writes the auditable JSONL of any ledger, one event per line, which is also the feed for a warehouse.
