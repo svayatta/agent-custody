@@ -4,9 +4,12 @@
 // paths stays in clear: ids, key ids, timestamps, the tool name, the grant, the digests and their salts, the decision
 // and the ids of the policies behind it, the status, the provenance fields, and the note itself. Every other value
 // under a private rule leaves a commitment in its place, sha256 over a random salt and the canonical value, so a
-// reviewer who is later shown the value can check it belongs; an encrypted commitment carries the value as well,
-// under a key the customer holds (AES-256-GCM). A field or path added to the receipt later starts withheld, never in
-// clear. The signed note lists the withheld paths; a verifier trusts the note, not the shape of the data.
+// reviewer who is later shown the value and the salt can check it belongs; an encrypted commitment carries both as
+// well, under a key the customer holds (AES-256-GCM). The salt never appears in the receipt: without it a reviewer
+// cannot confirm a guess of a withheld value against the commitment (issue #126), and the digests over withheld
+// values are salted with material derived from the field salts, so nothing public confirms a guess against them
+// either. A field or path added to the receipt later starts withheld, never in clear. The signed note lists the
+// withheld paths; a verifier trusts the note, not the shape of the data.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { canonicalize, digestOf, sha256Hex } from "./crypto.ts";
 import type { AuthorizationPredicate } from "./receipt.ts";
@@ -45,9 +48,8 @@ export interface CaptureNote {
 
 export interface Withheld {
   $custody: "withheld";
-  /** sha256 over salt || canonical JSON of the value */
+  /** sha256 over salt || canonical JSON of the value; the salt is not in the receipt */
   sha256: string;
-  salt: string;
 }
 export interface Encrypted {
   $custody: "encrypted";
@@ -55,12 +57,18 @@ export interface Encrypted {
   /** sha256 of the key, so a reviewer knows which key reveals it */
   keyid: string;
   iv: string;
+  /** AES-256-GCM over the canonical JSON of `{ salt, value }` */
   ciphertext: string;
   tag: string;
   sha256: string;
-  salt: string;
 }
 export type Commitment = Withheld | Encrypted;
+/** What a disclosure carries at a withheld path: the value and the salt the commitment was made with. Without `value`, only the salt, for the holder to fill in. */
+export interface Disclosed {
+  $custody: "disclosed";
+  salt: string;
+  value?: unknown;
+}
 
 /** A 32-byte key from hex (64 chars) or base64 (44 chars), as an environment variable holds it. */
 export function captureKeyFrom(text: string): Buffer {
@@ -75,45 +83,61 @@ export function captureKeyId(key: Buffer): string {
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
 const B64 = /^[A-Za-z0-9+/]+=*$/;
-/** A well-formed commitment: the sha256 and the salt a verifier checks, and for an encrypted one the fields the key needs. A `$custody` tag alone is not one. */
+/** A well-formed commitment: the sha256 a verifier checks, and for an encrypted one the fields the key needs. A `$custody` tag alone is not one. */
 export function isCommitment(v: unknown): v is Commitment {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
   const c = v as Record<string, unknown>;
-  if (typeof c.sha256 !== "string" || !HEX64.test(c.sha256) || typeof c.salt !== "string" || !HEX32.test(c.salt)) return false;
+  if (typeof c.sha256 !== "string" || !HEX64.test(c.sha256)) return false;
   if (c.$custody === "withheld") return true;
   if (c.$custody !== "encrypted") return false;
   return c.alg === "A256GCM" && typeof c.keyid === "string" && HEX64.test(c.keyid) && [c.iv, c.ciphertext, c.tag].every((f) => typeof f === "string" && (f as string).length > 0 && B64.test(f as string));
 }
-function commit(value: unknown, salt: Buffer): string {
-  return sha256Hex(Buffer.concat([salt, Buffer.from(canonicalize(value), "utf8")]));
+/** A disclosed value as a disclosure carries it: the salt, and the value when the holder has filled it in. */
+export function isDisclosed(v: unknown): v is Disclosed {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const d = v as Record<string, unknown>;
+  return d.$custody === "disclosed" && typeof d.salt === "string" && HEX32.test(d.salt);
+}
+function commit(value: unknown, salt: string): string {
+  return sha256Hex(Buffer.concat([Buffer.from(salt, "hex"), Buffer.from(canonicalize(value), "utf8")]));
 }
 
-/** Replaces a value with its commitment, carrying the value encrypted when a key is given. */
-export function withhold(value: unknown, key?: Buffer): Commitment {
-  const salt = randomBytes(16);
+/** Replaces a value with its commitment, carrying the value and the salt encrypted when a key is given; the salt is returned to the caller, never written into the receipt. */
+export function withhold(value: unknown, key?: Buffer): { commitment: Commitment; salt: string } {
+  const salt = randomBytes(16).toString("hex");
   const sha256 = commit(value, salt);
-  if (!key) return { $custody: "withheld", sha256, salt: salt.toString("hex") };
+  if (!key) return { commitment: { $custody: "withheld", sha256 }, salt };
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const ciphertext = Buffer.concat([cipher.update(canonicalize(value), "utf8"), cipher.final()]);
-  return { $custody: "encrypted", alg: "A256GCM", keyid: captureKeyId(key), iv: iv.toString("base64"), ciphertext: ciphertext.toString("base64"), tag: cipher.getAuthTag().toString("base64"), sha256, salt: salt.toString("hex") };
+  const ciphertext = Buffer.concat([cipher.update(canonicalize({ salt, value }), "utf8"), cipher.final()]);
+  return { commitment: { $custody: "encrypted", alg: "A256GCM", keyid: captureKeyId(key), iv: iv.toString("base64"), ciphertext: ciphertext.toString("base64"), tag: cipher.getAuthTag().toString("base64"), sha256 }, salt };
 }
 
-/** True when `value` is what the commitment was made over. */
-export function checkCommitment(c: Commitment, value: unknown): boolean {
-  return commit(value, Buffer.from(c.salt, "hex")) === c.sha256;
+/** True when `value` under `salt` is what the commitment was made over. */
+export function checkCommitment(c: Commitment, value: unknown, salt: string): boolean {
+  return HEX32.test(salt) && commit(value, salt) === c.sha256;
 }
 
-/** The value behind an encrypted commitment, under the key that made it; checked against the commitment too. */
-export function reveal(c: Commitment, key: Buffer): unknown {
-  if (c.$custody !== "encrypted") throw new Error("this value was withheld without its value; only the party that holds it can supply it");
+/** The value and the salt behind an encrypted commitment, under the key that made it; checked against the commitment too. */
+export function reveal(c: Commitment, key: Buffer): { value: unknown; salt: string } {
+  if (c.$custody !== "encrypted") throw new Error("this value was withheld without its value; only the party that holds it can supply it, with its salt");
   if (c.keyid !== captureKeyId(key)) throw new Error(`this value was encrypted under key ${c.keyid.slice(0, 12)}…, not the one given`);
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(c.iv, "base64"));
   decipher.setAuthTag(Buffer.from(c.tag, "base64"));
   const text = Buffer.concat([decipher.update(Buffer.from(c.ciphertext, "base64")), decipher.final()]).toString("utf8");
-  const value = JSON.parse(text) as unknown;
-  if (!checkCommitment(c, value)) throw new Error("the decrypted value does not match its commitment");
-  return value;
+  const inner = JSON.parse(text) as { salt?: unknown; value?: unknown };
+  if (!inner || typeof inner !== "object" || typeof inner.salt !== "string" || !("value" in inner)) throw new Error("the decrypted content is not a salt and a value");
+  if (!checkCommitment(c, inner.value, inner.salt)) throw new Error("the decrypted value does not match its commitment");
+  return { value: inner.value, salt: inner.salt };
+}
+
+/**
+ * The salt of a digest over a part that holds withheld values: derived from the salts of those values, in note order,
+ * so whoever can restore the values can recompute the digest and nobody else can confirm a guess against it. No salt
+ * when nothing under the part is withheld: the values are public, and so may the digest be.
+ */
+export function digestSalt(salts: string[]): string | undefined {
+  return salts.length ? sha256Hex(Buffer.from(salts.join(""), "hex")) : undefined;
 }
 
 export function ruleFor(capture: CaptureConfig | undefined, tool: string): CaptureRule | undefined {
@@ -181,10 +205,10 @@ export function setAt<T>(root: T, path: Path, value: unknown): T {
 const CLEAR_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "session", "model", "tool", "consumed", "authorization", "capture"]);
 /** Inside the parts that carry values: what stays in clear beside them. */
 const CLEAR_IN = {
-  request: new Set(["argsDigest", "argsSalt", "provenance"]),
-  fact: new Set(["tool", "resultDigest", "resultSalt", "provenance"]),
+  request: new Set(["argsDigest", "provenance"]),
+  fact: new Set(["tool", "resultDigest", "provenance"]),
   policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]),
-  execution: new Set(["status", "resultDigest", "resultSalt", "provenance"]),
+  execution: new Set(["status", "resultDigest", "provenance"]),
   upstream: new Set(["provider", "signature", "bind"]),
 };
 /** The result's error flag is its status, so it stays in clear; its metadata carries whatever an upstream put there, so it never does. */
@@ -199,33 +223,41 @@ export interface CaptureContext {
   factResults?: Record<string, unknown>;
 }
 
+/** The view the issuer signs, and the salts behind its commitments by `pathKey`, which the issuer keeps and never signs. */
+export interface PrivateView<P> {
+  predicate: P;
+  salts: Record<string, string>;
+}
+
 /**
  * The statement a receipt carries under a tool's rule: the predicate with every non-structural value withheld as the
- * rule says, the three digests salted, and the note of what is withheld at `capture`. Under a clear rule, the
- * predicate itself. Applied by the issuer to every statement it signs, the authorization included.
+ * rule says, the three digests salted from the field salts, and the note of what is withheld at `capture`. Under a
+ * clear rule, the predicate itself and no salts. Applied by the issuer to every statement it signs, the authorization
+ * included.
  */
-export function privateView<P extends AuthorizationPredicate>(predicate: P, rule: CaptureRule | undefined, key?: Buffer, ctx: CaptureContext = {}): P {
+export function privateView<P extends AuthorizationPredicate>(predicate: P, rule: CaptureRule | undefined, key?: Buffer, ctx: CaptureContext = {}): PrivateView<P> {
   const mode = ruleMode(rule);
-  if (mode === "clear") return predicate;
+  if (mode === "clear") return { predicate, salts: {} };
   if (mode === "encrypted" && !key) throw new Error("capture mode encrypted needs captureKeyEnv");
   /** every value outside the three sides is withheld in the rule's mode: encrypted when any side is */
   const k = mode === "encrypted" ? key : undefined;
   const withheld: Path[] = [];
+  const salts: Record<string, string> = {};
   let out: Record<string, unknown> = plain(predicate as unknown as Record<string, unknown>);
   const hide = (path: Path, value: unknown, withKey: Buffer | undefined) => {
     // nothing and null carry nothing, so they stay as they are
     if (value === undefined || value === null) return;
-    out = setAt(out, path, withhold(value, withKey));
+    const w = withhold(value, withKey);
+    out = setAt(out, path, w.commitment);
+    salts[pathKey(path)] = w.salt;
     withheld.push(path);
   };
+  /** the digest of a part, salted from the salts of the withheld values under it */
+  const digest = (value: unknown, prefix: Path) => digestOf(value, digestSalt(withheld.filter((w) => under(w, prefix)).map((w) => salts[pathKey(w)]!)));
   /** a side captured field by field: the listed fields kept, the rest withheld; a value that is not a plain object withheld whole */
   const object = (path: Path, value: unknown, side: { clear: Set<string>; key: Buffer | undefined }, always = new Set<string>(), never = new Set<string>()) => {
     if (!isObject(value)) return hide(path, value, side.key);
     for (const [f, v] of Object.entries(value)) if (never.has(f) || !(side.clear.has(f) || always.has(f))) hide([...path, f], v, side.key);
-  };
-  const salted = (value: unknown) => {
-    const salt = randomBytes(16).toString("hex");
-    return { digest: digestOf(value, salt), salt };
   };
   const argsSide = sideOf(rule, "args", key);
   const resultSide = sideOf(rule, "result", key);
@@ -238,11 +270,7 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
           if (argsSide) object(["request", "args"], v, argsSide);
         } else if (!CLEAR_IN.request.has(f)) hide(["request", f], v, k);
       }
-      if (own(value, "args")) {
-        const s = salted(value.args);
-        out = setAt(out, ["request", "argsDigest"], s.digest);
-        out = setAt(out, ["request", "argsSalt"], s.salt);
-      }
+      if (own(value, "args")) out = setAt(out, ["request", "argsDigest"], digest(value.args, ["request", "args"]));
     } else if (key_ === "facts" && isObject(value)) {
       for (const [name, fact] of Object.entries(value)) {
         if (!isObject(fact)) {
@@ -257,11 +285,7 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
           } else if (!CLEAR_IN.fact.has(f)) hide(["facts", name, f], v, k);
         }
         const full = ctx.factResults?.[name];
-        if (full !== undefined) {
-          const s = salted(full);
-          out = setAt(out, ["facts", name, "resultDigest"], s.digest);
-          out = setAt(out, ["facts", name, "resultSalt"], s.salt);
-        }
+        if (full !== undefined) out = setAt(out, ["facts", name, "resultDigest"], digest(full, ["facts", name]));
       }
     } else if (key_ === "policy" && isObject(value)) {
       for (const [f, v] of Object.entries(value)) {
@@ -283,15 +307,11 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
           }
         } else if (!CLEAR_IN.execution.has(f)) hide(["execution", f], v, k);
       }
-      if (own(value, "result")) {
-        const s = salted(value.result);
-        out = setAt(out, ["execution", "resultDigest"], s.digest);
-        out = setAt(out, ["execution", "resultSalt"], s.salt);
-      }
+      if (own(value, "result")) out = setAt(out, ["execution", "resultDigest"], digest(value.result, ["execution", "result"]));
     } else hide([key_], value, k);
   }
   if (withheld.length) out.capture = { mode, withheld } satisfies CaptureNote;
-  return out as unknown as P;
+  return { predicate: out as unknown as P, salts };
 }
 
 // ---- the way back ----
@@ -303,6 +323,8 @@ export interface Restoration<P> {
   predicate: P;
   /** how each restored path came back, by `pathKey` */
   restored: Map<string, How>;
+  /** the salt of each restored path, by `pathKey`: what the digests over them are salted from */
+  salts: Map<string, string>;
   /** the withheld paths whose value could not be had */
   missing: Path[];
   /** paths where the note, the data, a disclosure, or the key contradict each other; each a reason a check must fail */
@@ -310,13 +332,14 @@ export interface Restoration<P> {
 }
 
 /**
- * The full statement behind a view, under its note: a path the note names must hold a commitment; the value at that
- * path in the disclosure, when there is one, must match the commitment; else the key reveals what was encrypted under
- * it; else the path stays withheld. A disclosure is a partial predicate, the real values at the withheld paths, as
- * `agent-custody reveal` writes it. Nothing here throws: the problems are reported, so a verifier fails the right check.
+ * The full statement behind a view, under its note: a path the note names must hold a commitment; the disclosure, when
+ * it carries that path as `{ $custody: "disclosed", salt, value }`, must match the commitment; else the key reveals
+ * what was encrypted under it; else the path stays withheld. A disclosure is a partial predicate with those at the
+ * withheld paths, as `agent-custody reveal` writes it. Nothing here throws: the problems are reported, so a verifier
+ * fails the right check.
  */
 export function restorePaths<P>(predicate: P, note: CaptureNote | undefined, disclosed?: unknown, key?: Buffer): Restoration<P> {
-  const r: Restoration<P> = { predicate, restored: new Map(), missing: [], problems: [] };
+  const r: Restoration<P> = { predicate, restored: new Map(), salts: new Map(), missing: [], problems: [] };
   if (!note) return r;
   const keyid = key ? captureKeyId(key) : null;
   for (const path of note.withheld) {
@@ -326,21 +349,33 @@ export function restorePaths<P>(predicate: P, note: CaptureNote | undefined, dis
       continue;
     }
     const d = disclosed === undefined ? undefined : getAt(disclosed, path);
-    if (d !== undefined) {
-      if (!checkCommitment(c, d)) {
+    if (d !== undefined && !(isDisclosed(d) && !("value" in d))) {
+      if (!isDisclosed(d)) {
+        r.problems.push({ path, error: `the disclosed ${pathText(path)} must be { "$custody": "disclosed", "salt", "value" }, as agent-custody reveal writes it; a value alone cannot be checked` });
+        continue;
+      }
+      if (!checkCommitment(c, d.value, d.salt)) {
         r.problems.push({ path, error: `the disclosed ${pathText(path)} does not match the receipt's commitment` });
         continue;
       }
-      r.predicate = setAt(r.predicate, path, d);
+      r.predicate = setAt(r.predicate, path, d.value);
       r.restored.set(pathKey(path), "disclosed");
+      r.salts.set(pathKey(path), d.salt);
     } else if (key && c.$custody === "encrypted" && c.keyid === keyid) {
       try {
-        r.predicate = setAt(r.predicate, path, reveal(c, key));
+        const back = reveal(c, key);
+        r.predicate = setAt(r.predicate, path, back.value);
         r.restored.set(pathKey(path), "decrypted");
+        r.salts.set(pathKey(path), back.salt);
       } catch (e) {
         r.problems.push({ path, error: `${pathText(path)}: ${e instanceof Error ? e.message : String(e)}` });
       }
     } else r.missing.push(path);
   }
   return r;
+}
+
+/** The salt a digest over `prefix` was made with, once every withheld path under it is restored: see `digestSalt`. */
+export function digestSaltFor<P>(r: Restoration<P>, note: CaptureNote | undefined, prefix: Path): string | undefined {
+  return digestSalt((note?.withheld ?? []).filter((w) => under(w, prefix)).map((w) => r.salts.get(pathKey(w)) ?? ""));
 }

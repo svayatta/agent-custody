@@ -1,6 +1,6 @@
 // Independent verification of a receipt bundle. Needs only public keys, and optionally a copy of the log.
 import { canonicalize, digestOf, dsseVerifiers, dsseVerify, type Envelope, type PublicKeyRef } from "./crypto.ts";
-import { getAt, isCommitment, pathKey, pathText, restorePaths, under, type How } from "./capture.ts";
+import { digestSaltFor, getAt, isCommitment, pathKey, pathText, restorePaths, under, type How } from "./capture.ts";
 import { delegationHasParent, delegationValidAt, describeChain, verifyDelegation } from "./delegation.ts";
 import { leafHash, MerkleLog, verifyConsistency, verifyInclusion } from "./log.ts";
 import { checkProvider, checkUpstream, contentDigest, isProviderAttestation, type ProviderSecrets } from "./upstream.ts";
@@ -28,8 +28,8 @@ export interface VerifyOptions {
   logId?: string;
   /**
    * The withheld values, as `agent-custody reveal` writes them or the party that holds them hands them over: a partial
-   * predicate with the real value at each withheld path (`{ receiptId, request: { args: { reason } }, execution: { result, error, upstream: { rawBody } }, policy: { errors }, facts: { <name>: { value, args } } }`).
-   * The digests are then recomputed and every disclosed value checked against its commitment.
+   * predicate with `{ $custody: "disclosed", salt, value }` at each withheld path (`{ receiptId, request: { args: { reason: {...} } }, execution: { result: { content: {...} }, error, upstream: { rawBody } }, policy: { errors }, facts: { <name>: { value, args } } }`).
+   * The digests are then recomputed and every disclosed value checked against its commitment under its salt.
    */
   disclosed?: Record<string, unknown> & { receiptId?: string };
   /** the customer's capture key: encrypted fields are revealed and the digests recomputed */
@@ -122,7 +122,7 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   const args = region(["request", "args"]);
   if (args.problem) add("request args digest", false, args.problem);
   else if (args.missing.length) add("request args digest", subjectOk, committedNote(args.missing));
-  else add("request args digest", digestOf(full.request.args, p.request.argsSalt) === p.request.argsDigest && subjectOk, args.how ? `recomputed from ${args.how} values` : undefined);
+  else add("request args digest", digestOf(full.request.args, digestSaltFor(back, note, ["request", "args"])) === p.request.argsDigest && subjectOk, args.how ? `recomputed from ${args.how} values` : undefined);
   // a captured fact: its commitments are checked against a disclosure or the key; the policy decided on the real value
   for (const name of Object.keys(p.facts)) {
     for (const part of ["value", "args"] as const) {
@@ -136,11 +136,11 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   let result: { content: unknown; isError?: boolean } | null = null;
   if (executedOrFailed) {
     const r = region(["execution", "result"]);
-    const ex = full.execution as { result: unknown; resultDigest: string; resultSalt?: string };
+    const ex = full.execution as { result: unknown; resultDigest: string };
     if (r.problem) add("execution result digest", false, r.problem);
     else if (r.missing.length) add("execution result digest", true, committedNote(r.missing));
     else {
-      add("execution result digest", digestOf(ex.result, ex.resultSalt) === ex.resultDigest, r.how ? `recomputed from ${r.how} values` : undefined);
+      add("execution result digest", digestOf(ex.result, digestSaltFor(back, note, ["execution", "result"])) === ex.resultDigest, r.how ? `recomputed from ${r.how} values` : undefined);
       result = ex.result as { content: unknown; isError?: boolean };
     }
   }

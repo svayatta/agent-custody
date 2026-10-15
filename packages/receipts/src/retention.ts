@@ -28,6 +28,9 @@ function receiptOf(leaf: string): { receiptId: string | null; timestamp: string 
  * Prunes every leaf whose receipt timestamp is before the cutoff. Leaves already pruned, and leaves that are not
  * receipts, are left as they are. Rewrites the log file in place and deletes the pruned receipts' bundle files.
  */
+/** where the issuer keeps the salts behind a receipt's commitments, under the receipts directory; private, pruned with the receipt */
+export const SALTS_DIR = "salts";
+
 export function pruneLog(logFile: string, before: string, receiptsDir?: string): PruneResult {
   const lines = readFileSync(logFile, "utf8").split("\n").filter((l) => l.trim());
   const out: string[] = [];
@@ -48,6 +51,8 @@ export function pruneLog(logFile: string, before: string, receiptsDir?: string):
           unlinkSync(bundle);
           result.bundlesRemoved++;
         }
+        const salts = join(receiptsDir, SALTS_DIR, `${receiptId}.json`);
+        if (existsSync(salts)) unlinkSync(salts);
       }
     } else {
       out.push(line);

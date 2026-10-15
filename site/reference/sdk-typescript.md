@@ -123,17 +123,17 @@ Exported from `@agent-custody/receipts`. `createIssuer(key, receiptsDir, log, { 
 
 | export | signature | what it does |
 | --- | --- | --- |
-| `privateView` | `(predicate, rule: CaptureRule \| undefined, key?: Buffer, ctx?: CaptureContext) => predicate` | the statement a receipt carries under a rule: every non-structural value withheld as the rule says, the digests salted, the `capture` note set; the predicate itself under a clear rule. `ctx.clearFactArgs` names the fact arguments that may stay in clear, `ctx.factResults` the lookup results behind the fact digests |
-| `restorePaths` | `(predicate, note: CaptureNote \| undefined, disclosed?, key?: Buffer) => Restoration` | the statement with every restorable path put back: `{ predicate, restored: Map<pathKey, "disclosed" \| "decrypted">, missing: Path[], problems: { path, error }[] }`; a path the note names that holds no commitment, or a disclosure that contradicts one, is a problem, never a throw |
-| `withhold` | `(value, key?: Buffer) => Commitment` | a commitment over a random salt and the canonical value; with a key, the value under AES-256-GCM beside it |
-| `checkCommitment` | `(c: Commitment, value) => boolean` | true when `value` is what the commitment was made over |
-| `reveal` | `(c: Commitment, key: Buffer) => unknown` | the value behind an encrypted commitment, checked against it; throws for a `withheld` commitment or a key that is not the one it was encrypted under |
-| `isCommitment` | `(v) => boolean` | whether a value is a commitment |
+| `privateView` | `(predicate, rule: CaptureRule \| undefined, key?: Buffer, ctx?: CaptureContext) => { predicate, salts }` | the statement a receipt carries under a rule: every non-structural value withheld as the rule says, the digests salted from the field salts, the `capture` note set; and the salts by `pathKey`, which the issuer keeps in `receipts/salts/<id>.json` and never signs. The predicate itself and no salts under a clear rule. `ctx.clearFactArgs` names the fact arguments that may stay in clear, `ctx.factResults` the lookup results behind the fact digests |
+| `restorePaths` | `(predicate, note: CaptureNote \| undefined, disclosed?, key?: Buffer) => Restoration` | the statement with every restorable path put back: `{ predicate, restored: Map<pathKey, "disclosed" \| "decrypted">, salts: Map<pathKey, string>, missing: Path[], problems: { path, error }[] }`; a path the note names that holds no commitment, a disclosed value without its salt, or a disclosure that contradicts a commitment, is a problem, never a throw. `digestSaltFor(restoration, note, prefix)` is the salt of the digest over a part once its values are back |
+| `withhold` | `(value, key?: Buffer) => { commitment, salt }` | a commitment over a random salt and the canonical value, and the salt, which the receipt never carries; with a key, the value and the salt under AES-256-GCM inside the commitment |
+| `checkCommitment` | `(c: Commitment, value, salt) => boolean` | true when `value` under `salt` is what the commitment was made over |
+| `reveal` | `(c: Commitment, key: Buffer) => { value, salt }` | the value and the salt behind an encrypted commitment, checked against it; throws for a `withheld` commitment or a key that is not the one it was encrypted under |
+| `isCommitment`, `isDisclosed`, `digestSalt` | `(v) => boolean`, `(v) => boolean`, `(salts: string[]) => string \| undefined` | whether a value is a well-formed commitment; whether it is a disclosed value `{ $custody: "disclosed", salt, value? }`; the salt of a digest over values with these salts, none when there are none |
 | `ruleMode`, `ruleFor` | `(rule) => CaptureMode`, `(capture: CaptureConfig \| undefined, tool) => CaptureRule \| undefined` | the one mode a rule withholds in (`encrypted` when any side is, `digest` when any side is private, else `clear`); the tool's rule, or the `"*"` rule |
 | `getAt`, `setAt`, `pathKey`, `pathText`, `under` | `(root, path: Path)`, `(root, path, value) => root'`, `(path) => string`, `(path) => string`, `(path, prefix) => boolean` | own-property reads and copying writes at a path (a field named `__proto__` stays a field); a path as a map key, as text, and whether it lies under a prefix |
 | `captureKeyFrom`, `captureKeyId` | `(text) => Buffer`, `(key) => string` | the 32-byte key from its hex or base64 form; the sha256 of a key, which an encrypted commitment carries as `keyid` |
 
-Types: `CaptureMode`, `CaptureSide`, `CaptureRule`, `CaptureConfig`, `CaptureNote` (`{ mode, withheld: Path[] }`), `Path`, `CaptureContext`, `Restoration`, `How`, `Withheld`, `Encrypted`, `Commitment`.
+Types: `CaptureMode`, `CaptureSide`, `CaptureRule`, `CaptureConfig`, `CaptureNote` (`{ mode, withheld: Path[] }`), `Path`, `CaptureContext`, `PrivateView`, `Restoration`, `How`, `Withheld`, `Encrypted`, `Commitment`, `Disclosed`.
 
 ## The log client
 

@@ -32,8 +32,8 @@ export function canonicalize(value: unknown): string {
   };
   return JSON.stringify(sort(value));
 }
-/** sha256 over the canonical JSON; with a salt (hex), over salt || canonical, as a receipt under a capture rule carries it */
-export const digestOf = async (v: unknown, salt?: string) => hex(await sha256(salt ? concat(unhex(salt), enc.encode(canonicalize(v))) : enc.encode(canonicalize(v))));
+/** sha256 over the canonical JSON. A digest over withheld values is salted from their salts, which the browser never has, so it recomputes only digests over values in clear. */
+export const digestOf = async (v: unknown) => hex(await sha256(enc.encode(canonicalize(v))));
 
 /** Loads an Ed25519 public key from SPKI PEM. keyid is the sha256 of the DER. */
 export async function publicKeyFromPem(pem: string): Promise<PublicKey> {
@@ -213,7 +213,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   // The note decides, never the shape of the data: a path it names must hold a commitment (else the check fails), and
   // commitment-shaped data it does not name is ordinary data, inside the digest.
   // a commitment is one only when it carries what a verifier checks: the sha256 and the salt, and for an encrypted one the fields the key needs
-  const isCommitment = (v: any) => !!v && typeof v === "object" && !Array.isArray(v) && /^[0-9a-f]{64}$/.test(v.sha256) && /^[0-9a-f]{32}$/.test(v.salt) && (v.$custody === "withheld" || (v.$custody === "encrypted" && v.alg === "A256GCM" && /^[0-9a-f]{64}$/.test(v.keyid) && [v.iv, v.ciphertext, v.tag].every((f: unknown) => typeof f === "string" && f.length > 0 && /^[A-Za-z0-9+/]+=*$/.test(f))));
+  const isCommitment = (v: any) => !!v && typeof v === "object" && !Array.isArray(v) && /^[0-9a-f]{64}$/.test(v.sha256) && (v.$custody === "withheld" || (v.$custody === "encrypted" && v.alg === "A256GCM" && /^[0-9a-f]{64}$/.test(v.keyid) && [v.iv, v.ciphertext, v.tag].every((f: unknown) => typeof f === "string" && f.length > 0 && /^[A-Za-z0-9+/]+=*$/.test(f))));
   type Path = string[];
   const note = p.capture as { mode: string; withheld: Path[] } | undefined;
   const under = (w: Path, prefix: Path) => prefix.length <= w.length && prefix.every((s, i) => w[i] === s);
@@ -235,7 +235,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   const args = region(["request", "args"]);
   if (args.problem) add("request args digest", false, args.problem);
   else if (args.paths.length) add("request args digest", subjectOk, committedNote(args.paths));
-  else add("request args digest", (await digestOf(p.request.args, p.request.argsSalt)) === p.request.argsDigest && subjectOk);
+  else add("request args digest", (await digestOf(p.request.args)) === p.request.argsDigest && subjectOk);
   for (const name of Object.keys(p.facts)) {
     for (const part of ["value", "args"]) {
       const r = region(["facts", name, part]);
@@ -250,7 +250,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
     if (r.problem) add("execution result digest", false, r.problem);
     else if (r.paths.length) add("execution result digest", true, committedNote(r.paths));
     else {
-      add("execution result digest", (await digestOf(p.execution.result, p.execution.resultSalt)) === p.execution.resultDigest);
+      add("execution result digest", (await digestOf(p.execution.result)) === p.execution.resultDigest);
       resultInClear = true;
     }
   }

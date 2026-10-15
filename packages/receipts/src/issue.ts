@@ -1,5 +1,6 @@
 // Signing, logging and writing a receipt. Shared by every producer: the gateway and the SDK.
 import { mkdirSync, writeFileSync } from "node:fs";
+import { SALTS_DIR } from "./retention.ts";
 import { join } from "node:path";
 import { privateView, ruleFor, under, type CaptureConfig, type CaptureContext, type CaptureNote } from "./capture.ts";
 import { canonicalize, dsseSign, type KeyPair } from "./crypto.ts";
@@ -31,14 +32,24 @@ export interface IssuerOptions {
 export function createIssuer(key: KeyPair, receiptsDir: string, log: string | LogSink, opts: IssuerOptions = {}): Issuer {
   const sink = typeof log === "string" ? fileLog(log, key) : log;
   mkdirSync(receiptsDir, { recursive: true });
-  const view = <P extends AuthorizationPredicate>(predicate: P, ctx?: CaptureContext): P => privateView(predicate, ruleFor(opts.capture?.rules, predicate.tool.name), opts.capture?.key, ctx);
+  const view = <P extends AuthorizationPredicate>(predicate: P, ctx?: CaptureContext) => privateView(predicate, ruleFor(opts.capture?.rules, predicate.tool.name), opts.capture?.key, ctx);
   /** The view committed in an authorization, by receipt id: the receipt that follows carries the same commitments and salts for the parts they share. */
-  const committed = new Map<string, { request: AuthorizationPredicate["request"]; facts: AuthorizationPredicate["facts"]; policy: AuthorizationPredicate["policy"]; note: CaptureNote | undefined }>();
+  const committed = new Map<string, { request: AuthorizationPredicate["request"]; facts: AuthorizationPredicate["facts"]; policy: AuthorizationPredicate["policy"]; note: CaptureNote | undefined; salts: Record<string, string> }>();
+  /**
+   * The salts behind a statement's commitments, kept beside the receipts and never in them: `receipts/salts/<id>.json`.
+   * They are what makes a disclosure possible for a value withheld without its value, and what a reviewer must not
+   * be handed, since with them a guess can be confirmed. Written at authorization and again, complete, at issue.
+   */
+  const keepSalts = (receiptId: string, salts: Record<string, string>) => {
+    if (!Object.keys(salts).length) return;
+    mkdirSync(join(receiptsDir, SALTS_DIR), { recursive: true });
+    writeFileSync(join(receiptsDir, SALTS_DIR, `${receiptId}.json`), JSON.stringify({ receiptId, salts }, null, 2));
+  };
   return {
     keyid: key.keyid,
     log: sink,
     async issue(predicate, ctx) {
-      let v = view(predicate, ctx);
+      let { predicate: v, salts } = view(predicate, ctx);
       const prior = committed.get(predicate.receiptId);
       if (prior) {
         committed.delete(predicate.receiptId);
@@ -48,7 +59,9 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
         const withheld = [...(prior.note?.withheld ?? []), ...rest];
         v = { ...v, request: prior.request, facts: prior.facts, policy: prior.policy, ...(withheld.length && mode ? { capture: { mode, withheld } } : {}) };
         if (!withheld.length) delete (v as { capture?: unknown }).capture;
+        salts = { ...Object.fromEntries(Object.entries(salts).filter(([k]) => !shared(JSON.parse(k) as string[]))), ...prior.salts };
       }
+      keepSalts(predicate.receiptId, salts);
       const envelope = dsseSign(RECEIPT_TYPE, buildStatement(v), key);
       const entry = await sink.append(canonicalize(envelope));
       const bundle: ReceiptBundle = { envelope, treeHead: entry.treeHead, inclusion: entry.inclusion };
@@ -59,8 +72,9 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
       return bundle;
     },
     async authorize(predicate, ctx) {
-      const v = view(predicate, ctx);
-      committed.set(predicate.receiptId, { request: v.request, facts: v.facts, policy: v.policy, note: v.capture });
+      const { predicate: v, salts } = view(predicate, ctx);
+      committed.set(predicate.receiptId, { request: v.request, facts: v.facts, policy: v.policy, note: v.capture, salts });
+      keepSalts(predicate.receiptId, salts);
       const envelope = dsseSign(RECEIPT_TYPE, buildAuthorizationStatement(v), key);
       const entry = await sink.append(canonicalize(envelope));
       const bundle: AuthorizationBundle = { envelope, treeHead: entry.treeHead, inclusion: entry.inclusion };

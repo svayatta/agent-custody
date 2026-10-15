@@ -33,8 +33,8 @@ const decodeAll = (text: string): string => {
 };
 /** everything a receipt file says, decoded, nested payloads included */
 const bundleText = (b: ReceiptBundle): string => decodeAll(JSON.stringify(b));
-/** every file in the receipts directory and every log line, decoded */
-const onDisk = (receiptsDir: string, logFile: string): string => decodeAll([...readdirSync(receiptsDir).map((f) => readFileSync(join(receiptsDir, f), "utf8")), readFileSync(logFile, "utf8")].join("\n"));
+/** every file under the receipts directory (the issuer's salts included) and every log line, decoded */
+const onDisk = (receiptsDir: string, logFile: string): string => decodeAll([...readdirSync(receiptsDir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => readFileSync(join(e.parentPath, e.name), "utf8")), readFileSync(logFile, "utf8")].join("\n"));
 /** an exporter that keeps what the issuer hands it, and what the two real exporters would send of it */
 const keepExports = () => {
   const seen: string[] = [];

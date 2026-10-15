@@ -31,9 +31,8 @@ export interface FactRecord {
   args: Record<string, unknown>;
   /** the value as recorded; under a capture rule, commitments where fields were withheld (the receipt's `capture` note names them) */
   value: unknown;
-  /** the digest of the lookup's full result; under a capture rule salted with `resultSalt` */
+  /** the digest of the lookup's full result; salted from the fact's field salts when any are withheld */
   resultDigest: string;
-  resultSalt?: string;
   provenance: "observed";
 }
 
@@ -50,8 +49,8 @@ export interface ReceiptPredicate {
   model: { id: string | null; provenance: "claimed" };
   /** upstream names which of several upstreams served the tool; absent when the gateway has one */
   tool: { name: string; provenance: Provenance; upstream?: string };
-  /** `args` as the receipt carries them; `argsDigest` is over the whole call's arguments, salted with `argsSalt` under a capture rule. Withheld fields hold commitments. */
-  request: { args: Record<string, unknown>; argsDigest: string; argsSalt?: string; provenance: "claimed" };
+  /** `args` as the receipt carries them; `argsDigest` is over the whole call's arguments, salted from the field salts when any are withheld. Withheld fields hold commitments. */
+  request: { args: Record<string, unknown>; argsDigest: string; provenance: "claimed" };
   facts: Record<string, FactRecord>;
   /**
    * Fact ids the agent had been shown, through this gateway, by the time of this call: every id an upstream declared
@@ -71,10 +70,9 @@ export interface ReceiptPredicate {
   execution:
     | {
         status: "executed" | "failed";
-        /** the result as the receipt carries it; `resultDigest` is over the whole result, salted with `resultSalt` under a capture rule */
+        /** the result as the receipt carries it; `resultDigest` is over the whole result, salted from the field salts when any are withheld */
         result: unknown;
         resultDigest: string;
-        resultSalt?: string;
         provenance: Provenance;
         /** an upstream's own signature over what it returned, bound to this receipt and checked with the upstream's key; or a provider's delivery, checked with the provider's shared secret */
         upstream?: UpstreamEvidence;

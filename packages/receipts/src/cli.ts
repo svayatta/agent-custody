@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { hostname, userInfo } from "node:os";
 import { captureKeyFrom, getAt, pathText, restorePaths, setAt } from "./capture.ts";
+import { SALTS_DIR } from "./retention.ts";
 import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
 import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
 import type { Envelope } from "./crypto.ts";
@@ -503,15 +504,22 @@ async function main(argv: string[]): Promise<number> {
       const key = captureKeyFrom(secretFrom(values["capture-key-env"]));
       const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
       const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as ReceiptStatement).predicate;
-      // every withheld path the key reveals goes into the disclosure at its own path; a path withheld as a digest only
-      // carries no value to reveal, so it is left out, and said so
+      // every withheld path the key reveals goes into the disclosure at its own path, value and salt; a path withheld
+      // as a digest only carries no value to reveal: with the issuer's salts file beside the receipt its salt goes in
+      // for the holder to add the value to, and either way it is said so
       const back = restorePaths(p, p.capture, undefined, key);
       for (const x of back.problems) throw new Error(x.error);
+      const saltsFile = join(dirname(file), SALTS_DIR, `${p.receiptId}.json`);
+      const kept = existsSync(saltsFile) ? (JSON.parse(readFileSync(saltsFile, "utf8")) as { salts?: Record<string, string> }).salts ?? {} : {};
       let disclosure: Record<string, unknown> = { receiptId: p.receiptId };
-      for (const path of p.capture?.withheld ?? []) if (back.restored.has(JSON.stringify(path))) disclosure = setAt(disclosure, path, getAt(back.predicate, path));
+      for (const path of p.capture?.withheld ?? []) {
+        const k = JSON.stringify(path);
+        if (back.restored.has(k)) disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: back.salts.get(k), value: getAt(back.predicate, path) });
+        else if (kept[k]) disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: kept[k] });
+      }
       const notRevealed = back.missing.map(pathText);
       const text = JSON.stringify(disclosure, null, 2);
-      const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them.` : "";
+      const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them${Object.keys(kept).length ? ", by filling in \"value\" beside the salt written for each" : ` (their salts would be in ${saltsFile})`}.` : "";
       if (values.out) {
         writeFileSync(values.out, text);
         console.log(`disclosure for receipt ${p.receiptId} written to ${values.out}; verify it with --disclose ${values.out}.${note}`);
