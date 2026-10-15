@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { hostname, userInfo } from "node:os";
-import { captureKeyFrom, isCommitment, restore, type CaptureNote } from "./capture.ts";
+import { captureKeyFrom, getAt, pathText, restorePaths, setAt } from "./capture.ts";
 import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -477,7 +477,7 @@ async function main(argv: string[]): Promise<number> {
       if (!file || issuerKeyFiles.length === 0) throw new Error("verify needs <bundle> --issuer-key (alias --gateway-key)");
       const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
       const captureKey = values["capture-key-env"] ? captureKeyFrom(secretFrom(values["capture-key-env"])) : undefined;
-      const disclosed = values.disclose ? (JSON.parse(readFileSync(values.disclose, "utf8")) as { args?: Record<string, unknown>; result?: unknown }) : undefined;
+      const disclosed = values.disclose ? (JSON.parse(readFileSync(values.disclose, "utf8")) as Record<string, unknown>) : undefined;
       const fetchedLogKeys = values["log-url"] ? (await fetchLogKeys(values["log-url"])).keys : [];
       const logKeys = [...(values["log-key"] ?? []).map(loadPublicKey), ...fetchedLogKeys];
       const result = verifyBundle(bundle, {
@@ -503,26 +503,13 @@ async function main(argv: string[]): Promise<number> {
       const key = captureKeyFrom(secretFrom(values["capture-key-env"]));
       const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
       const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as ReceiptStatement).predicate;
-      // a part withheld as a digest only carries no value to reveal; it is left out, and said so
-      const notRevealed: string[] = [];
-      const back = (name: string, view: unknown, note: CaptureNote | undefined): unknown => {
-        if (!note) return undefined;
-        const r = restore(view, note, undefined, key);
-        if (!r) notRevealed.push(name);
-        return r?.value;
-      };
-      const args = back("args", p.request.args, p.request.capture);
-      const ex = p.execution.status === "executed" || p.execution.status === "failed" ? p.execution : null;
-      const resultNote = ex?.capture;
-      const result = ex ? back("result", ex.result, resultNote ? { ...resultNote, withheld: resultNote.withheld.filter((w: string) => w !== "upstream.rawBody") } : undefined) : undefined;
-      const evidence = ex?.upstream;
-      const upstreamRawBody = resultNote && evidence && isProviderAttestation(evidence) && isCommitment(evidence.rawBody) ? back("the provider's delivery body", evidence.rawBody, { mode: resultNote.mode, withheld: ["*"], whole: true }) : undefined;
-      const facts = Object.fromEntries(Object.entries(p.facts).map(([k, f]) => {
-        const value = back(`fact ${k}`, f.value, f.capture);
-        const fargs = back(`fact ${k} args`, f.args, f.argsCapture);
-        return [k, { ...(value !== undefined ? { value } : {}), ...(fargs !== undefined ? { args: fargs } : {}) }];
-      }).filter(([, v]) => Object.keys(v as object).length));
-      const disclosure = { receiptId: p.receiptId, ...(args !== undefined ? { args } : {}), ...(result !== undefined ? { result } : {}), ...(upstreamRawBody !== undefined ? { upstreamRawBody } : {}), ...(Object.keys(facts).length ? { facts } : {}) };
+      // every withheld path the key reveals goes into the disclosure at its own path; a path withheld as a digest only
+      // carries no value to reveal, so it is left out, and said so
+      const back = restorePaths(p, p.capture, undefined, key);
+      for (const x of back.problems) throw new Error(x.error);
+      let disclosure: Record<string, unknown> = { receiptId: p.receiptId };
+      for (const path of p.capture?.withheld ?? []) if (back.restored.has(JSON.stringify(path))) disclosure = setAt(disclosure, path, getAt(back.predicate, path));
+      const notRevealed = back.missing.map(pathText);
       const text = JSON.stringify(disclosure, null, 2);
       const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them.` : "";
       if (values.out) {

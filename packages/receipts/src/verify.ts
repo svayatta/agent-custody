@@ -1,9 +1,9 @@
 // Independent verification of a receipt bundle. Needs only public keys, and optionally a copy of the log.
 import { canonicalize, digestOf, dsseVerifiers, dsseVerify, type Envelope, type PublicKeyRef } from "./crypto.ts";
-import { isCommitment, restore, type CaptureNote, type Restored } from "./capture.ts";
+import { getAt, isCommitment, pathKey, pathText, restorePaths, under, type How } from "./capture.ts";
 import { delegationHasParent, delegationValidAt, describeChain, verifyDelegation } from "./delegation.ts";
 import { leafHash, MerkleLog, verifyConsistency, verifyInclusion } from "./log.ts";
-import { checkProvider, checkUpstream, contentDigest, isProviderAttestation, type ProviderSecrets, UPSTREAM_SIG_META_KEY } from "./upstream.ts";
+import { checkProvider, checkUpstream, contentDigest, isProviderAttestation, type ProviderSecrets } from "./upstream.ts";
 import { AUTHORIZATION_PREDICATE_TYPE, RECEIPT_PREDICATE_TYPE, RECEIPT_TYPE, TREEHEAD_TYPE, type AuthorizationStatement, type ReceiptBundle, type ReceiptStatement, type TreeHead } from "./receipt.ts";
 
 export interface Check {
@@ -26,8 +26,12 @@ export interface VerifyOptions {
   logFile?: string;
   /** If given, every tree head in the bundle must name this log, so a head from another tenant's log cannot be presented as this one's. */
   logId?: string;
-  /** the withheld values, as `agent-custody reveal` writes them or the party that holds them hands them over: the digests are then recomputed and every commitment checked */
-  disclosed?: { args?: Record<string, unknown>; result?: unknown; facts?: Record<string, { value?: unknown; args?: Record<string, unknown> }>; upstreamRawBody?: string };
+  /**
+   * The withheld values, as `agent-custody reveal` writes them or the party that holds them hands them over: a partial
+   * predicate with the real value at each withheld path (`{ receiptId, request: { args: { reason } }, execution: { result, error, upstream: { rawBody } }, policy: { errors }, facts: { <name>: { value, args } } }`).
+   * The digests are then recomputed and every disclosed value checked against its commitment.
+   */
+  disclosed?: Record<string, unknown> & { receiptId?: string };
   /** the customer's capture key: encrypted fields are revealed and the digests recomputed */
   captureKey?: Buffer;
 }
@@ -88,85 +92,71 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     add("principal is claimed, not attested", p.principal.provenance === "claimed", "no signed delegation in this receipt");
   }
 
-  // Private evidence: a withheld part is committed to by its digest in the signed statement, and the capture note in
-  // that statement says what is withheld. A part is recomputed when the receipt carries the values, when they are
-  // disclosed, or when the capture key reveals them; otherwise the check passes as a commitment and says so. The note
-  // decides, never the shape of the data: a field it names must be a commitment, and commitment-shaped data it does
-  // not name is ordinary data, inside the digest.
+  // Private evidence: the signed capture note names every path whose value is withheld behind a commitment. Each path
+  // is put back when the receipt carries the value, when it is disclosed, or when the capture key reveals it; a digest
+  // over values that are all back is recomputed (with the salt the statement carries), and otherwise the check passes
+  // as a commitment and says so. The note decides, never the shape of the data: a path it names must hold a
+  // commitment, and commitment-shaped data it does not name is ordinary data, inside the digest.
   const subjectOk = st.subject[0]?.digest.sha256 === p.request.argsDigest;
-  const withheldNote = (c: CaptureNote) => `committed, not recomputed: ${c.whole ? "the value is" : `${c.withheld.length} field(s) are`} withheld (${c.mode}); ${c.mode === "encrypted" ? "give the capture key or " : ""}disclose them to recompute`;
-  const errorOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
-  let argsBack: Restored | null = null;
-  try {
-    argsBack = restore(p.request.args, p.request.capture, opts.disclosed?.args, opts.captureKey);
-    if (argsBack) add("request args digest", digestOf(argsBack.value) === p.request.argsDigest && subjectOk, argsBack.how === "clear" ? undefined : `recomputed from ${argsBack.how} values`);
-    else add("request args digest", subjectOk, withheldNote(p.request.capture!));
-  } catch (e) {
-    add("request args digest", false, errorOf(e));
+  const note = p.capture;
+  if (opts.disclosed && typeof opts.disclosed === "object" && "receiptId" in opts.disclosed && opts.disclosed.receiptId !== undefined) {
+    add("disclosure names this receipt", opts.disclosed.receiptId === p.receiptId, opts.disclosed.receiptId === p.receiptId ? undefined : `the disclosure is for receipt ${String(opts.disclosed.receiptId)}`);
   }
+  const back = restorePaths(p, note, opts.disclosed, opts.captureKey);
+  const full = back.predicate;
+  const committedNote = (paths: string[][]) => {
+    const encrypted = paths.filter((w) => (getAt(p, w) as { $custody?: string } | undefined)?.$custody === "encrypted").length;
+    return `committed, not recomputed: ${paths.length} value(s) withheld${encrypted ? ` (${encrypted} encrypted)` : ""}; ${encrypted ? "give the capture key or " : ""}disclose them to recompute`;
+  };
+  const claimed = new Set<string>();
+  /** the state of the withheld paths under a prefix, and the paths it claims for its check line */
+  const region = (prefix: string[]) => {
+    const paths = (note?.withheld ?? []).filter((w) => under(w, prefix));
+    for (const w of paths) claimed.add(pathKey(w));
+    const problem = back.problems.find((x) => under(x.path, prefix))?.error ?? null;
+    const missing = back.missing.filter((w) => under(w, prefix));
+    const hows = [...new Set(paths.map((w) => back.restored.get(pathKey(w))).filter((h): h is How => !!h))];
+    const how = hows.length === 2 ? "disclosed and decrypted" : hows[0];
+    return { paths, problem, missing, how };
+  };
+  const args = region(["request", "args"]);
+  if (args.problem) add("request args digest", false, args.problem);
+  else if (args.missing.length) add("request args digest", subjectOk, committedNote(args.missing));
+  else add("request args digest", digestOf(full.request.args, p.request.argsSalt) === p.request.argsDigest && subjectOk, args.how ? `recomputed from ${args.how} values` : undefined);
   // a captured fact: its commitments are checked against a disclosure or the key; the policy decided on the real value
-  for (const [name, f] of Object.entries(p.facts)) {
-    if (f.capture) {
-      try {
-        const r = restore(f.value, f.capture, opts.disclosed?.facts?.[name]?.value, opts.captureKey);
-        add(`fact ${name} value`, true, r ? `commitments hold against the ${r.how} value` : withheldNote(f.capture));
-      } catch (e) {
-        add(`fact ${name} value`, false, errorOf(e));
-      }
-    }
-    if (f.argsCapture) {
-      try {
-        const r = restore(f.args, f.argsCapture, opts.disclosed?.facts?.[name]?.args, opts.captureKey);
-        add(`fact ${name} args`, true, r ? `commitments hold against the ${r.how} value` : withheldNote(f.argsCapture));
-      } catch (e) {
-        add(`fact ${name} args`, false, errorOf(e));
-      }
+  for (const name of Object.keys(p.facts)) {
+    for (const part of ["value", "args"] as const) {
+      const r = region(["facts", name, part]);
+      if (!r.paths.length) continue;
+      if (r.problem) add(`fact ${name} ${part}`, false, r.problem);
+      else add(`fact ${name} ${part}`, true, r.missing.length ? committedNote(r.missing) : `commitments hold against the ${r.how} value`);
     }
   }
-  let resultBack: Restored | null = null;
-  const resultNote = p.execution.status === "executed" || p.execution.status === "failed" ? p.execution.capture : undefined;
-  const evidence = p.execution.status === "executed" || p.execution.status === "failed" ? p.execution.upstream : undefined;
-  // The provider's delivery body is listed on the result's note but lives in the evidence, and the gateway dropped the
-  // metadata copy from the view. It is restored first, so the result can be put back together exactly as it was.
-  const bodyWithheld = !!resultNote?.withheld.includes("upstream.rawBody");
-  let body: string | null = evidence && isProviderAttestation(evidence) && typeof evidence.rawBody === "string" ? evidence.rawBody : null;
-  let bodyError: string | null = null;
-  if (bodyWithheld && evidence && isProviderAttestation(evidence) && isCommitment(evidence.rawBody) && resultNote) {
-    try {
-      const r = restore(evidence.rawBody, { mode: resultNote.mode, withheld: ["*"], whole: true }, opts.disclosed?.upstreamRawBody, opts.captureKey);
-      if (r) body = String(r.value);
-    } catch (e) {
-      bodyError = errorOf(e);
+  const executedOrFailed = p.execution.status === "executed" || p.execution.status === "failed";
+  let result: { content: unknown; isError?: boolean } | null = null;
+  if (executedOrFailed) {
+    const r = region(["execution", "result"]);
+    const ex = full.execution as { result: unknown; resultDigest: string; resultSalt?: string };
+    if (r.problem) add("execution result digest", false, r.problem);
+    else if (r.missing.length) add("execution result digest", true, committedNote(r.missing));
+    else {
+      add("execution result digest", digestOf(ex.result, ex.resultSalt) === ex.resultDigest, r.how ? `recomputed from ${r.how} values` : undefined);
+      result = ex.result as { content: unknown; isError?: boolean };
     }
   }
-  const resultOnlyNote = resultNote ? { ...resultNote, withheld: resultNote.withheld.filter((w) => w !== "upstream.rawBody") } : undefined;
-  // the note's "upstream.rawBody" is held to the same rule as a field: the evidence must carry the commitment it names
-  const bodyNoteProblem = bodyWithheld && !(evidence && isProviderAttestation(evidence) && isCommitment(evidence.rawBody)) ? "the capture note says the delivery body is withheld, but the receipt carries no commitment for it" : null;
-  if (bodyNoteProblem) add("execution result digest", false, bodyNoteProblem);
-  else if (p.execution.status === "executed" || p.execution.status === "failed") {
-    try {
-      const restored = restore(p.execution.result, resultOnlyNote && (resultOnlyNote.whole || resultOnlyNote.withheld.length) ? resultOnlyNote : undefined, opts.disclosed?.result, opts.captureKey);
-      if (restored && bodyWithheld) {
-        // the digest was over the result with the delivery in its metadata; without the body it stays a commitment
-        if (body === null || bodyError) resultBack = null;
-        else {
-          const v = restored.value as { _meta?: Record<string, unknown> };
-          resultBack = { ...restored, value: { ...v, _meta: { ...(v._meta ?? {}), [UPSTREAM_SIG_META_KEY]: { ...(evidence as object), rawBody: body } } } };
-        }
-      } else resultBack = restored;
-      if (bodyError) add("execution result digest", false, bodyError);
-      else if (resultBack) add("execution result digest", digestOf(resultBack.value) === p.execution.resultDigest, resultBack.how === "clear" ? undefined : `recomputed from ${resultBack.how} values`);
-      else add("execution result digest", true, withheldNote(resultOnlyNote && (resultOnlyNote.whole || resultOnlyNote.withheld.length) ? resultOnlyNote : { mode: resultNote!.mode, withheld: ["upstream.rawBody"] }));
-    } catch (e) {
-      add("execution result digest", false, errorOf(e));
-    }
+  // every other withheld path gets its own line: a message, a denial reason, a provider's delivery body, a part added later
+  for (const w of note?.withheld ?? []) {
+    if (claimed.has(pathKey(w))) continue;
+    const problem = back.problems.find((x) => pathKey(x.path) === pathKey(w))?.error;
+    const how = back.restored.get(pathKey(w));
+    add(`withheld ${pathText(w)}`, !problem, problem ?? (how ? `holds against the ${how} value` : committedNote([w])));
   }
-  if ((p.execution.status === "executed" || p.execution.status === "failed") && evidence) {
-    const result = resultBack?.value as { content: unknown; isError?: boolean } | undefined;
+  const evidence = executedOrFailed && "upstream" in p.execution ? p.execution.upstream : undefined;
+  if (executedOrFailed && evidence) {
+    const body = isProviderAttestation(evidence) ? (full.execution as { upstream?: { rawBody?: unknown } }).upstream?.rawBody : null;
     if (isProviderAttestation(evidence)) {
       if (opts.providerSecrets) {
-        if (bodyError) add("upstream signature (provider secret)", false, bodyError);
-        else if (!body || !result) add("upstream signature not checked", true, "the result and the delivery body are withheld; disclose them or give the capture key to check the provider's delivery");
+        if (typeof body !== "string" || !result) add("upstream signature not checked", true, "the result or the delivery body is withheld; disclose them or give the capture key to check the provider's delivery");
         else {
           const u = checkProvider({ ...evidence, rawBody: body }, opts.providerSecrets, { timestamp: p.timestamp, result });
           add("upstream signature (provider secret)", u.ok, u.ok ? u.keyid : u.error);
@@ -184,7 +174,9 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     // a deny that was not enforced (observe mode, enforced: false on the receipt) may sit beside an executed call; an enforced one never does
     const consistent = p.policy.decision === "allow" ? p.execution.status !== "denied" : p.policy.enforced === false ? p.execution.status !== "denied" : p.execution.status === "denied";
     add("policy decision consistent with execution", consistent, `${p.policy.decision}${p.policy.enforced === false ? " (observe mode, not enforced)" : ""} -> ${p.execution.status}`);
-    add("no policy errors on an allow", !(p.policy.decision === "allow" && p.policy.errors.length > 0));
+    // a withheld error list is a non-empty one: the issuer leaves an empty list in clear
+    const errors = isCommitment(p.policy.errors) || (Array.isArray(p.policy.errors) && p.policy.errors.length > 0);
+    add("no policy errors on an allow", !(p.policy.decision === "allow" && errors));
   }
 
   const logKeys = opts.logKeys ?? [];

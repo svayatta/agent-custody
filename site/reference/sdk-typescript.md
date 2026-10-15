@@ -119,20 +119,21 @@ Types: `AgentCard`, `ResolvedCard`, `A2aServerOptions`, `RunningA2aServer`.
 
 ## Private evidence
 
-Exported from `@agent-custody/receipts`. The gateway and `createSdkIssuer` apply them from the config, and the verifier uses them to restore the values; the behaviour is on the [gateway](./gateway#private-evidence) and [verify](./verify#reveal) pages.
+Exported from `@agent-custody/receipts`. `createIssuer(key, receiptsDir, log, { capture: { rules, key } })` applies the rule to every statement it signs (`issue(predicate, ctx?)`, `authorize(predicate, ctx?)`), which is how the gateway and `createSdkIssuer` get it, and the verifier uses `restorePaths` to put the values back; the behaviour is on the [gateway](./gateway#private-evidence) and [verify](./verify#reveal) pages.
 
 | export | signature | what it does |
 | --- | --- | --- |
-| `captureArgs`, `captureResult` | `(value, side: CaptureSide \| undefined, key?: Buffer)` → `{ view, note?: CaptureNote }` | the view a receipt carries of the arguments or the result under a side's rule, and the note saying what is withheld; `captureResult` keeps `isError` and `_meta` in clear. `captureValue(value, side, key?, alwaysClear?)` is the general form |
+| `privateView` | `(predicate, rule: CaptureRule \| undefined, key?: Buffer, ctx?: CaptureContext) => predicate` | the statement a receipt carries under a rule: every non-structural value withheld as the rule says, the digests salted, the `capture` note set; the predicate itself under a clear rule. `ctx.clearFactArgs` names the fact arguments that may stay in clear, `ctx.factResults` the lookup results behind the fact digests |
+| `restorePaths` | `(predicate, note: CaptureNote \| undefined, disclosed?, key?: Buffer) => Restoration` | the statement with every restorable path put back: `{ predicate, restored: Map<pathKey, "disclosed" \| "decrypted">, missing: Path[], problems: { path, error }[] }`; a path the note names that holds no commitment, or a disclosure that contradicts one, is a problem, never a throw |
 | `withhold` | `(value, key?: Buffer) => Commitment` | a commitment over a random salt and the canonical value; with a key, the value under AES-256-GCM beside it |
 | `checkCommitment` | `(c: Commitment, value) => boolean` | true when `value` is what the commitment was made over |
 | `reveal` | `(c: Commitment, key: Buffer) => unknown` | the value behind an encrypted commitment, checked against it; throws for a `withheld` commitment or a key that is not the one it was encrypted under |
-| `restore` | `(view, disclosed?, key?: Buffer) => Restored \| null` | the full value behind a view, `{ value, how: "clear" \| "disclosed" \| "decrypted" }`, or `null` when it cannot be had; throws when a disclosure or the key contradicts a commitment |
-| `isCommitment`, `commitmentsIn` | `(v) => boolean`, `(view) => Record<string, Commitment>` | whether a value is a commitment; the commitments in a view by field, `{ "*": c }` when the whole value is one |
+| `isCommitment` | `(v) => boolean` | whether a value is a commitment |
+| `ruleMode`, `ruleFor` | `(rule) => CaptureMode`, `(capture: CaptureConfig \| undefined, tool) => CaptureRule \| undefined` | the one mode a rule withholds in (`encrypted` when any side is, `digest` when any side is private, else `clear`); the tool's rule, or the `"*"` rule |
+| `getAt`, `setAt`, `pathKey`, `pathText`, `under` | `(root, path: Path)`, `(root, path, value) => root'`, `(path) => string`, `(path) => string`, `(path, prefix) => boolean` | own-property reads and copying writes at a path (a field named `__proto__` stays a field); a path as a map key, as text, and whether it lies under a prefix |
 | `captureKeyFrom`, `captureKeyId` | `(text) => Buffer`, `(key) => string` | the 32-byte key from its hex or base64 form; the sha256 of a key, which an encrypted commitment carries as `keyid` |
-| `ruleFor` | `(capture: CaptureConfig \| undefined, tool) => CaptureRule \| undefined` | the tool's rule, or the `"*"` rule |
 
-Types: `CaptureMode`, `CaptureSide`, `CaptureRule`, `CaptureConfig`, `CaptureNote`, `Withheld`, `Encrypted`, `Commitment`, `Restored`.
+Types: `CaptureMode`, `CaptureSide`, `CaptureRule`, `CaptureConfig`, `CaptureNote` (`{ mode, withheld: Path[] }`), `Path`, `CaptureContext`, `Restoration`, `How`, `Withheld`, `Encrypted`, `Commitment`.
 
 ## The log client
 

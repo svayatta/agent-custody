@@ -256,7 +256,7 @@ src/splunk.ts      Splunk export: one HTTP Event Collector event per receipt, to
 src/rest.ts        the REST connector: an HTTP API described as tools, standing where an MCP upstream stands
 src/a2a.ts         agents delegating to agents: a remote A2A agent as an upstream, and the gateway serving A2A itself in front of it
 src/upstream.ts    attested execution: an upstream signs its result for the receipt; the verifier checks it with the upstream key
-src/capture.ts     private evidence: per-tool capture rules, withheld fields as salted commitments or encrypted under the customer's key, restore and reveal
+src/capture.ts     private evidence: per-tool capture rules applied by the issuer to the whole statement, withheld values as salted commitments or encrypted under the customer's key, restore and reveal
 vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them
 src/verify.ts      offline verification, the human-readable report, and the audit that a later log extends an earlier one
 src/cli.ts         keygen, grant, gateway, hook, serve, log, prune, verify, reveal, audit
@@ -312,7 +312,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 - Pre-commit authorization for consequential tools: named in `precommit`, a call is signed and logged before it is forwarded, withheld if the log will not take it, and its receipt carries the committed authorization with proof that it precedes the execution.
 - The grant on every call (issue #97): expiry and revocation are checked on every call and again before the forward, in every mode, on the MCP, HTTP, and A2A fronts; `agent-custody revoke` revokes a grant and every grant delegated from it. The remote log's answer is verified against pinned keys before a pre-committed call goes upstream (issue #99). The portal verifies an address only from the account's own session before a provider sign-in can link to it (issue #103). The verifier recomputes the execution result digest (issue #104). The Stripe webhook ignores a repeated or out-of-order event (issue #105).
 - Agent-to-agent delegation under custody: the A2A upstream and the gateway's A2A front; receipts per delegation with the delegate's card as a fact. A Google ADK `RemoteA2aAgent`, or any A2A client, is pointed at the gateway and a refused delegation comes back as a rejected task the delegate never saw. The delegate does not yet countersign its answer; the receipt attests what the gateway sent and observed, not what the delegate did with it.
-- Private evidence: per-tool capture rules, withheld fields as commitments, encrypted under the customer's key, revealed and recomputed by the verifier.
+- Private evidence: per-tool capture rules, applied by the issuer to the whole statement so nothing outside a fixed structural list is in clear under a private rule; withheld values as salted commitments, encrypted under the customer's key, revealed and recomputed by the verifier; the digests salted so a guess cannot be confirmed.
 
 **Next, in the order it pays off**
 

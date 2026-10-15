@@ -32,7 +32,8 @@ export function canonicalize(value: unknown): string {
   };
   return JSON.stringify(sort(value));
 }
-export const digestOf = async (v: unknown) => hex(await sha256(enc.encode(canonicalize(v))));
+/** sha256 over the canonical JSON; with a salt (hex), over salt || canonical, as a receipt under a capture rule carries it */
+export const digestOf = async (v: unknown, salt?: string) => hex(await sha256(salt ? concat(unhex(salt), enc.encode(canonicalize(v))) : enc.encode(canonicalize(v))));
 
 /** Loads an Ed25519 public key from SPKI PEM. keyid is the sha256 of the DER. */
 export async function publicKeyFromPem(pem: string): Promise<PublicKey> {
@@ -206,69 +207,89 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   } else {
     add("principal is claimed, not attested", p.principal.provenance === "claimed", "no signed delegation in this receipt");
   }
-  // Private evidence (mirrors src/verify.ts): a withheld part is committed to by its digest in the signed statement,
-  // and the signed capture note says what is withheld. The browser has no key and takes no disclosure, so it
-  // recomputes what the receipt carries in clear and reports the rest as committed. The note decides, never the shape
-  // of the data: a field the note names must be a commitment (else the check fails), and commitment-shaped data the
-  // note does not name is ordinary data, inside the digest.
+  // Private evidence (mirrors src/verify.ts): the signed capture note names every path whose value is withheld behind
+  // a commitment. The browser has no key and takes no disclosure, so a digest over withheld values passes as committed
+  // and says so; a digest over values the receipt carries in clear is recomputed, with the salt the statement carries.
+  // The note decides, never the shape of the data: a path it names must hold a commitment (else the check fails), and
+  // commitment-shaped data it does not name is ordinary data, inside the digest.
   const isCommitment = (v: any) => !!v && typeof v === "object" && !Array.isArray(v) && (v.$custody === "withheld" || v.$custody === "encrypted");
-  type Note = { mode: string; withheld: string[]; whole?: boolean };
-  /** null when the note matches the view; otherwise why it does not */
-  const noteProblem = (view: any, note: Note): string | null => {
-    if (note.whole) return isCommitment(view) ? null : "the capture note says the value is withheld whole, but the receipt carries no commitment";
-    if (!view || typeof view !== "object" || Array.isArray(view)) return "the capture note names withheld fields, but the receipt carries no object";
-    for (const name of note.withheld) if (!isCommitment(view[name])) return `the capture note says field "${name}" is withheld, but the receipt carries no commitment for it`;
-    return null;
+  type Path = string[];
+  const note = p.capture as { mode: string; withheld: Path[] } | undefined;
+  const under = (w: Path, prefix: Path) => prefix.length <= w.length && prefix.every((s, i) => w[i] === s);
+  const getAt = (root: any, path: Path) => path.reduce((v, k) => (v && typeof v === "object" && !Array.isArray(v) && Object.prototype.hasOwnProperty.call(v, k) ? v[k] : undefined), root);
+  const pathText = (w: Path) => w.map((s) => (/^[A-Za-z0-9_-]+$/.test(s) ? s : JSON.stringify(s))).join(".");
+  const committedNote = (paths: Path[]) => {
+    const encrypted = paths.filter((w) => getAt(p, w)?.$custody === "encrypted").length;
+    return `committed, not recomputed: ${paths.length} value(s) withheld${encrypted ? ` (${encrypted} encrypted)` : ""}; ${encrypted ? "give the capture key or " : ""}disclose them with the command-line verifier to recompute`;
   };
-  const withheldNote = (c: Note) => `committed, not recomputed: ${c.whole ? "the value is" : `${c.withheld.length} field(s) are`} withheld (${c.mode}); ${c.mode === "encrypted" ? "give the capture key or " : ""}disclose them with the command-line verifier to recompute`;
+  const claimed = new Set<string>();
+  /** the withheld paths under a prefix, and the first one the receipt bears no commitment for */
+  const region = (prefix: Path) => {
+    const paths = (note?.withheld ?? []).filter((w) => under(w, prefix));
+    for (const w of paths) claimed.add(JSON.stringify(w));
+    const bad = paths.find((w) => !isCommitment(getAt(p, w)));
+    return { paths, problem: bad ? `the capture note says ${pathText(bad)} is withheld, but the receipt carries no commitment for it` : null };
+  };
   const subjectOk = st.subject[0]?.digest.sha256 === p.request.argsDigest;
-  const argsNote = p.request.capture as Note | undefined;
-  if (argsNote) {
-    const problem = noteProblem(p.request.args, argsNote);
-    add("request args digest", !problem && subjectOk, problem ?? withheldNote(argsNote));
-  } else add("request args digest", (await digestOf(p.request.args)) === p.request.argsDigest && subjectOk);
-  for (const [name, f] of Object.entries(p.facts) as [string, any][]) {
-    if (f.capture) { const problem = noteProblem(f.value, f.capture); add(`fact ${name} value`, !problem, problem ?? withheldNote(f.capture)); }
-    if (f.argsCapture) { const problem = noteProblem(f.args, f.argsCapture); add(`fact ${name} args`, !problem, problem ?? withheldNote(f.argsCapture)); }
+  const args = region(["request", "args"]);
+  if (args.problem) add("request args digest", false, args.problem);
+  else if (args.paths.length) add("request args digest", subjectOk, committedNote(args.paths));
+  else add("request args digest", (await digestOf(p.request.args, p.request.argsSalt)) === p.request.argsDigest && subjectOk);
+  for (const name of Object.keys(p.facts)) {
+    for (const part of ["value", "args"]) {
+      const r = region(["facts", name, part]);
+      if (!r.paths.length) continue;
+      add(`fact ${name} ${part}`, !r.problem, r.problem ?? committedNote(r.paths));
+    }
   }
   const executedOrFailed = p.execution.status === "executed" || p.execution.status === "failed";
-  const resultNote = executedOrFailed ? (p.execution.capture as Note | undefined) : undefined;
-  const resultOnlyNote = resultNote ? { ...resultNote, withheld: resultNote.withheld.filter((w) => w !== "upstream.rawBody") } : undefined;
-  const resultWithheld = !!resultOnlyNote && (resultOnlyNote.whole || resultOnlyNote.withheld.length > 0);
-  const isProvider = (v: any) => !!v && (v.provider === "stripe-webhook" || v.provider === "github-delivery") && (typeof v.rawBody === "string" || isCommitment(v.rawBody));
-  // whether the delivery body is withheld is read from the signed note, as for every field, and the evidence must bear it out
-  const bodyWithheld = !!resultNote?.withheld.includes("upstream.rawBody");
-  const bodyNoteProblem = bodyWithheld && !(executedOrFailed && p.execution.upstream && isProvider(p.execution.upstream) && isCommitment((p.execution.upstream as any).rawBody)) ? "the capture note says the delivery body is withheld, but the receipt carries no commitment for it" : null;
+  let resultInClear = false;
   if (executedOrFailed) {
-    if (bodyNoteProblem) add("execution result digest", false, bodyNoteProblem);
-    else if (resultWithheld) { const problem = noteProblem(p.execution.result, resultOnlyNote!); add("execution result digest", !problem, problem ?? withheldNote(resultOnlyNote!)); }
-    else if (bodyWithheld) add("execution result digest", true, withheldNote({ mode: resultNote!.mode, withheld: ["upstream.rawBody"] }));
-    else add("execution result digest", (await digestOf(p.execution.result)) === p.execution.resultDigest);
+    const r = region(["execution", "result"]);
+    if (r.problem) add("execution result digest", false, r.problem);
+    else if (r.paths.length) add("execution result digest", true, committedNote(r.paths));
+    else {
+      add("execution result digest", (await digestOf(p.execution.result, p.execution.resultSalt)) === p.execution.resultDigest);
+      resultInClear = true;
+    }
   }
-  if (executedOrFailed && p.execution.upstream && (resultWithheld || bodyWithheld) && (opts.providerSecrets || (opts.upstreamKeys?.length ?? 0) > 0)) {
-    add("upstream signature not checked", true, "the result is withheld; disclose it with the command-line verifier to check the upstream's evidence against it");
-  } else if ((p.execution.status === "executed" || p.execution.status === "failed") && p.execution.upstream && isProvider(p.execution.upstream)) {
+  // every other withheld path gets its own line: a message, a denial reason, a provider's delivery body, a part added later
+  for (const w of note?.withheld ?? []) {
+    if (claimed.has(JSON.stringify(w))) continue;
+    const ok = isCommitment(getAt(p, w));
+    add(`withheld ${pathText(w)}`, ok, ok ? committedNote([w]) : `the capture note says ${pathText(w)} is withheld, but the receipt carries no commitment for it`);
+  }
+  const isProvider = (v: any) => !!v && (v.provider === "stripe-webhook" || v.provider === "github-delivery") && (typeof v.rawBody === "string" || isCommitment(v.rawBody)) && typeof v.signature === "string" && typeof v.bind === "string";
+  if (executedOrFailed && p.execution.upstream && isProvider(p.execution.upstream)) {
     if (opts.providerSecrets) {
-      const u = await checkProvider(p.execution.upstream, opts.providerSecrets, p.timestamp, p.execution.result);
-      add("upstream signature (provider secret)", u.ok, u.detail);
+      if (!resultInClear || typeof p.execution.upstream.rawBody !== "string") add("upstream signature not checked", true, "the result or the delivery body is withheld; disclose them with the command-line verifier to check the provider's delivery");
+      else {
+        const u = await checkProvider(p.execution.upstream, opts.providerSecrets, p.timestamp, p.execution.result);
+        add("upstream signature (provider secret)", u.ok, u.detail);
+      }
     }
-  } else if ((p.execution.status === "executed" || p.execution.status === "failed") && p.execution.upstream && (opts.upstreamKeys?.length ?? 0) > 0) {
-    const u = await dsseVerify(p.execution.upstream.envelope, opts.upstreamKeys!);
-    let ok = u.ok && p.execution.upstream.envelope.payloadType === UPSTREAM_TYPE;
-    let detail = u.ok ? `keyid ${short(u.keyid)}` : u.error;
-    if (u.ok) {
-      const expectedDigest = await digestOf({ content: p.execution.result.content, isError: !!p.execution.result.isError });
-      if (u.payload.receiptId !== p.receiptId) { ok = false; detail = "signed for a different receipt"; }
-      else if (u.payload.tool !== p.tool.name) { ok = false; detail = `signed for tool ${u.payload.tool}`; }
-      else if (u.payload.contentDigest !== expectedDigest) { ok = false; detail = "signed content differs from the result in the receipt"; }
+  } else if (executedOrFailed && p.execution.upstream && (opts.upstreamKeys?.length ?? 0) > 0) {
+    if (!resultInClear) add("upstream signature not checked", true, "the result is withheld; disclose it with the command-line verifier to check the upstream's signature against it");
+    else {
+      const u = await dsseVerify(p.execution.upstream.envelope, opts.upstreamKeys!);
+      let ok = u.ok && p.execution.upstream.envelope.payloadType === UPSTREAM_TYPE;
+      let detail = u.ok ? `keyid ${short(u.keyid)}` : u.error;
+      if (u.ok) {
+        const expectedDigest = await digestOf({ content: p.execution.result.content, isError: !!p.execution.result.isError });
+        if (u.payload.receiptId !== p.receiptId) { ok = false; detail = "signed for a different receipt"; }
+        else if (u.payload.tool !== p.tool.name) { ok = false; detail = `signed for tool ${u.payload.tool}`; }
+        else if (u.payload.contentDigest !== expectedDigest) { ok = false; detail = "signed content differs from the result in the receipt"; }
+      }
+      add("upstream signature (upstream key)", ok, detail);
     }
-    add("upstream signature (upstream key)", ok, detail);
   }
   if (p.policy) {
     // a deny that was not enforced (observe mode, enforced: false on the receipt) may sit beside an executed call; an enforced one never does
     const consistent = p.policy.decision === "allow" ? p.execution.status !== "denied" : p.policy.enforced === false ? p.execution.status !== "denied" : p.execution.status === "denied";
     add("policy decision consistent with execution", consistent, `${p.policy.decision}${p.policy.enforced === false ? " (observe mode, not enforced)" : ""} -> ${p.execution.status}`);
-    add("no policy errors on an allow", !(p.policy.decision === "allow" && p.policy.errors.length > 0));
+    // a withheld error list is a non-empty one: the issuer leaves an empty list in clear
+    const errors = isCommitment(p.policy.errors) || (Array.isArray(p.policy.errors) && p.policy.errors.length > 0);
+    add("no policy errors on an allow", !(p.policy.decision === "allow" && errors));
   }
   const logKeys = opts.logKeys ?? [];
   if (p.authorization) {

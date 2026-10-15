@@ -40,7 +40,7 @@ const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
 const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as ReceiptStatement).predicate;
 console.log(`   the agent got: ${(r.content[0] as { text: string }).text}`);
 console.log(`   the receipt carries: args ${JSON.stringify(Object.fromEntries(Object.entries(p.request.args).map(([k, v]) => [k, typeof v === "object" ? `<${(v as { $custody: string }).$custody}>` : v])))}`);
-console.log(`   withheld: args ${JSON.stringify(p.request.capture)}, result ${JSON.stringify((p.execution as { capture?: unknown }).capture)}, fact customer ${JSON.stringify(p.facts.customer!.capture)}`);
+console.log(`   withheld (${p.capture!.mode}): ${p.capture!.withheld.map((w) => w.join(".")).join(", ")}`);
 // the statement is base64 inside the file: a leak check reads it decoded, the authorization inside it too
 const statement = Buffer.from(bundle.envelope.payload, "base64").toString();
 const authorization = p.authorization ? Buffer.from(p.authorization.envelope.payload, "base64").toString() : "";
@@ -60,15 +60,15 @@ const disclosureFile = join(fx.dir, "disclosure.json");
 const reveal = spawnSync(process.execPath, [cli, "reveal", file, "--capture-key-env", "EXAMPLE_CAPTURE_KEY", "--out", disclosureFile], { encoding: "utf8" });
 if (reveal.status !== 0) throw new Error(reveal.stderr);
 console.log(`   ${reveal.stdout.trim()}`);
-const disclosure = JSON.parse(readFileSync(disclosureFile, "utf8")) as { args: Record<string, unknown>; facts: Record<string, unknown> };
-console.log(`   revealed reason: ${JSON.stringify(disclosure.args.reason)}`);
-console.log(`   revealed customer record: ${JSON.stringify(disclosure.facts.customer)}`);
+const disclosure = JSON.parse(readFileSync(disclosureFile, "utf8")) as { request: { args: Record<string, unknown> }; facts: { customer: { value: unknown } } };
+console.log(`   revealed reason: ${JSON.stringify(disclosure.request.args.reason)}`);
+console.log(`   revealed customer record: ${JSON.stringify(disclosure.facts.customer.value)}`);
 const verified = spawnSync(process.execPath, [cli, "verify", file, "--issuer-key", fx.gatewayPub, "--principal-key", fx.principalPub, "--upstream-key", fx.upstreamPub, "--log", fx.logFile, "--capture-key-env", "EXAMPLE_CAPTURE_KEY"], { encoding: "utf8" });
 if (verified.status !== 0) throw new Error(verified.stdout + verified.stderr);
 console.log(verified.stdout.split("\n").filter((l) => /args digest|execution result digest|upstream signature|RESULT/.test(l)).map((l) => `   ${l}`).join("\n"));
 
 step(5, "a disclosure that lies about the note fails the commitment");
-const lie = verifyBundle(bundle, { ...opts, disclosed: { args: { ...args, reason: "a different note" } } });
+const lie = verifyBundle(bundle, { ...opts, disclosed: { request: { args: { reason: "a different note" } } } });
 console.log(`   ${formatReport(lie).split("\n").find((l) => /args digest/.test(l))}`);
 if (!bare.ok || !lie.checks.some((c) => c.name === "request args digest" && !c.ok)) throw new Error("expected the bare receipt to verify and the lying disclosure to fail");
 console.log("\nOK");

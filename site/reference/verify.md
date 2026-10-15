@@ -17,7 +17,7 @@ agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principa
 | `--upstream-key` | an upstream that signs its results; the execution then verifies as attested |
 | `--stripe-secret-env`, `--github-secret-env` | shared secrets for provider deliveries carried in the receipt |
 | `--log` | a copy of the log file; the root is recomputed at the receipt's tree size and compared |
-| `--disclose` | a disclosure file, `{ "receiptId", "args"?, "result"?, "facts"?: { "<name>": { "value"?, "args"? } }, "upstreamRawBody"? }`, holding the values a capture rule withheld, as `reveal` writes it or as the party that holds them hands it over; each value is checked against its commitment and the digests are recomputed from it |
+| `--disclose` | a disclosure file: `{ "receiptId", … }` with the real values at the paths a capture rule withheld (`request.args.<field>`, `execution.result.<field>`, `execution.error`, `execution.upstream.rawBody`, `policy.errors`, `facts.<name>.value.<field>`, `facts.<name>.args.<field>`), any part of them, as `reveal` writes it or as the party that holds them hands it over; each value is checked against its commitment and the digests are recomputed from it; a file for another receipt is refused |
 | `--capture-key-env` | the environment variable holding the customer's capture key; encrypted fields are decrypted, checked against their commitments, and the digests recomputed |
 | `--json` | machine-readable output |
 
@@ -42,11 +42,13 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | delegation binds principal and agent, valid at receipt time | the grant is for this principal and agent and the receipt's time is inside its window |
 | executed tool within delegated scope | if the tool ran, the grant covered it |
 | principal is claimed, not attested | SDK receipts: the principal is a config string and labelled so |
-| request args digest | the arguments match their digest and the statement's subject: recomputed when they are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when fields are withheld and neither is given it passes as committed, the detail saying "committed, not recomputed" and how many fields are withheld; a disclosure that contradicts a commitment fails it with the field named |
-| execution result digest | executed and failed calls: the result matches `execution.resultDigest`, under the same rules; a provider delivery withheld with the result is restored first |
+| disclosure names this receipt | only with `--disclose`: the file's `receiptId` is this receipt's |
+| request args digest | the arguments match their digest (salted under a capture rule, `request.argsSalt`) and the statement's subject: recomputed when they are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when values are withheld and neither is given it passes as committed, the detail saying "committed, not recomputed" and how many values are withheld; a path the note names that holds no commitment, or a disclosure that contradicts a commitment, fails it with the path named |
+| execution result digest | executed and failed calls: the result matches `execution.resultDigest` (salted, `execution.resultSalt`), under the same rules |
 | fact `<name>` value, fact `<name>` args | a captured fact's commitments hold against the disclosed or decrypted value, or pass as committed when neither is given |
+| withheld `<path>` | every other path the capture note names (`execution.error`, `execution.reason`, `policy.errors`, `execution.upstream.rawBody`, a part added later): it holds a commitment, which holds against the disclosed or decrypted value when one is given |
 | upstream signature (upstream key), upstream signature (provider secret) | the upstream's signature over the result verifies when a key is given; a Stripe or GitHub delivery verifies when its secret is given |
-| upstream signature not checked | only when the result is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |
+| upstream signature not checked | only when the result or the delivery body is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |
 | policy decision consistent with execution | an enforced `deny` never sits beside `executed`; a `deny` with `enforced: false` (observe mode) may, and the detail says so |
 | authorization … (five checks) | pre-committed calls: the authorization verifies, names this call, was allowed, is included in the log, and precedes the receipt leaf |
 | tree head signature, tree head names the expected log | the head was signed by an issuer or log key, and by the log the verifier expected |
@@ -66,13 +68,13 @@ agent-custody reveal receipts/<id>.json --capture-key-env AGENT_CUSTODY_CAPTURE_
 | `--capture-key-env` | the environment variable holding the 32-byte key, 64 hex characters or base64; never the key itself |
 | `--out` | where to write the disclosure; without it, stdout |
 
-Output, `{ "receiptId", "args"?, "result"?, "facts"? }`, every encrypted part decrypted and checked against its commitment:
+Output: `{ "receiptId", … }` with every encrypted value decrypted, checked against its commitment, and written at its own path:
 
 ```json
-{ "receiptId": "36c85dc9-…", "args": { "customer_id": "cust_123", "amount": 2500, "reason": "customer called from +44 20 7946 0000 about the card ending 4242" }, "facts": { "customer": { "id": "cust_123", "email": "alex@example.com", "verified": true } } }
+{ "receiptId": "36c85dc9-…", "request": { "args": { "reason": "customer called from +44 20 7946 0000 about the card ending 4242" } }, "facts": { "customer": { "value": { "id": "cust_123", "email": "alex@example.com", "verified": true } } } }
 ```
 
-A part withheld as a digest only carries no value to reveal: it is left out of the file, and the command says which (`Not revealed, withheld without a value: result; only the party that holds them can disclose them`). A key other than the one a part was encrypted under reveals nothing of it, and the part is listed the same way; a decrypted value that does not match its commitment is an error. Exit 0; with `--out` the command prints where the file went and the `verify --disclose` option that reads it. In code: `restore(view, disclosed?, key?)` and `reveal(commitment, key)`, on the [SDK](./sdk-typescript#private-evidence) page.
+A value withheld as a digest only carries nothing to reveal: it is left out of the file, and the command says which (`Not revealed, withheld without a value: execution.result.content, execution.result._meta; only the party that holds them can disclose them`). A key other than the one a value was encrypted under reveals nothing of it, and the path is listed the same way; a decrypted value that does not match its commitment is an error. Exit 0; with `--out` the command prints where the file went and the `verify --disclose` option that reads it. In code: `restorePaths(predicate, note, disclosed?, key?)` and `reveal(commitment, key)`, on the [SDK](./sdk-typescript#private-evidence) page.
 
 ## `audit`
 

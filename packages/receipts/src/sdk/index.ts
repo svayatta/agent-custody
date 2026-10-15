@@ -1,7 +1,7 @@
 // The interceptor SDK: issues receipts from inside the agent's own process.
 // Everything it records is "claimed", because the issuer shares a process with the agent. The receipt says so.
 import { randomUUID } from "node:crypto";
-import { captureArgs, captureKeyFrom, captureResult, ruleFor } from "../capture.ts";
+import { captureKeyFrom } from "../capture.ts";
 import { readFileSync } from "node:fs";
 import type { SdkConfig } from "../config.ts";
 import { digestOf, loadPrivateKey } from "../crypto.ts";
@@ -62,7 +62,8 @@ export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
   for (const [tool, rule] of Object.entries(cfg.capture ?? {})) {
     for (const side of [rule.args, rule.result]) if (side?.mode === "encrypted" && !captureKey) throw new Error(`capture for ${tool} uses mode encrypted, which needs captureKeyEnv`);
   }
-  const issuer = createIssuer(key, cfg.receiptsDir, openLog(cfg, key), { exporter: openExporter(cfg) });
+  // the capture rules are applied by the issuer to every statement it signs, so every adapter's receipt gets them
+  const issuer = createIssuer(key, cfg.receiptsDir, openLog(cfg, key), { exporter: openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
   const policyText = cfg.policyFile ? readFileSync(cfg.policyFile, "utf8") : null;
 
   const decide = (ev: ToolEvent): PolicyDecision | null => {
@@ -72,18 +73,13 @@ export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
   };
 
   function record(ev: ToolEvent, outcome: Outcome, policy: PolicyDecision | null = null): Promise<ReceiptBundle> {
-    const rule = ruleFor(cfg.capture, ev.tool);
-    const argsCaptured = captureArgs(ev.args, rule?.args, captureKey);
-    const resultCaptured = outcome.status === "executed" || outcome.status === "failed" ? captureResult(outcome.result, rule?.result, captureKey) : null;
-    // A thrown error is the tool's answer in another form and may repeat the arguments: under a private rule for
-    // either it is not recorded. The caller still has it; every adapter passes the message here, so the rule holds for all.
-    const privateRule = (rule?.args?.mode ?? "clear") !== "clear" || (rule?.result?.mode ?? "clear") !== "clear";
+    // the call in full; the issuer withholds what the tool's capture rule says, the thrown message included
     const execution: ReceiptPredicate["execution"] =
       outcome.status === "denied"
         ? { status: "denied", reason: outcome.reason, provenance: "claimed" }
         : outcome.status === "error"
-          ? { status: "error", error: privateRule ? "the tool reported an error (the message is withheld under the capture rule)" : outcome.error, provenance: "claimed" }
-          : { status: outcome.status, result: resultCaptured!.view, resultDigest: digestOf(outcome.result), provenance: "claimed", ...(resultCaptured!.note ? { capture: resultCaptured!.note } : {}) };
+          ? { status: "error", error: outcome.error, provenance: "claimed" }
+          : { status: outcome.status, result: outcome.result, resultDigest: digestOf(outcome.result), provenance: "claimed" };
     return issuer.issue({
       receiptId: randomUUID(),
       timestamp: new Date().toISOString(),
@@ -93,7 +89,7 @@ export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
       session: { id: ev.session?.id ?? null, toolUseId: ev.session?.toolUseId ?? null, provenance: "claimed" },
       model: { id: ev.model ?? null, provenance: "claimed" },
       tool: { name: ev.tool, provenance: "claimed" },
-      request: { args: argsCaptured.view, argsDigest: digestOf(ev.args), provenance: "claimed", ...(argsCaptured.note ? { capture: argsCaptured.note } : {}) },
+      request: { args: ev.args, argsDigest: digestOf(ev.args), provenance: "claimed" },
       facts: {},
       policy: policy ? { ...policy, provenance: "claimed" } : null,
       execution,

@@ -23,7 +23,9 @@ export interface SplunkConfig {
 /** The HEC event for one receipt: flat fields Splunk can search without a props stanza. Exported for tests and other transports. */
 export function hecEvent(p: ReceiptPredicate, bundle: ReceiptBundle, cfg: SplunkConfig): Record<string, unknown> {
   const auth = p.authorization as AuthorizationBundle | undefined;
-  const exec = p.execution as { status: string; reason?: string; error?: string };
+  const exec = p.execution as { status: string; reason?: unknown; error?: unknown };
+  // under a capture rule a message is a commitment; the event says so rather than carrying it
+  const text = (v: unknown) => (typeof v === "string" ? v : v && typeof v === "object" ? "(withheld under the capture rule)" : undefined);
   return {
     time: Date.parse(p.timestamp) / 1000,
     source: cfg.source ?? "agent-custody",
@@ -40,7 +42,7 @@ export function hecEvent(p: ReceiptPredicate, bundle: ReceiptBundle, cfg: Splunk
       agent_provenance: p.agent.provenance,
       principal: p.principal.id,
       status: exec.status,
-      reason: exec.reason ?? exec.error ?? null,
+      reason: text(exec.reason) ?? text(exec.error) ?? null,
       policy_decision: p.policy?.decision ?? null,
       policy_digest: p.policy?.policyDigest ?? null,
       policy_reasons: p.policy?.reasons ?? [],
