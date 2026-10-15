@@ -172,7 +172,7 @@ describe("the tenant portal", () => {
     expect(o.json).toMatchObject({ used: 3, quota: 3 });
   });
 
-  it("checkout sends the tenant to Stripe with the right price and reference; the signed webhook moves the plan to team; a cancellation moves it back; a bad signature is refused", async () => {
+  it("checkout sends the tenant to Stripe with the right price and reference; the signed webhook moves the plan to team; a cancellation moves it back; a bad signature, a replayed event, and an out-of-order event change nothing", async () => {
     const b = browser();
     await b.call("POST", "/api/login", { email: "dana@example.com", password: "a-long-enough-password" });
     const c = await b.call("POST", "/api/checkout", {});
@@ -182,10 +182,11 @@ describe("the tenant portal", () => {
     expect(call.body.get("line_items[0][price]")).toBe("price_team");
     expect(call.body.get("client_reference_id")).toBe("acme");
     expect(call.body.get("success_url")).toBe("https://app.example.test/?upgraded=1");
-    const event = (type: string, object: Record<string, unknown>) => JSON.stringify({ id: "evt_1", type, data: { object } });
+    const t0 = Math.floor(Date.now() / 1000);
+    const event = (id: string, created: number, type: string, object: Record<string, unknown>) => JSON.stringify({ id, created, type, data: { object } });
     const signed = (payload: string, secret = WHSEC) => { const t = Math.floor(Date.now() / 1000); return `t=${t},v1=${createHmac("sha256", secret).update(`${t}.${payload}`).digest("hex")}`; };
     const post = (payload: string, sig: string) => fetch(new URL("/stripe/webhook", portal.url), { method: "POST", headers: { "content-type": "application/json", "stripe-signature": sig }, body: payload });
-    const completed = event("checkout.session.completed", { id: "cs_test_1", client_reference_id: "acme", customer: "cus_1", subscription: "sub_1" });
+    const completed = event("evt_1", t0, "checkout.session.completed", { id: "cs_test_1", client_reference_id: "acme", customer: "cus_1", subscription: "sub_1" });
     expect((await post(completed, signed(completed, "whsec_wrong"))).status).toBe(400);
     expect((await post(completed, signed(completed))).status).toBe(200);
     expect((await tenancy.tenant("acme"))!.plan).toBe("team");
@@ -195,9 +196,20 @@ describe("the tenant portal", () => {
     expect((await b.call("POST", "/api/checkout", {})).status).toBe(409);
     expect((await b.call("POST", "/api/billing-portal", {})).json.url).toBe("https://billing.stripe.com/p/session/x");
     expect(stripeCalls.find((x) => x.path === "billing_portal/sessions")!.body.get("customer")).toBe("cus_1");
-    const deleted = event("customer.subscription.deleted", { id: "sub_1", status: "canceled" });
+    const deleted = event("evt_2", t0 + 10, "customer.subscription.deleted", { id: "sub_1", status: "canceled" });
     expect((await post(deleted, signed(deleted))).status).toBe(200);
     expect((await tenancy.tenant("acme"))!.plan).toBe("free");
+    // Stripe redelivers the checkout: the event id was applied already, so the plan stays free (issue #105)
+    expect(await (await post(completed, signed(completed))).json()).toEqual({ received: true, duplicate: true });
+    expect((await tenancy.tenant("acme"))!.plan).toBe("free");
+    // an update created before the cancellation arrives after it: older than the stored state, so ignored
+    const late = event("evt_3", t0 + 5, "customer.subscription.updated", { id: "sub_1", status: "active" });
+    expect((await post(late, signed(late))).status).toBe(200);
+    expect((await tenancy.tenant("acme"))!.plan).toBe("free");
+    expect((await b.call("GET", "/api/overview")).json.billing).toEqual({ status: "canceled" });
+    // an event without an id or a created time is refused
+    const bare = JSON.stringify({ type: "customer.subscription.updated", data: { object: { id: "sub_1", status: "active" } } });
+    expect((await post(bare, signed(bare))).status).toBe(400);
     const audit = (await b.call("GET", "/api/overview")).json.audit;
     expect(audit.slice(0, 2).map((e: any) => [e.action, e.actor, e.detail.plan])).toEqual([["tenant.plan", "stripe:customer.subscription.deleted", "free"], ["tenant.plan", "stripe:checkout", "team"]]);
     // an old timestamp is refused even with a valid mac
