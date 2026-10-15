@@ -57,7 +57,9 @@ Memory:
 
 - The memory server believes `_meta` only from a caller known to be the gateway. It drops a direct caller's `_meta` whole (issue #95). Gateway tokens and direct-writer tokens are different, and `serve --http` refuses to start without `--token-env`.
 - Memory write order is validate, stores, ledger. Retract order is ledger, then stores.
-- A store without `verifyRemoved` is `unverified`, never `verified`. Without a ledger, the explain belief questions read "unknown without a ledger", never "nothing". Receipts inside a custody pack keep the values they recorded, by design.
+- `memory.repair` removes only the store entries whose fact id the ledger does not know and that were stored before its cutoff, the earlier of `before` and ten minutes ago. A write whose stores take more than five minutes is refused before its ledger append, so a write in progress is never that old.
+- One store scope (a pgvector table, a Mem0 user, a Zep user or graph, a Letta agent with its tags, a LangGraph namespace, a Cognee dataset) belongs to one ledger. A repair on one ledger removes the entries of another ledger that shares the scope. The clocks of the memory servers agree to within a few minutes, because `storedAt` comes from the writer and the repair cutoff from the repairer. An entry without a parseable `storedAt` is never repaired.
+- A store without `verifyDeleted` is `unverified`, never `verified`. Without a ledger, the explain belief questions read "unknown without a ledger", never "nothing". Receipts inside a custody pack keep the values they recorded, by design.
 - `selectAbout` and `selectFor` in `packages/state/src/storage.ts` are the reference semantics. The SQL stores must match them. The ledger suite runs on JSONL, SQLite, and Postgres; a store change is wrong if any backend diverges. `PostgresStore` never closes a client that it was given.
 
 Web pages and the hosted log:

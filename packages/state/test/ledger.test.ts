@@ -37,6 +37,16 @@ describe.each(backends)("fact ledger on %s", (name, file) => {
     expect((await l.asOf({ subject: "acct:42", predicate: "plan" })).map((f) => f.space)).toEqual(["org", "user:me"]);
   });
 
+  it("records the repair of a store entry the ledger has no fact for, under that entry's fact id, and refuses one it has", async () => {
+    const l = new Ledger(file(), clock());
+    const kept = await l.assert({ subject: "acct:42", predicate: "plan", value: "pro", space: "org", actor: "agent:support" });
+    const ev = await l.repair({ factId: "orphan-1", store: "vec", externalId: "row-1", outcome: "verified", actor: "ops", reason: "append failed" });
+    expect(await l.history("orphan-1")).toEqual([ev]);
+    expect(await l.get("orphan-1")).toBeUndefined();
+    expect((await l.asOf()).map((f) => f.factId)).toEqual([kept.fact.factId]);
+    await expect(l.repair({ factId: kept.fact.factId, store: "vec", externalId: "row-2", outcome: "verified", actor: "ops", reason: "x" })).rejects.toThrow(/is in the ledger/);
+  });
+
   it("superseding a fact ends its validity where the replacement begins, so the old value is still true for its own interval", async () => {
     const c = clock();
     const l = new Ledger(file(), c);

@@ -37,6 +37,23 @@ function parseRetention(spec: string): Record<string, string> {
   return out;
 }
 
+/**
+ * Spawns the gateway from its config and makes one call through it, so the call runs as the principal named in that
+ * gateway's grant and its receipt is the record. Prints the result text; exits 1 when the result is an error.
+ */
+async function callVia(config: string, tool: string, args: Record<string, unknown>): Promise<number> {
+  const gatewayCli = fileURLToPath(import.meta.resolve("@agent-custody/receipts/cli"));
+  const client = new Client({ name: "agent-custody-memory-cli", version: "0" });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [gatewayCli, "gateway", "--config", config], stderr: "inherit" }));
+  try {
+    const r = await client.callTool({ name: tool, arguments: args });
+    console.log(((r as { content: { type: string; text?: string }[] }).content.find((c) => c.type === "text")?.text) ?? "");
+    return (r as { isError?: boolean }).isError ? 1 : 0;
+  } finally {
+    await client.close();
+  }
+}
+
 const USAGE = `agent-custody-memory <command>
 
   serve --ledger <ledger.jsonl|ledger.sqlite|postgres://…> [--allow-direct] [--key <memory.key>] [--forget-key-env NAME] [--retention 'org=P365D,team:*=P90D']
@@ -55,6 +72,10 @@ const USAGE = `agent-custody-memory <command>
                                                    Without --before, the memory server's --retention windows decide. Put this on a timer.
   sweep --ledger <ledger.jsonl> --before <ISO instant> [--space <space>] --reason <text> [--actor <id>] [--forget-key-env NAME] [--no-digest]
                                                    retention on the ledger file alone, for ledgers with no gateway or stores in front of them.
+  repair --via <gateway.json> --reason <text> [--before <ISO instant>]
+                                                   runs memory.repair through that gateway: removes the store entries that the ledger has no fact
+                                                   for (a write whose ledger append failed), verifies each removal, and records a repair event.
+                                                   Only entries stored more than ten minutes ago; --before can only move that cutoff earlier.
   eval [--scenarios <file.json>] [--baseline] [--json] [--sign <key> --out <report.json>]
                                                    runs the memory-mutation scenarios on a fresh ledger; --baseline also scores a naive
                                                    overwrite store; --sign writes a signed report. Exits 1 if the ledger regresses.
@@ -115,20 +136,9 @@ async function main(argv: string[]): Promise<number> {
     case "sweep": {
       const { values } = parseArgs({ args: rest, options: { ledger: { type: "string" }, via: { type: "string" }, before: { type: "string" }, space: { type: "string" }, reason: { type: "string" }, actor: { type: "string", default: "cli" }, "forget-key-env": { type: "string" }, "no-digest": { type: "boolean", default: false } } });
       if (values.via) {
-        // Retention as a receipted call: spawn the gateway from its config and call memory.sweep through it, so the
-        // sweep runs as the principal named in that gateway's grant and its receipt is the record.
+        // Retention as a receipted call, through the gateway.
         if (!values.reason) throw new Error("sweep --via needs --reason");
-        const gatewayCli = fileURLToPath(import.meta.resolve("@agent-custody/receipts/cli"));
-        const client = new Client({ name: "agent-custody-memory-sweep", version: "0" });
-        await client.connect(new StdioClientTransport({ command: process.execPath, args: [gatewayCli, "gateway", "--config", values.via], stderr: "inherit" }));
-        try {
-          const r = await client.callTool({ name: "memory.sweep", arguments: { reason: values.reason, ...(values.before ? { before: new Date(values.before).toISOString() } : {}), ...(values.space ? { space: values.space } : {}), ...(values["no-digest"] ? { keepDigest: false } : {}) } });
-          const text = ((r as { content: { type: string; text?: string }[] }).content.find((c) => c.type === "text")?.text) ?? "";
-          console.log(text);
-          return (r as { isError?: boolean }).isError ? 1 : 0;
-        } finally {
-          await client.close();
-        }
+        return callVia(values.via, "memory.sweep", { reason: values.reason, ...(values.before ? { before: new Date(values.before).toISOString() } : {}), ...(values.space ? { space: values.space } : {}), ...(values["no-digest"] ? { keepDigest: false } : {}) });
       }
       if (!values.ledger || !values.before || !values.reason) throw new Error("sweep needs --ledger, --before, and --reason, or --via <gateway.json> --reason");
       const sweeper = new Ledger(values.ledger, forgetKeyFrom(values["forget-key-env"]));
@@ -137,6 +147,12 @@ async function main(argv: string[]): Promise<number> {
       for (const f of r.forgotten) console.log(`  ${f.factId}  ${f.digestKind}${f.valueDigest ? ` ${f.valueDigest.slice(0, 12)}` : ""}`);
       await sweeper.close();
       return 0;
+    }
+    case "repair": {
+      // Only through the gateway: the stores are configured on the memory server, not here.
+      const { values } = parseArgs({ args: rest, options: { via: { type: "string" }, reason: { type: "string" }, before: { type: "string" } } });
+      if (!values.via || !values.reason) throw new Error("repair needs --via <gateway.json> and --reason");
+      return callVia(values.via, "memory.repair", { reason: values.reason, ...(values.before ? { before: new Date(values.before).toISOString() } : {}) });
     }
     case "eval": {
       const { values } = parseArgs({ args: rest, options: { scenarios: { type: "string" }, baseline: { type: "boolean", default: false }, json: { type: "boolean", default: false }, sign: { type: "string" }, out: { type: "string" }, verify: { type: "string" }, key: { type: "string", multiple: true } } });
