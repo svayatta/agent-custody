@@ -1,7 +1,7 @@
 // Private evidence (issue #109): the receipt carries only what the capture rule allows, the digests and signatures
 // are over the whole call, and the verifier recomputes them when the values are in clear, disclosed, or revealed with
 // the customer's key, and says "committed, not recomputed" when they are not.
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -381,5 +381,30 @@ describe("private evidence through the SDK", () => {
     expect(full.ok).toBe(true);
     expect(check("execution result digest", full).detail).toBe("recomputed from decrypted values");
     delete process.env.TEST_CAPTURE_KEY;
+  });
+
+  it("the message of a wrapped tool that throws stays out of the receipt under a private rule, through record, which every adapter uses", async () => {
+    const fx = buildSdkFixture(mkdtempSync(join(tmpdir(), "capture-sdk-throw-")));
+    const cfg = JSON.parse(readFileSync(fx.configFile, "utf8"));
+    cfg.capture = { "stripe.refund": { args: { mode: "digest", clear: ["amount"] } } };
+    writeFileSync(fx.configFile, JSON.stringify(cfg));
+    const sdk = createSdkIssuer(loadSdkConfig(fx.configFile));
+    const refund = sdk.wrap("stripe.refund", async (a: { customer_id: string; amount: number }) => {
+      throw new Error(`card declined for ${a.customer_id}`);
+    });
+    // the caller gets the error itself
+    await expect(refund({ customer_id: "cust_SDK_SECRET", amount: 900 })).rejects.toThrow(/card declined for cust_SDK_SECRET/);
+    const files = readdirSync(fx.receiptsDir).filter((f) => f.endsWith(".json") && !f.endsWith(".authorization.json"));
+    expect(files).toHaveLength(1);
+    const bundle = JSON.parse(readFileSync(join(fx.receiptsDir, files[0]!), "utf8")) as ReceiptBundle;
+    const p = decode(bundle).predicate;
+    expect(p.execution.status).toBe("error");
+    expect((p.execution as { error: string }).error).toBe("the tool reported an error (the message is withheld under the capture rule)");
+    expect(isCommitment(p.request.args.customer_id)).toBe(true);
+    expect(leakText(bundle)).not.toContain("cust_SDK_SECRET");
+    expect(verifyBundle(bundle, { issuerKeys: [loadPublicKey(fx.appPub)], principalKeys: [], logFile: fx.logFile }).ok).toBe(true);
+    // a tool without a rule records the message, as before
+    const clear = await sdk.record({ tool: "stripe.payout", args: { customer_id: "cust_SDK_SECRET" } }, { status: "error", error: "payout declined for cust_SDK_SECRET" });
+    expect((decode(clear).predicate.execution as { error: string }).error).toBe("payout declined for cust_SDK_SECRET");
   });
 });

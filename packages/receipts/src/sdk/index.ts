@@ -75,11 +75,14 @@ export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
     const rule = ruleFor(cfg.capture, ev.tool);
     const argsCaptured = captureArgs(ev.args, rule?.args, captureKey);
     const resultCaptured = outcome.status === "executed" || outcome.status === "failed" ? captureResult(outcome.result, rule?.result, captureKey) : null;
+    // A thrown error is the tool's answer in another form and may repeat the arguments: under a private rule for
+    // either it is not recorded. The caller still has it; every adapter passes the message here, so the rule holds for all.
+    const privateRule = (rule?.args?.mode ?? "clear") !== "clear" || (rule?.result?.mode ?? "clear") !== "clear";
     const execution: ReceiptPredicate["execution"] =
       outcome.status === "denied"
         ? { status: "denied", reason: outcome.reason, provenance: "claimed" }
         : outcome.status === "error"
-          ? { status: "error", error: outcome.error, provenance: "claimed" }
+          ? { status: "error", error: privateRule ? "the tool reported an error (the message is withheld under the capture rule)" : outcome.error, provenance: "claimed" }
           : { status: outcome.status, result: resultCaptured!.view, resultDigest: digestOf(outcome.result), provenance: "claimed", ...(resultCaptured!.note ? { capture: resultCaptured!.note } : {}) };
     return issuer.issue({
       receiptId: randomUUID(),

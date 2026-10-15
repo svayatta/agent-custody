@@ -47,7 +47,7 @@ Gateway and receipts:
 - The gateway never reads published policies.
 - `capture` rules (`src/capture.ts`) change the receipt file only. The policy decides on the real values, the agent gets the real result and the real error, and the digests and signatures are over the whole call. A withheld field leaves a salted commitment that the signed capture note names; `isError` and `_meta` on a result stay in clear.
 - A fact lookup's arguments follow the call's `args` rule: a fact argument stays in clear only when its template is a constant or copies a call argument that is in clear, read from the fact config that was used, because fact names are not unique across tools. A fact's value follows the `facts` rule alone, so a private `args` rule does not hide what the lookup answers; the docs say so.
-- Under a private rule, the answer of a failed lookup, the message of a lookup that threw, and the message of an upstream that threw are not recorded: they would land in `policy.errors` or `execution.error` in clear. A provider delivery's `rawBody` is withheld with the result (`upstream.rawBody` on the note, the metadata copy dropped).
+- Under a private `args` or `facts` rule, the answer of a lookup that failed or threw is not recorded in `policy.errors`, and the agent's refusal does not carry it either. Under a private `args` or `result` rule, the message of an upstream or wrapped tool that threw is not recorded in `execution.error`, in the gateway and in the SDK's `record`, which every adapter goes through; the agent still gets the message. A provider delivery's `rawBody` is withheld with the result (`upstream.rawBody` on the note, the metadata copy dropped).
 
 Verifier (`src/verify.ts` and its mirror `site/verifier/verify-web.ts`):
 
