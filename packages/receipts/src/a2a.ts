@@ -178,20 +178,20 @@ export function a2aUpstream(name: string, cfg: A2aUpstreamConfig, opts: A2aOptio
       const tools: Tool[] = [
         {
           name: sendTool,
-          description: `Delegate a task to the agent "${c.name}"${c.description ? `: ${c.description}` : ""}${skills ? `. Skills: ${skills}` : ""}`,
+          description: `Delegate a task to the agent "${c.name}"${c.description ? `: ${c.description}` : ""}${skills ? `. Skills: ${skills}` : ""}. Send text for a plain task, or message for a full A2A message; one of the two is needed. Returns the agent's task or message as JSON text. A JSON-RPC error from the agent comes back as an error result.`,
           inputSchema: {
             type: "object",
             properties: {
               text: { type: "string", description: "the task, as text" },
               message: { type: "object", description: "a full A2A message, forwarded as is; text is derived from it" },
-              taskId: { type: "string" },
-              contextId: { type: "string" },
-              configuration: { type: "object" },
-              metadata: { type: "object" },
+              taskId: { type: "string", description: "the id of an earlier task to continue; used with text only, because a full message carries its own" },
+              contextId: { type: "string", description: "the id of the conversation context to continue; used with text only" },
+              configuration: { type: "object", description: "the A2A send configuration, forwarded as is" },
+              metadata: { type: "object", description: "A2A metadata for the request, forwarded as is" },
             },
           },
         },
-        { name: cardTool, description: `The agent card of "${c.name}", fetched by the gateway`, inputSchema: { type: "object", properties: {} } },
+        { name: cardTool, description: `The agent card of "${c.name}", fetched afresh from the agent by the gateway: its name, description, skills, and the interfaces it serves. Call it to see what the agent can do before you delegate with ${sendTool}. A gateway config can also name it as a fact, so that a policy can read the card.`, inputSchema: { type: "object", properties: {} } },
       ];
       return { tools };
     },

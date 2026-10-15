@@ -45,16 +45,18 @@ const Hold = z.object({ factId: z.string().min(1), reason: z.string().min(1) });
 const Sweep = z.object({ before: iso.optional(), space: z.string().min(1).optional(), reason: z.string().min(1), keepDigest: z.boolean().optional() });
 
 const str = { type: "string" as const };
+const isoStr = { type: "string" as const, description: "an ISO 8601 date-time with a UTC offset, for example 2026-10-15T09:00:00Z" };
+const actorStr = { type: "string" as const, description: "who acts; ignored behind the gateway, which records the agent named in the signed grant" };
 export const TOOLS: Tool[] = [
   {
     name: "memory.write",
     description: "Record a belief: subject, predicate, value, in a space. Optionally supersede an earlier fact. With evidence naming a fact the gateway fetched for this call, the value must equal it (or the field at path) and the write is verified; otherwise it is refused. Returns the new fact with its id, transaction time, actor, provenance, and source receipt.",
-    inputSchema: { type: "object", properties: { subject: str, predicate: str, value: {}, space: str, actor: str, validFrom: str, confidence: { type: "number" }, supersedes: str, evidence: { type: "object", properties: { fact: str, path: str }, required: ["fact"] } }, required: ["subject", "predicate", "value", "space"] },
+    inputSchema: { type: "object", properties: { subject: str, predicate: str, value: {}, space: str, actor: actorStr, validFrom: isoStr, confidence: { type: "number", minimum: 0, maximum: 1 }, supersedes: str, evidence: { type: "object", properties: { fact: str, path: str }, required: ["fact"] } }, required: ["subject", "predicate", "value", "space"] },
   },
   {
     name: "memory.read",
     description: "The facts believed at a moment. validAt asks whether a fact was true then; txAt asks whether the ledger knew it then. Both default to now. Filter by space, subject, predicate. Quarantined (claimed, unconfirmed) facts are left out unless includeClaimed is true; requireVerified returns only facts whose value the gateway checked against its source.",
-    inputSchema: { type: "object", properties: { subject: str, predicate: str, space: str, validAt: str, txAt: str, includeClaimed: { type: "boolean" }, requireVerified: { type: "boolean" } } },
+    inputSchema: { type: "object", properties: { subject: str, predicate: str, space: str, validAt: isoStr, txAt: isoStr, includeClaimed: { type: "boolean" }, requireVerified: { type: "boolean" } } },
   },
   {
     name: "memory.confirm",
@@ -64,7 +66,7 @@ export const TOOLS: Tool[] = [
   {
     name: "memory.retract",
     description: "Undo a belief: the fact leaves the present, stays visible to questions about the past, and whatever it superseded is believed again.",
-    inputSchema: { type: "object", properties: { factId: str, reason: str, actor: str }, required: ["factId", "reason"] },
+    inputSchema: { type: "object", properties: { factId: str, reason: str, actor: actorStr }, required: ["factId", "reason"] },
   },
   {
     name: "memory.forget",
@@ -73,18 +75,18 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "memory.hold",
-    description: "Legal hold: while it stands the fact cannot be forgotten, by request or by retention sweep.",
+    description: "Place a legal hold on a fact. While the hold stands, memory.forget refuses the fact and memory.sweep skips it. The reason is recorded with the hold event. Fails when the fact does not exist, is already forgotten, or is already on hold. Returns the hold event. Lift it with memory.release.",
     inputSchema: { type: "object", properties: { factId: str, reason: str }, required: ["factId", "reason"] },
   },
   {
     name: "memory.release",
-    description: "Lift a legal hold.",
+    description: "Lift the legal hold on a fact, so that memory.forget and retention sweeps can reach it again. The reason is recorded with the release event. Fails when the fact is not on hold. Returns the release event.",
     inputSchema: { type: "object", properties: { factId: str, reason: str }, required: ["factId", "reason"] },
   },
   {
     name: "memory.sweep",
     description: "Retention: forget every fact the ledger learned of before an instant, in one space or all, skipping held facts, and remove each from every store. Without `before`, the server's configured retention windows decide per space. The receipt is the record of the sweep.",
-    inputSchema: { type: "object", properties: { before: str, space: str, reason: str, keepDigest: { type: "boolean" } }, required: ["reason"] },
+    inputSchema: { type: "object", properties: { before: isoStr, space: str, reason: str, keepDigest: { type: "boolean" } }, required: ["reason"] },
   },
   {
     name: "memory.get",
@@ -93,7 +95,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "memory.history",
-    description: "Every event that touched a fact, oldest first.",
+    description: "Every ledger event for one fact, oldest first: its assert, the assert that superseded it, and its confirm, retract, hold, release, and forget events. Returns { events }. Use it to see how a belief changed; use memory.read for what is believed now, and memory.get for one fact's current state.",
     inputSchema: { type: "object", properties: { factId: str }, required: ["factId"] },
   },
 ];

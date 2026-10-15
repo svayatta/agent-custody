@@ -33,6 +33,14 @@ Operators who log here should set `"hashOnly": true` in their `log` config, so t
 
 The volume at `/data` is the whole state: the log and the key. Back it up; a lost key means every tree head it signed is still verifiable, but new heads will be signed by a different key, which verifiers must be told about.
 
+## Checking a change to deploy/
+
+- `docker-compose.yaml` and `k8s/` share the variables in the table above.
+- The profiles `public` (Caddy TLS and the docs site) and `file` (the file-backed log, no Postgres) are off by default. Their variables must stay optional, so that `docker compose config` passes without them.
+- Check with `docker compose -f deploy/docker-compose.yaml config -q` and `kubectl kustomize deploy/k8s`.
+- `.github/workflows/image.yml` pushes the image to ghcr.io on a `v*` tag or by hand (`gh workflow run image.yml -f version=X`). It uses `GITHUB_TOKEN`, never a personal token.
+- The site build excludes `deploy/**`.
+
 ## One VM, docker compose
 
 Any Linux VM with Docker works. A Hetzner CX22 (2 vCPU, 4 GB, about 4 EUR a month) is more than the first tenants need; the log does a hash and a signature per append.
