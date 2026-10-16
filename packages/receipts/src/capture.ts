@@ -73,7 +73,9 @@ export interface Disclosed {
 /** A 32-byte key from hex (64 chars) or base64 (44 chars), as an environment variable holds it. */
 export function captureKeyFrom(text: string): Buffer {
   const t = text.trim();
-  const key = /^[0-9a-fA-F]{64}$/.test(t) ? Buffer.from(t, "hex") : Buffer.from(t, "base64");
+  // strict forms only: a base64 string with stray characters would decode silently to a different key
+  if (!/^[0-9a-fA-F]{64}$/.test(t) && !/^[A-Za-z0-9+/]{43}=$/.test(t)) throw new Error("capture key: expected 32 bytes as 64 hex characters or 44 characters of base64");
+  const key = t.length === 64 ? Buffer.from(t, "hex") : Buffer.from(t, "base64");
   if (key.length !== 32) throw new Error("capture key: expected 32 bytes as 64 hex characters or base64");
   return key;
 }
@@ -90,7 +92,12 @@ export function isCommitment(v: unknown): v is Commitment {
   if (typeof c.sha256 !== "string" || !HEX64.test(c.sha256)) return false;
   if (c.$custody === "withheld") return true;
   if (c.$custody !== "encrypted") return false;
-  return c.alg === "A256GCM" && typeof c.keyid === "string" && HEX64.test(c.keyid) && [c.iv, c.ciphertext, c.tag].every((f) => typeof f === "string" && (f as string).length > 0 && B64.test(f as string));
+  // a 12-byte iv and a 16-byte tag, as AES-256-GCM is used here; a shorter tag would be accepted by the cipher and must not be
+  return c.alg === "A256GCM" && typeof c.keyid === "string" && HEX64.test(c.keyid) && [c.iv, c.ciphertext, c.tag].every((f) => typeof f === "string" && (f as string).length > 0 && B64.test(f as string)) && (c.iv as string).length === 16 && (c.tag as string).length === 24;
+}
+/** What an encrypted commitment is bound to: the receipt and the path, so a ciphertext moved to another receipt or path does not decrypt. */
+export function aadFor(receiptId: unknown, path: Path): string {
+  return canonicalize({ receiptId: typeof receiptId === "string" ? receiptId : null, path });
 }
 /** A disclosed value as a disclosure carries it: the salt, and the value when the holder has filled it in. */
 export function isDisclosed(v: unknown): v is Disclosed {
@@ -102,13 +109,14 @@ function commit(value: unknown, salt: string): string {
   return sha256Hex(Buffer.concat([Buffer.from(salt, "hex"), Buffer.from(canonicalize(value), "utf8")]));
 }
 
-/** Replaces a value with its commitment, carrying the value and the salt encrypted when a key is given; the salt is returned to the caller, never written into the receipt. */
-export function withhold(value: unknown, key?: Buffer): { commitment: Commitment; salt: string } {
+/** Replaces a value with its commitment, carrying the value and the salt encrypted when a key is given (bound to `aad`, see `aadFor`); the salt is returned to the caller, never written into the receipt. */
+export function withhold(value: unknown, key?: Buffer, aad?: string): { commitment: Commitment; salt: string } {
   const salt = randomBytes(16).toString("hex");
   const sha256 = commit(value, salt);
   if (!key) return { commitment: { $custody: "withheld", sha256 }, salt };
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
+  if (aad) cipher.setAAD(Buffer.from(aad, "utf8"));
   const ciphertext = Buffer.concat([cipher.update(canonicalize({ salt, value }), "utf8"), cipher.final()]);
   return { commitment: { $custody: "encrypted", alg: "A256GCM", keyid: captureKeyId(key), iv: iv.toString("base64"), ciphertext: ciphertext.toString("base64"), tag: cipher.getAuthTag().toString("base64"), sha256 }, salt };
 }
@@ -119,10 +127,11 @@ export function checkCommitment(c: Commitment, value: unknown, salt: string): bo
 }
 
 /** The value and the salt behind an encrypted commitment, under the key that made it; checked against the commitment too. */
-export function reveal(c: Commitment, key: Buffer): { value: unknown; salt: string } {
+export function reveal(c: Commitment, key: Buffer, aad?: string): { value: unknown; salt: string } {
   if (c.$custody !== "encrypted") throw new Error("this value was withheld without its value; only the party that holds it can supply it, with its salt");
   if (c.keyid !== captureKeyId(key)) throw new Error(`this value was encrypted under key ${c.keyid.slice(0, 12)}…, not the one given`);
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(c.iv, "base64"));
+  if (aad) decipher.setAAD(Buffer.from(aad, "utf8"));
   decipher.setAuthTag(Buffer.from(c.tag, "base64"));
   const text = Buffer.concat([decipher.update(Buffer.from(c.ciphertext, "base64")), decipher.final()]).toString("utf8");
   const inner = JSON.parse(text) as { salt?: unknown; value?: unknown };
@@ -206,18 +215,19 @@ export function setAt<T>(root: T, path: Path, value: unknown): T {
 // ---- the choke point ----
 
 /** The structural top-level parts of a statement: ids, keys, times, the grant, the names. Never withheld. */
-const CLEAR_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "session", "model", "tool", "authorization", "capture"]);
+const CLEAR_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "authorization", "capture"]);
 /** Inside the parts that carry values: what stays in clear beside them. */
 const CLEAR_IN = {
   request: new Set(["argsDigest", "provenance"]),
   fact: new Set(["tool", "resultDigest", "provenance"]),
   policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]),
   execution: new Set(["status", "resultDigest", "provenance"]),
-  upstream: new Set(["provider", "signature"]),
+  upstream: new Set(["provider"]),
   consumed: new Set(["provenance"]),
+  /** the host's correlation ids are supplied by the agent's process or its call: values, withheld; the provenance stays */
+  session: new Set(["provenance"]),
+  model: new Set(["provenance"]),
 };
-/** a provider's bind is a path into the delivery body, which the verifier follows; anything else under that name is upstream-authored data */
-const BIND_PATH = /^[A-Za-z0-9_.[\]-]{1,256}$/;
 /** The result's error flag is its status, so it stays in clear when it is the boolean flag and nothing else; its metadata carries whatever an upstream put there, so it never does. */
 const RESULT_ALWAYS_CLEAR = new Set(["isError"]);
 const RESULT_NEVER_CLEAR = new Set(["_meta"]);
@@ -237,7 +247,7 @@ export interface PrivateView<P> {
 }
 
 /** The parts an authorization and its receipt share; the receipt's view takes them from the authorization's, commitments and salts alike. */
-const SHARED_WITH_AUTHORIZATION = ["request", "facts", "policy"];
+const SHARED_WITH_AUTHORIZATION = ["request", "facts", "policy", "consumed"];
 
 /**
  * The statement a receipt carries under a tool's rule: the predicate with every non-structural value withheld as the
@@ -265,10 +275,11 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
       if (s) salts[pathKey(w)] = s;
     }
   }
+  const receiptId = (predicate as unknown as { receiptId?: unknown }).receiptId;
   const hide = (path: Path, value: unknown, withKey: Buffer | undefined) => {
     // nothing carries nothing; a null does (that a value was null), and is withheld like any other
     if (value === undefined) return;
-    const w = withhold(value, withKey);
+    const w = withhold(value, withKey, aadFor(receiptId, path));
     out = setAt(out, path, w.commitment);
     salts[pathKey(path)] = w.salt;
     withheld.push(path);
@@ -316,7 +327,7 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
         const full = ownOf(ctx.factResults, name);
         const digestPath = ["facts", name, "resultDigest"];
         if (full !== undefined) {
-          const w = withhold(full, factsSide ? factsSide.key : k);
+          const w = withhold(full, factsSide ? factsSide.key : k, aadFor(receiptId, digestPath));
           out = setAt(out, digestPath, w.commitment);
           salts[pathKey(digestPath)] = w.salt;
           withheld.push(digestPath);
@@ -335,18 +346,24 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
           // a result left in clear by the rule still carries its metadata, which an upstream wrote and which may repeat the arguments: withheld under any private rule
           else if (isObject(v) && own(v, "_meta")) hide(["execution", "result", "_meta"], v._meta, k);
         } else if (f === "upstream" && isObject(v)) {
-          // A provider's delivery body and an upstream's signed envelope are upstream-authored (the signed payload may
-          // carry any claim the upstream chose), so under any private rule they are withheld, with the result side's key
-          // when the result is private and the rule's otherwise. A provider's signature stays, and its bind stays when
-          // it is the path the verifier follows into the body, and nothing else.
+          // Everything an upstream or a provider wrote in the evidence is withheld under any private rule: the delivery
+          // body and the signed envelope (a signed payload may carry any claim), and the provider's signature and bind
+          // too, since the signature is a MAC over the withheld body (whoever holds the secret would confirm a guess of
+          // the body against it) and the bind is a string the upstream chose. Only the provider's name stays. The
+          // verifier checks the delivery once the body, the signature, and the bind are back.
           for (const [uf, uv] of Object.entries(v)) {
-            if (uf === "rawBody" || uf === "envelope") hide(["execution", "upstream", uf], uv, resultSide ? resultSide.key : k);
-            else if (uf === "bind" && typeof uv === "string" && BIND_PATH.test(uv)) continue;
+            if (uf === "rawBody" || uf === "envelope" || uf === "signature" || uf === "bind") hide(["execution", "upstream", uf], uv, resultSide ? resultSide.key : k);
             else if (!CLEAR_IN.upstream.has(uf)) hide(["execution", "upstream", uf], uv, k);
           }
         } else if (!CLEAR_IN.execution.has(f)) hide(["execution", f], v, k);
       }
       if (own(value, "result")) out = setAt(out, ["execution", "resultDigest"], digest(value.result, ["execution", "result"]));
+    } else if ((key_ === "session" || key_ === "model") && isObject(value)) {
+      // correlation ids the host or the agent supplied: a value when there is one; none is structural
+      for (const [f, v] of Object.entries(value)) {
+        if (v === null) continue;
+        if (!CLEAR_IN[key_].has(f)) hide([key_, f], v, k);
+      }
     } else if (key_ === "consumed" && isObject(value)) {
       // the fact ids an upstream declared it served are upstream-chosen strings: withheld under a private rule, an empty list being structural
       for (const [f, v] of Object.entries(value)) {
@@ -414,7 +431,7 @@ export function restorePaths<P>(predicate: P, note: CaptureNote | undefined, dis
       r.salts.set(pathKey(path), d.salt);
     } else if (key && c.$custody === "encrypted" && c.keyid === keyid) {
       try {
-        const back = reveal(c, key);
+        const back = reveal(c, key, aadFor(getAt(predicate, ["receiptId"]), path));
         r.predicate = setAt(r.predicate, path, back.value);
         r.restored.set(pathKey(path), "decrypted");
         r.salts.set(pathKey(path), back.salt);

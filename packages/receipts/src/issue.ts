@@ -1,5 +1,5 @@
 // Signing, logging and writing a receipt. Shared by every producer: the gateway and the SDK.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { SALTS_DIR, saltsFileFor } from "./retention.ts";
 import { join } from "node:path";
 import { getAt, privateView, ruleFor, type CaptureConfig, type CaptureContext, type PrivateView } from "./capture.ts";
@@ -38,8 +38,10 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
    * commitments and salts for the parts they share. Set once the log has taken the authorization, released when the
    * receipt is issued, and bounded: a call that never reaches its receipt does not keep its view for ever.
    */
-  const committed = new Map<string, PrivateView<AuthorizationPredicate>>();
-  const COMMITTED_AT_MOST = 10_000;
+  const committed = new Map<string, { view: PrivateView<AuthorizationPredicate>; at: number }>();
+  /** an authorization whose receipt has not followed within this long is a call that died; its view is let go */
+  const COMMITTED_FOR_MS = 60 * 60 * 1000;
+  const COMMITTED_AT_MOST = 100_000;
   /**
    * The salts behind a statement's digest-only commitments, kept beside the receipts and never in them:
    * `receipts/salts/<id>.json`, the owner's alone. They are what makes a disclosure possible for a value withheld
@@ -49,20 +51,23 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
   const keepSalts = (v: PrivateView<AuthorizationPredicate>) => {
     const salts = Object.fromEntries((v.predicate.capture?.withheld ?? []).filter((w) => (getAt(v.predicate, w) as { $custody?: string } | undefined)?.$custody === "withheld").map((w) => [JSON.stringify(w), v.salts[JSON.stringify(w)]!]));
     if (!Object.keys(salts).length) return;
+    // mkdir's mode applies only to a directory it creates: one that was there keeps its own, so it is set after
     mkdirSync(join(receiptsDir, SALTS_DIR), { recursive: true, mode: 0o700 });
+    chmodSync(join(receiptsDir, SALTS_DIR), 0o700);
     writeFileSync(saltsFileFor(receiptsDir, v.predicate.receiptId), JSON.stringify({ receiptId: v.predicate.receiptId, salts }, null, 2), { mode: 0o600 });
   };
   return {
     keyid: key.keyid,
     log: sink,
     async issue(predicate, ctx) {
-      const prior = committed.get(predicate.receiptId);
+      const prior = committed.get(predicate.receiptId)?.view;
       committed.delete(predicate.receiptId);
       const pv = view(predicate, ctx, prior);
       const v = pv.predicate;
-      keepSalts(pv);
       const envelope = dsseSign(RECEIPT_TYPE, buildStatement(v), key);
       const entry = await sink.append(canonicalize(envelope));
+      // the salts once the log has taken the leaf: a receipt the log refused leaves nothing behind
+      keepSalts(pv);
       const bundle: ReceiptBundle = { envelope, treeHead: entry.treeHead, inclusion: entry.inclusion };
       writeFileSync(join(receiptsDir, `${predicate.receiptId}.json`), JSON.stringify(bundle, null, 2));
       // After the evidence, not before, and awaited so a process that exits right after issuing still exports. The
@@ -76,7 +81,12 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
       const envelope = dsseSign(RECEIPT_TYPE, buildAuthorizationStatement(v), key);
       const entry = await sink.append(canonicalize(envelope));
       // committed: the receipt that follows shares this view; nothing is kept for an authorization the log refused
-      committed.set(predicate.receiptId, pv);
+      const now = Date.now();
+      for (const [id, c] of committed) {
+        if (now - c.at <= COMMITTED_FOR_MS) break;
+        committed.delete(id);
+      }
+      committed.set(predicate.receiptId, { view: pv, at: now });
       if (committed.size > COMMITTED_AT_MOST) committed.delete(committed.keys().next().value!);
       keepSalts(pv);
       const bundle: AuthorizationBundle = { envelope, treeHead: entry.treeHead, inclusion: entry.inclusion };

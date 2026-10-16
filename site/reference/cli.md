@@ -15,7 +15,7 @@ Two commands, one per package. Both run on plain Node 22 or later. Exit code 0 o
 | `hook [--config <sdk.json>]` | the Claude Code hook; the event on stdin | [Claude Code](./claude-code) |
 | `serve --config <sdk.json> [--port 8788] [--host 127.0.0.1]` | the sidecar | [sidecar](./sidecar) |
 | `verify <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--log-key <pub> \| --log-url <url>] [--log-id <id>] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]` | checks one receipt | [verify](./verify#verify) |
-| `reveal <bundle.json> --capture-key-env NAME [--out <file>]` | the values a receipt withheld under a capture rule, decrypted with the customer's key, as a disclosure file for `verify --disclose` | [verify](./verify#reveal) |
+| `reveal <bundle.json> --capture-key-env NAME --issuer-key <pub> [--out <file>] [--include-salts]` | the values a receipt withheld under a capture rule, decrypted with the customer's key, as a disclosure file for `verify --disclose` | [verify](./verify#reveal) |
 | `audit --older <bundle> --newer <bundle> (--log <log.jsonl> \| --log-url <url>) [--issuer-key <pub>] [--log-key <pub>] [--log-id <id>] [--witness-key <pub> \| --witness-url <url>] [--json]` | proves the newer head extends the older | [verify](./verify#audit) |
 | `prune --log <log.jsonl> --before <ISO> [--receipts <dir>]` | retention on a local log: older leaves become their hashes | [log API](./log-api#files) |
 | `log --file <log.jsonl> --key <log.key> [--port 8787] [--host] [--token-env NAME] [--log-id <id>] [--tenants <file>]` | the log server over a file | [log API](./log-api#the-server) |

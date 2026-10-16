@@ -58,7 +58,7 @@ console.log(formatReport(bare).split("\n").filter((l) => /args digest|execution 
 step(4, "with the customer's key, agent-custody reveal writes the disclosure, and verify --disclose recomputes every digest from it");
 const cli = join(import.meta.dirname, "..", "src", "cli.ts");
 const disclosureFile = join(fx.dir, "disclosure.json");
-const reveal = spawnSync(process.execPath, [cli, "reveal", file, "--capture-key-env", "EXAMPLE_CAPTURE_KEY", "--out", disclosureFile], { encoding: "utf8" });
+const reveal = spawnSync(process.execPath, [cli, "reveal", file, "--capture-key-env", "EXAMPLE_CAPTURE_KEY", "--issuer-key", fx.gatewayPub, "--out", disclosureFile], { encoding: "utf8" });
 if (reveal.status !== 0) throw new Error(reveal.stderr);
 console.log(`   ${reveal.stdout.trim()}`);
 // each revealed path carries the value and the salt its commitment was made with; the salt is what a reviewer needs to check it, and what the receipt never carries

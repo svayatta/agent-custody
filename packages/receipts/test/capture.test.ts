@@ -2,13 +2,14 @@
 // (the issuer's view of the whole statement), the digests and signatures are over the whole call, salted, and the
 // verifier recomputes them when the values are in clear, disclosed, or revealed with the customer's key, and says
 // "committed, not recomputed" when they are not.
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { captureKeyFrom, checkCommitment, digestSalt, getAt, isCommitment, pathKey, privateView, restorePaths, reveal, ruleFor, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
+import { aadFor, captureKeyFrom, checkCommitment, digestSalt, getAt, isCommitment, pathKey, privateView, restorePaths, reveal, ruleFor, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
+import { pruneLog } from "../src/retention.ts";
 import { sha256Hex } from "../src/crypto.ts";
 import { SALTS_DIR } from "../src/retention.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
@@ -81,6 +82,19 @@ describe("the view of a statement under a rule", () => {
     expect(isCommitment(e.commitment)).toBe(true);
     expect(isCommitment({ sha256: "x" })).toBe(false);
     expect(isCommitment({ $custody: "withheld" })).toBe(false);
+    // the encrypted form carries a 12-byte iv and a 16-byte tag, nothing shorter
+    expect(isCommitment({ ...e.commitment, tag: Buffer.alloc(8).toString("base64") })).toBe(false);
+    expect(isCommitment({ ...e.commitment, iv: Buffer.alloc(8).toString("base64") })).toBe(false);
+    // a key is 64 hex characters or 44 of strict base64: a string with stray characters never decodes to a different key by accident
+    expect(() => captureKeyFrom(`${KEY_HEX.slice(0, 63)}g`)).toThrow(/64 hex characters or 44 characters of base64/);
+    expect(() => captureKeyFrom(`${Buffer.from(KEY_HEX, "hex").toString("base64").slice(0, 43)}!`)).toThrow(/64 hex/);
+    expect(captureKeyFrom(Buffer.from(KEY_HEX, "hex").toString("base64")).equals(key)).toBe(true);
+    // an encrypted commitment is bound to its receipt and path: moved elsewhere, it does not decrypt under the right key
+    const bound = withhold("patient 0042", key, aadFor("receipt-A", ["request", "args", "reason"]));
+    expect(reveal(bound.commitment, key, aadFor("receipt-A", ["request", "args", "reason"])).value).toBe("patient 0042");
+    expect(() => reveal(bound.commitment, key, aadFor("receipt-B", ["request", "args", "reason"]))).toThrow();
+    expect(() => reveal(bound.commitment, key, aadFor("receipt-A", ["execution", "result", "note"]))).toThrow();
+    expect(() => reveal(bound.commitment, key)).toThrow();
     expect(() => captureKeyFrom("too-short")).toThrow(/32 bytes/);
   });
 
@@ -243,15 +257,42 @@ describe("the view of a statement under a rule", () => {
     });
     // args private, result explicitly clear: the content stays, everything an upstream wrote beside it does not
     const v = privateView(p, { args: { mode: "digest", clear: ["amount"] }, result: { mode: "clear" } }).predicate;
-    expect(withheldPaths(v).sort()).toEqual(["request.args.reason", "consumed.factIds", "execution.result._meta", "execution.upstream.rawBody"].sort());
+    // the provider's signature is a MAC over the withheld body and its bind is a string the upstream chose: withheld with the body; only the provider's name stays
+    expect(withheldPaths(v).sort()).toEqual(["request.args.reason", "consumed.factIds", "execution.result._meta", "execution.upstream.rawBody", "execution.upstream.signature", "execution.upstream.bind"].sort());
     expect((v.execution as { result: { content: unknown } }).result.content).toEqual([{ type: "text", text: "ok" }]);
-    expect((v.execution as { upstream: { bind: string } }).upstream.bind).toBe("data.object.id");
-    expect(JSON.stringify(v)).not.toContain("cust_123");
-    // a bind that is not a path is data; an empty consumed list is structural
+    expect((v.execution as { upstream: { provider: string } }).upstream.provider).toBe("stripe-webhook");
+    expect(JSON.stringify(v)).not.toMatch(/cust_123|v1=00|data\.object/);
+    // an empty consumed list is structural
     const odd = privateView(predicate({ consumed: { factIds: [], provenance: "observed" }, execution: { status: "executed", result: { content: [] }, resultDigest: "y", provenance: "claimed", upstream: { provider: "github-delivery", rawBody: "{}", signature: "sha256=00", bind: "note cust_123" } } }), { args: { mode: "digest" } }).predicate;
     expect(withheldPaths(odd)).toContain("execution.upstream.bind");
     expect(withheldPaths(odd)).not.toContain("consumed.factIds");
     expect(JSON.stringify(odd)).not.toContain("cust_123");
+  });
+
+  it("a ciphertext moved to another receipt or path is a problem, not a disclosure; the host's ids are withheld; consumed is shared with the authorization once", () => {
+    const a = privateView(predicate({ receiptId: "receipt-A", request: { args: { reason: "SENSITIVE phone +44 20 7946 0000", amount: 1 }, argsDigest: "x", provenance: "claimed" } }), { args: { mode: "encrypted", clear: ["amount"] } }, key).predicate;
+    const moved = getAt(a, ["request", "args", "reason"]);
+    // the same ciphertext under another receipt id, and under another path of the same receipt
+    const b = { ...predicate({ receiptId: "receipt-B" }), execution: { status: "executed", result: { note: moved }, resultDigest: "y", provenance: "claimed" }, capture: { mode: "encrypted", withheld: [["execution", "result", "note"]] } } as ReceiptPredicate;
+    const rb = restorePaths(b, b.capture, undefined, key);
+    expect(rb.problems).toHaveLength(1);
+    expect(rb.restored.size).toBe(0);
+    const samePath = { ...a, execution: { status: "executed", result: { reason: moved }, resultDigest: "y", provenance: "claimed" }, capture: { mode: "encrypted", withheld: [["execution", "result", "reason"]] } } as ReceiptPredicate;
+    expect(restorePaths(samePath, samePath.capture, undefined, key).problems).toHaveLength(1);
+    expect(restorePaths(a, a.capture, undefined, key).predicate.request.args.reason).toBe("SENSITIVE phone +44 20 7946 0000");
+    // the model and session ids are what the agent's call or process supplied: values under a private rule; none stays none
+    const ids = privateView(predicate({ model: { id: "gpt-with-cust_123-in-it", provenance: "claimed" }, session: { id: "sess_cust_123", toolUseId: null, provenance: "claimed" } }), { args: { mode: "digest" } }).predicate;
+    expect(withheldPaths(ids)).toEqual(expect.arrayContaining(["model.id", "session.id"]));
+    expect(withheldPaths(ids)).not.toContain("session.toolUseId");
+    expect(JSON.stringify(ids)).not.toContain("cust_123");
+    expect(privateView(predicate(), { args: { mode: "digest" } }).predicate.model).toEqual({ id: null, provenance: "claimed" });
+    // consumed is a shared part: the receipt built on the authorization carries its commitment once, with its salt
+    const withIds = predicate({ consumed: { factIds: ["fact:1"], provenance: "observed" } });
+    const auth = privateView({ ...withIds, execution: undefined } as unknown as ReceiptPredicate, { args: { mode: "digest" } });
+    const after = privateView(withIds, { args: { mode: "digest" } }, undefined, {}, auth);
+    expect(withheldPaths(after.predicate).filter((w) => w === "consumed.factIds")).toHaveLength(1);
+    expect(after.predicate.consumed).toEqual(auth.predicate.consumed);
+    expect(after.salts[pathKey(["consumed", "factIds"])]).toBe(auth.salts[pathKey(["consumed", "factIds"])]);
   });
 
   it("a reviewer who can guess a withheld value cannot confirm the guess from the receipt, in either mode (issue #126)", () => {
@@ -295,6 +336,9 @@ describe("private evidence through the gateway", () => {
     // the fake provider also delivers a signed webhook for every refund, so the delivery body is in play
     cfg.upstream.args.push("--webhook-secret", WEBHOOK_SECRET);
     writeFileSync(fx.configFile, JSON.stringify(cfg));
+    // a salts directory that already exists with a wider mode is tightened by the issuer
+    mkdirSync(join(fx.receiptsDir, SALTS_DIR), { recursive: true });
+    chmodSync(join(fx.receiptsDir, SALTS_DIR), 0o755);
     gw = await createGateway(loadConfig(fx.configFile));
     const clearCfg = { ...cfg, capture: {}, receiptsDir: "receipts-clear", logFile: "log-clear.jsonl" };
     writeFileSync(join(fx.dir, "gateway-clear.json"), JSON.stringify(clearCfg));
@@ -345,9 +389,12 @@ describe("private evidence through the gateway", () => {
     expect(isCommitment(ex.result._meta)).toBe(true);
     expect(paths).toContain("execution.result._meta");
     expect(paths).toContain("execution.upstream.rawBody");
-    const up = (p.execution as { upstream: { rawBody: unknown; signature: string } }).upstream;
+    const up = (p.execution as { upstream: { rawBody: unknown; signature: unknown; bind: unknown; provider: string } }).upstream;
     expect(isCommitment(up.rawBody)).toBe(true);
-    expect(typeof up.signature).toBe("string");
+    expect(isCommitment(up.signature)).toBe(true);
+    expect(isCommitment(up.bind)).toBe(true);
+    expect(up.provider).toBe("stripe-webhook");
+    expect(paths).toEqual(expect.arrayContaining(["execution.upstream.signature", "execution.upstream.bind"]));
     // the fact the policy decided on is encrypted field by field: the policy saw it, the file does not show it
     const customer = p.facts.customer!.value as Record<string, unknown>;
     expect(Object.values(customer).every(isCommitment)).toBe(true);
@@ -412,7 +459,8 @@ describe("private evidence through the gateway", () => {
     const p = decode(bundle).predicate;
     // the holder of the values discloses them with their salts: from the file for digest-only ones, from the key for encrypted ones
     const salts = allSalts(fx.receiptsDir, p, key);
-    const disclosed = disclose(p.capture, salts, { request: { args }, execution: { result, upstream: { rawBody: (originalMeta["agent-custody/upstream-signature"] as { rawBody: string }).rawBody } } });
+    const attestation = originalMeta["agent-custody/upstream-signature"] as { rawBody: string; signature: string; bind: string };
+    const disclosed = disclose(p.capture, salts, { request: { args }, execution: { result, upstream: { rawBody: attestation.rawBody, signature: attestation.signature, bind: attestation.bind } } });
     const withDisclosure = verifyBundle(bundle, { ...opts, disclosed });
     expect(withDisclosure.ok, formatReport(withDisclosure)).toBe(true);
     expect(check("request args digest", withDisclosure).detail).toBe("recomputed from disclosed values");
@@ -623,6 +671,13 @@ describe("private evidence through the gateway", () => {
       const v = verifyBundle(bundle, { issuerKeys: [loadPublicKey(fx8.gatewayPub)], principalKeys: [loadPublicKey(fx8.principalPub)], logFile: fx8.logFile });
       expect(v.ok, formatReport(v)).toBe(true);
       expect(check("authorization names this call", v).ok).toBe(true);
+      // pruned, the call leaves nothing behind: not the bundle, not the salts, not the authorization that was committed before it
+      const authorizationFile = join(fx8.receiptsDir, `${p.receiptId}.authorization.json`);
+      expect(existsSync(authorizationFile)).toBe(true);
+      pruneLog(fx8.logFile, new Date(Date.now() + 60_000).toISOString(), fx8.receiptsDir);
+      expect(existsSync(join(fx8.receiptsDir, `${p.receiptId}.json`))).toBe(false);
+      expect(existsSync(join(fx8.receiptsDir, SALTS_DIR, `${p.receiptId}.json`))).toBe(false);
+      expect(existsSync(authorizationFile)).toBe(false);
     } finally {
       await gw8.close();
     }
@@ -634,7 +689,7 @@ describe("private evidence through the gateway", () => {
     const p = decode(bundle).predicate;
     const file = join(fx.receiptsDir, `${p.receiptId}.json`);
     const cli = join(import.meta.dirname, "..", "src", "cli.ts");
-    const run = (...extra: string[]) => spawnSync(process.execPath, [cli, "reveal", file, "--capture-key-env", "TEST_CAPTURE_KEY", ...extra], { encoding: "utf8", env: { ...process.env, TEST_CAPTURE_KEY: KEY_HEX } });
+    const run = (...extra: string[]) => spawnSync(process.execPath, [cli, "reveal", file, "--capture-key-env", "TEST_CAPTURE_KEY", "--issuer-key", fx.gatewayPub, ...extra], { encoding: "utf8", env: { ...process.env, TEST_CAPTURE_KEY: KEY_HEX } });
     // by default: the encrypted values with their salts, nothing for the digest-only ones but their names
     const plain = run();
     expect(plain.status, plain.stderr).toBe(0);
@@ -667,14 +722,25 @@ describe("private evidence through the gateway", () => {
     }
     expect(statSync(out).mode & 0o777).toBe(0o600);
     expect(getAt(JSON.parse(readFileSync(out, "utf8")), ["request", "args", "reason"])).toMatchObject({ value: "fraud" });
-    // a receipt id from a bundle never becomes part of a path unchecked
+    // a bundle assembled by someone else (another receipt's ciphertext at a path of their choosing, any signature) is refused before anything is decrypted
     const st = decode(bundle);
-    const forged = { ...bundle, envelope: { ...bundle.envelope, payload: Buffer.from(JSON.stringify({ ...st, predicate: { ...st.predicate, receiptId: "../../etc/passwd" } })).toString("base64") } };
+    const forged = { ...bundle, envelope: { ...bundle.envelope, payload: Buffer.from(JSON.stringify({ ...st, predicate: { ...st.predicate, receiptId: "../../etc/passwd" } })).toString("base64"), signatures: [{ keyid: "not-the-issuer", sig: "AAAA" }] } };
     const forgedFile = join(fx.dir, "forged.json");
     writeFileSync(forgedFile, JSON.stringify(forged));
-    const bad = spawnSync(process.execPath, [cli, "reveal", forgedFile, "--capture-key-env", "TEST_CAPTURE_KEY", "--include-salts"], { encoding: "utf8", env: { ...process.env, TEST_CAPTURE_KEY: KEY_HEX } });
+    const bad = spawnSync(process.execPath, [cli, "reveal", forgedFile, "--capture-key-env", "TEST_CAPTURE_KEY", "--issuer-key", fx.gatewayPub, "--include-salts"], { encoding: "utf8", env: { ...process.env, TEST_CAPTURE_KEY: KEY_HEX } });
     expect(bad.status).not.toBe(0);
-    expect(bad.stderr).toMatch(/not a valid id/);
+    expect(bad.stderr).toMatch(/not signed by the issuer key/);
+    expect(bad.stdout).toBe("");
+    // and without the issuer key the command does not run at all
+    expect(spawnSync(process.execPath, [cli, "reveal", file, "--capture-key-env", "TEST_CAPTURE_KEY"], { encoding: "utf8", env: { ...process.env, TEST_CAPTURE_KEY: KEY_HEX } }).status).not.toBe(0);
+    // --out never writes through a symlink left at that name
+    const victim = join(fx.dir, "victim.txt");
+    writeFileSync(victim, "untouched");
+    const link = join(fx.dir, "disclosure-link.json");
+    symlinkSync(victim, link);
+    const viaLink = run("--out", link);
+    expect(viaLink.status).not.toBe(0);
+    expect(readFileSync(victim, "utf8")).toBe("untouched");
   });
 
   it("a rule in mode encrypted without a key, or a key variable that is not set, fails at startup", async () => {

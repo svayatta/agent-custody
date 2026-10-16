@@ -62,6 +62,9 @@ export function pruneLog(logFile: string, before: string, receiptsDir?: string):
         }
         const salts = saltsFileFor(receiptsDir, receiptId);
         if (existsSync(salts)) unlinkSync(salts);
+        // the authorization committed before the call carries the same call: it goes too
+        const authorization = join(receiptsDir, `${receiptId}.authorization.json`);
+        if (existsSync(authorization)) unlinkSync(authorization);
       }
     } else {
       out.push(line);

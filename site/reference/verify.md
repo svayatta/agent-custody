@@ -35,6 +35,7 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | --- | --- |
 | receipt signature (issuer key) | the bundle was signed by a trusted issuer key; nothing else is decided if this fails |
 | receipt payload type | it is an in-toto statement with the receipt predicate type |
+| structural parts in clear | the capture note, if any, is well formed and names no structural part (ids, the tool, the grant, the status, the decision, the digests, a fact's tool, a provider's name), and those parts are what every later check assumes; nothing else is decided if this fails |
 | issuer kind is known, issuer keyid matches signer | the receipt says who issued it and the signature agrees |
 | gateway receipt carries a delegation, carries a policy decision | gateway receipts embed both |
 | delegation signature (principal key) | the grant was signed by a trusted principal key |
@@ -48,7 +49,7 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | fact `<name>` value, fact `<name>` args | a captured fact's commitments hold against the disclosed or decrypted value, or pass as committed when neither is given |
 | withheld `<path>` | every other path the capture note names (`execution.error`, `execution.reason`, `policy.errors`, `execution.upstream.rawBody`, a part added later): it holds a commitment, which holds against the disclosed or decrypted value when one is given |
 | upstream signature (upstream key), upstream signature (provider secret) | the upstream's signature over the result verifies when a key is given; a Stripe or GitHub delivery verifies when its secret is given |
-| upstream signature not checked | only when the result, the delivery body, or the upstream's signed envelope is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |
+| upstream signature not checked | only when the result, the delivery body, its signature or bind, or the upstream's signed envelope is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |
 | policy decision consistent with execution | an enforced `deny` never sits beside `executed`; a `deny` with `enforced: false` (observe mode) may, and the detail says so |
 | authorization … (five checks) | pre-committed calls: the authorization verifies, names this call, was allowed, is included in the log, and precedes the receipt leaf |
 | tree head signature, tree head names the expected log | the head was signed by an issuer or log key, and by the log the verifier expected |
@@ -60,12 +61,13 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 The values a receipt withheld under a capture rule in mode `encrypted`, as a disclosure file for `verify --disclose`. Needs the customer's capture key.
 
 ```bash
-agent-custody reveal receipts/<id>.json --capture-key-env AGENT_CUSTODY_CAPTURE_KEY [--out disclosure.json]
+agent-custody reveal receipts/<id>.json --capture-key-env AGENT_CUSTODY_CAPTURE_KEY --issuer-key keys/gateway.pub [--out disclosure.json] [--include-salts]
 ```
 
 | option | meaning |
 | --- | --- |
-| `--capture-key-env` | the environment variable holding the 32-byte key, 64 hex characters or base64; never the key itself |
+| `--capture-key-env` | the environment variable holding the 32-byte key, 64 hex characters or 44 of base64; never the key itself |
+| `--issuer-key` | the issuer's public key; the bundle must verify against it, or nothing is revealed (repeatable) |
 | `--out` | where to write the disclosure; without it, stdout |
 | `--include-salts` | also write the salt of every value the key cannot reveal, from the salts file beside the receipt, for the holder of the values to complete |
 

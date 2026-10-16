@@ -4,10 +4,10 @@ import { captureKeyFrom, getAt, pathText, restorePaths, setAt } from "./capture.
 import { saltsFileFor } from "./retention.ts";
 import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fchmodSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { loadConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
-import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
+import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
 import type { Envelope } from "./crypto.ts";
 import { createDelegation, decodeDelegation, delegateFrom, grantDigest } from "./delegation.ts";
 import { createGateway, createGatewayHost, serveStdio, writeRevokedGrants } from "./gateway.ts";
@@ -46,7 +46,7 @@ const USAGE = `agent-custody <command>
                                                    --agent-key names the agent's own key in the grant, so the agent may delegate
   delegate --key <agent.key> --parent <grant.json> --agent <sub-agent> --scopes <a,b> [--ttl-hours N] [--agent-key <sub.pub>] --out <file>
                                                    a narrower grant for a sub-agent, signed by the agent the parent names; the parent travels inside
-  reveal <bundle> --capture-key-env NAME [--out <file>] [--include-salts]   the values a receipt withheld (capture mode encrypted), as a disclosure file
+  reveal <bundle> --capture-key-env NAME --issuer-key <pub> [--out <file>] [--include-salts]   the values a receipt withheld (capture mode encrypted), as a disclosure file
                                                    for verify --disclose; needs the customer's capture key
   revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them
@@ -498,12 +498,15 @@ async function main(argv: string[]): Promise<number> {
     case "reveal": {
       // The values a receipt withheld, under the customer's key, as a disclosure file: hand it to a reviewer with the
       // receipt, and `verify --disclose` recomputes every digest from it.
-      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { "capture-key-env": { type: "string" }, out: { type: "string" }, "include-salts": { type: "boolean" } } });
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { "capture-key-env": { type: "string" }, "issuer-key": { type: "string", multiple: true }, out: { type: "string" }, "include-salts": { type: "boolean" } } });
       const file = positionals[0];
-      if (!file || !values["capture-key-env"]) throw new Error("reveal needs <bundle> --capture-key-env NAME [--out disclosure.json] [--include-salts]");
+      if (!file || !values["capture-key-env"] || !values["issuer-key"]?.length) throw new Error("reveal needs <bundle> --capture-key-env NAME --issuer-key <pub> [--out disclosure.json] [--include-salts]");
       const key = captureKeyFrom(secretFrom(values["capture-key-env"]));
       const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
-      const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as ReceiptStatement).predicate;
+      // only the issuer's own statement is decrypted: a bundle someone assembled around another receipt's ciphertexts is refused before any value comes back
+      const signed = dsseVerify(bundle.envelope, values["issuer-key"].map((f) => loadPublicKey(f)));
+      if (!signed.ok) throw new Error(`reveal: the bundle is not signed by the issuer key given (${signed.error}); nothing is revealed`);
+      const p = (signed.payload as ReceiptStatement).predicate;
       // Every withheld path the key reveals goes into the disclosure at its own path, value and salt. A path withheld
       // as a digest only carries no value to reveal, and its salt is not written unless asked for (--include-salts):
       // a salt beside no value would hand a reviewer the means to confirm guesses, and a file that carries one does
@@ -528,9 +531,15 @@ async function main(argv: string[]): Promise<number> {
       const how = saltsWritten ? `; their salts are written in the file for the holder to add \"value\" beside, and the file does not verify until then: do not hand it over unfinished` : values["include-salts"] ? ` (no salts file at ${saltsFile})` : `; --include-salts writes their salts from ${saltsFile} for the holder to complete`;
       const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them${how}.` : "";
       if (values.out) {
-        // decrypted values and salts: the owner's alone, whatever the umask, and whatever mode a file already there had
-        writeFileSync(values.out, text, { mode: 0o600 });
-        chmodSync(values.out, 0o600);
+        // decrypted values and salts: the owner's alone, whatever the umask, whatever mode a file already there had,
+        // and never through a symlink someone left at that name
+        const fd = openSync(values.out, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW, 0o600);
+        try {
+          fchmodSync(fd, 0o600);
+          writeSync(fd, text);
+        } finally {
+          closeSync(fd);
+        }
         console.log(`disclosure for receipt ${p.receiptId} written to ${values.out}; verify it with --disclose ${values.out}.${note}`);
       } else {
         console.log(text);
