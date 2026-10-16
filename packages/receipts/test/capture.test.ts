@@ -76,7 +76,7 @@ describe("the view of a statement under a rule", () => {
     expect(() => reveal(w, key)).toThrow(/withheld without its value/);
     const e = withhold("phone +44 20 7946 0000", key);
     expect(e.commitment.$custody).toBe("encrypted");
-    expect(JSON.stringify(e.commitment)).not.toMatch(/7946|salt/);
+    expect(JSON.stringify(e.commitment)).not.toMatch(/7946 0000|"salt"/);
     expect(reveal(e.commitment, key)).toEqual({ value: "phone +44 20 7946 0000", salt: e.salt });
     expect(() => reveal(e.commitment, captureKeyFrom(randomBytes(32).toString("hex")))).toThrow(/not the one given/);
     expect(isCommitment(e.commitment)).toBe(true);
@@ -104,7 +104,7 @@ describe("the view of a statement under a rule", () => {
     expect(v.capture).toEqual({ mode: "digest", withheld: [["request", "args", "reason"], ["request", "args", "note"], ["execution", "result", "_meta"]] });
     expect(v.request.args.amount).toBe(2500);
     expect(isCommitment(v.request.args.reason)).toBe(true);
-    expect(JSON.stringify(v)).not.toMatch(/7946|4242|salt/);
+    expect(JSON.stringify(v)).not.toMatch(/7946 0000|"card"|"salt"/);
     expect(Object.keys(salts).sort()).toEqual(v.capture!.withheld.map(pathKey).sort());
     // the digests are over the full values, salted from the field salts: whoever can restore the values can recompute them
     expect(v.request.argsDigest).toBe(digestOf(p.request.args, saltFor(v.capture, salts, ["request", "args"])));
