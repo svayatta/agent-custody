@@ -51,10 +51,10 @@ Payload (type `https://agent-custody.dev/custody-pack/v0.1`): `{ "version": "0.1
 Everything that relied on a fact: later calls that had been shown it, beliefs derived from it, and whether it was retracted.
 
 ```bash
-agent-custody-memory blast --ledger ledger.sqlite --receipts receipts --fact <factId> [--json]
+agent-custody-memory blast --ledger ledger.sqlite --receipts receipts --fact <factId> [--capture-key-env NAME] [--json]
 ```
 
-`{ "factId", "retracted": boolean, "consumers": [{ "receiptId", "timestamp", "tool", "status" }], "derived": [ facts ], "stillBelieved": [ facts ] }`. In code: `blastRadius(ledger, loadReceipts(dir), factId)`.
+`{ "factId", "retracted": boolean, "consumers": [{ "receiptId", "timestamp", "tool", "status" }], "derived": [ facts ], "stillBelieved": [ facts ], "withheld": [ receipts ] }`. A receipt issued under a [capture rule](./gateway#private-evidence) withholds what the agent had been shown: such a call made since the fact existed is listed under `withheld`, the text report says `INCOMPLETE` and lists it, and the sets above are incomplete while any is listed; `--capture-key-env` decrypts the ids of receipts in mode `encrypted` so the query sees through. In code: `blastRadius(ledger, loadReceipts(dir, { captureKey? }), factId)`; a summary carries `consumedWithheld`.
 
 ## `eval`
 

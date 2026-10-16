@@ -644,6 +644,35 @@ describe("private evidence through the gateway", () => {
     }
   });
 
+  it("a call to a tool no upstream offers keeps the rule its real name selects, and the receipt shows the name as (unknown tool), in either mode", async () => {
+    for (const mode of ["digest", "encrypted"] as const) {
+      const fxu = buildFixture(mkdtempSync(join(tmpdir(), `capture-unknown-${mode}-`)));
+      const cfg = JSON.parse(readFileSync(fxu.configFile, "utf8"));
+      // an explicit rule for the name and no wildcard: the rule must be found by the real name, not the masked one
+      cfg.capture = { "not.offered": { args: { mode } } };
+      cfg.captureKeyEnv = "TEST_CAPTURE_KEY";
+      writeFileSync(fxu.configFile, JSON.stringify(cfg));
+      const gwu = await createGateway(loadConfig(fxu.configFile));
+      try {
+        const r = await gwu.handleCall({ name: "not.offered", arguments: { secret: `PRIVATE_UNKNOWN_${mode}` } });
+        expect(r.isError).toBe(true);
+        const bundle = bundleOf2(fxu, r);
+        const p = decode(bundle).predicate;
+        expect(p.execution.status).toBe("denied");
+        expect(p.tool.name).toBe("(unknown tool)");
+        expect(isCommitment(p.request.args.secret)).toBe(true);
+        expect(leakText(bundle)).not.toMatch(/PRIVATE_UNKNOWN|not\.offered/);
+        const v = verifyBundle(bundle, { issuerKeys: [loadPublicKey(fxu.gatewayPub)], principalKeys: [loadPublicKey(fxu.principalPub)], logFile: fxu.logFile });
+        expect(v.ok, formatReport(v)).toBe(true);
+        // an offered tool keeps its name under the same kind of rule
+        const known = await gwu.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500 } });
+        expect(decode(bundleOf2(fxu, known)).predicate.tool.name).toBe("stripe.refund");
+      } finally {
+        await gwu.close();
+      }
+    }
+  });
+
   it("a pre-committed call's authorization and receipt carry the same commitments and salts, so the receipt still names the authorization", async () => {
     const fx8 = buildFixture(mkdtempSync(join(tmpdir(), "capture-precommit-")));
     const cfg = JSON.parse(readFileSync(fx8.configFile, "utf8"));

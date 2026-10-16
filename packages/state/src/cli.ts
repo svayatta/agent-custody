@@ -2,6 +2,7 @@
 import { parseArgs } from "node:util";
 import { Ledger } from "./ledger.ts";
 import { createMemoryServer, serveStdio } from "./server.ts";
+import { captureKeyFrom } from "@agent-custody/receipts";
 import { blastRadius, formatBlastRadius, loadReceipts } from "./blast.ts";
 import { serveMemoryHttp } from "./http.ts";
 import { loadPrivateKey, loadPublicKey, verifyBundle } from "@agent-custody/receipts";
@@ -252,10 +253,12 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "blast": {
-      const { values } = parseArgs({ args: rest, options: { ledger: { type: "string" }, receipts: { type: "string" }, fact: { type: "string" }, json: { type: "boolean", default: false } } });
-      if (!values.ledger || !values.receipts || !values.fact) throw new Error("blast needs --ledger, --receipts, and --fact");
+      const { values } = parseArgs({ args: rest, options: { ledger: { type: "string" }, receipts: { type: "string" }, fact: { type: "string" }, "capture-key-env": { type: "string" }, json: { type: "boolean", default: false } } });
+      if (!values.ledger || !values.receipts || !values.fact) throw new Error("blast needs --ledger, --receipts, and --fact [--capture-key-env NAME]");
       const blastLedger = new Ledger(values.ledger);
-      const b = await blastRadius(blastLedger, loadReceipts(values.receipts), values.fact);
+      // receipts under a capture rule withhold what the agent had been shown; the key brings it back, else the query says it is incomplete
+      const captureKey = values["capture-key-env"] ? captureKeyFrom(process.env[values["capture-key-env"]] ?? (() => { throw new Error(`${values["capture-key-env"]} is not set`); })()) : undefined;
+      const b = await blastRadius(blastLedger, loadReceipts(values.receipts, { captureKey }), values.fact);
       await blastLedger.close();
       console.log(values.json ? JSON.stringify(b, null, 2) : formatBlastRadius(b, values.fact));
       return b.fact ? 0 : 1;

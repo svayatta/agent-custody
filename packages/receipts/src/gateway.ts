@@ -17,7 +17,7 @@ import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
-import { captureKeyFrom, ruleFor, ruleMode } from "./capture.ts";
+import { captureKeyFrom, ruleFor } from "./capture.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
 
@@ -320,7 +320,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       // are not unique across tools. And the lookups' full results, behind the facts' digests.
       const argsClear = new Set(ruleFor(cfg.capture, tool)?.args?.clear ?? []);
       const clearFactArgs = Object.fromEntries(Object.entries(factTemplates).map(([name, template]) => [name, Object.entries(template).filter(([, v]) => !v.startsWith("$args.") || argsClear.has(v.slice("$args.".length))).map(([k]) => k)]));
-      const captureCtx = { clearFactArgs, factResults };
+      // a name no upstream offers is text the agent chose: the issuer selects the rule by it and masks it in the view
+      const captureCtx = { clearFactArgs, factResults, unknownTool: !owner.has(tool) };
       const head = {
         receiptId,
         timestamp,
@@ -328,8 +329,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         principal: { id: delegation.principal, keyid: principalKeyid, provenance: "attested" as const },
         agent: { id: delegation.agent, provenance: "attested" as const },
         delegation: { envelope: grantEnvelope, provenance: "attested" as const },
-        // a name no upstream offers is text the agent chose: under a private rule it is not recorded (the denial's reason, withheld, carries it)
-        tool: { name: owner.has(tool) || ruleMode(ruleFor(cfg.capture, tool)) === "clear" ? tool : "(unknown tool)", provenance: "observed" as const, ...(owner.has(tool) && upstreamConfigs.length > 1 ? { upstream: owner.get(tool)! } : {}) },
+        tool: { name: tool, provenance: "observed" as const, ...(owner.has(tool) && upstreamConfigs.length > 1 ? { upstream: owner.get(tool)! } : {}) },
         request: { args, argsDigest: digestOf(args), provenance: "claimed" as const },
         facts,
         consumed: { factIds: consumedNow, provenance: "observed" as const },

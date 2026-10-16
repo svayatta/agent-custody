@@ -44,4 +44,4 @@ Two commands, one per package. Both run on plain Node 22 or later. Exit code 0 o
 | `explain --receipts <dir> --receipt <id> [--ledger <path>] [--issuer-key] [--principal-key] [--log-key] [--json]`, `explain … --out <file> --sign <key>`, `explain --verify <file> --key <pub>` | one action explained | [state tools](./state-tools#explain) |
 | `review --receipts <dir> [--ledger <path>] [--issuer-key] [--principal-key] [--log-key] [--log-id] [--port 8791] [--host] [--title <text>]`, `review … --out <dir>` | the review pages | [state tools](./state-tools#review) |
 | `export --ledger <path> --out <ledger.jsonl>` | any ledger as JSONL | [state tools](./state-tools#sweep-and-export) |
-| `blast --ledger <path> --receipts <dir> --fact <factId> [--json]` | what relied on a fact | [state tools](./state-tools#blast) |
+| `blast --ledger <path> --receipts <dir> --fact <factId> [--capture-key-env NAME] [--json]` | what relied on a fact | [state tools](./state-tools#blast) |

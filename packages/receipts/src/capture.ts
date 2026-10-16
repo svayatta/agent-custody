@@ -238,6 +238,8 @@ export interface CaptureContext {
   clearFactArgs?: Record<string, string[]>;
   /** per fact name: the lookup's full result, which the receipt's `resultDigest` then commits to; without it the digest the producer computed is withheld */
   factResults?: Record<string, unknown>;
+  /** the tool name is not one any upstream offers, so it is text the agent chose: under a private rule the view shows "(unknown tool)" in its place, the rule having been selected by the real name */
+  unknownTool?: boolean;
 }
 
 /** The view the issuer signs, and the salts behind its commitments by `pathKey`, which the issuer keeps and never signs. */
@@ -267,6 +269,7 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
   let out: Record<string, unknown> = plain(predicate as unknown as Record<string, unknown>);
   // the note is this view's to write: one that came in with the predicate names nothing here
   delete out.capture;
+  if (ctx.unknownTool && isObject(out.tool)) out.tool = { ...out.tool, name: "(unknown tool)" };
   if (prior) {
     for (const part of SHARED_WITH_AUTHORIZATION) if (own(prior.predicate as unknown as Record<string, unknown>, part)) out[part] = (prior.predicate as unknown as Record<string, unknown>)[part];
     for (const w of prior.predicate.capture?.withheld ?? []) {

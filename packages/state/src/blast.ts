@@ -3,6 +3,7 @@
 // downstream action and every derived belief, transitively, and the retraction that undoes the belief if there is one.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { restorePaths, type CaptureNote } from "@agent-custody/receipts";
 import type { Fact, Ledger, RetractEvent } from "./ledger.ts";
 
 /** The parts of a receipt this query needs. Decoded from a bundle's statement; nothing here is verified, so verify first. */
@@ -11,12 +12,14 @@ export interface ReceiptSummary {
   timestamp: string;
   tool: string;
   status: string;
-  /** fact ids the agent had been shown before this call, from the receipt's consumed field */
+  /** fact ids the agent had been shown before this call, from the receipt's consumed field; empty when none, or when they are withheld */
   consumed: string[];
+  /** true when the receipt withholds the consumed ids under a capture rule and no key brought them back: the call may depend on any fact, and the query cannot tell */
+  consumedWithheld: boolean;
 }
 
-/** Reads every bundle in a receipts directory. Order is by timestamp. */
-export function loadReceipts(dir: string): ReceiptSummary[] {
+/** Reads every bundle in a receipts directory. Order is by timestamp. With the capture key, withheld consumed ids are decrypted; otherwise a receipt that withholds them is marked, not treated as having consumed nothing. */
+export function loadReceipts(dir: string, opts: { captureKey?: Buffer } = {}): ReceiptSummary[] {
   const out: ReceiptSummary[] = [];
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".json")) continue;
@@ -25,7 +28,14 @@ export function loadReceipts(dir: string): ReceiptSummary[] {
     const st = JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as { predicate?: any };
     const p = st.predicate;
     if (!p?.receiptId) continue;
-    out.push({ receiptId: p.receiptId, timestamp: p.timestamp, tool: p.tool?.name ?? "?", status: p.execution?.status ?? "?", consumed: Array.isArray(p.consumed?.factIds) ? p.consumed.factIds : [] });
+    let ids: unknown = p.consumed?.factIds;
+    let consumedWithheld = false;
+    if (p.consumed && !Array.isArray(ids)) {
+      const back = opts.captureKey ? restorePaths(p, p.capture as CaptureNote | undefined, undefined, opts.captureKey).predicate as { consumed?: { factIds?: unknown } } : null;
+      if (Array.isArray(back?.consumed?.factIds)) ids = back!.consumed!.factIds;
+      else consumedWithheld = true;
+    }
+    out.push({ receiptId: p.receiptId, timestamp: p.timestamp, tool: p.tool?.name ?? "?", status: p.execution?.status ?? "?", consumed: Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [], consumedWithheld });
   }
   return out.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 }
@@ -40,6 +50,8 @@ export interface BlastRadius {
   retraction: RetractEvent | null;
   /** derived facts that are still believed; the ones a cleanup has to decide about */
   stillBelieved: Fact[];
+  /** receipts made after the fact existed whose consumed ids are withheld: each may depend on it, and the sets above are incomplete while any is listed */
+  withheld: ReceiptSummary[];
 }
 
 export async function blastRadius(ledger: Ledger, receipts: ReceiptSummary[], factId: string): Promise<BlastRadius> {
@@ -66,7 +78,10 @@ export async function blastRadius(ledger: Ledger, receipts: ReceiptSummary[], fa
   }
   const retraction = ((await ledger.history(factId)).find((e) => e.kind === "retract") as RetractEvent | undefined) ?? null;
   const derivedFacts = [...derived.values()];
-  return { fact: byId.get(factId) ?? null, receipts: [...hit.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp)), derivedFacts, retraction, stillBelieved: derivedFacts.filter((f) => believed.has(f.factId)) };
+  const fact = byId.get(factId) ?? null;
+  // what the query cannot see: a call whose consumed ids are withheld, made once the fact existed, may have relied on it
+  const withheld = receipts.filter((r) => r.consumedWithheld && !hit.has(r.receiptId) && (!fact || r.timestamp >= fact.validFrom));
+  return { fact, receipts: [...hit.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp)), derivedFacts, retraction, stillBelieved: derivedFacts.filter((f) => believed.has(f.factId)), withheld };
 }
 
 export function formatBlastRadius(b: BlastRadius, factId: string): string {
@@ -77,5 +92,9 @@ export function formatBlastRadius(b: BlastRadius, factId: string): string {
   for (const r of b.receipts) lines.push(`  ${r.timestamp}  ${r.tool.padEnd(18)} ${r.status.padEnd(9)} receipt ${r.receiptId.slice(0, 8)}`);
   lines.push(`${b.derivedFacts.length} belief(s) written in those calls, ${b.stillBelieved.length} still believed:`);
   for (const f of b.derivedFacts) lines.push(`  ${f.subject} ${f.predicate} = ${JSON.stringify(f.value)}  fact ${f.factId.slice(0, 8)}  ${b.stillBelieved.includes(f) ? "STILL BELIEVED" : "no longer believed"}`);
+  if (b.withheld.length) {
+    lines.push(`INCOMPLETE: ${b.withheld.length} call(s) made since the fact existed withhold what the agent had been shown under a capture rule; each may depend on it, and so may beliefs written in them. Give the capture key to see.`);
+    for (const r of b.withheld) lines.push(`  ${r.timestamp}  ${r.tool.padEnd(18)} ${r.status.padEnd(9)} receipt ${r.receiptId.slice(0, 8)}  consumed ids withheld`);
+  }
   return lines.join("\n");
 }
