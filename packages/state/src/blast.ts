@@ -22,7 +22,8 @@ export interface ReceiptSummary {
 export function loadReceipts(dir: string, opts: { captureKey?: Buffer } = {}): ReceiptSummary[] {
   const out: ReceiptSummary[] = [];
   for (const f of readdirSync(dir)) {
-    if (!f.endsWith(".json")) continue;
+    // the authorization committed before a pre-committed call carries the same call: the receipt is the record
+    if (!f.endsWith(".json") || f.endsWith(".authorization.json")) continue;
     const bundle = JSON.parse(readFileSync(join(dir, f), "utf8")) as { envelope?: { payload?: string } };
     if (!bundle.envelope?.payload) continue;
     const st = JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as { predicate?: any };

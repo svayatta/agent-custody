@@ -17,7 +17,7 @@ import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
-import { captureKeyFrom, ruleFor } from "./capture.ts";
+import { captureKeyFrom, effectiveRule } from "./capture.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
 
@@ -318,7 +318,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       // copies a call argument the args rule keeps in clear (the rule's `clear` names call arguments, and a fact argument
       // may carry one under another name); the template is the one of the fact config that was used, since fact names
       // are not unique across tools. And the lookups' full results, behind the facts' digests.
-      const argsClear = new Set(ruleFor(cfg.capture, tool)?.args?.clear ?? []);
+      // the same rule the issuer will apply: for a name no upstream offers that may be the wildcard, not the name's own
+      const argsClear = new Set(effectiveRule(cfg.capture, tool, !owner.has(tool))?.args?.clear ?? []);
       const clearFactArgs = Object.fromEntries(Object.entries(factTemplates).map(([name, template]) => [name, Object.entries(template).filter(([, v]) => !v.startsWith("$args.") || argsClear.has(v.slice("$args.".length))).map(([k]) => k)]));
       // a name no upstream offers is text the agent chose: the issuer selects the rule by it and masks it in the view
       const captureCtx = { clearFactArgs, factResults, unknownTool: !owner.has(tool) };

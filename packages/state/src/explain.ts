@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { digestOf, dsseSign, dsseVerify, verifyBundle, type Envelope, type KeyPair, type PublicKeyRef, type ReceiptBundle, type ReceiptStatement, type VerifyOptions, type VerifyResult } from "@agent-custody/receipts";
+import { restorePaths, type CaptureNote } from "@agent-custody/receipts";
 import { blastRadius, loadReceipts, type ReceiptSummary } from "./blast.ts";
 import type { Fact, Ledger } from "./ledger.ts";
 
@@ -23,6 +24,8 @@ export interface ActionPack {
   written: Fact[];
   /** what each written belief is today */
   status: Record<string, "believed" | "retracted" | "forgotten" | "superseded">;
+  /** true when the receipt withholds the ids of the beliefs shown before the call under a capture rule and no key opened them: `consumed` is then empty for want of seeing, not for want of beliefs */
+  consumedWithheld: boolean;
   /** everything downstream of the written beliefs: later calls that consumed them and beliefs derived, transitively; `withheld` lists later calls whose consumed ids a capture rule withholds, each of which may depend on them, so the other sets are incomplete while it is not empty */
   downstream: { receipts: ReceiptSummary[]; derivedFacts: Fact[]; stillBelieved: Fact[]; withheld: ReceiptSummary[] };
   /** every receipt cited by the downstream walk, by id, as the full bundle */
@@ -43,8 +46,10 @@ function loadBundle(receiptsDir: string, receiptId: string): ReceiptBundle {
 export async function buildActionPack(receiptsDir: string, receiptId: string, ledger?: Ledger, opts: { captureKey?: Buffer } = {}): Promise<ActionPack> {
   const receipt = loadBundle(receiptsDir, receiptId);
   const p = decodeStatement(receipt).predicate;
-  // under a capture rule the ids are a commitment in the receipt: nothing to look up, and the explanation says so
-  const consumedIds = Array.isArray(p.consumed?.factIds) ? p.consumed.factIds : [];
+  // under a capture rule the ids are a commitment in the receipt: the key brings them back; without it there is nothing to look up, and the explanation says so
+  const opened = !Array.isArray(p.consumed?.factIds) && opts.captureKey ? (restorePaths(p, p.capture as CaptureNote | undefined, undefined, opts.captureKey).predicate as { consumed?: { factIds?: unknown } }).consumed?.factIds : undefined;
+  const consumedIds: string[] = Array.isArray(p.consumed?.factIds) ? p.consumed.factIds : Array.isArray(opened) ? opened.filter((id): id is string => typeof id === "string") : [];
+  const consumedWithheld = !!p.consumed && !Array.isArray(p.consumed.factIds) && !Array.isArray(opened);
   const consumed: ActionPack["consumed"] = { facts: [], unknown: [] };
   const written: Fact[] = [];
   const status: ActionPack["status"] = {};
@@ -87,7 +92,7 @@ export async function buildActionPack(receiptsDir: string, receiptId: string, le
   } else {
     consumed.unknown.push(...consumedIds);
   }
-  return { version: "0.1", generatedAt: new Date().toISOString(), receiptId, receipt, consumed, written, status, downstream, receipts, missingReceipts };
+  return { version: "0.1", generatedAt: new Date().toISOString(), receiptId, receipt, consumed, consumedWithheld, written, status, downstream, receipts, missingReceipts };
 }
 
 export function signActionPack(pack: ActionPack, key: KeyPair): Envelope {
@@ -175,7 +180,7 @@ export function formatExplain(pack: ActionPack, verification: VerifyResult | nul
   const facts = Object.entries(p.facts);
   row("WHAT THE AGENT SAW", facts.length ? facts.map(([k, f]) => `${k} = ${JSON.stringify(f.value)} (fetched by the gateway via ${f.tool})`).join("; ") : "no facts fetched for this call");
   const shown = Array.isArray(p.consumed?.factIds) ? p.consumed.factIds : [];
-  if (p.consumed && !Array.isArray(p.consumed.factIds)) more("the beliefs shown before this call are withheld under the capture rule");
+  if (pack.consumedWithheld) more("the beliefs shown before this call are withheld under the capture rule; give the capture key to see them");
   else if (!withLedger) more(shown.length ? `${shown.length} belief(s) shown before this call; open with a ledger to see them` : "no beliefs shown before this call");
   else if (shown.length === 0) more("no beliefs shown before this call");
   else {

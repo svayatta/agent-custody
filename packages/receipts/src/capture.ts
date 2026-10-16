@@ -156,6 +156,32 @@ export function ruleFor(capture: CaptureConfig | undefined, tool: string): Captu
   return Object.hasOwn(capture, "*") ? capture["*"] : undefined;
 }
 const ownOf = <T>(o: Record<string, T> | undefined, k: string): T | undefined => (o && Object.hasOwn(o, k) ? o[k] : undefined);
+const PRIVACY: Record<CaptureMode, number> = { clear: 0, digest: 1, encrypted: 2 };
+/**
+ * The rule for a call: the tool's own, else the wildcard. For a name no upstream offers, which is text the agent
+ * chose, the more private of the two, and the wildcard when they are as private, so that a rule left for a retired
+ * name can never be selected by an agent to widen what is in clear. The gateway and the issuer both call this, so the
+ * fact arguments kept in clear and the view agree.
+ */
+export function effectiveRule(capture: CaptureConfig | undefined, tool: string, unknownTool = false): CaptureRule | undefined {
+  const named = ruleFor(capture, tool);
+  if (!unknownTool) return named;
+  const star = ownOf(capture, "*");
+  if (!star || !ownOf(capture, tool)) return named ?? star;
+  return PRIVACY[ruleMode(star)] >= PRIVACY[ruleMode(named)] ? star : named;
+}
+/** An upstream's attestation envelope as `signResult` writes it: the three claims and nothing else. Any other payload is upstream-authored data. */
+function isPlainAttestation(envelope: unknown): boolean {
+  if (!isObject(envelope) || typeof envelope.payload !== "string") return false;
+  try {
+    const p = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8")) as unknown;
+    if (!isObject(p)) return false;
+    const keys = Object.keys(p).sort();
+    return keys.join(",") === "contentDigest,receiptId,tool" && keys.every((k) => typeof p[k] === "string");
+  } catch {
+    return false;
+  }
+}
 
 /** The one mode a rule withholds in: encrypted when any side is, else digest; clear when no side is private. */
 export function ruleMode(rule: CaptureRule | undefined): CaptureMode {
@@ -381,6 +407,10 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
           // the body against it) and the bind is a string the upstream chose. Only the provider's name stays. The
           // verifier checks the delivery once the body, the signature, and the bind are back.
           for (const [uf, uv] of Object.entries(v)) {
+            // beside a result the rule leaves in clear, an envelope that is the plain attestation (receipt id, tool,
+            // content digest) stays, so the signature over that public result can be checked; one carrying any other
+            // claim is upstream-authored data and is withheld, and the verifier then says so rather than skipping the check
+            if (uf === "envelope" && !resultSide && isPlainAttestation(uv)) continue;
             if (uf === "rawBody" || uf === "envelope" || uf === "signature" || uf === "bind") hide(["execution", "upstream", uf], uv, resultSide ? resultSide.key : k);
             else if (!CLEAR_IN.upstream.has(uf)) hide(["execution", "upstream", uf], uv, k);
           }
@@ -461,7 +491,10 @@ export function restorePaths<P>(predicate: P, note: CaptureNote | undefined, dis
       r.restored.set(pathKey(path), "disclosed");
       r.salts.set(pathKey(path), d.salt);
       r.values.set(pathKey(path), d.value);
-    } else if (key && c.$custody === "encrypted" && c.keyid === keyid) {
+    } else if (key && c.$custody === "encrypted" && c.keyid !== keyid) {
+      // a key was given and it is not this value's: said so, rather than passing as committed with a hint to give the key
+      r.problems.push({ path, error: `${pathText(path)} is encrypted under key ${c.keyid.slice(0, 12)}…, not the one given` });
+    } else if (key && c.$custody === "encrypted") {
       try {
         const back = reveal(c, key, aadFor(getAt(predicate, ["receiptId"]), path));
         r.predicate = setAt(r.predicate, path, back.value);
@@ -473,9 +506,12 @@ export function restorePaths<P>(predicate: P, note: CaptureNote | undefined, dis
       }
     } else r.missing.push(path);
   }
-  // a restored `$rest` is the rest of its parent: folded back in, so the parent is the object the digest was made over
+  // a restored `$rest` is the rest of its parent: folded back in, so the parent is the object the digest was made over.
+  // Only where a side is captured as one (the arguments, the result, a fact's value): a fact's lookup arguments are
+  // captured field by field, and one of them may be named $rest.
+  const aggregate = (parent: Path) => pathKey(parent) === pathKey(["request", "args"]) || pathKey(parent) === pathKey(["execution", "result"]) || (parent.length === 3 && parent[0] === "facts" && parent[2] === "value");
   for (const path of note.withheld) {
-    if (path[path.length - 1] !== REST || !r.restored.has(pathKey(path))) continue;
+    if (path[path.length - 1] !== REST || !r.restored.has(pathKey(path)) || !aggregate(path.slice(0, -1))) continue;
     const parentPath = path.slice(0, -1);
     const parent = getAt(r.predicate, parentPath);
     if (!isObject(parent)) continue;

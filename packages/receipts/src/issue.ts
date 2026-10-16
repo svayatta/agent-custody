@@ -2,7 +2,7 @@
 import { chmodSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { SALTS_DIR, saltsFileFor } from "./retention.ts";
 import { join } from "node:path";
-import { getAt, privateView, ruleFor, ruleMode, type CaptureConfig, type CaptureContext, type CaptureRule, type PrivateView } from "./capture.ts";
+import { effectiveRule, getAt, privateView, type CaptureConfig, type CaptureContext, type PrivateView } from "./capture.ts";
 import { canonicalize, dsseSign, type KeyPair } from "./crypto.ts";
 import { fileLog, type LogSink } from "./log-sink.ts";
 import type { ReceiptExporter } from "./otel.ts";
@@ -32,15 +32,7 @@ export interface IssuerOptions {
 export function createIssuer(key: KeyPair, receiptsDir: string, log: string | LogSink, opts: IssuerOptions = {}): Issuer {
   const sink = typeof log === "string" ? fileLog(log, key) : log;
   mkdirSync(receiptsDir, { recursive: true });
-  const PRIVACY: Record<string, number> = { clear: 0, digest: 1, encrypted: 2 };
-  /** the rule for a call: by the tool's name; for a name no upstream offers (the agent's text), the more private of that name's rule and the wildcard, so that a rule left for a retired name cannot be chosen by an agent to get its call recorded in clear */
-  const ruleOf = (name: string, ctx?: CaptureContext): CaptureRule | undefined => {
-    const named = ruleFor(opts.capture?.rules, name);
-    if (!ctx?.unknownTool) return named;
-    const star = opts.capture?.rules && Object.hasOwn(opts.capture.rules, "*") ? opts.capture.rules["*"] : undefined;
-    return (PRIVACY[ruleMode(star)] ?? 0) > (PRIVACY[ruleMode(named)] ?? 0) ? star : named;
-  };
-  const view = <P extends AuthorizationPredicate>(predicate: P, ctx?: CaptureContext, prior?: PrivateView<AuthorizationPredicate>) => privateView(predicate, ruleOf(predicate.tool.name, ctx), opts.capture?.key, ctx, prior);
+  const view = <P extends AuthorizationPredicate>(predicate: P, ctx?: CaptureContext, prior?: PrivateView<AuthorizationPredicate>) => privateView(predicate, effectiveRule(opts.capture?.rules, predicate.tool.name, ctx?.unknownTool), opts.capture?.key, ctx, prior);
   /** the salts directory, checked before anything is signed or appended, so that a problem with it costs no leaf in the log */
   const saltsDir = join(receiptsDir, SALTS_DIR);
   const ensureSaltsDir = () => {

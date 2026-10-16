@@ -8,7 +8,9 @@ import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { aadFor, captureKeyFrom, checkCommitment, digestSalt, getAt, isCommitment, pathKey, privateView, REST, restorePaths, reveal, ruleFor, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
+import { aadFor, captureKeyFrom, checkCommitment, digestSalt, effectiveRule, getAt, isCommitment, pathKey, privateView, REST, restorePaths, reveal, ruleFor, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
+import { dsseSign, generateKeyPair } from "../src/crypto.ts";
+import { signResult, UPSTREAM_SIG_META_KEY, UPSTREAM_TYPE } from "../src/upstream.ts";
 import { sha256Hex } from "../src/crypto.ts";
 import { pruneLog, SALTS_DIR } from "../src/retention.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
@@ -33,7 +35,7 @@ const check = (name: string, r: ReturnType<typeof verifyBundle>) => r.checks.fin
 const text = (r: { content: { type: string; text?: string }[] }) => (r.content[0] as { text: string }).text;
 const withheldPaths = (p: ReceiptPredicate) => (p.capture?.withheld ?? []).map((w) => w.join("."));
 /** the salts the issuer kept beside a receipt, never in it: those of digest-only commitments; an encrypted one's salt comes back with the key */
-const saltsOf = (receiptsDir: string, id: string) => (JSON.parse(readFileSync(join(receiptsDir, SALTS_DIR, `${id}.json`), "utf8")) as { salts: Record<string, string> }).salts;
+const saltsOf = (receiptsDir: string, id: string) => (existsSync(join(receiptsDir, SALTS_DIR, `${id}.json`)) ? (JSON.parse(readFileSync(join(receiptsDir, SALTS_DIR, `${id}.json`), "utf8")) as { salts: Record<string, string> }).salts : {});
 const allSalts = (receiptsDir: string, p: ReceiptPredicate, k?: Buffer) => ({ ...saltsOf(receiptsDir, p.receiptId), ...Object.fromEntries(restorePaths(p, p.capture, undefined, k).salts) });
 /** the salt a digest over `prefix` was made with, from the kept salts */
 const saltFor = (note: CaptureNote | undefined, salts: Record<string, string>, prefix: Path) => digestSalt((note?.withheld ?? []).filter((w) => prefix.every((s, i) => w[i] === s)).map((w) => salts[pathKey(w)]!));
@@ -143,7 +145,10 @@ describe("the view of a statement under a rule", () => {
     expect(dec.missing).toEqual([]);
     expect(dec.predicate.request.args).toEqual(p.request.args);
     expect([...dec.restored.values()].every((h) => h === "decrypted")).toBe(true);
-    expect(restorePaths(enc, enc.capture, undefined, captureKeyFrom(randomBytes(32).toString("hex"))).missing.length).toBeGreaterThan(0);
+    // a key that is not this value's is said so, not passed as committed with a hint to give the key
+    const wrongKey = restorePaths(enc, enc.capture, undefined, captureKeyFrom(randomBytes(32).toString("hex")));
+    expect(wrongKey.missing).toEqual([]);
+    expect(wrongKey.problems[0]!.error).toMatch(/is encrypted under key [0-9a-f]{12}…, not the one given/);
     // a field literally named $rest is never kept in clear: it goes with the rest and comes back with it
     const named = privateView(predicate({ request: { args: { amount: 1, [REST]: "mine" }, argsDigest: "x", provenance: "claimed" } }), { args: { mode: "digest", clear: ["amount", REST] } });
     expect(Object.keys(named.predicate.request.args)).toEqual(["amount", REST]);
@@ -311,6 +316,33 @@ describe("the view of a statement under a rule", () => {
     expect(withheldPaths(after.predicate).filter((w) => w === "consumed.factIds")).toHaveLength(1);
     expect(after.predicate.consumed).toEqual(auth.predicate.consumed);
     expect(after.salts[pathKey(["consumed", "factIds"])]).toBe(auth.salts[pathKey(["consumed", "factIds"])]);
+  });
+
+  it("the rule for a call is one function: a name no upstream offers gets the more private of its rule and the wildcard, the wildcard when they are as private", () => {
+    const capture = { "legacy.export": { args: { mode: "digest" as const, clear: ["customer_id"] } }, "retired.clear": { args: { mode: "clear" as const } }, "*": { args: { mode: "digest" as const } } };
+    expect(effectiveRule(capture, "legacy.export")).toBe(capture["legacy.export"]);
+    // unknown: as private as the wildcard, so the wildcard, whose clear list is narrower, wins
+    expect(effectiveRule(capture, "legacy.export", true)).toBe(capture["*"]);
+    expect(effectiveRule(capture, "retired.clear", true)).toBe(capture["*"]);
+    expect(effectiveRule({ ...capture, "*": { args: { mode: "clear" as const } } }, "legacy.export", true)).toBe(capture["legacy.export"]);
+    expect(effectiveRule({ a: { args: { mode: "digest" as const } } }, "other", true)).toBeUndefined();
+    expect(effectiveRule(capture, "constructor", true)).toBe(capture["*"]);
+  });
+
+  it("beside a result the rule leaves in clear, an upstream envelope that is the plain attestation stays so the signature can be checked; one carrying any other claim is withheld", () => {
+    const upstream = generateKeyPair();
+    const result = { content: [{ type: "text" as const, text: "ok" }], _meta: {} as Record<string, unknown> };
+    const plain = signResult(result, upstream, "r-1", "stripe.refund")._meta[UPSTREAM_SIG_META_KEY];
+    const chatty = dsseSign(UPSTREAM_TYPE, { receiptId: "r-1", tool: "stripe.refund", contentDigest: "00".repeat(32), customer_id: "cust_123" }, upstream);
+    const base = (envelope: unknown): ReceiptPredicate => predicate({ execution: { status: "executed", result, resultDigest: "y", provenance: "claimed", upstream: { envelope } as never } });
+    const kept = privateView(base(plain), { args: { mode: "digest" }, result: { mode: "clear" } }).predicate;
+    expect(withheldPaths(kept)).not.toContain("execution.upstream.envelope");
+    expect((kept.execution as { upstream: { envelope: unknown } }).upstream.envelope).toEqual(plain);
+    const hidden = privateView(base(chatty), { args: { mode: "digest" }, result: { mode: "clear" } }).predicate;
+    expect(withheldPaths(hidden)).toContain("execution.upstream.envelope");
+    expect(JSON.stringify(hidden)).not.toContain(chatty.payload);
+    // with the result private, the envelope goes with it either way: its content digest is an unsalted hash of the withheld content
+    expect(withheldPaths(privateView(base(plain), { result: { mode: "digest" } }).predicate)).toContain("execution.upstream.envelope");
   });
 
   it("a reviewer who can guess a withheld value cannot confirm the guess from the receipt, in either mode (issue #126)", () => {
@@ -520,6 +552,37 @@ describe("private evidence through the gateway", () => {
     }
   });
 
+  it("a fact argument literally named $rest is an argument, kept through capture and restoration, in either mode", async () => {
+    for (const mode of ["digest", "encrypted"] as const) {
+      const fxr = buildFixture(mkdtempSync(join(tmpdir(), `capture-restarg-${mode}-`)));
+      const cfg = JSON.parse(readFileSync(fxr.configFile, "utf8"));
+      cfg.facts = [{ name: "customer", tool: "customer.lookup", args: { customer_id: "$args.customer_id", [REST]: "$args.reason" }, forTools: ["stripe.refund"] }];
+      cfg.capture = { "*": { args: { mode, clear: ["customer_id", "amount"] } } };
+      cfg.captureKeyEnv = "TEST_CAPTURE_KEY";
+      writeFileSync(fxr.configFile, JSON.stringify(cfg));
+      const gwr = await createGateway(loadConfig(fxr.configFile));
+      try {
+        const r = await gwr.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500, reason: "dup" } });
+        expect(r.isError).toBeFalsy();
+        const bundle = bundleOf2(fxr, r);
+        const p = decode(bundle).predicate;
+        expect(isCommitment(p.facts.customer!.args[REST])).toBe(true);
+        expect(withheldPaths(p)).toContain("facts.customer.args.$rest");
+        const o = { issuerKeys: [loadPublicKey(fxr.gatewayPub)], principalKeys: [loadPublicKey(fxr.principalPub)], logFile: fxr.logFile };
+        const salts = allSalts(fxr.receiptsDir, p, key);
+        const disclosed = { facts: { customer: { args: { [REST]: { $custody: "disclosed", salt: salts[pathKey(["facts", "customer", "args", REST])], value: "dup" } } } } };
+        const v = verifyBundle(bundle, { ...o, disclosed });
+        expect(v.ok, formatReport(v)).toBe(true);
+        expect(check("fact customer args", v).detail).toMatch(/hold against the disclosed value/);
+        // the argument survives restoration as an argument, not as a slot to fold away
+        const back = restorePaths(p, p.capture, disclosed, mode === "encrypted" ? key : undefined);
+        expect(back.predicate.facts.customer!.args).toEqual({ customer_id: "cust_123", [REST]: "dup" });
+      } finally {
+        await gwr.close();
+      }
+    }
+  });
+
   it("the answer of a lookup that failed, marked isError or thrown, is withheld from the receipt under a private rule; the agent gets it", async () => {
     const fx4 = buildFixture(mkdtempSync(join(tmpdir(), "capture-lookupfail-")));
     const cfg = JSON.parse(readFileSync(fx4.configFile, "utf8"));
@@ -682,6 +745,22 @@ describe("private evidence through the gateway", () => {
         const lp = decode(bundleOf2(fxu, legacy)).predicate;
         expect(lp.tool.name).toBe("(unknown tool)");
         expect(leakText(bundleOf2(fxu, legacy))).not.toContain("PRIVATE_LEGACY");
+        // and the fact arguments copied from the call follow the rule the issuer applies, not the name's wider clear list
+        const fxw = buildFixture(mkdtempSync(join(tmpdir(), `capture-unknown-wide-${mode}-`)));
+        const wcfg = JSON.parse(readFileSync(fxw.configFile, "utf8"));
+        wcfg.capture = { "legacy.export": { args: { mode: "digest", clear: ["customer_id"] } }, "*": { args: { mode: "encrypted" } } };
+        wcfg.captureKeyEnv = "TEST_CAPTURE_KEY";
+        wcfg.facts = [{ name: "customer", tool: "customer.lookup", args: { customer_id: "$args.customer_id" }, forTools: ["stripe.refund", "legacy.export"] }];
+        writeFileSync(fxw.configFile, JSON.stringify(wcfg));
+        const gww = await createGateway(loadConfig(fxw.configFile));
+        try {
+          const wide = await gww.handleCall({ name: "legacy.export", arguments: { customer_id: "cust_123", amount: 1 } });
+          const wp = decode(bundleOf2(fxw, wide)).predicate;
+          expect(Object.keys(wp.request.args)).toEqual([REST]);
+          expect(leakText(bundleOf2(fxw, wide))).not.toContain("cust_123");
+        } finally {
+          await gww.close();
+        }
         // an offered tool keeps its name under the same kind of rule
         const known = await gwu.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500 } });
         expect(decode(bundleOf2(fxu, known)).predicate.tool.name).toBe("stripe.refund");

@@ -63,7 +63,7 @@ export function structuralProblem(p: unknown): string | null {
       if (!Array.isArray(w) || w.length === 0 || !w.every((s) => typeof s === "string")) return "the capture note names a malformed path";
       const path = w as string[];
       const head = path[0]!;
-      const named = STRUCTURAL_TOP.has(head) || (path.length === 1 && head in STRUCTURAL_IN) || (path.length === 2 && STRUCTURAL_IN[head]?.has(path[1]!)) || head === "facts" && (path.length <= 2 || path[2] === "tool" || path[2] === "provenance") || (head === "execution" && path.length === 2 && path[1] === "upstream") || (head === "execution" && path.length === 3 && path[1] === "upstream" && path[2] === "provider") || (head === "execution" && path.length === 3 && path[1] === "result" && path[2] === "isError");
+      const named = STRUCTURAL_TOP.has(head) || (path.length === 1 && Object.hasOwn(STRUCTURAL_IN, head)) || (path.length === 2 && Object.hasOwn(STRUCTURAL_IN, head) && STRUCTURAL_IN[head]!.has(path[1]!)) || head === "facts" && (path.length <= 2 || path[2] === "tool" || path[2] === "provenance") || (head === "execution" && path.length === 2 && path[1] === "upstream") || (head === "execution" && path.length === 3 && path[1] === "upstream" && path[2] === "provider") || (head === "execution" && path.length === 3 && path[1] === "result" && path[2] === "isError");
       if (named) return `the capture note names a structural part: ${pathText(path)}`;
     }
   }
@@ -211,7 +211,9 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     } else if ((opts.upstreamKeys?.length ?? 0) > 0) {
       const env = restoredEvidence?.envelope as Envelope | undefined;
       const wellFormed = !!env && typeof env === "object" && typeof env.payload === "string" && Array.isArray(env.signatures);
-      if (!result || withheldStill(["execution", "upstream", "envelope"])) add("upstream signature not checked", true, "the result or the upstream's signature is withheld; disclose them or give the capture key to check the signature against the result");
+      if (!result) add("upstream signature not checked", true, "the result is withheld; disclose it or give the capture key to check the upstream's signature against it");
+      // the issuer withholds the envelope beside a result it leaves in clear only when the envelope carries claims beyond the attestation; a verifier given the upstream's key is then told, not waved past
+      else if (withheldStill(["execution", "upstream", "envelope"])) add("upstream signature (upstream key)", false, "the result is in clear but the upstream's signature is withheld; disclose it or give the capture key to check it");
       else if (!wellFormed) add("upstream signature (upstream key)", false, "the receipt carries no upstream envelope to check, and the capture note does not say it is withheld");
       else {
         const u = checkUpstream(env, opts.upstreamKeys!, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: contentDigest(result) });

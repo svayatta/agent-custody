@@ -1,12 +1,13 @@
 // A receipt under a capture rule withholds what the agent had been shown. The blast query must say so rather than
 // report an empty, apparently complete, dependency set; with the capture key it sees through.
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { captureKeyFrom, createIssuer, generateKeyPair, type ReceiptPredicate } from "@agent-custody/receipts";
 import { blastRadius, formatBlastRadius, loadReceipts } from "../src/blast.ts";
+import { buildActionPack, formatExplain } from "../src/explain.ts";
 import { Ledger } from "../src/ledger.ts";
 
 const KEY_HEX = randomBytes(32).toString("hex");
@@ -65,6 +66,21 @@ describe("blast radius under a capture rule", () => {
       expect(bp.derivedFacts).toEqual([]);
       expect(bp.withheld.map((r) => r.receiptId)).toEqual([priv.receiptId]);
       expect(formatBlastRadius(bp, priv.factId)).toMatch(/INCOMPLETE: 1 call\(s\).*withhold what the agent had been shown/);
+      // the authorization committed before a pre-committed call carries the same call: it is not a second receipt
+      const bundleFile = join(priv.dir, "receipts", `${priv.receiptId}.json`);
+      writeFileSync(join(priv.dir, "receipts", `${priv.receiptId}.authorization.json`), readFileSync(bundleFile, "utf8"));
+      expect(loadReceipts(join(priv.dir, "receipts")).map((r) => r.receiptId)).toEqual([priv.receiptId]);
+      expect((await blastRadius(priv.ledger, loadReceipts(join(priv.dir, "receipts")), priv.factId)).withheld).toHaveLength(1);
+      // explain says the beliefs shown are withheld, and with the key it sees them
+      const pack = await buildActionPack(join(priv.dir, "receipts"), priv.receiptId, priv.ledger);
+      expect(pack.consumedWithheld).toBe(true);
+      expect(pack.consumed.facts).toEqual([]);
+      expect(formatExplain(pack, null, true)).toMatch(/withheld under the capture rule/);
+      const packWithKey = await buildActionPack(join(priv.dir, "receipts"), priv.receiptId, priv.ledger, { captureKey: captureKeyFrom(KEY_HEX) });
+      if (mode === "encrypted") {
+        expect(packWithKey.consumedWithheld).toBe(false);
+        expect(packWithKey.consumed.facts.map((f) => f.factId)).toEqual([priv.factId]);
+      } else expect(packWithKey.consumedWithheld).toBe(true);
       // a fact valid from tomorrow is readable today and may be consumed today: the bound is when the ledger learned it, not when it is true
       const tomorrow = new Date(Date.now() + 86_400_000).toISOString();
       const future = await make({ "*": { args: { mode } } }, tomorrow);
