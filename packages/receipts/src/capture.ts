@@ -215,7 +215,7 @@ const CLEAR_IN = {
   execution: new Set(["status", "resultDigest", "provenance"]),
   upstream: new Set(["provider", "signature", "bind"]),
 };
-/** The result's error flag is its status, so it stays in clear; its metadata carries whatever an upstream put there, so it never does. */
+/** The result's error flag is its status, so it stays in clear when it is the boolean flag and nothing else; its metadata carries whatever an upstream put there, so it never does. */
 const RESULT_ALWAYS_CLEAR = new Set(["isError"]);
 const RESULT_NEVER_CLEAR = new Set(["_meta"]);
 
@@ -272,10 +272,10 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
   };
   /** the digest of a part, salted from the salts of the withheld values under it */
   const digest = (value: unknown, prefix: Path) => digestOf(value, digestSalt(withheld.filter((w) => under(w, prefix)).map((w) => salts[pathKey(w)]!)));
-  /** a side captured field by field: the listed fields kept, the rest withheld; a value that is not a plain object withheld whole */
+  /** a side captured field by field: the listed fields kept, the rest withheld; a value that is not a plain object withheld whole. `always` names a boolean status flag that stays in clear only when it is one. */
   const object = (path: Path, value: unknown, side: { clear: Set<string>; key: Buffer | undefined }, always = new Set<string>(), never = new Set<string>()) => {
     if (!isObject(value)) return hide(path, value, side.key);
-    for (const [f, v] of Object.entries(value)) if (never.has(f) || !(side.clear.has(f) || always.has(f))) hide([...path, f], v, side.key);
+    for (const [f, v] of Object.entries(value)) if (never.has(f) || !(side.clear.has(f) || (always.has(f) && typeof v === "boolean"))) hide([...path, f], v, side.key);
   };
   const argsSide = sideOf(rule, "args", key);
   const resultSide = sideOf(rule, "result", key);
@@ -305,12 +305,12 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
             if (argsSide) object(["facts", name, "args"], v, { clear: new Set(ownOf(ctx.clearFactArgs, name) ?? []), key: argsSide.key });
           } else if (!CLEAR_IN.fact.has(f)) hide(["facts", name, f], v, k);
         }
-        // the fact's digest is over the lookup's full result, which carries the value: salted from the fact's salts
-        // when the producer gave the full result, and withheld outright when it did not and the value is withheld,
-        // since an unsalted digest over a withheld value would confirm a guess
+        // the fact's digest is over the lookup's full result, which may carry the value and repeat the arguments:
+        // salted from the fact's salts when the producer gave the full result, and withheld outright when it did not
+        // and any part of the fact is withheld, since an unsalted digest over a withheld value would confirm a guess
         const full = ownOf(ctx.factResults, name);
         if (full !== undefined) out = setAt(out, ["facts", name, "resultDigest"], digest(full, ["facts", name]));
-        else if (withheld.some((w) => under(w, ["facts", name, "value"]))) hide(["facts", name, "resultDigest"], fact.resultDigest, k);
+        else if (withheld.some((w) => under(w, ["facts", name]))) hide(["facts", name, "resultDigest"], fact.resultDigest, k);
       }
     } else if (key_ === "policy" && isObject(value)) {
       for (const [f, v] of Object.entries(value)) {

@@ -140,6 +140,14 @@ describe("the view of a statement under a rule", () => {
     const meta = privateView(predicate(), { result: { mode: "digest", clear: ["content", "_meta", "isError"] } }).predicate;
     expect(withheldPaths(meta)).toEqual(["request.args.customer_id", "request.args.amount", "request.args.reason", "request.args.note", "execution.result._meta"]);
     expect((meta.execution as { result: { isError: boolean } }).result.isError).toBe(false);
+    // only the boolean flag is the status: an SDK tool may return anything under that name, and that is a value
+    for (const mode of ["digest", "encrypted"] as const) {
+      const odd = privateView(predicate({ execution: { status: "executed", result: { isError: { customer_id: "PRIVATE_555" }, message: "PRIVATE_555" }, resultDigest: "y", provenance: "claimed" } }), { result: { mode } }, key).predicate;
+      expect(withheldPaths(odd)).toEqual(expect.arrayContaining(["execution.result.isError", "execution.result.message"]));
+      expect(JSON.stringify(odd)).not.toContain("PRIVATE_555");
+      const str = privateView(predicate({ execution: { status: "failed", result: { isError: "PRIVATE_555", content: [] }, resultDigest: "y", provenance: "claimed" } }), { result: { mode } }, key).predicate;
+      expect(withheldPaths(str)).toContain("execution.result.isError");
+    }
     // a thrown message, and a part of the statement added later, start withheld
     const err = privateView({ ...predicate({ execution: { status: "error", error: "card declined for cust_123", provenance: "claimed" } }), later: { secret: "cust_123" } } as ReceiptPredicate, { args: { mode: "digest", clear: ["customer_id", "amount", "reason", "note"] } }).predicate;
     expect(withheldPaths(err)).toEqual(["execution.error", "later"]);
@@ -195,6 +203,13 @@ describe("the view of a statement under a rule", () => {
     expect(v.request.args.amount).toBe(2500);
     expect(isCommitment(getAt(v, ["facts", "constructor", "resultDigest"]))).toBe(true);
     expect(Object.keys(salts)).toHaveLength(7);
+    // the same when only the lookup's arguments are private and its value is in clear: the full result may repeat them
+    for (const mode of ["digest", "encrypted"] as const) {
+      const argsOnly = privateView(p, { args: { mode, clear: ["amount"] }, facts: { mode: "clear" } }, key).predicate;
+      expect(withheldPaths(argsOnly)).toContain("facts.constructor.args.customer_id");
+      expect(withheldPaths(argsOnly)).not.toContain("facts.constructor.value.id");
+      expect(isCommitment(getAt(argsOnly, ["facts", "constructor", "resultDigest"]))).toBe(true);
+    }
     // with the full lookup result given, the digest is salted instead
     const given = privateView(p, { args: { mode: "digest", clear: ["amount"] } }, undefined, { factResults: { constructor: { content: [] } } }).predicate;
     expect(typeof getAt(given, ["facts", "constructor", "resultDigest"])).toBe("string");
