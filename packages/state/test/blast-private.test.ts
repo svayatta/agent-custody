@@ -39,11 +39,11 @@ async function issueCall(dir: string, consumed: string[], rules: Record<string, 
 describe("blast radius under a capture rule", () => {
   for (const mode of ["digest", "encrypted"] as const) {
     it(`a receipt whose consumed ids are withheld is reported as such, not as having consumed nothing; the key sees through (${mode})`, async () => {
-      const make = async (rules: Record<string, unknown> | undefined) => {
+      const make = async (rules: Record<string, unknown> | undefined, validFrom?: string) => {
         const dir = mkdtempSync(join(tmpdir(), `blast-private-${mode}-`));
         mkdirSync(join(dir, "receipts"), { recursive: true });
         const ledger = new Ledger(join(dir, "ledger.jsonl"));
-        const shown = await ledger.assert({ subject: "acct:42", predicate: "plan", value: "pro", space: "team", actor: "crm" });
+        const shown = await ledger.assert({ subject: "acct:42", predicate: "plan", value: "pro", space: "team", actor: "crm", ...(validFrom ? { validFrom } : {}) });
         const receiptId = await issueCall(dir, [shown.fact.factId], rules, mode);
         // a belief written in that call, derived from what the agent had been shown
         await ledger.assert({ subject: "acct:42", predicate: "tier", value: "gold", space: "team", actor: "support-agent", source: { receiptId } });
@@ -65,6 +65,13 @@ describe("blast radius under a capture rule", () => {
       expect(bp.derivedFacts).toEqual([]);
       expect(bp.withheld.map((r) => r.receiptId)).toEqual([priv.receiptId]);
       expect(formatBlastRadius(bp, priv.factId)).toMatch(/INCOMPLETE: 1 call\(s\).*withhold what the agent had been shown/);
+      // a fact valid from tomorrow is readable today and may be consumed today: the bound is when the ledger learned it, not when it is true
+      const tomorrow = new Date(Date.now() + 86_400_000).toISOString();
+      const future = await make({ "*": { args: { mode } } }, tomorrow);
+      expect((await future.ledger.asOf({ validAt: tomorrow })).map((f) => f.factId)).toContain(future.factId);
+      const bf = await blastRadius(future.ledger, loadReceipts(join(future.dir, "receipts")), future.factId);
+      expect(bf.withheld.map((r) => r.receiptId)).toEqual([future.receiptId]);
+      expect(formatBlastRadius(bf, future.factId)).toMatch(/INCOMPLETE/);
       // with the key, an encrypted receipt opens and the dependency is found; a digest-only one stays marked
       const withKey = loadReceipts(join(priv.dir, "receipts"), { captureKey: captureKeyFrom(KEY_HEX) });
       const bk = await blastRadius(priv.ledger, withKey, priv.factId);

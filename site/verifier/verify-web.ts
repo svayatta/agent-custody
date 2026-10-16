@@ -178,6 +178,7 @@ export function structuralProblem(p: unknown): string | null {
   const note = p.capture;
   if (note !== undefined) {
     if (!isObj(note) || (note.mode !== "digest" && note.mode !== "encrypted") || !Array.isArray(note.withheld)) return "the capture note is malformed";
+    if (new Set(note.withheld.map((w: unknown) => JSON.stringify(w))).size !== note.withheld.length) return "the capture note names a path twice";
     for (const w of note.withheld) {
       if (!Array.isArray(w) || w.length === 0 || !w.every((s: unknown) => typeof s === "string")) return "the capture note names a malformed path";
       const path = w as string[];

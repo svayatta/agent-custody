@@ -1,5 +1,5 @@
 // Signing, logging and writing a receipt. Shared by every producer: the gateway and the SDK.
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { SALTS_DIR, saltsFileFor } from "./retention.ts";
 import { join } from "node:path";
 import { getAt, privateView, ruleFor, type CaptureConfig, type CaptureContext, type PrivateView } from "./capture.ts";
@@ -53,6 +53,8 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
     if (!Object.keys(salts).length) return;
     // mkdir's mode applies only to a directory it creates: one that was there keeps its own, so it is set after
     mkdirSync(join(receiptsDir, SALTS_DIR), { recursive: true, mode: 0o700 });
+    // the directory is the issuer's own: a link left at that name would carry every salt elsewhere
+    if (lstatSync(join(receiptsDir, SALTS_DIR)).isSymbolicLink()) throw new Error(`${join(receiptsDir, SALTS_DIR)} is a symbolic link; the salts are not written through it`);
     chmodSync(join(receiptsDir, SALTS_DIR), 0o700);
     writeFileSync(saltsFileFor(receiptsDir, v.predicate.receiptId), JSON.stringify({ receiptId: v.predicate.receiptId, salts }, null, 2), { mode: 0o600 });
   };
