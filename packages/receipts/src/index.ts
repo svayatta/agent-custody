@@ -6,6 +6,7 @@ export { buildRequest, restUpstream } from "./rest.ts";
 export { openExporter, otlpExporter, spanFor } from "./otel.ts";
 export { hecEvent, splunkExporter } from "./splunk.ts";
 export { GRANT_HEADER, grantHeader, parseGrantHeader, serveHttp } from "./gateway-http.ts";
+export * from "./capture.ts";
 export { A2A_CARD_PATH, A2A_RECEIPT_METADATA_KEY, A2A_STREAM_META_KEY, a2aUpstream, fetchAgentCard, serveA2a, textOf } from "./a2a.ts";
 export { deliverMail, founderNote, PortalStore, portalHandler, readSession, sendFollowUps, servePortal, signSession, stripeRequest, verifyStripeSignature } from "./portal.ts";
 export type { MailOptions, OAuthOptions, PortalOptions, PortalUser, Profile, RunningPortal, StripeOptions } from "./portal.ts";

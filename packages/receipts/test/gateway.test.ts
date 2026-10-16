@@ -117,7 +117,7 @@ describe("gateway", () => {
     const r = await gw.handleCall({ name: "stripe.payout", arguments: { amount: 100 } });
     expect(r.isError).toBe(true);
     const st = decode(bundleFor(String(r._meta?.[RECEIPT_META_KEY])));
-    expect(st.predicate.policy?.errors[0]).toMatch(/not in the delegation scopes/);
+    expect((st.predicate.policy?.errors as string[])[0]).toMatch(/not in the delegation scopes/);
     expect(st.predicate.facts).toEqual({});
   });
 
@@ -126,7 +126,7 @@ describe("gateway", () => {
     expect(r.isError).toBe(true);
     const st = decode(bundleFor(String(r._meta?.[RECEIPT_META_KEY])));
     expect(st.predicate.execution.status).toBe("denied");
-    expect(st.predicate.policy?.errors[0]).toMatch(/no such customer/);
+    expect((st.predicate.policy?.errors as string[])[0]).toMatch(/no such customer/);
   });
 
   it("verification fails on a tampered receipt and on a substituted log", async () => {

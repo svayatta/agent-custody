@@ -1,5 +1,6 @@
 // Independent verification of a receipt bundle. Needs only public keys, and optionally a copy of the log.
 import { canonicalize, digestOf, dsseVerifiers, dsseVerify, type Envelope, type PublicKeyRef } from "./crypto.ts";
+import { digestSaltFor, getAt, isCommitment, pathKey, pathText, restorePaths, under, type How } from "./capture.ts";
 import { delegationHasParent, delegationValidAt, describeChain, verifyDelegation } from "./delegation.ts";
 import { leafHash, MerkleLog, verifyConsistency, verifyInclusion } from "./log.ts";
 import { checkProvider, checkUpstream, contentDigest, isProviderAttestation, type ProviderSecrets } from "./upstream.ts";
@@ -25,6 +26,14 @@ export interface VerifyOptions {
   logFile?: string;
   /** If given, every tree head in the bundle must name this log, so a head from another tenant's log cannot be presented as this one's. */
   logId?: string;
+  /**
+   * The withheld values, as `agent-custody reveal` writes them or the party that holds them hands them over: a partial
+   * predicate with `{ $custody: "disclosed", salt, value }` at each withheld path (`{ receiptId, request: { args: { reason: {...} } }, execution: { result: { content: {...} }, error, upstream: { rawBody } }, policy: { errors }, facts: { <name>: { value, args } } }`).
+   * The digests are then recomputed and every disclosed value checked against its commitment under its salt.
+   */
+  disclosed?: Record<string, unknown> & { receiptId?: string };
+  /** the customer's capture key: encrypted fields are revealed and the digests recomputed */
+  captureKey?: Buffer;
 }
 
 export interface VerifyResult {
@@ -34,6 +43,43 @@ export interface VerifyResult {
 }
 
 const short = (s: string) => s.slice(0, 12);
+
+const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+/** The parts of a statement a capture note may never name: what a verifier reads to run its checks. A note naming one, or a commitment sitting there, is not a private receipt but a broken one. */
+const STRUCTURAL_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "authorization", "capture"]);
+const STRUCTURAL_IN: Record<string, Set<string>> = { request: new Set(["argsDigest", "provenance"]), execution: new Set(["status", "provenance"]), policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]), consumed: new Set(["provenance"]), session: new Set(["provenance"]), model: new Set(["provenance"]) };
+/**
+ * Why a statement cannot be verified at all, or null: the capture note is malformed, names a structural part, or a
+ * structural part is not what every check assumes it to be. Checked once, before anything reads the statement, so that
+ * a crafted note cannot hide the status, the tool, the decision, or the digests behind a commitment and still verify.
+ */
+export function structuralProblem(p: unknown): string | null {
+  if (!isObject(p)) return "the predicate is not an object";
+  const note = p.capture;
+  if (note !== undefined) {
+    if (!isObject(note) || (note.mode !== "digest" && note.mode !== "encrypted") || !Array.isArray(note.withheld)) return "the capture note is malformed";
+    if (new Set(note.withheld.map((w) => JSON.stringify(w))).size !== note.withheld.length) return "the capture note names a path twice";
+    for (const w of note.withheld) {
+      if (!Array.isArray(w) || w.length === 0 || !w.every((s) => typeof s === "string")) return "the capture note names a malformed path";
+      const path = w as string[];
+      const head = path[0]!;
+      const named = STRUCTURAL_TOP.has(head) || (path.length === 1 && Object.hasOwn(STRUCTURAL_IN, head)) || (path.length === 2 && Object.hasOwn(STRUCTURAL_IN, head) && STRUCTURAL_IN[head]!.has(path[1]!)) || head === "facts" && (path.length <= 2 || path[2] === "tool" || path[2] === "provenance") || (head === "execution" && path.length === 2 && path[1] === "upstream") || (head === "execution" && path.length === 3 && path[1] === "upstream" && path[2] === "provider") || (head === "execution" && path.length === 3 && path[1] === "result" && path[2] === "isError");
+      if (named) return `the capture note names a structural part: ${pathText(path)}`;
+    }
+  }
+  if (typeof p.receiptId !== "string" || typeof p.timestamp !== "string") return "receiptId or timestamp is not a string";
+  if (!isObject(p.issuer) || !isObject(p.principal) || !isObject(p.agent) || !isObject(p.session) || !isObject(p.model)) return "issuer, principal, agent, session, or model is not an object";
+  if (!isObject(p.tool) || typeof p.tool.name !== "string") return "tool.name is not a string";
+  if (!isObject(p.request) || typeof p.request.argsDigest !== "string" || !isObject(p.request.args)) return "request.args or request.argsDigest is not what it should be";
+  if (!isObject(p.execution) || !["executed", "failed", "denied", "error", "withheld"].includes(String(p.execution.status))) return "execution.status is not a status";
+  if (p.policy !== null && (!isObject(p.policy) || (p.policy.decision !== "allow" && p.policy.decision !== "deny") || !Array.isArray(p.policy.reasons))) return "policy is neither null nor a decision";
+  if (!isObject(p.facts) || Object.values(p.facts).some((f) => !isObject(f) || typeof f.tool !== "string")) return "facts is not a map of facts";
+  if (p.consumed !== undefined && !isObject(p.consumed)) return "consumed is not an object";
+  if (p.delegation !== undefined && (!isObject(p.delegation) || !isObject(p.delegation.envelope))) return "delegation is not a signed envelope";
+  if (p.authorization !== undefined && (!isObject(p.authorization) || !isObject(p.authorization.envelope))) return "authorization is not a bundle";
+  if (isObject(p.execution.upstream) && typeof p.execution.upstream.provider !== "undefined" && typeof p.execution.upstream.provider !== "string") return "execution.upstream.provider is not a string";
+  return null;
+}
 
 export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): VerifyResult {
   const checks: Check[] = [];
@@ -51,6 +97,8 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   add("receipt signature (issuer key)", true, `keyid ${short(sig.keyid)}`);
   const st = sig.payload as ReceiptStatement;
   if (!add("receipt payload type", bundle.envelope.payloadType === RECEIPT_TYPE && st.predicateType === RECEIPT_PREDICATE_TYPE)) return done(null);
+  const broken = structuralProblem(st.predicate);
+  if (!add("structural parts in clear", !broken, broken ?? undefined)) return done(null);
   const p = st.predicate;
 
   add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
@@ -83,27 +131,103 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     add("principal is claimed, not attested", p.principal.provenance === "claimed", "no signed delegation in this receipt");
   }
 
-  add("request args digest", digestOf(p.request.args) === p.request.argsDigest && st.subject[0]?.digest.sha256 === p.request.argsDigest);
-  if (p.execution.status === "executed" || p.execution.status === "failed") {
-    add("execution result digest", p.execution.result !== undefined && digestOf(p.execution.result) === p.execution.resultDigest);
+  // Private evidence: the signed capture note names every path whose value is withheld behind a commitment. Each path
+  // is put back when the receipt carries the value, when it is disclosed, or when the capture key reveals it; a digest
+  // over values that are all back is recomputed (with the salt the statement carries), and otherwise the check passes
+  // as a commitment and says so. The note decides, never the shape of the data: a path it names must hold a
+  // commitment, and commitment-shaped data it does not name is ordinary data, inside the digest.
+  const subjectOk = st.subject[0]?.digest.sha256 === p.request.argsDigest;
+  const note = p.capture;
+  if (opts.disclosed && typeof opts.disclosed === "object" && "receiptId" in opts.disclosed && opts.disclosed.receiptId !== undefined) {
+    add("disclosure names this receipt", opts.disclosed.receiptId === p.receiptId, opts.disclosed.receiptId === p.receiptId ? undefined : `the disclosure is for receipt ${String(opts.disclosed.receiptId)}`);
   }
-  if ((p.execution.status === "executed" || p.execution.status === "failed") && p.execution.upstream) {
-    const result = p.execution.result as { content: unknown; isError?: boolean };
-    if (isProviderAttestation(p.execution.upstream)) {
+  const back = restorePaths(p, note, opts.disclosed, opts.captureKey);
+  const full = back.predicate;
+  const committedNote = (paths: string[][]) => {
+    const encrypted = paths.filter((w) => (getAt(p, w) as { $custody?: string } | undefined)?.$custody === "encrypted").length;
+    return `committed, not recomputed: ${paths.length} value(s) withheld${encrypted ? ` (${encrypted} encrypted)` : ""}; ${encrypted ? "give the capture key or " : ""}disclose them to recompute`;
+  };
+  const claimed = new Set<string>();
+  /** the state of the withheld paths under a prefix, and the paths it claims for its check line */
+  const region = (prefix: string[]) => {
+    const paths = (note?.withheld ?? []).filter((w) => under(w, prefix));
+    for (const w of paths) claimed.add(pathKey(w));
+    const problem = back.problems.find((x) => under(x.path, prefix))?.error ?? null;
+    const missing = back.missing.filter((w) => under(w, prefix));
+    const hows = [...new Set(paths.map((w) => back.restored.get(pathKey(w))).filter((h): h is How => !!h))];
+    const how = hows.length === 2 ? "disclosed and decrypted" : hows[0];
+    return { paths, problem, missing, how };
+  };
+  const args = region(["request", "args"]);
+  if (args.problem) add("request args digest", false, args.problem);
+  else if (args.missing.length) add("request args digest", subjectOk, committedNote(args.missing));
+  else add("request args digest", digestOf(full.request.args, digestSaltFor(back, note, ["request", "args"])) === p.request.argsDigest && subjectOk, args.how ? `recomputed from ${args.how} values` : undefined);
+  // a captured fact: its commitments are checked against a disclosure or the key; the policy decided on the real value
+  for (const name of Object.keys(p.facts)) {
+    for (const part of ["value", "args"] as const) {
+      const r = region(["facts", name, part]);
+      if (!r.paths.length) continue;
+      if (r.problem) add(`fact ${name} ${part}`, false, r.problem);
+      else add(`fact ${name} ${part}`, true, r.missing.length ? committedNote(r.missing) : `commitments hold against the ${r.how} value`);
+    }
+  }
+  const executedOrFailed = p.execution.status === "executed" || p.execution.status === "failed";
+  let result: { content: unknown; isError?: boolean } | null = null;
+  if (executedOrFailed) {
+    const r = region(["execution", "result"]);
+    const ex = full.execution as { result: unknown; resultDigest: string };
+    if (r.problem) add("execution result digest", false, r.problem);
+    else if (r.missing.length) add("execution result digest", true, committedNote(r.missing));
+    else {
+      add("execution result digest", digestOf(ex.result, digestSaltFor(back, note, ["execution", "result"])) === ex.resultDigest, r.how ? `recomputed from ${r.how} values` : undefined);
+      result = ex.result as { content: unknown; isError?: boolean };
+    }
+  }
+  // every other withheld path gets its own line: a message, a denial reason, a provider's delivery body, a part added later
+  for (const w of note?.withheld ?? []) {
+    if (claimed.has(pathKey(w))) continue;
+    const problem = back.problems.find((x) => pathKey(x.path) === pathKey(w))?.error;
+    const how = back.restored.get(pathKey(w));
+    add(`withheld ${pathText(w)}`, !problem, problem ?? (how ? `holds against the ${how} value` : committedNote([w])));
+  }
+  const evidence = executedOrFailed && "upstream" in p.execution ? p.execution.upstream : undefined;
+  if (executedOrFailed && evidence) {
+    // The evidence as restored: the delivery body or the signed envelope may have been withheld with the result. A
+    // check is skipped only for a part the signed note declares withheld and the verifier could not restore; a body
+    // or an envelope that is simply not there, or commitment-shaped without the note saying so, fails the check.
+    const restoredEvidence = (full.execution as { upstream?: { rawBody?: unknown; envelope?: unknown } }).upstream;
+    const withheldStill = (path: string[]) => (note?.withheld ?? []).some((w) => pathKey(w) === pathKey(path)) && back.missing.some((w) => pathKey(w) === pathKey(path));
+    if (isProviderAttestation(evidence)) {
       if (opts.providerSecrets) {
-        const u = checkProvider(p.execution.upstream, opts.providerSecrets, { timestamp: p.timestamp, result });
-        add("upstream signature (provider secret)", u.ok, u.ok ? u.keyid : u.error);
+        const re = restoredEvidence as { rawBody?: unknown; signature?: unknown; bind?: unknown } | undefined;
+        const parts = ["rawBody", "signature", "bind"] as const;
+        if (!result || parts.some((f) => withheldStill(["execution", "upstream", f]))) add("upstream signature not checked", true, "the result, the delivery body, its signature, or its bind is withheld; disclose them or give the capture key to check the provider's delivery");
+        else if (parts.some((f) => typeof re?.[f] !== "string")) add("upstream signature (provider secret)", false, "the receipt carries no delivery body, signature, or bind to check, and the capture note does not say they are withheld");
+        else {
+          const u = checkProvider({ ...evidence, rawBody: re!.rawBody as string, signature: re!.signature as string, bind: re!.bind as string }, opts.providerSecrets, { timestamp: p.timestamp, result });
+          add("upstream signature (provider secret)", u.ok, u.ok ? u.keyid : u.error);
+        }
       }
     } else if ((opts.upstreamKeys?.length ?? 0) > 0) {
-      const u = checkUpstream(p.execution.upstream.envelope, opts.upstreamKeys!, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: contentDigest(result) });
-      add("upstream signature (upstream key)", u.ok, u.ok ? `keyid ${short(u.keyid)}` : u.error);
+      const env = restoredEvidence?.envelope as Envelope | undefined;
+      const wellFormed = !!env && typeof env === "object" && typeof env.payload === "string" && Array.isArray(env.signatures);
+      if (!result) add("upstream signature not checked", true, "the result is withheld; disclose it or give the capture key to check the upstream's signature against it");
+      // the issuer withholds the envelope beside a result it leaves in clear only when the envelope carries claims beyond the attestation; a verifier given the upstream's key is then told, not waved past
+      else if (withheldStill(["execution", "upstream", "envelope"])) add("upstream signature (upstream key)", false, "the result is in clear but the upstream's signature is withheld; disclose it or give the capture key to check it");
+      else if (!wellFormed) add("upstream signature (upstream key)", false, "the receipt carries no upstream envelope to check, and the capture note does not say it is withheld");
+      else {
+        const u = checkUpstream(env, opts.upstreamKeys!, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: contentDigest(result) });
+        add("upstream signature (upstream key)", u.ok, u.ok ? `keyid ${short(u.keyid)}` : u.error);
+      }
     }
   }
   if (p.policy) {
     // a deny that was not enforced (observe mode, enforced: false on the receipt) may sit beside an executed call; an enforced one never does
     const consistent = p.policy.decision === "allow" ? p.execution.status !== "denied" : p.policy.enforced === false ? p.execution.status !== "denied" : p.execution.status === "denied";
     add("policy decision consistent with execution", consistent, `${p.policy.decision}${p.policy.enforced === false ? " (observe mode, not enforced)" : ""} -> ${p.execution.status}`);
-    add("no policy errors on an allow", !(p.policy.decision === "allow" && p.policy.errors.length > 0));
+    // a withheld error list is a non-empty one: the issuer leaves an empty list in clear
+    const errors = isCommitment(p.policy.errors) || (Array.isArray(p.policy.errors) && p.policy.errors.length > 0);
+    add("no policy errors on an allow", !(p.policy.decision === "allow" && errors));
   }
 
   const logKeys = opts.logKeys ?? [];
@@ -214,14 +338,15 @@ export function formatReport(r: VerifyResult): string {
   const row = (f: string, prov: string, v: unknown) => lines.push(`${f.padEnd(15)} ${prov.padEnd(11)} ${typeof v === "string" ? v : JSON.stringify(v)}`);
   row("principal", p.principal.provenance, p.principal.id ?? "(none)");
   row("agent", p.agent.provenance, p.agent.id);
-  if (p.session.id || p.session.toolUseId) row("session", p.session.provenance, `${p.session.id ?? "-"} / ${p.session.toolUseId ?? "-"}`);
-  row("model", p.model.provenance, p.model.id ?? "(none supplied)");
+  const idText = (v: unknown) => (typeof v === "string" ? v : v === null || v === undefined ? "-" : "(withheld under the capture rule)");
+  if (p.session.id || p.session.toolUseId) row("session", p.session.provenance, `${idText(p.session.id)} / ${idText(p.session.toolUseId)}`);
+  row("model", p.model.provenance, p.model.id === null ? "(none supplied)" : idText(p.model.id));
   row("tool", p.tool.provenance, p.tool.name);
   row("args", p.request.provenance, p.request.args);
   for (const [k, f] of Object.entries(p.facts)) row(`fact.${k}`, f.provenance, f.value);
   if (p.policy) row("policy", p.policy.provenance, `${p.policy.decision}${p.policy.enforced === false ? " (observe mode, not enforced)" : ""} [${p.policy.reasons.join(",")}] policy ${short(p.policy.policyDigest)}`);
   else row("policy", "-", "(none evaluated)");
-  if (p.consumed) row("consumed", p.consumed.provenance, p.consumed.factIds.length === 0 ? "(no facts shown before this call)" : p.consumed.factIds);
+  if (p.consumed) row("consumed", p.consumed.provenance, !Array.isArray(p.consumed.factIds) ? "(withheld under the capture rule)" : p.consumed.factIds.length === 0 ? "(no facts shown before this call)" : p.consumed.factIds);
   if (p.authorization) {
     const committed = r.checks.filter((c) => c.name.startsWith("authorization ")).every((c) => c.ok);
     row("authorization", "observed", committed ? `committed to the log as leaf ${p.authorization.inclusion.leafIndex}, before the call was forwarded` : "carried, but its checks FAILED");

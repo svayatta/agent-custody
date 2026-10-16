@@ -1,6 +1,7 @@
 // The interceptor SDK: issues receipts from inside the agent's own process.
 // Everything it records is "claimed", because the issuer shares a process with the agent. The receipt says so.
 import { randomUUID } from "node:crypto";
+import { captureKeyFrom } from "../capture.ts";
 import { readFileSync } from "node:fs";
 import type { SdkConfig } from "../config.ts";
 import { digestOf, loadPrivateKey } from "../crypto.ts";
@@ -57,7 +58,12 @@ export class PolicyDeniedError extends Error {
 
 export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
   const key = loadPrivateKey(cfg.identity.keyFile);
-  const issuer = createIssuer(key, cfg.receiptsDir, openLog(cfg, key), { exporter: openExporter(cfg) });
+  const captureKey = cfg.captureKeyEnv ? captureKeyFrom(process.env[cfg.captureKeyEnv] ?? (() => { throw new Error(`capture key: environment variable ${cfg.captureKeyEnv} is not set`); })()) : undefined;
+  for (const [tool, rule] of Object.entries(cfg.capture ?? {})) {
+    for (const side of [rule.args, rule.result, rule.facts]) if (side?.mode === "encrypted" && !captureKey) throw new Error(`capture for ${tool} uses mode encrypted, which needs captureKeyEnv`);
+  }
+  // the capture rules are applied by the issuer to every statement it signs, so every adapter's receipt gets them
+  const issuer = createIssuer(key, cfg.receiptsDir, openLog(cfg, key), { exporter: openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
   const policyText = cfg.policyFile ? readFileSync(cfg.policyFile, "utf8") : null;
 
   const decide = (ev: ToolEvent): PolicyDecision | null => {
@@ -67,6 +73,7 @@ export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
   };
 
   function record(ev: ToolEvent, outcome: Outcome, policy: PolicyDecision | null = null): Promise<ReceiptBundle> {
+    // the call in full; the issuer withholds what the tool's capture rule says, the thrown message included
     const execution: ReceiptPredicate["execution"] =
       outcome.status === "denied"
         ? { status: "denied", reason: outcome.reason, provenance: "claimed" }
