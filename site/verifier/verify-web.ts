@@ -164,14 +164,16 @@ async function checkProvider(att: any, secrets: { stripe?: string; github?: stri
   try { body = JSON.parse(att.rawBody); } catch { return { ok: false, detail: "delivery body is not JSON" }; }
   const bound = String(att.bind).split(".").reduce((v: any, k: string) => (v && typeof v === "object" ? v[k] : undefined), body);
   if (bound === undefined || bound === null || bound === "") return { ok: false, detail: `delivery has no value at ${att.bind}` };
-  if (!JSON.stringify(result).includes(JSON.stringify(bound).replace(/^"|"$/g, ""))) return { ok: false, detail: `delivery's ${att.bind} (${String(bound)}) does not appear in the receipt's result` };
+  // what the agent received, never _meta: the delivery copy there always contains the bound value
+  const received = result as { content?: unknown; isError?: unknown; structuredContent?: unknown };
+  if (!JSON.stringify({ content: received.content, isError: received.isError, structuredContent: received.structuredContent }).includes(JSON.stringify(bound).replace(/^"|"$/g, ""))) return { ok: false, detail: `delivery's ${att.bind} (${String(bound)}) does not appear in the receipt's result` };
   return { ok: true, detail: `shared secret (${att.provider}, bound on ${att.bind})` };
 }
 
 const isObj = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 const STRUCTURAL_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "authorization", "capture"]);
 const STRUCTURAL_IN: Record<string, Set<string>> = { request: new Set(["argsDigest", "provenance"]), execution: new Set(["status", "provenance"]), policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]), consumed: new Set(["provenance"]), session: new Set(["provenance"]), model: new Set(["provenance"]) };
-const pathTextOf = (w: string[]) => w.map((s) => (/^[A-Za-z0-9_-]+$/.test(s) ? s : JSON.stringify(s))).join(".");
+const pathTextOf = (w: string[]) => w.map((s) => (/^[A-Za-z0-9_$-]+$/.test(s) ? s : JSON.stringify(s))).join(".");
 /** mirrors src/verify.ts structuralProblem: a capture note may never name what a verifier reads to run its checks, and those parts must be what every check assumes */
 export function structuralProblem(p: unknown): string | null {
   if (!isObj(p)) return "the predicate is not an object";
@@ -183,7 +185,7 @@ export function structuralProblem(p: unknown): string | null {
       if (!Array.isArray(w) || w.length === 0 || !w.every((s: unknown) => typeof s === "string")) return "the capture note names a malformed path";
       const path = w as string[];
       const head = path[0]!;
-      const named = STRUCTURAL_TOP.has(head) || (path.length === 1 && head in STRUCTURAL_IN) || (path.length === 2 && STRUCTURAL_IN[head]?.has(path[1]!)) || head === "facts" && (path.length <= 2 || path[2] === "tool" || path[2] === "provenance") || (head === "execution" && path.length === 3 && path[1] === "upstream" && path[2] === "provider");
+      const named = STRUCTURAL_TOP.has(head) || (path.length === 1 && head in STRUCTURAL_IN) || (path.length === 2 && STRUCTURAL_IN[head]?.has(path[1]!)) || head === "facts" && (path.length <= 2 || path[2] === "tool" || path[2] === "provenance") || (head === "execution" && path.length === 2 && path[1] === "upstream") || (head === "execution" && path.length === 3 && path[1] === "upstream" && path[2] === "provider") || (head === "execution" && path.length === 3 && path[1] === "result" && path[2] === "isError");
       if (named) return `the capture note names a structural part: ${pathTextOf(path)}`;
     }
   }
@@ -255,7 +257,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   const note = p.capture as { mode: string; withheld: Path[] } | undefined;
   const under = (w: Path, prefix: Path) => prefix.length <= w.length && prefix.every((s, i) => w[i] === s);
   const getAt = (root: any, path: Path) => path.reduce((v, k) => (v && typeof v === "object" && !Array.isArray(v) && Object.prototype.hasOwnProperty.call(v, k) ? v[k] : undefined), root);
-  const pathText = (w: Path) => w.map((s) => (/^[A-Za-z0-9_-]+$/.test(s) ? s : JSON.stringify(s))).join(".");
+  const pathText = (w: Path) => w.map((s) => (/^[A-Za-z0-9_$-]+$/.test(s) ? s : JSON.stringify(s))).join(".");
   const committedNote = (paths: Path[]) => {
     const encrypted = paths.filter((w) => getAt(p, w)?.$custody === "encrypted").length;
     return `committed, not recomputed: ${paths.length} value(s) withheld${encrypted ? ` (${encrypted} encrypted)` : ""}; ${encrypted ? "give the capture key or " : ""}disclose them with the command-line verifier to recompute`;

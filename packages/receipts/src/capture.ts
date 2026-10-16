@@ -181,7 +181,7 @@ function sideOf(rule: CaptureRule | undefined, side: "args" | "result" | "facts"
 // ---- paths ----
 
 export const pathKey = (p: Path) => JSON.stringify(p);
-export const pathText = (p: Path) => p.map((s) => (/^[A-Za-z0-9_-]+$/.test(s) ? s : JSON.stringify(s))).join(".");
+export const pathText = (p: Path) => p.map((s) => (/^[A-Za-z0-9_$-]+$/.test(s) ? s : JSON.stringify(s))).join(".");
 export const under = (p: Path, prefix: Path) => prefix.length <= p.length && prefix.every((s, i) => p[i] === s);
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const own = (o: Record<string, unknown>, k: string) => Object.prototype.hasOwnProperty.call(o, k);
@@ -231,6 +231,8 @@ const CLEAR_IN = {
 /** The result's error flag is its status, so it stays in clear when it is the boolean flag and nothing else; its metadata carries whatever an upstream put there, so it never does. */
 const RESULT_ALWAYS_CLEAR = new Set(["isError"]);
 const RESULT_NEVER_CLEAR = new Set(["_meta"]);
+/** the slot in a captured side's view that holds the commitment over every field not kept in clear */
+export const REST = "$rest";
 
 /** What the producer knows about this call that the view needs: which fact arguments copy a call argument that is in clear, and the full lookup results behind the fact digests. */
 export interface CaptureContext {
@@ -289,10 +291,34 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
   };
   /** the digest of a part, salted from the salts of the withheld values under it */
   const digest = (value: unknown, prefix: Path) => digestOf(value, digestSalt(withheld.filter((w) => under(w, prefix)).map((w) => salts[pathKey(w)]!)));
-  /** a side captured field by field: the listed fields kept, the rest withheld; a value that is not a plain object withheld whole. `always` names a boolean status flag that stays in clear only when it is one. */
+  /**
+   * A side captured under its rule: the listed fields are kept beside one commitment, at `$rest`, over an object of
+   * every other field. Field by field would leave the field names in clear, in the view and in the signed note, and
+   * names are chosen by the agent or the upstream like the values are. A value that is not a plain object is withheld
+   * whole. `always` names a boolean status flag that stays in clear only when it is one; `never` names fields that are
+   * withheld even when listed. A field literally named `$rest` is never clear: it is withheld with the rest and comes
+   * back with it.
+   */
   const object = (path: Path, value: unknown, side: { clear: Set<string>; key: Buffer | undefined }, always = new Set<string>(), never = new Set<string>()) => {
     if (!isObject(value)) return hide(path, value, side.key);
-    for (const [f, v] of Object.entries(value)) if (never.has(f) || !(side.clear.has(f) || (always.has(f) && typeof v === "boolean"))) hide([...path, f], v, side.key);
+    const view: Record<string, unknown> = Object.create(null);
+    const rest: Record<string, unknown> = Object.create(null);
+    let any = false;
+    for (const [f, v] of Object.entries(value)) {
+      if (f !== REST && !never.has(f) && (side.clear.has(f) || (always.has(f) && typeof v === "boolean"))) view[f] = v;
+      else {
+        rest[f] = v;
+        any = true;
+      }
+    }
+    if (!any) return;
+    out = setAt(out, path, view);
+    hide([...path, REST], rest, side.key);
+  };
+  /** the lookup arguments of a fact, field by field: the names are the fact config's, not the call's */
+  const fields = (path: Path, value: unknown, side: { clear: Set<string>; key: Buffer | undefined }) => {
+    if (!isObject(value)) return hide(path, value, side.key);
+    for (const [f, v] of Object.entries(value)) if (!side.clear.has(f)) hide([...path, f], v, side.key);
   };
   const argsSide = sideOf(rule, "args", key);
   const resultSide = sideOf(rule, "result", key);
@@ -319,7 +345,7 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
           if (f === "value") {
             if (factsSide) object(["facts", name, "value"], v, factsSide);
           } else if (f === "args") {
-            if (argsSide) object(["facts", name, "args"], v, { clear: new Set(ownOf(ctx.clearFactArgs, name) ?? []), key: argsSide.key });
+            if (argsSide) fields(["facts", name, "args"], v, { clear: new Set(ownOf(ctx.clearFactArgs, name) ?? []), key: argsSide.key });
           } else if (!CLEAR_IN.fact.has(f)) hide(["facts", name, f], v, k);
         }
         // The fact's digest is over the lookup's full result, of which the receipt shows only the selected value: the
@@ -390,6 +416,8 @@ export interface Restoration<P> {
   restored: Map<string, How>;
   /** the salt of each restored path, by `pathKey`: what the digests over them are salted from */
   salts: Map<string, string>;
+  /** the value of each restored path as it was committed, by `pathKey`; a `$rest` is folded into its parent in `predicate`, so this is where it stays whole */
+  values: Map<string, unknown>;
   /** the withheld paths whose value could not be had */
   missing: Path[];
   /** paths where the note, the data, a disclosure, or the key contradict each other; each a reason a check must fail */
@@ -404,7 +432,7 @@ export interface Restoration<P> {
  * fails the right check.
  */
 export function restorePaths<P>(predicate: P, note: CaptureNote | undefined, disclosed?: unknown, key?: Buffer): Restoration<P> {
-  const r: Restoration<P> = { predicate, restored: new Map(), salts: new Map(), missing: [], problems: [] };
+  const r: Restoration<P> = { predicate, restored: new Map(), salts: new Map(), values: new Map(), missing: [], problems: [] };
   if (!note) return r;
   const keyid = key ? captureKeyId(key) : null;
   for (const path of note.withheld) {
@@ -432,16 +460,30 @@ export function restorePaths<P>(predicate: P, note: CaptureNote | undefined, dis
       r.predicate = setAt(r.predicate, path, d.value);
       r.restored.set(pathKey(path), "disclosed");
       r.salts.set(pathKey(path), d.salt);
+      r.values.set(pathKey(path), d.value);
     } else if (key && c.$custody === "encrypted" && c.keyid === keyid) {
       try {
         const back = reveal(c, key, aadFor(getAt(predicate, ["receiptId"]), path));
         r.predicate = setAt(r.predicate, path, back.value);
         r.restored.set(pathKey(path), "decrypted");
         r.salts.set(pathKey(path), back.salt);
+        r.values.set(pathKey(path), back.value);
       } catch (e) {
         r.problems.push({ path, error: `${pathText(path)}: ${e instanceof Error ? e.message : String(e)}` });
       }
     } else r.missing.push(path);
+  }
+  // a restored `$rest` is the rest of its parent: folded back in, so the parent is the object the digest was made over
+  for (const path of note.withheld) {
+    if (path[path.length - 1] !== REST || !r.restored.has(pathKey(path))) continue;
+    const parentPath = path.slice(0, -1);
+    const parent = getAt(r.predicate, parentPath);
+    if (!isObject(parent)) continue;
+    const merged: Record<string, unknown> = Object.create(null);
+    for (const [k, v] of Object.entries(parent)) if (k !== REST) merged[k] = v;
+    const rest = parent[REST];
+    if (isObject(rest)) for (const [k, v] of Object.entries(rest)) merged[k] = v;
+    r.predicate = setAt(r.predicate, parentPath, merged);
   }
   return r;
 }

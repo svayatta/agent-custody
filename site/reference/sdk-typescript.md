@@ -130,6 +130,7 @@ Exported from `@agent-custody/receipts`. `createIssuer(key, receiptsDir, log, { 
 | `reveal` | `(c: Commitment, key: Buffer) => { value, salt }` | the value and the salt behind an encrypted commitment, checked against it; throws for a `withheld` commitment or a key that is not the one it was encrypted under |
 | `isCommitment`, `isDisclosed`, `digestSalt` | `(v) => boolean`, `(v) => boolean`, `(salts: string[]) => string \| undefined` | whether a value is a well-formed commitment; whether it is a disclosed value `{ $custody: "disclosed", salt, value? }`; the salt of a digest over values with these salts, none when there are none |
 | `ruleMode`, `ruleFor` | `(rule) => CaptureMode`, `(capture: CaptureConfig \| undefined, tool) => CaptureRule \| undefined` | the one mode a rule withholds in (`encrypted` when any side is, `digest` when any side is private, else `clear`); the tool's rule, or the `"*"` rule |
+| `REST` | `"$rest"` | the slot in a captured side's view that holds the commitment over every field not kept in clear |
 | `getAt`, `setAt`, `pathKey`, `pathText`, `under` | `(root, path: Path)`, `(root, path, value) => root'`, `(path) => string`, `(path) => string`, `(path, prefix) => boolean` | own-property reads and copying writes at a path (a field named `__proto__` stays a field); a path as a map key, as text, and whether it lies under a prefix |
 | `captureKeyFrom`, `captureKeyId` | `(text) => Buffer`, `(key) => string` | the 32-byte key from its hex or base64 form; the sha256 of a key, which an encrypted commitment carries as `keyid` |
 

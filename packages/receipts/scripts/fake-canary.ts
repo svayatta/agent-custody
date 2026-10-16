@@ -23,7 +23,7 @@ const secretArg = process.argv.indexOf("--webhook-secret");
 const webhookSecret = secretArg >= 0 ? process.argv[secretArg + 1]! : null;
 
 /** every place a result can carry a value, carrying the same text (and the record's fields, when there is a record) */
-const everywhere = (text: string, isError = false, record: Record<string, unknown> = {}): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify({ ...record, said: text }) }], structuredContent: { ...record, said: text }, _meta: { "fake/trace": text, "agent-custody/facts": [`fact:${text}`] }, isError });
+const everywhere = (text: string, isError = false, record: Record<string, unknown> = {}): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify({ ...record, said: text, [`key_${text}`]: true }) }], structuredContent: { ...record, said: text, [`key_${text}`]: true }, _meta: { "fake/trace": text, [`meta_${text}`]: true, "agent-custody/facts": [`fact:${text}`] }, isError, [`top_${text}`]: true } as CallToolResult);
 
 function handle(name: string, a: Record<string, unknown>): CallToolResult {
   const id = String(a.customer_id ?? "");

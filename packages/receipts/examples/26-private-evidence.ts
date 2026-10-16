@@ -62,15 +62,16 @@ const reveal = spawnSync(process.execPath, [cli, "reveal", file, "--capture-key-
 if (reveal.status !== 0) throw new Error(reveal.stderr);
 console.log(`   ${reveal.stdout.trim()}`);
 // each revealed path carries the value and the salt its commitment was made with; the salt is what a reviewer needs to check it, and what the receipt never carries
-const disclosure = JSON.parse(readFileSync(disclosureFile, "utf8")) as { request: { args: Record<string, { value: unknown }> }; facts: { customer: { value: Record<string, { value: unknown }> } } };
-console.log(`   revealed reason: ${JSON.stringify(disclosure.request.args.reason!.value)}`);
-console.log(`   revealed customer record: ${JSON.stringify(Object.fromEntries(Object.entries(disclosure.facts.customer.value).map(([k, w]) => [k, w.value])))}`);
+// a side's withheld fields come back as one object at `$rest`, so that not even their names were in the receipt
+const disclosure = JSON.parse(readFileSync(disclosureFile, "utf8")) as { request: { args: { $rest: { value: { reason: string } } } }; facts: { customer: { value: { $rest: { value: unknown } } } } };
+console.log(`   revealed reason: ${JSON.stringify(disclosure.request.args.$rest.value.reason)}`);
+console.log(`   revealed customer record: ${JSON.stringify(disclosure.facts.customer.value.$rest.value)}`);
 const verified = spawnSync(process.execPath, [cli, "verify", file, "--issuer-key", fx.gatewayPub, "--principal-key", fx.principalPub, "--upstream-key", fx.upstreamPub, "--log", fx.logFile, "--capture-key-env", "EXAMPLE_CAPTURE_KEY"], { encoding: "utf8" });
 if (verified.status !== 0) throw new Error(verified.stdout + verified.stderr);
 console.log(verified.stdout.split("\n").filter((l) => /args digest|execution result digest|upstream signature|RESULT/.test(l)).map((l) => `   ${l}`).join("\n"));
 
 step(5, "a disclosure that lies about the note fails the commitment");
-const lie = verifyBundle(bundle, { ...opts, disclosed: { request: { args: { reason: { ...disclosure.request.args.reason, value: "a different note" } } } } });
+const lie = verifyBundle(bundle, { ...opts, disclosed: { request: { args: { $rest: { ...disclosure.request.args.$rest, value: { reason: "a different note" } } } } } });
 console.log(`   ${formatReport(lie).split("\n").find((l) => /args digest/.test(l))}`);
 if (!bare.ok || !lie.checks.some((c) => c.name === "request args digest" && !c.ok)) throw new Error("expected the bare receipt to verify and the lying disclosure to fail");
 console.log("\nOK");

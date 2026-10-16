@@ -63,7 +63,7 @@ export function structuralProblem(p: unknown): string | null {
       if (!Array.isArray(w) || w.length === 0 || !w.every((s) => typeof s === "string")) return "the capture note names a malformed path";
       const path = w as string[];
       const head = path[0]!;
-      const named = STRUCTURAL_TOP.has(head) || (path.length === 1 && head in STRUCTURAL_IN) || (path.length === 2 && STRUCTURAL_IN[head]?.has(path[1]!)) || head === "facts" && (path.length <= 2 || path[2] === "tool" || path[2] === "provenance") || (head === "execution" && path.length === 3 && path[1] === "upstream" && path[2] === "provider");
+      const named = STRUCTURAL_TOP.has(head) || (path.length === 1 && head in STRUCTURAL_IN) || (path.length === 2 && STRUCTURAL_IN[head]?.has(path[1]!)) || head === "facts" && (path.length <= 2 || path[2] === "tool" || path[2] === "provenance") || (head === "execution" && path.length === 2 && path[1] === "upstream") || (head === "execution" && path.length === 3 && path[1] === "upstream" && path[2] === "provider") || (head === "execution" && path.length === 3 && path[1] === "result" && path[2] === "isError");
       if (named) return `the capture note names a structural part: ${pathText(path)}`;
     }
   }

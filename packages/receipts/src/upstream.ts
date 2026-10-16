@@ -133,7 +133,9 @@ export function checkProvider(att: ProviderAttestation, secrets: ProviderSecrets
   }
   const bound = pathValue(body, bind);
   if (bound === undefined || bound === null || bound === "") return { ok: false, error: `delivery has no value at ${bind}` };
-  if (!JSON.stringify(ctx.result).includes(JSON.stringify(bound).replace(/^"|"$/g, ""))) return { ok: false, error: `delivery's ${bind} (${String(bound)}) does not appear in the receipt's result` };
+  // what the agent received: the content and the flag, never _meta, which carries the delivery itself and so always contains the bound value
+  const received = ctx.result as { content: unknown; isError?: boolean; structuredContent?: unknown };
+  if (!JSON.stringify({ content: received.content, isError: received.isError, structuredContent: received.structuredContent }).includes(JSON.stringify(bound).replace(/^"|"$/g, ""))) return { ok: false, error: `delivery's ${bind} (${String(bound)}) does not appear in the receipt's result` };
   return { ok: true, keyid: `shared secret (${att.provider}, bound on ${bind})` };
 }
 

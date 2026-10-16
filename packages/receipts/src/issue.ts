@@ -2,7 +2,7 @@
 import { chmodSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { SALTS_DIR, saltsFileFor } from "./retention.ts";
 import { join } from "node:path";
-import { getAt, privateView, ruleFor, type CaptureConfig, type CaptureContext, type PrivateView } from "./capture.ts";
+import { getAt, privateView, ruleFor, ruleMode, type CaptureConfig, type CaptureContext, type CaptureRule, type PrivateView } from "./capture.ts";
 import { canonicalize, dsseSign, type KeyPair } from "./crypto.ts";
 import { fileLog, type LogSink } from "./log-sink.ts";
 import type { ReceiptExporter } from "./otel.ts";
@@ -32,7 +32,25 @@ export interface IssuerOptions {
 export function createIssuer(key: KeyPair, receiptsDir: string, log: string | LogSink, opts: IssuerOptions = {}): Issuer {
   const sink = typeof log === "string" ? fileLog(log, key) : log;
   mkdirSync(receiptsDir, { recursive: true });
-  const view = <P extends AuthorizationPredicate>(predicate: P, ctx?: CaptureContext, prior?: PrivateView<AuthorizationPredicate>) => privateView(predicate, ruleFor(opts.capture?.rules, predicate.tool.name), opts.capture?.key, ctx, prior);
+  const PRIVACY: Record<string, number> = { clear: 0, digest: 1, encrypted: 2 };
+  /** the rule for a call: by the tool's name; for a name no upstream offers (the agent's text), the more private of that name's rule and the wildcard, so that a rule left for a retired name cannot be chosen by an agent to get its call recorded in clear */
+  const ruleOf = (name: string, ctx?: CaptureContext): CaptureRule | undefined => {
+    const named = ruleFor(opts.capture?.rules, name);
+    if (!ctx?.unknownTool) return named;
+    const star = opts.capture?.rules && Object.hasOwn(opts.capture.rules, "*") ? opts.capture.rules["*"] : undefined;
+    return (PRIVACY[ruleMode(star)] ?? 0) > (PRIVACY[ruleMode(named)] ?? 0) ? star : named;
+  };
+  const view = <P extends AuthorizationPredicate>(predicate: P, ctx?: CaptureContext, prior?: PrivateView<AuthorizationPredicate>) => privateView(predicate, ruleOf(predicate.tool.name, ctx), opts.capture?.key, ctx, prior);
+  /** the salts directory, checked before anything is signed or appended, so that a problem with it costs no leaf in the log */
+  const saltsDir = join(receiptsDir, SALTS_DIR);
+  const ensureSaltsDir = () => {
+    if (!opts.capture?.rules) return;
+    // mkdir's mode applies only to a directory it creates: one that was there keeps its own, so it is set after
+    mkdirSync(saltsDir, { recursive: true, mode: 0o700 });
+    // the directory is the issuer's own: a link left at that name would carry every salt elsewhere
+    if (lstatSync(saltsDir).isSymbolicLink()) throw new Error(`${saltsDir} is a symbolic link; the salts are not written through it`);
+    chmodSync(saltsDir, 0o700);
+  };
   /**
    * The view committed in an authorization, by receipt id, until its receipt is issued: the receipt carries the same
    * commitments and salts for the parts they share. Set once the log has taken the authorization, released when the
@@ -51,23 +69,20 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
   const keepSalts = (v: PrivateView<AuthorizationPredicate>) => {
     const salts = Object.fromEntries((v.predicate.capture?.withheld ?? []).filter((w) => (getAt(v.predicate, w) as { $custody?: string } | undefined)?.$custody === "withheld").map((w) => [JSON.stringify(w), v.salts[JSON.stringify(w)]!]));
     if (!Object.keys(salts).length) return;
-    // mkdir's mode applies only to a directory it creates: one that was there keeps its own, so it is set after
-    mkdirSync(join(receiptsDir, SALTS_DIR), { recursive: true, mode: 0o700 });
-    // the directory is the issuer's own: a link left at that name would carry every salt elsewhere
-    if (lstatSync(join(receiptsDir, SALTS_DIR)).isSymbolicLink()) throw new Error(`${join(receiptsDir, SALTS_DIR)} is a symbolic link; the salts are not written through it`);
-    chmodSync(join(receiptsDir, SALTS_DIR), 0o700);
     writeFileSync(saltsFileFor(receiptsDir, v.predicate.receiptId), JSON.stringify({ receiptId: v.predicate.receiptId, salts }, null, 2), { mode: 0o600 });
   };
   return {
     keyid: key.keyid,
     log: sink,
     async issue(predicate, ctx) {
+      ensureSaltsDir();
+      // the authorization's view stays until the log has taken the receipt: a producer that retries after a refusal gets the same commitments and salts
       const prior = committed.get(predicate.receiptId)?.view;
-      committed.delete(predicate.receiptId);
       const pv = view(predicate, ctx, prior);
       const v = pv.predicate;
       const envelope = dsseSign(RECEIPT_TYPE, buildStatement(v), key);
       const entry = await sink.append(canonicalize(envelope));
+      committed.delete(predicate.receiptId);
       // the salts once the log has taken the leaf: a receipt the log refused leaves nothing behind
       keepSalts(pv);
       const bundle: ReceiptBundle = { envelope, treeHead: entry.treeHead, inclusion: entry.inclusion };
@@ -78,6 +93,7 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
       return bundle;
     },
     async authorize(predicate, ctx) {
+      ensureSaltsDir();
       const pv = view(predicate, ctx);
       const v = pv.predicate;
       const envelope = dsseSign(RECEIPT_TYPE, buildAuthorizationStatement(v), key);

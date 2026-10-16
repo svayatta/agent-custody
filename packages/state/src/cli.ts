@@ -3,6 +3,9 @@ import { parseArgs } from "node:util";
 import { Ledger } from "./ledger.ts";
 import { createMemoryServer, serveStdio } from "./server.ts";
 import { captureKeyFrom } from "@agent-custody/receipts";
+
+/** the capture key from the environment variable named, for queries over receipts under a capture rule; none when no variable is named */
+const keyFromEnv = (name: string | undefined): Buffer | undefined => (name ? captureKeyFrom(process.env[name] ?? (() => { throw new Error(`${name} is not set`); })()) : undefined);
 import { blastRadius, formatBlastRadius, loadReceipts } from "./blast.ts";
 import { serveMemoryHttp } from "./http.ts";
 import { loadPrivateKey, loadPublicKey, verifyBundle } from "@agent-custody/receipts";
@@ -174,7 +177,7 @@ async function main(argv: string[]): Promise<number> {
       return regressed ? 1 : 0;
     }
     case "pack": {
-      const { values } = parseArgs({ args: rest, options: { ledger: { type: "string" }, receipts: { type: "string" }, fact: { type: "string" }, out: { type: "string" }, sign: { type: "string" }, verify: { type: "string" }, key: { type: "string", multiple: true }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, json: { type: "boolean", default: false } } });
+      const { values } = parseArgs({ args: rest, options: { "capture-key-env": { type: "string" }, ledger: { type: "string" }, receipts: { type: "string" }, fact: { type: "string" }, out: { type: "string" }, sign: { type: "string" }, verify: { type: "string" }, key: { type: "string", multiple: true }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, json: { type: "boolean", default: false } } });
       if (values.verify) {
         if (!values.key?.length) throw new Error("pack --verify needs --key <pub>");
         const r = verifyPack(JSON.parse(readFileSync(values.verify, "utf8")), values.key.map(loadPublicKey), values["issuer-key"]?.length ? { issuerKeys: values["issuer-key"].map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey) } : undefined);
@@ -188,7 +191,7 @@ async function main(argv: string[]): Promise<number> {
       }
       if (!values.ledger || !values.receipts || !values.fact || !values.out || !values.sign) throw new Error("pack needs --ledger, --receipts, --fact, --out, and --sign");
       const packLedger = new Ledger(values.ledger);
-      const pack = await buildPack(packLedger, values.receipts, values.fact);
+      const pack = await buildPack(packLedger, values.receipts, values.fact, { captureKey: keyFromEnv(values["capture-key-env"]) });
       await packLedger.close();
       writeFileSync(values.out, JSON.stringify(signPack(pack, loadPrivateKey(values.sign)), null, 2));
       console.log(formatPack(pack));
@@ -196,7 +199,7 @@ async function main(argv: string[]): Promise<number> {
       return pack.missingReceipts.length ? 1 : 0;
     }
     case "explain": {
-      const { values } = parseArgs({ args: rest, options: { ledger: { type: "string" }, receipts: { type: "string" }, receipt: { type: "string" }, out: { type: "string" }, sign: { type: "string" }, verify: { type: "string" }, key: { type: "string", multiple: true }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, "log-key": { type: "string", multiple: true }, json: { type: "boolean", default: false } } });
+      const { values } = parseArgs({ args: rest, options: { "capture-key-env": { type: "string" }, ledger: { type: "string" }, receipts: { type: "string" }, receipt: { type: "string" }, out: { type: "string" }, sign: { type: "string" }, verify: { type: "string" }, key: { type: "string", multiple: true }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, "log-key": { type: "string", multiple: true }, json: { type: "boolean", default: false } } });
       const receiptKeys = values["issuer-key"]?.length ? { issuerKeys: values["issuer-key"].map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), ...(values["log-key"]?.length ? { logKeys: values["log-key"].map(loadPublicKey) } : {}) } : undefined;
       if (values.verify) {
         if (!values.key?.length) throw new Error("explain --verify needs --key <pub>");
@@ -211,7 +214,7 @@ async function main(argv: string[]): Promise<number> {
       }
       if (!values.receipts || !values.receipt) throw new Error("explain needs --receipts and --receipt, or --verify");
       const ledger = values.ledger ? new Ledger(values.ledger) : undefined;
-      const pack = await buildActionPack(values.receipts, values.receipt, ledger);
+      const pack = await buildActionPack(values.receipts, values.receipt, ledger, { captureKey: keyFromEnv(values["capture-key-env"]) });
       await ledger?.close();
       const verification = receiptKeys ? verifyBundle(pack.receipt, receiptKeys) : null;
       if (values.out) {
@@ -257,8 +260,7 @@ async function main(argv: string[]): Promise<number> {
       if (!values.ledger || !values.receipts || !values.fact) throw new Error("blast needs --ledger, --receipts, and --fact [--capture-key-env NAME]");
       const blastLedger = new Ledger(values.ledger);
       // receipts under a capture rule withhold what the agent had been shown; the key brings it back, else the query says it is incomplete
-      const captureKey = values["capture-key-env"] ? captureKeyFrom(process.env[values["capture-key-env"]] ?? (() => { throw new Error(`${values["capture-key-env"]} is not set`); })()) : undefined;
-      const b = await blastRadius(blastLedger, loadReceipts(values.receipts, { captureKey }), values.fact);
+      const b = await blastRadius(blastLedger, loadReceipts(values.receipts, { captureKey: keyFromEnv(values["capture-key-env"]) }), values.fact);
       await blastLedger.close();
       console.log(values.json ? JSON.stringify(b, null, 2) : formatBlastRadius(b, values.fact));
       return b.fact ? 0 : 1;

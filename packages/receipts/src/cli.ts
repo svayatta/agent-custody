@@ -520,16 +520,20 @@ async function main(argv: string[]): Promise<number> {
       let saltsWritten = 0;
       for (const path of p.capture?.withheld ?? []) {
         const k = JSON.stringify(path);
-        if (back.restored.has(k)) disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: back.salts.get(k), value: getAt(back.predicate, path) });
+        if (back.restored.has(k)) disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: back.salts.get(k), value: back.values.get(k) });
         else if (kept[k]) {
           disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: kept[k] });
           saltsWritten++;
         }
       }
-      const notRevealed = back.missing.map(pathText);
+      // a value withheld without its value cannot be revealed by anyone but its holder; one encrypted under another key is a different matter, said separately
+      const foreign = back.missing.filter((w) => (getAt(p, w) as { $custody?: string } | undefined)?.$custody === "encrypted");
+      const notRevealed = back.missing.filter((w) => !foreign.includes(w)).map(pathText);
+      const foreignNote = foreign.length ? ` Encrypted under key ${String((getAt(p, foreign[0]!) as { keyid: string }).keyid).slice(0, 12)}…, not the one given: ${foreign.map(pathText).join(", ")}.` : "";
+      if (foreign.length && back.restored.size === 0) throw new Error(`reveal: nothing revealed; the values are encrypted under key ${String((getAt(p, foreign[0]!) as { keyid: string }).keyid).slice(0, 12)}…, not the one given`);
       const text = JSON.stringify(disclosure, null, 2);
       const how = saltsWritten ? `; their salts are written in the file for the holder to add \"value\" beside, and the file does not verify until then: do not hand it over unfinished` : values["include-salts"] ? ` (no salts file at ${saltsFile})` : `; --include-salts writes their salts from ${saltsFile} for the holder to complete`;
-      const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them${how}.` : "";
+      const note = (notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them${how}.` : "") + foreignNote;
       if (values.out) {
         // decrypted values and salts: the owner's alone, whatever the umask, whatever mode a file already there had,
         // and never through a symlink someone left at that name

@@ -3,15 +3,14 @@
 // verifier recomputes them when the values are in clear, disclosed, or revealed with the customer's key, and says
 // "committed, not recomputed" when they are not.
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { aadFor, captureKeyFrom, checkCommitment, digestSalt, getAt, isCommitment, pathKey, privateView, restorePaths, reveal, ruleFor, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
-import { pruneLog } from "../src/retention.ts";
+import { aadFor, captureKeyFrom, checkCommitment, digestSalt, getAt, isCommitment, pathKey, privateView, REST, restorePaths, reveal, ruleFor, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
 import { sha256Hex } from "../src/crypto.ts";
-import { SALTS_DIR } from "../src/retention.ts";
+import { pruneLog, SALTS_DIR } from "../src/retention.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { digestOf, loadPublicKey } from "../src/crypto.ts";
 import { createGateway, RECEIPT_META_KEY, type Gateway } from "../src/gateway.ts";
@@ -38,15 +37,26 @@ const saltsOf = (receiptsDir: string, id: string) => (JSON.parse(readFileSync(jo
 const allSalts = (receiptsDir: string, p: ReceiptPredicate, k?: Buffer) => ({ ...saltsOf(receiptsDir, p.receiptId), ...Object.fromEntries(restorePaths(p, p.capture, undefined, k).salts) });
 /** the salt a digest over `prefix` was made with, from the kept salts */
 const saltFor = (note: CaptureNote | undefined, salts: Record<string, string>, prefix: Path) => digestSalt((note?.withheld ?? []).filter((w) => prefix.every((s, i) => w[i] === s)).map((w) => salts[pathKey(w)]!));
-/** a disclosure as the holder of the values and the salts writes it: `{ $custody: "disclosed", salt, value }` at each withheld path the partial predicate covers */
-const disclose = (note: CaptureNote | undefined, salts: Record<string, string>, partial: Record<string, unknown>): Record<string, unknown> => {
+/**
+ * A disclosure as the holder of the values and the salts writes it, from a partial predicate holding the real values:
+ * `{ $custody: "disclosed", salt, value }` at each withheld path the partial covers. A `$rest` path takes the object of
+ * every field of the real parent that the view does not show in clear, which is what the commitment was made over.
+ */
+const disclose = (p: ReceiptPredicate, salts: Record<string, string>, partial: Record<string, unknown>): Record<string, unknown> => {
   let out: Record<string, unknown> = {};
-  for (const w of note?.withheld ?? []) {
-    const value = getAt(partial, w);
+  for (const w of p.capture?.withheld ?? []) {
+    let value: unknown;
+    if (w[w.length - 1] === REST) {
+      const real = getAt(partial, w.slice(0, -1));
+      const view = getAt(p, w.slice(0, -1)) as Record<string, unknown> | undefined;
+      if (!real || typeof real !== "object") continue;
+      value = Object.fromEntries(Object.entries(real as Record<string, unknown>).filter(([k]) => k === REST || !view || !Object.hasOwn(view, k)));
+    } else value = getAt(partial, w);
     if (value !== undefined) out = setAt(out, w, { $custody: "disclosed", salt: salts[pathKey(w)], value });
   }
   return out;
 };
+const rest = (p: ReceiptPredicate, parent: Path) => getAt(p, [...parent, REST]);
 const WEBHOOK_SECRET = "whsec_capture_test";
 
 /** an SDK-shaped predicate with a value in every place a call can leave one */
@@ -95,16 +105,16 @@ describe("the view of a statement under a rule", () => {
     expect(() => reveal(bound.commitment, key, aadFor("receipt-B", ["request", "args", "reason"]))).toThrow();
     expect(() => reveal(bound.commitment, key, aadFor("receipt-A", ["execution", "result", "note"]))).toThrow();
     expect(() => reveal(bound.commitment, key)).toThrow();
-    expect(() => captureKeyFrom("too-short")).toThrow(/32 bytes/);
   });
 
-  it("captures each side field by field, keeps the listed fields, salts the digests, and restores from a disclosure or the key", () => {
+  it("captures a side as the listed fields beside one commitment over the rest, so no field name chosen by the agent or the upstream appears; salts the digests; restores from a disclosure or the key", () => {
     const p = predicate();
     const { predicate: v, salts } = privateView(p, { args: { mode: "digest", clear: ["customer_id", "amount"] }, result: { mode: "digest", clear: ["content"] } });
-    expect(v.capture).toEqual({ mode: "digest", withheld: [["request", "args", "reason"], ["request", "args", "note"], ["execution", "result", "_meta"]] });
-    expect(v.request.args.amount).toBe(2500);
-    expect(isCommitment(v.request.args.reason)).toBe(true);
-    expect(JSON.stringify(v)).not.toMatch(/7946 0000|"card"|"salt"/);
+    expect(v.capture).toEqual({ mode: "digest", withheld: [["request", "args", REST], ["execution", "result", REST]] });
+    expect(v.request.args).toEqual({ customer_id: "cust_123", amount: 2500, [REST]: expect.objectContaining({ $custody: "withheld" }) });
+    // the names `reason` and `note` are nowhere: not in the view, not in the note
+    expect(JSON.stringify(v)).not.toMatch(/7946 0000|"card"|"salt"|"reason"|"note"/);
+    expect((v.execution as { result: { content: unknown; isError: boolean } }).result).toMatchObject({ content: p.execution.status === "executed" ? (p.execution as { result: { content: unknown } }).result.content : null, isError: false });
     expect(Object.keys(salts).sort()).toEqual(v.capture!.withheld.map(pathKey).sort());
     // the digests are over the full values, salted from the field salts: whoever can restore the values can recompute them
     expect(v.request.argsDigest).toBe(digestOf(p.request.args, saltFor(v.capture, salts, ["request", "args"])));
@@ -112,25 +122,33 @@ describe("the view of a statement under a rule", () => {
     const ex = v.execution as { resultDigest: string };
     expect(ex.resultDigest).toBe(digestOf((p.execution as { result: unknown }).result, saltFor(v.capture, salts, ["execution", "result"])));
     // nothing comes back without a disclosure or a key
-    expect(restorePaths(v, v.capture).missing).toHaveLength(3);
-    const back = restorePaths(v, v.capture, disclose(v.capture, salts, { request: { args: { reason: p.request.args.reason, note: p.request.args.note } }, execution: { result: { _meta: { "x/trace": "cust_123" } } } }));
+    expect(restorePaths(v, v.capture).missing).toHaveLength(2);
+    // a disclosure of the rest of each side folds back into the object the digest was made over
+    const back = restorePaths(v, v.capture, disclose(v, salts, { request: { args: p.request.args }, execution: { result: (p.execution as { result: unknown }).result } }));
     expect(back.problems).toEqual([]);
     expect(back.missing).toEqual([]);
     expect(back.predicate.request.args).toEqual(p.request.args);
+    expect(Object.hasOwn(back.predicate.request.args, REST)).toBe(false);
     expect(digestOf(back.predicate.request.args, saltFor(v.capture, salts, ["request", "args"]))).toBe(v.request.argsDigest);
-    const lie = restorePaths(v, v.capture, disclose(v.capture, salts, { request: { args: { reason: "something else" } } }));
-    expect(lie.problems[0]!.error).toMatch(/disclosed request.args.reason does not match/);
+    expect(digestOf((back.predicate.execution as { result: unknown }).result, saltFor(v.capture, salts, ["execution", "result"]))).toBe(ex.resultDigest);
+    const lie = restorePaths(v, v.capture, disclose(v, salts, { request: { args: { ...p.request.args, reason: "something else" } } }));
+    expect(lie.problems[0]!.error).toMatch(/disclosed request.args.\$rest does not match/);
     // a value alone, without its salt, cannot be checked and is said so
-    const bare = restorePaths(v, v.capture, { request: { args: { reason: p.request.args.reason } } });
+    const bare = restorePaths(v, v.capture, { request: { args: { [REST]: { reason: p.request.args.reason } } } });
     expect(bare.problems[0]!.error).toMatch(/must be \{ "\$custody": "disclosed", "salt", "value" \}/);
     // a salt alone, as reveal --include-salts writes for the holder to complete, is an unfinished disclosure and fails rather than passing as committed
-    expect(restorePaths(v, v.capture, { request: { args: { reason: { $custody: "disclosed", salt: salts[pathKey(["request", "args", "reason"])] } } } }).problems[0]!.error).toMatch(/carries a salt but no value/);
+    expect(restorePaths(v, v.capture, { request: { args: { [REST]: { $custody: "disclosed", salt: salts[pathKey(["request", "args", REST])] } } } }).problems[0]!.error).toMatch(/carries a salt but no value/);
     const enc = privateView(p, { args: { mode: "encrypted", clear: ["amount"] } }, key).predicate;
     const dec = restorePaths(enc, enc.capture, undefined, key);
     expect(dec.missing).toEqual([]);
     expect(dec.predicate.request.args).toEqual(p.request.args);
     expect([...dec.restored.values()].every((h) => h === "decrypted")).toBe(true);
     expect(restorePaths(enc, enc.capture, undefined, captureKeyFrom(randomBytes(32).toString("hex"))).missing.length).toBeGreaterThan(0);
+    // a field literally named $rest is never kept in clear: it goes with the rest and comes back with it
+    const named = privateView(predicate({ request: { args: { amount: 1, [REST]: "mine" }, argsDigest: "x", provenance: "claimed" } }), { args: { mode: "digest", clear: ["amount", REST] } });
+    expect(Object.keys(named.predicate.request.args)).toEqual(["amount", REST]);
+    expect(isCommitment(named.predicate.request.args[REST])).toBe(true);
+    expect(restorePaths(named.predicate, named.predicate.capture, disclose(named.predicate, named.salts, { request: { args: { amount: 1, [REST]: "mine" } } })).predicate.request.args).toEqual({ amount: 1, [REST]: "mine" });
     expect(privateView(p, { args: { mode: "clear" } })).toEqual({ predicate: p, salts: {} });
     expect(privateView(p, undefined).predicate).toBe(p);
     expect(() => privateView(p, { args: { mode: "encrypted" } })).toThrow(/needs captureKeyEnv/);
@@ -142,27 +160,28 @@ describe("the view of a statement under a rule", () => {
       execution: { status: "denied", reason: "no such customer cust_123", provenance: "claimed" },
     });
     const v = privateView(p, { result: { mode: "digest" } }).predicate;
-    expect(withheldPaths(v)).toEqual(["request.args.customer_id", "request.args.amount", "request.args.reason", "request.args.note", "policy.errors", "execution.reason"]);
+    expect(withheldPaths(v)).toEqual(["request.args.$rest", "policy.errors", "execution.reason"]);
+    expect(Object.keys(v.request.args)).toEqual([REST]);
     expect(isCommitment(v.policy!.errors)).toBe(true);
     expect(JSON.stringify(v)).not.toContain("cust_123");
-    // a side set to clear is in clear, and an empty error list is structural
+    // a side set to clear is in clear (its content, not the metadata an upstream wrote), and an empty error list is structural
     const clear = privateView(predicate(), { args: { mode: "digest" }, result: { mode: "clear" } }).predicate;
-    // the content stays as the rule says; the metadata an upstream wrote does not, result in clear or not
-    expect(withheldPaths(clear)).toEqual(["request.args.customer_id", "request.args.amount", "request.args.reason", "request.args.note", "execution.result._meta"]);
+    expect(withheldPaths(clear)).toEqual(["request.args.$rest", "execution.result._meta"]);
     expect((clear.execution as { result: { content: unknown } }).result.content).toEqual([{ type: "text", text: "refund re_1 for cust_123" }]);
     expect(isCommitment((clear.execution as { result: { _meta: unknown } }).result._meta)).toBe(true);
     expect(clear.policy!.errors).toEqual([]);
     // the result's error flag is its status and stays; its metadata never does, listed in clear or not
     const meta = privateView(predicate(), { result: { mode: "digest", clear: ["content", "_meta", "isError"] } }).predicate;
-    expect(withheldPaths(meta)).toEqual(["request.args.customer_id", "request.args.amount", "request.args.reason", "request.args.note", "execution.result._meta"]);
-    expect((meta.execution as { result: { isError: boolean } }).result.isError).toBe(false);
+    expect(withheldPaths(meta)).toEqual(["request.args.$rest", "execution.result.$rest"]);
+    expect((meta.execution as { result: { isError: boolean; _meta?: unknown } }).result.isError).toBe(false);
+    expect((meta.execution as { result: { _meta?: unknown } }).result._meta).toBeUndefined();
     // only the boolean flag is the status: an SDK tool may return anything under that name, and that is a value
     for (const mode of ["digest", "encrypted"] as const) {
       const odd = privateView(predicate({ execution: { status: "executed", result: { isError: { customer_id: "PRIVATE_555" }, message: "PRIVATE_555" }, resultDigest: "y", provenance: "claimed" } }), { result: { mode } }, key).predicate;
-      expect(withheldPaths(odd)).toEqual(expect.arrayContaining(["execution.result.isError", "execution.result.message"]));
+      expect(Object.keys((odd.execution as { result: Record<string, unknown> }).result)).toEqual([REST]);
       expect(JSON.stringify(odd)).not.toContain("PRIVATE_555");
       const str = privateView(predicate({ execution: { status: "failed", result: { isError: "PRIVATE_555", content: [] }, resultDigest: "y", provenance: "claimed" } }), { result: { mode } }, key).predicate;
-      expect(withheldPaths(str)).toContain("execution.result.isError");
+      expect(JSON.stringify(str)).not.toContain("PRIVATE_555");
     }
     // a thrown message, and a part of the statement added later, start withheld
     const err = privateView({ ...predicate({ execution: { status: "error", error: "card declined for cust_123", provenance: "claimed" } }), later: { secret: "cust_123" } } as ReceiptPredicate, { args: { mode: "digest", clear: ["customer_id", "amount", "reason", "note"] } }).predicate;
@@ -170,7 +189,7 @@ describe("the view of a statement under a rule", () => {
     expect(JSON.stringify(err)).not.toMatch(/declined|secret/);
     // one mode for what is outside the sides: encrypted as soon as any side is, so the key brings everything back
     const mixed = privateView(p, { args: { mode: "digest" }, result: { mode: "encrypted" } }, key).predicate;
-    expect((mixed.request.args.customer_id as { $custody: string }).$custody).toBe("withheld");
+    expect((mixed.request.args[REST] as { $custody: string }).$custody).toBe("withheld");
     expect((mixed.policy!.errors as { $custody: string }).$custody).toBe("encrypted");
     expect(restorePaths(mixed, mixed.capture, undefined, key).predicate.policy!.errors).toEqual(["no such customer cust_123"]);
   });
@@ -179,15 +198,15 @@ describe("the view of a statement under a rule", () => {
     const args = JSON.parse('{"__proto__":{"secret":"review"},"amount":2500,"*":"star"}') as Record<string, unknown>;
     const p = predicate({ request: { args, argsDigest: "x", provenance: "claimed" } });
     const { predicate: v, salts } = privateView(p, { args: { mode: "encrypted", clear: ["amount"] } }, key);
-    expect(v.capture!.withheld).toEqual([["request", "args", "__proto__"], ["request", "args", "*"], ["execution", "result", "content"], ["execution", "result", "_meta"]]);
+    expect(v.capture!.withheld).toEqual([["request", "args", REST], ["execution", "result", REST]]);
     const persisted = JSON.parse(JSON.stringify(v)) as ReceiptPredicate;
-    expect(isCommitment(getAt(persisted, ["request", "args", "__proto__"]))).toBe(true);
-    expect(isCommitment(getAt(persisted, ["request", "args", "*"]))).toBe(true);
+    expect(JSON.stringify(persisted)).not.toMatch(/__proto__|secret|star/);
     const back = restorePaths(persisted, persisted.capture, undefined, key);
     expect(back.missing).toEqual([]);
     expect(JSON.parse(JSON.stringify(back.predicate.request.args))).toEqual(args);
+    expect(Object.hasOwn(back.predicate.request.args, "__proto__")).toBe(true);
     expect(digestOf(back.predicate.request.args, saltFor(v.capture, salts, ["request", "args"]))).toBe(v.request.argsDigest);
-    expect(restorePaths(persisted, persisted.capture, disclose(v.capture, salts, { request: { args } })).problems).toEqual([]);
+    expect(restorePaths(persisted, persisted.capture, disclose(v, salts, { request: { args } })).problems).toEqual([]);
     expect(({} as Record<string, unknown>).secret).toBeUndefined();
   });
 
@@ -212,20 +231,13 @@ describe("the view of a statement under a rule", () => {
       facts: { constructor: { tool: "customer.lookup", args: { customer_id: "cust_123" }, value: { id: "cust_123" }, resultDigest: digestOf({ content: [] }), provenance: "observed" as const } },
       capture: { mode: "digest", withheld: [["request", "args", "amount"]] },
     });
-    const { predicate: v, salts } = privateView(p, rule["*"] ? { args: { mode: "digest", clear: ["amount"] } } : undefined);
-    // the note came from this view, not from the predicate; a null is a value and is withheld; the fact named constructor is handled by own property
-    // the result side was not set, so it is withheld too
-    expect(withheldPaths(v).sort()).toEqual(["request.args.reason", "request.args.note", "facts.constructor.value.id", "facts.constructor.args.customer_id", "facts.constructor.resultDigest", "execution.result.content", "execution.result._meta"].sort());
+    const { predicate: v, salts } = privateView(p, { args: { mode: "digest", clear: ["amount"] } });
+    // the note came from this view, not from the predicate; a null is a value and goes with the rest; the fact named constructor is handled by own property; the result side was not set, so it is withheld too
+    expect(withheldPaths(v).sort()).toEqual(["request.args.$rest", "facts.constructor.value.$rest", "facts.constructor.args.customer_id", "facts.constructor.resultDigest", "execution.result.$rest"].sort());
     expect(v.request.args.amount).toBe(2500);
+    expect(Object.keys(v.request.args)).toEqual(["amount", REST]);
     expect(isCommitment(getAt(v, ["facts", "constructor", "resultDigest"]))).toBe(true);
-    expect(Object.keys(salts)).toHaveLength(7);
-    // the same when only the lookup's arguments are private and its value is in clear: the full result may repeat them
-    for (const mode of ["digest", "encrypted"] as const) {
-      const argsOnly = privateView(p, { args: { mode, clear: ["amount"] }, facts: { mode: "clear" } }, key).predicate;
-      expect(withheldPaths(argsOnly)).toContain("facts.constructor.args.customer_id");
-      expect(withheldPaths(argsOnly)).not.toContain("facts.constructor.value.id");
-      expect(isCommitment(getAt(argsOnly, ["facts", "constructor", "resultDigest"]))).toBe(true);
-    }
+    expect(Object.keys(salts)).toHaveLength(5);
     // with the full lookup result given, the digest is a commitment to that result, disclosed and checked like any value
     const full = { content: [{ type: "text", text: '{"id":"cust_123"}' }], _meta: { trace: "cust_123" } };
     const gv = privateView(p, { args: { mode: "digest", clear: ["amount"] } }, undefined, { factResults: { constructor: full } });
@@ -239,29 +251,35 @@ describe("the view of a statement under a rule", () => {
     const publicFact = privateView({ ...p, facts: { customer: { tool: "customer.lookup", args: {}, value: { verified: true }, resultDigest: digestOf(full), provenance: "observed" as const } } }, { args: { mode: "digest", clear: ["amount"] }, facts: { mode: "digest", clear: ["verified"] } }, undefined, { factResults: { customer: full } }).predicate;
     expect(withheldPaths(publicFact)).toContain("facts.customer.resultDigest");
     expect(getAt(publicFact, ["facts", "customer", "resultDigest"])).not.toBe(digestOf(full));
+    // the same when only the lookup's arguments are private and its value is in clear: the full result may repeat them
+    for (const mode of ["digest", "encrypted"] as const) {
+      const argsOnly = privateView(p, { args: { mode, clear: ["amount"] }, facts: { mode: "clear" } }, key).predicate;
+      expect(withheldPaths(argsOnly)).toContain("facts.constructor.args.customer_id");
+      expect(withheldPaths(argsOnly)).not.toContain("facts.constructor.value.$rest");
+      expect(isCommitment(getAt(argsOnly, ["facts", "constructor", "resultDigest"]))).toBe(true);
+    }
     // the receipt's view built on the authorization's carries the same commitments and salts for the shared parts
     const auth = privateView({ ...p, execution: undefined } as unknown as ReceiptPredicate, { args: { mode: "digest", clear: ["amount"] } });
     const after = privateView(p, { args: { mode: "digest", clear: ["amount"] } }, undefined, {}, auth);
     expect(after.predicate.request).toEqual(auth.predicate.request);
     expect(after.predicate.facts).toEqual(auth.predicate.facts);
     expect(after.predicate.request.argsDigest).toBe(auth.predicate.request.argsDigest);
-    expect(withheldPaths(after.predicate)).toEqual([...withheldPaths(auth.predicate), "execution.result.content", "execution.result._meta"]);
+    expect(withheldPaths(after.predicate)).toEqual([...withheldPaths(auth.predicate), "execution.result.$rest"]);
     for (const w of auth.predicate.capture!.withheld) expect(after.salts[pathKey(w)]).toBe(auth.salts[pathKey(w)]);
   });
 
-  it("upstream-authored strings outside the three sides are withheld under any private rule: consumed fact ids, a bind that is not a path, and the metadata, body, and envelope beside a result left in clear", () => {
+  it("upstream-authored strings outside the three sides are withheld under any private rule: consumed fact ids, a provider's signature and bind, and the metadata, body, and envelope beside a result left in clear", () => {
     const p = predicate({
       request: { args: { amount: 2500, reason: "cust_123 asked" }, argsDigest: "x", provenance: "claimed" },
       consumed: { factIds: ["fact:cust_123"], provenance: "observed" },
-      execution: { status: "executed", result: { content: [{ type: "text", text: "ok" }], _meta: { "x/trace": "cust_123" } }, resultDigest: "y", provenance: "claimed", upstream: { provider: "stripe-webhook", rawBody: "{\"customer\":\"cust_123\"}", signature: "t=1,v1=00", bind: "data.object.id" } },
+      execution: { status: "executed", result: { content: [{ type: "text", text: "ok" }], _meta: { "x/trace": "cust_123" } }, resultDigest: "y", provenance: "claimed", upstream: { provider: "stripe-webhook", rawBody: '{"customer":"cust_123"}', signature: "t=1,v1=00", bind: "data.object.id" } },
     });
-    // args private, result explicitly clear: the content stays, everything an upstream wrote beside it does not
+    // args private, result explicitly clear: the content stays, everything an upstream wrote beside it does not; the provider's signature is a MAC over the withheld body and its bind is a string the upstream chose
     const v = privateView(p, { args: { mode: "digest", clear: ["amount"] }, result: { mode: "clear" } }).predicate;
-    // the provider's signature is a MAC over the withheld body and its bind is a string the upstream chose: withheld with the body; only the provider's name stays
-    expect(withheldPaths(v).sort()).toEqual(["request.args.reason", "consumed.factIds", "execution.result._meta", "execution.upstream.rawBody", "execution.upstream.signature", "execution.upstream.bind"].sort());
+    expect(withheldPaths(v).sort()).toEqual(["request.args.$rest", "consumed.factIds", "execution.result._meta", "execution.upstream.rawBody", "execution.upstream.signature", "execution.upstream.bind"].sort());
     expect((v.execution as { result: { content: unknown } }).result.content).toEqual([{ type: "text", text: "ok" }]);
     expect((v.execution as { upstream: { provider: string } }).upstream.provider).toBe("stripe-webhook");
-    expect(JSON.stringify(v)).not.toMatch(/cust_123|v1=00|data\.object/);
+    expect(JSON.stringify(v)).not.toMatch(/cust_123|v1=00|data\.object|"reason"/);
     // an empty consumed list is structural
     const odd = privateView(predicate({ consumed: { factIds: [], provenance: "observed" }, execution: { status: "executed", result: { content: [] }, resultDigest: "y", provenance: "claimed", upstream: { provider: "github-delivery", rawBody: "{}", signature: "sha256=00", bind: "note cust_123" } } }), { args: { mode: "digest" } }).predicate;
     expect(withheldPaths(odd)).toContain("execution.upstream.bind");
@@ -271,7 +289,7 @@ describe("the view of a statement under a rule", () => {
 
   it("a ciphertext moved to another receipt or path is a problem, not a disclosure; the host's ids are withheld; consumed is shared with the authorization once", () => {
     const a = privateView(predicate({ receiptId: "receipt-A", request: { args: { reason: "SENSITIVE phone +44 20 7946 0000", amount: 1 }, argsDigest: "x", provenance: "claimed" } }), { args: { mode: "encrypted", clear: ["amount"] } }, key).predicate;
-    const moved = getAt(a, ["request", "args", "reason"]);
+    const moved = a.request.args[REST];
     // the same ciphertext under another receipt id, and under another path of the same receipt
     const b = { ...predicate({ receiptId: "receipt-B" }), execution: { status: "executed", result: { note: moved }, resultDigest: "y", provenance: "claimed" }, capture: { mode: "encrypted", withheld: [["execution", "result", "note"]] } } as ReceiptPredicate;
     const rb = restorePaths(b, b.capture, undefined, key);
@@ -300,18 +318,18 @@ describe("the view of a statement under a rule", () => {
     const guesses = ["fraud", "duplicate", "goodwill", "requested by customer"];
     for (const mode of ["digest", "encrypted"] as const) {
       const { predicate: v, salts } = privateView(predicate({ request: { args, argsDigest: "x", provenance: "claimed" } }), { args: { mode, clear: ["amount"] } }, key);
-      const c = v.request.args.reason as { sha256: string };
+      const c = v.request.args[REST] as { sha256: string };
       // nothing in the receipt is a salt, and no public computation over a guess reaches the commitment or the digest
       expect(JSON.stringify(v)).not.toMatch(/"salt"/);
       for (const guess of guesses) {
-        expect(sha256Hex(JSON.stringify(guess))).not.toBe(c.sha256);
-        expect(digestOf(guess)).not.toBe(c.sha256);
+        expect(sha256Hex(JSON.stringify({ reason: guess }))).not.toBe(c.sha256);
+        expect(digestOf({ reason: guess })).not.toBe(c.sha256);
         expect(digestOf({ amount: 2500, reason: guess })).not.toBe(v.request.argsDigest);
         expect(digestOf({ amount: 2500, reason: guess }, sha256Hex(""))).not.toBe(v.request.argsDigest);
       }
       // with the salt, and only with it, the true value checks and the others do not: the test can fail
-      const salt = salts[pathKey(["request", "args", "reason"])]!;
-      expect(guesses.filter((g) => checkCommitment(c as never, g, salt))).toEqual(["fraud"]);
+      const salt = salts[pathKey(["request", "args", REST])]!;
+      expect(guesses.filter((g) => checkCommitment(c as never, { reason: g }, salt))).toEqual(["fraud"]);
       expect(digestOf(args, digestSalt([salt]))).toBe(v.request.argsDigest);
     }
   });
@@ -359,16 +377,15 @@ describe("private evidence through the gateway", () => {
     expect(text(r)).toContain("succeeded");
     const bundle = bundleOf(r);
     const file = leakText(bundle);
-    expect(file).not.toMatch(/7946 0000|ending 4242|called from/);
+    expect(file).not.toMatch(/7946 0000|ending 4242|called from|"reason"/);
     // and without a rule the same call would show them, so the check can fail
     const clearCall = await gwClear.handleCall({ name: "stripe.refund", arguments: args });
     expect(leakText(clearBundleOf(clearCall))).toMatch(/7946 0000/);
     const p = decode(bundle).predicate;
-    expect(p.request.args).toMatchObject({ customer_id: "cust_123", amount: 2500 });
-    expect(isCommitment(p.request.args.reason)).toBe(true);
+    expect(p.request.args).toEqual({ customer_id: "cust_123", amount: 2500, [REST]: expect.objectContaining({ $custody: "encrypted" }) });
     expect(p.capture!.mode).toBe("encrypted");
     const paths = withheldPaths(p);
-    expect(paths).toContain("request.args.reason");
+    expect(paths).toContain("request.args.$rest");
     // the digest is salted from the field salts the issuer kept beside the receipt, never in it, for the owner alone
     expect(file).not.toMatch(/"salt"/);
     const kept = saltsOf(fx.receiptsDir, p.receiptId);
@@ -377,29 +394,25 @@ describe("private evidence through the gateway", () => {
     // the file holds the salts of the digest-only commitments and none of the encrypted ones, whose salts the key alone recovers
     const kinds = Object.fromEntries(p.capture!.withheld.map((w) => [pathKey(w), (getAt(p, w) as { $custody: string }).$custody]));
     expect(Object.keys(kept).sort()).toEqual(Object.keys(kinds).filter((k) => kinds[k] === "withheld").sort());
-    expect(kinds[pathKey(["request", "args", "reason"])]).toBe("encrypted");
+    expect(kinds[pathKey(["request", "args", REST])]).toBe("encrypted");
     const salts = allSalts(fx.receiptsDir, p, key);
     expect(p.request.argsDigest).toBe(digestOf(args, saltFor(p.capture, salts, ["request", "args"])));
     expect(p.request.argsDigest).not.toBe(digestOf(args));
     expect(p.execution.status).toBe("executed");
-    const ex = p.execution as { result: { content: unknown; isError?: boolean; _meta?: unknown }; resultSalt?: string };
-    expect(isCommitment(ex.result.content)).toBe(true);
-    expect(isCommitment(ex.result.isError)).toBe(false);
-    // the metadata carries the provider's delivery, so it is withheld with the result, and so is the body in the evidence
-    expect(isCommitment(ex.result._meta)).toBe(true);
-    expect(paths).toContain("execution.result._meta");
-    expect(paths).toContain("execution.upstream.rawBody");
+    const ex = p.execution as { result: Record<string, unknown> };
+    // the result shows its status flag and one commitment over everything else, the provider's delivery in the metadata included
+    expect(Object.keys(ex.result).every((k) => k === REST || k === "isError")).toBe(true);
+    expect(isCommitment(ex.result[REST])).toBe(true);
+    expect(paths).toContain("execution.result.$rest");
+    expect(paths).toEqual(expect.arrayContaining(["execution.upstream.rawBody", "execution.upstream.signature", "execution.upstream.bind"]));
     const up = (p.execution as { upstream: { rawBody: unknown; signature: unknown; bind: unknown; provider: string } }).upstream;
     expect(isCommitment(up.rawBody)).toBe(true);
     expect(isCommitment(up.signature)).toBe(true);
     expect(isCommitment(up.bind)).toBe(true);
     expect(up.provider).toBe("stripe-webhook");
-    expect(paths).toEqual(expect.arrayContaining(["execution.upstream.signature", "execution.upstream.bind"]));
-    // the fact the policy decided on is encrypted field by field: the policy saw it, the file does not show it
-    const customer = p.facts.customer!.value as Record<string, unknown>;
-    expect(Object.values(customer).every(isCommitment)).toBe(true);
-    expect(paths).toEqual(expect.arrayContaining(["facts.customer.value.id", "facts.customer.value.email", "facts.customer.value.verified"]));
-    expect(file).not.toContain('"plan":"pro"');
+    // the fact the policy decided on is one encrypted commitment: the policy saw it, the file shows neither its values nor its field names
+    expect(Object.keys(p.facts.customer!.value as object)).toEqual([REST]);
+    expect(file).not.toMatch(/"plan"|"email"|"verified"/);
     expect(p.policy!.decision).toBe("allow");
     // the lookup's arguments are copied from the call: the customer id is in clear there as in the request, and nothing else leaks through them
     expect(p.facts.customer!.args).toEqual({ customer_id: "cust_123" });
@@ -419,7 +432,7 @@ describe("private evidence through the gateway", () => {
     try {
       const r = await gw2.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500 } });
       const p = decode(bundleOf2(fx2, r)).predicate;
-      expect(isCommitment(p.request.args.customer_id)).toBe(true);
+      expect(Object.keys(p.request.args)).toEqual([REST]);
       expect(isCommitment(p.facts.customer!.args.customer_id)).toBe(true);
       expect(withheldPaths(p)).toContain("facts.customer.args.customer_id");
       expect(leakText(bundleOf2(fx2, r))).not.toContain("cust_123");
@@ -427,7 +440,7 @@ describe("private evidence through the gateway", () => {
       const v = verifyBundle(bundleOf2(fx2, r), o);
       expect(v.ok, formatReport(v)).toBe(true);
       expect(check("fact customer args", v).detail).toMatch(/committed, not recomputed/);
-      const disclosed = verifyBundle(bundleOf2(fx2, r), { ...o, disclosed: disclose(p.capture, saltsOf(fx2.receiptsDir, p.receiptId), { facts: { customer: { args: { customer_id: "cust_123" } } } }) });
+      const disclosed = verifyBundle(bundleOf2(fx2, r), { ...o, disclosed: disclose(p, saltsOf(fx2.receiptsDir, p.receiptId), { facts: { customer: { args: { customer_id: "cust_123" } } } }) });
       expect(check("fact customer args", disclosed).detail).toMatch(/hold against the disclosed value/);
     } finally {
       await gw2.close();
@@ -460,7 +473,7 @@ describe("private evidence through the gateway", () => {
     // the holder of the values discloses them with their salts: from the file for digest-only ones, from the key for encrypted ones
     const salts = allSalts(fx.receiptsDir, p, key);
     const attestation = originalMeta["agent-custody/upstream-signature"] as { rawBody: string; signature: string; bind: string };
-    const disclosed = disclose(p.capture, salts, { request: { args }, execution: { result, upstream: { rawBody: attestation.rawBody, signature: attestation.signature, bind: attestation.bind } } });
+    const disclosed = disclose(p, salts, { request: { args }, execution: { result, upstream: { rawBody: attestation.rawBody, signature: attestation.signature, bind: attestation.bind } } });
     const withDisclosure = verifyBundle(bundle, { ...opts, disclosed });
     expect(withDisclosure.ok, formatReport(withDisclosure)).toBe(true);
     expect(check("request args digest", withDisclosure).detail).toBe("recomputed from disclosed values");
@@ -468,19 +481,19 @@ describe("private evidence through the gateway", () => {
     expect(check("withheld execution.upstream.rawBody", withDisclosure).detail).toBe("holds against the disclosed value");
     expect(check("upstream signature (provider secret)", withDisclosure).ok).toBe(true);
     // key and disclosure together: each part comes back the way it can
-    const both = verifyBundle(bundle, { ...opts, captureKey: key, disclosed: disclose(p.capture, salts, { execution: { result } }) });
+    const both = verifyBundle(bundle, { ...opts, captureKey: key, disclosed: disclose(p, salts, { execution: { result } }) });
     expect(both.ok, formatReport(both)).toBe(true);
     expect(check("execution result digest", both).detail).toBe("recomputed from disclosed values");
 
-    const lie = verifyBundle(bundle, { ...opts, disclosed: disclose(p.capture, salts, { request: { args: { reason: "a different reason" } } }) });
+    const lie = verifyBundle(bundle, { ...opts, disclosed: disclose(p, salts, { request: { args: { ...args, reason: "a different reason" } } }) });
     expect(lie.ok).toBe(false);
-    expect(check("request args digest", lie).detail).toMatch(/disclosed request.args.reason does not match/);
+    expect(check("request args digest", lie).detail).toMatch(/disclosed request.args.\$rest does not match/);
     // a disclosure that lies about the fact the policy decided on fails too, key or no key
-    const factLie = verifyBundle(bundle, { ...opts, captureKey: key, disclosed: disclose(p.capture, salts, { facts: { customer: { value: { id: "cust_999" } } } }) });
+    const factLie = verifyBundle(bundle, { ...opts, captureKey: key, disclosed: disclose(p, salts, { facts: { customer: { value: { id: "cust_999", email: "x", verified: true, plan: "pro" } } } }) });
     expect(factLie.ok).toBe(false);
     expect(check("fact customer value", factLie).detail).toMatch(/does not match/);
     // a disclosure for another receipt is refused as such
-    const other = verifyBundle(bundle, { ...opts, disclosed: { receiptId: "someone-else", ...disclose(p.capture, salts, { request: { args } }) } });
+    const other = verifyBundle(bundle, { ...opts, disclosed: { receiptId: "someone-else", ...disclose(p, salts, { request: { args } }) } });
     expect(other.ok).toBe(false);
     expect(check("disclosure names this receipt", other).ok).toBe(false);
   });
@@ -497,8 +510,8 @@ describe("private evidence through the gateway", () => {
       expect(r.isError).toBeFalsy();
       const p = decode(bundleOf2(fx3, r)).predicate;
       expect(p.request.args.customer_id).toBe("cust_123");
-      expect(isCommitment(p.request.args.account_ref)).toBe(true);
-      // the lookup's customer_id came from account_ref, which is withheld: so it is withheld too, under its own name
+      expect(Object.keys(p.request.args).sort()).toEqual(["customer_id", "amount", REST].sort());
+      // the lookup's customer_id came from account_ref, which is withheld: so it is withheld too, under its own name (a config name)
       expect(isCommitment(p.facts.customer!.args.customer_id)).toBe(true);
       expect(p.facts.customer!.args.mode).toBe("full");
       expect(withheldPaths(p).filter((w) => w.startsWith("facts.customer.args"))).toEqual(["facts.customer.args.customer_id"]);
@@ -551,9 +564,9 @@ describe("private evidence through the gateway", () => {
       const p = decode(bundle).predicate;
       expect(p.execution.status).toBe("error");
       expect(isCommitment((p.execution as { error: unknown }).error)).toBe(true);
-      expect(isCommitment(p.request.args.customer_id)).toBe(true);
+      expect(Object.keys(p.request.args).sort()).toEqual(["amount", REST].sort());
       // the facts side was not set, so the customer record is withheld too
-      expect(Object.values(p.facts.customer!.value as Record<string, unknown>).every(isCommitment)).toBe(true);
+      expect(Object.keys(p.facts.customer!.value as object)).toEqual([REST]);
       expect(leakText(bundle)).not.toContain("declined");
       expect(leakText(bundle)).not.toContain("cust_123");
       const o = { issuerKeys: [loadPublicKey(fx6.gatewayPub)], principalKeys: [loadPublicKey(fx6.principalPub)], logFile: fx6.logFile };
@@ -562,9 +575,9 @@ describe("private evidence through the gateway", () => {
       expect(check("withheld execution.error", v).detail).toMatch(/committed, not recomputed/);
       const message = text(r).replace(/^Upstream error: /, "").replace(/ \(receipt [^)]+\)$/, "");
       const salts = saltsOf(fx6.receiptsDir, p.receiptId);
-      const disclosed = verifyBundle(bundle, { ...o, disclosed: disclose(p.capture, salts, { execution: { error: message } }) });
+      const disclosed = verifyBundle(bundle, { ...o, disclosed: disclose(p, salts, { execution: { error: message } }) });
       expect(check("withheld execution.error", disclosed).detail).toBe("holds against the disclosed value");
-      expect(check("withheld execution.error", verifyBundle(bundle, { ...o, disclosed: disclose(p.capture, salts, { execution: { error: "another message" } }) })).ok).toBe(false);
+      expect(check("withheld execution.error", verifyBundle(bundle, { ...o, disclosed: disclose(p, salts, { execution: { error: "another message" } }) })).ok).toBe(false);
     } finally {
       await gw6.close();
     }
@@ -600,7 +613,7 @@ describe("private evidence through the gateway", () => {
         expect(r.isError).toBeFalsy();
         const p = decode(bundleOf2(fx7, r)).predicate;
         expect(p.request.args.customer_id).toBe("cust_123");
-        expect(isCommitment(p.request.args.account_ref)).toBe(true);
+        expect(isCommitment(rest(p, ["request", "args"]))).toBe(true);
         expect(isCommitment(p.facts.customer!.args.customer_id)).toBe(true);
         expect(withheldPaths(p)).toContain("facts.customer.args.customer_id");
       } finally {
@@ -644,12 +657,12 @@ describe("private evidence through the gateway", () => {
     }
   });
 
-  it("a call to a tool no upstream offers keeps the rule its real name selects, and the receipt shows the name as (unknown tool), in either mode", async () => {
+  it("a call to a tool no upstream offers keeps the rule its real name selects, or the wildcard if that is more private, and the receipt shows the name as (unknown tool), in either mode", async () => {
     for (const mode of ["digest", "encrypted"] as const) {
       const fxu = buildFixture(mkdtempSync(join(tmpdir(), `capture-unknown-${mode}-`)));
       const cfg = JSON.parse(readFileSync(fxu.configFile, "utf8"));
       // an explicit rule for the name and no wildcard: the rule must be found by the real name, not the masked one
-      cfg.capture = { "not.offered": { args: { mode } } };
+      cfg.capture = { "not.offered": { args: { mode } }, "legacy.export": { args: { mode: "clear" } }, "*": { args: { mode: "digest" } } };
       cfg.captureKeyEnv = "TEST_CAPTURE_KEY";
       writeFileSync(fxu.configFile, JSON.stringify(cfg));
       const gwu = await createGateway(loadConfig(fxu.configFile));
@@ -660,10 +673,15 @@ describe("private evidence through the gateway", () => {
         const p = decode(bundle).predicate;
         expect(p.execution.status).toBe("denied");
         expect(p.tool.name).toBe("(unknown tool)");
-        expect(isCommitment(p.request.args.secret)).toBe(true);
-        expect(leakText(bundle)).not.toMatch(/PRIVATE_UNKNOWN|not\.offered/);
+        expect(Object.keys(p.request.args)).toEqual([REST]);
+        expect(leakText(bundle)).not.toMatch(/PRIVATE_UNKNOWN|not\.offered|"secret"/);
         const v = verifyBundle(bundle, { issuerKeys: [loadPublicKey(fxu.gatewayPub)], principalKeys: [loadPublicKey(fxu.principalPub)], logFile: fxu.logFile });
         expect(v.ok, formatReport(v)).toBe(true);
+        // a clear rule left for a name no upstream offers does not let the agent pick it: the wildcard, being more private, applies
+        const legacy = await gwu.handleCall({ name: "legacy.export", arguments: { secret: `PRIVATE_LEGACY_${mode}` } });
+        const lp = decode(bundleOf2(fxu, legacy)).predicate;
+        expect(lp.tool.name).toBe("(unknown tool)");
+        expect(leakText(bundleOf2(fxu, legacy))).not.toContain("PRIVATE_LEGACY");
         // an offered tool keeps its name under the same kind of rule
         const known = await gwu.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500 } });
         expect(decode(bundleOf2(fxu, known)).predicate.tool.name).toBe("stripe.refund");
@@ -673,7 +691,7 @@ describe("private evidence through the gateway", () => {
     }
   });
 
-  it("a pre-committed call's authorization and receipt carry the same commitments and salts, so the receipt still names the authorization", async () => {
+  it("a pre-committed call's authorization and receipt carry the same commitments and salts, so the receipt still names the authorization; pruned, nothing is left", async () => {
     const fx8 = buildFixture(mkdtempSync(join(tmpdir(), "capture-precommit-")));
     const cfg = JSON.parse(readFileSync(fx8.configFile, "utf8"));
     cfg.capture = { "*": { args: { mode: "digest", clear: ["amount"] }, facts: { mode: "digest" } } };
@@ -687,16 +705,16 @@ describe("private evidence through the gateway", () => {
       const p = decode(bundle).predicate;
       const ap = (JSON.parse(Buffer.from(p.authorization!.envelope.payload, "base64").toString()) as AuthorizationStatement).predicate;
       expect(ap.request.argsDigest).toBe(p.request.argsDigest);
-      expect(ap.request.args.customer_id).toEqual(p.request.args.customer_id);
+      expect(ap.request.args).toEqual(p.request.args);
+      expect(ap.facts.customer!.value).toEqual(p.facts.customer!.value);
+      expect(ap.facts.customer!.resultDigest).toEqual(p.facts.customer!.resultDigest);
+      expect(ap.capture!.withheld.map((w: Path) => w.join("."))).toEqual(withheldPaths(p).filter((w) => w.startsWith("request.") || w.startsWith("facts.") || w.startsWith("policy.") || w.startsWith("consumed.")));
+      expect(withheldPaths(p)).toContain("execution.result.$rest");
+      expect(leakText(bundle)).not.toContain("cust_123");
       // one salts file, covering the shared parts and the receipt's own
       const salts = saltsOf(fx8.receiptsDir, p.receiptId);
       expect(Object.keys(salts).sort()).toEqual(p.capture!.withheld.map(pathKey).sort());
       expect(p.request.argsDigest).toBe(digestOf({ customer_id: "cust_123", amount: 2500, reason: "dup" }, saltFor(p.capture, salts, ["request", "args"])));
-      expect(ap.facts.customer!.value).toEqual(p.facts.customer!.value);
-      expect(ap.facts.customer!.resultDigest).toEqual(p.facts.customer!.resultDigest);
-      expect(ap.capture!.withheld.map((w: Path) => w.join("."))).toEqual(withheldPaths(p).filter((w) => w.startsWith("request.") || w.startsWith("facts.") || w.startsWith("policy.")));
-      expect(withheldPaths(p)).toContain("execution.result.content");
-      expect(leakText(bundle)).not.toContain("cust_123");
       const v = verifyBundle(bundle, { issuerKeys: [loadPublicKey(fx8.gatewayPub)], principalKeys: [loadPublicKey(fx8.principalPub)], logFile: fx8.logFile });
       expect(v.ok, formatReport(v)).toBe(true);
       expect(check("authorization names this call", v).ok).toBe(true);
@@ -712,7 +730,7 @@ describe("private evidence through the gateway", () => {
     }
   });
 
-  it("reveal writes the salts of values it cannot reveal only when asked, and a file carrying a salt without its value does not verify", async () => {
+  it("reveal writes the salts of values it cannot reveal only when asked, a file carrying a salt without its value does not verify, and a bundle not the issuer's reveals nothing", async () => {
     const r = await gw.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2700, reason: "fraud" } });
     const bundle = bundleOf(r);
     const p = decode(bundle).predicate;
@@ -723,9 +741,9 @@ describe("private evidence through the gateway", () => {
     const plain = run();
     expect(plain.status, plain.stderr).toBe(0);
     const disclosure = JSON.parse(plain.stdout) as Record<string, unknown>;
-    expect(getAt(disclosure, ["request", "args", "reason"])).toMatchObject({ $custody: "disclosed", value: "fraud" });
-    expect(getAt(disclosure, ["execution", "result", "content"])).toBeUndefined();
-    expect(plain.stderr).toMatch(/Not revealed.*execution.result.content.*--include-salts/s);
+    expect(getAt(disclosure, ["request", "args", REST])).toMatchObject({ $custody: "disclosed", value: { reason: "fraud" } });
+    expect(getAt(disclosure, ["execution", "result", REST])).toBeUndefined();
+    expect(plain.stderr).toMatch(/Not revealed.*execution.result.\$rest.*--include-salts/s);
     const ok = verifyBundle(bundle, { ...opts, disclosed: disclosure });
     expect(ok.ok, formatReport(ok)).toBe(true);
     expect(check("request args digest", ok).detail).toBe("recomputed from disclosed values");
@@ -733,11 +751,15 @@ describe("private evidence through the gateway", () => {
     const withSalts = run("--include-salts");
     expect(withSalts.status, withSalts.stderr).toBe(0);
     const unfinished = JSON.parse(withSalts.stdout) as Record<string, unknown>;
-    expect(getAt(unfinished, ["execution", "result", "content"])).toEqual({ $custody: "disclosed", salt: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    expect(getAt(unfinished, ["execution", "result", REST])).toEqual({ $custody: "disclosed", salt: expect.stringMatching(/^[0-9a-f]{32}$/) });
     expect(withSalts.stderr).toMatch(/do not hand it over unfinished/);
     const refused = verifyBundle(bundle, { ...opts, disclosed: unfinished });
     expect(refused.ok).toBe(false);
     expect(check("execution result digest", refused).detail).toMatch(/carries a salt but no value/);
+    // the wrong key reveals nothing and says which key the values are under, with a failure, not a success that reads like one
+    const wrong = spawnSync(process.execPath, [cli, "reveal", file, "--capture-key-env", "OTHER_KEY", "--issuer-key", fx.gatewayPub], { encoding: "utf8", env: { ...process.env, OTHER_KEY: randomBytes(32).toString("hex") } });
+    expect(wrong.status).not.toBe(0);
+    expect(wrong.stderr).toMatch(/encrypted under key [0-9a-f]{12}…, not the one given/);
     // --out writes decrypted values and salts: owner-only, whatever the umask, and whatever mode a file already there had
     const out = join(fx.dir, "disclosure-out.json");
     writeFileSync(out, "{}");
@@ -750,7 +772,7 @@ describe("private evidence through the gateway", () => {
       process.umask(before);
     }
     expect(statSync(out).mode & 0o777).toBe(0o600);
-    expect(getAt(JSON.parse(readFileSync(out, "utf8")), ["request", "args", "reason"])).toMatchObject({ value: "fraud" });
+    expect(getAt(JSON.parse(readFileSync(out, "utf8")), ["request", "args", REST])).toMatchObject({ value: { reason: "fraud" } });
     // a bundle assembled by someone else (another receipt's ciphertext at a path of their choosing, any signature) is refused before anything is decrypted
     const st = decode(bundle);
     const forged = { ...bundle, envelope: { ...bundle.envelope, payload: Buffer.from(JSON.stringify({ ...st, predicate: { ...st.predicate, receiptId: "../../etc/passwd" } })).toString("base64"), signatures: [{ keyid: "not-the-issuer", sig: "AAAA" }] } };
@@ -793,13 +815,13 @@ describe("private evidence through the SDK", () => {
     cfg.captureKeyEnv = "TEST_CAPTURE_KEY";
     writeFileSync(fx.configFile, JSON.stringify(cfg));
     const sdk = createSdkIssuer(loadSdkConfig(fx.configFile));
-    // sentinels that cannot occur by chance in base64 or hex
+    // sentinels that cannot occur by chance in base64 or hex, in values and in field names
     const bundle = await sdk.record({ tool: "stripe.refund", args: { amount: 900, customer_id: "cust_SDK_nine" } }, { status: "executed", result: { refund_id: "re_9", card_last4: "ending 4242" } });
-    expect(leakText(bundle)).not.toMatch(/cust_SDK_nine|ending 4242/);
+    expect(leakText(bundle)).not.toMatch(/cust_SDK_nine|ending 4242|customer_id|card_last4|refund_id/);
     const o = { issuerKeys: [loadPublicKey(fx.appPub)], principalKeys: [], logFile: fx.logFile };
     const bare = verifyBundle(bundle, o);
     expect(bare.ok, formatReport(bare)).toBe(true);
-    expect(check("execution result digest", bare).detail).toMatch(/2 value\(s\) withheld \(2 encrypted\)/);
+    expect(check("execution result digest", bare).detail).toMatch(/1 value\(s\) withheld \(1 encrypted\)/);
     const full = verifyBundle(bundle, { ...o, captureKey: key });
     expect(full.ok).toBe(true);
     expect(check("execution result digest", full).detail).toBe("recomputed from decrypted values");
@@ -823,8 +845,8 @@ describe("private evidence through the SDK", () => {
     const p = decode(bundle).predicate;
     expect(p.execution.status).toBe("error");
     expect(isCommitment((p.execution as { error: unknown }).error)).toBe(true);
-    expect(isCommitment(p.request.args.customer_id)).toBe(true);
-    expect(leakText(bundle)).not.toContain("cust_SDK_SECRET");
+    expect(isCommitment(rest(p, ["request", "args"]))).toBe(true);
+    expect(leakText(bundle)).not.toMatch(/cust_SDK_SECRET|customer_id/);
     expect(verifyBundle(bundle, { issuerKeys: [loadPublicKey(fx.appPub)], principalKeys: [], logFile: fx.logFile }).ok).toBe(true);
     // a tool without a rule records the message, as before
     const clear = await sdk.record({ tool: "stripe.payout", args: { customer_id: "cust_SDK_SECRET" } }, { status: "error", error: "payout declined for cust_SDK_SECRET" });

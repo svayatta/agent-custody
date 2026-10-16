@@ -23,8 +23,8 @@ export interface ActionPack {
   written: Fact[];
   /** what each written belief is today */
   status: Record<string, "believed" | "retracted" | "forgotten" | "superseded">;
-  /** everything downstream of the written beliefs: later calls that consumed them and beliefs derived, transitively */
-  downstream: { receipts: ReceiptSummary[]; derivedFacts: Fact[]; stillBelieved: Fact[] };
+  /** everything downstream of the written beliefs: later calls that consumed them and beliefs derived, transitively; `withheld` lists later calls whose consumed ids a capture rule withholds, each of which may depend on them, so the other sets are incomplete while it is not empty */
+  downstream: { receipts: ReceiptSummary[]; derivedFacts: Fact[]; stillBelieved: Fact[]; withheld: ReceiptSummary[] };
   /** every receipt cited by the downstream walk, by id, as the full bundle */
   receipts: Record<string, ReceiptBundle>;
   missingReceipts: string[];
@@ -40,7 +40,7 @@ function loadBundle(receiptsDir: string, receiptId: string): ReceiptBundle {
  * Builds the pack. Without a ledger the receipt is explained on its own and the belief questions are answered as
  * unknown rather than as nothing, so a reader can tell "nothing depended on it" from "nobody looked".
  */
-export async function buildActionPack(receiptsDir: string, receiptId: string, ledger?: Ledger): Promise<ActionPack> {
+export async function buildActionPack(receiptsDir: string, receiptId: string, ledger?: Ledger, opts: { captureKey?: Buffer } = {}): Promise<ActionPack> {
   const receipt = loadBundle(receiptsDir, receiptId);
   const p = decodeStatement(receipt).predicate;
   // under a capture rule the ids are a commitment in the receipt: nothing to look up, and the explanation says so
@@ -48,7 +48,7 @@ export async function buildActionPack(receiptsDir: string, receiptId: string, le
   const consumed: ActionPack["consumed"] = { facts: [], unknown: [] };
   const written: Fact[] = [];
   const status: ActionPack["status"] = {};
-  const downstream: ActionPack["downstream"] = { receipts: [], derivedFacts: [], stillBelieved: [] };
+  const downstream: ActionPack["downstream"] = { receipts: [], derivedFacts: [], stillBelieved: [], withheld: [] };
   const receipts: Record<string, ReceiptBundle> = {};
   const missingReceipts: string[] = [];
   if (ledger) {
@@ -58,8 +58,9 @@ export async function buildActionPack(receiptsDir: string, receiptId: string, le
       else consumed.unknown.push(id);
     }
     for (const f of await ledger.facts()) if (f.source.receiptId === receiptId) written.push(f);
-    const summaries = loadReceipts(receiptsDir);
+    const summaries = loadReceipts(receiptsDir, opts);
     const seenReceipts = new Map<string, ReceiptSummary>();
+    const seenWithheld = new Map<string, ReceiptSummary>();
     const seenFacts = new Map<string, Fact>();
     const believed = new Set<string>();
     for (const f of written) {
@@ -67,12 +68,14 @@ export async function buildActionPack(receiptsDir: string, receiptId: string, le
       status[f.factId] = history.some((e) => e.kind === "forget") ? "forgotten" : history.some((e) => e.kind === "retract") ? "retracted" : f.validTo !== null ? "superseded" : "believed";
       const b = await blastRadius(ledger, summaries, f.factId);
       for (const r of b.receipts) seenReceipts.set(r.receiptId, r);
+      for (const r of b.withheld) seenWithheld.set(r.receiptId, r);
       for (const d of b.derivedFacts) seenFacts.set(d.factId, d);
       for (const s of b.stillBelieved) believed.add(s.factId);
     }
     downstream.receipts = [...seenReceipts.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     downstream.derivedFacts = [...seenFacts.values()];
     downstream.stillBelieved = downstream.derivedFacts.filter((f) => believed.has(f.factId));
+    downstream.withheld = [...seenWithheld.values()].filter((r) => !seenReceipts.has(r.receiptId)).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const wanted = new Set<string>([...downstream.receipts.map((r) => r.receiptId), ...downstream.derivedFacts.map((f) => f.source.receiptId).filter((x): x is string => !!x)]);
     for (const id of [...wanted].sort()) {
       try {
@@ -197,6 +200,10 @@ export function formatExplain(pack: ActionPack, verification: VerifyResult | nul
       row("DID ANYTHING DEPEND ON THIS", `${w.length} belief(s) written in this call, ${pack.downstream.receipts.length} later call(s) made after seeing them, ${pack.downstream.derivedFacts.length} belief(s) derived`);
       for (const f of w) more(`  wrote ${factLine(f)}: ${pack.status[f.factId]}`);
       for (const r of pack.downstream.receipts) more(`  then ${r.timestamp} ${r.tool} ${r.status} (receipt ${r.receiptId.slice(0, 8)})`);
+      if (pack.downstream.withheld?.length) {
+        more(`  INCOMPLETE: ${pack.downstream.withheld.length} later call(s) withhold what the agent had been shown under a capture rule; each may depend on these beliefs. Give the capture key to see.`);
+        for (const r of pack.downstream.withheld) more(`  maybe ${r.timestamp} ${r.tool} ${r.status} (receipt ${r.receiptId.slice(0, 8)}, consumed ids withheld)`);
+      }
     }
     const open = [...w.filter((f) => pack.status[f.factId] === "believed"), ...pack.downstream.stillBelieved];
     if (open.length === 0) row("WHAT NEEDS REVERSAL", w.length === 0 ? "nothing" : "nothing still believed; every belief from this call and after it is retracted, forgotten, or superseded");
