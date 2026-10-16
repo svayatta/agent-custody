@@ -48,7 +48,7 @@ export function spanFor(p: ReceiptPredicate, bundle: ReceiptBundle, serviceName:
     ...int("agent_custody.log.leaf_index", bundle.inclusion.leafIndex),
     ...int("agent_custody.log.tree_size", bundle.inclusion.treeSize),
     ...(auth ? int("agent_custody.authorization.leaf_index", auth.inclusion.leafIndex) : []),
-    ...int("agent_custody.consumed.count", p.consumed?.factIds.length ?? 0),
+    ...int("agent_custody.consumed.count", Array.isArray(p.consumed?.factIds) ? p.consumed.factIds.length : 0),
     ...str("agent_custody.model", p.model.id),
     ...str("agent_custody.session", p.session.id),
   ];

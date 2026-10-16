@@ -2,10 +2,10 @@
 // (the issuer's view of the whole statement), the digests and signatures are over the whole call, salted, and the
 // verifier recomputes them when the values are in clear, disclosed, or revealed with the customer's key, and says
 // "committed, not recomputed" when they are not.
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { captureKeyFrom, checkCommitment, digestSalt, getAt, isCommitment, pathKey, privateView, restorePaths, reveal, ruleFor, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
@@ -133,8 +133,10 @@ describe("the view of a statement under a rule", () => {
     expect(JSON.stringify(v)).not.toContain("cust_123");
     // a side set to clear is in clear, and an empty error list is structural
     const clear = privateView(predicate(), { args: { mode: "digest" }, result: { mode: "clear" } }).predicate;
-    expect(withheldPaths(clear)).toEqual(["request.args.customer_id", "request.args.amount", "request.args.reason", "request.args.note"]);
-    expect((clear.execution as { result: { _meta: unknown } }).result._meta).toEqual({ "x/trace": "cust_123" });
+    // the content stays as the rule says; the metadata an upstream wrote does not, result in clear or not
+    expect(withheldPaths(clear)).toEqual(["request.args.customer_id", "request.args.amount", "request.args.reason", "request.args.note", "execution.result._meta"]);
+    expect((clear.execution as { result: { content: unknown } }).result.content).toEqual([{ type: "text", text: "refund re_1 for cust_123" }]);
+    expect(isCommitment((clear.execution as { result: { _meta: unknown } }).result._meta)).toBe(true);
     expect(clear.policy!.errors).toEqual([]);
     // the result's error flag is its status and stays; its metadata never does, listed in clear or not
     const meta = privateView(predicate(), { result: { mode: "digest", clear: ["content", "_meta", "isError"] } }).predicate;
@@ -210,10 +212,19 @@ describe("the view of a statement under a rule", () => {
       expect(withheldPaths(argsOnly)).not.toContain("facts.constructor.value.id");
       expect(isCommitment(getAt(argsOnly, ["facts", "constructor", "resultDigest"]))).toBe(true);
     }
-    // with the full lookup result given, the digest is salted instead
-    const given = privateView(p, { args: { mode: "digest", clear: ["amount"] } }, undefined, { factResults: { constructor: { content: [] } } }).predicate;
-    expect(typeof getAt(given, ["facts", "constructor", "resultDigest"])).toBe("string");
-    expect(getAt(given, ["facts", "constructor", "resultDigest"])).not.toBe(digestOf({ content: [] }));
+    // with the full lookup result given, the digest is a commitment to that result, disclosed and checked like any value
+    const full = { content: [{ type: "text", text: '{"id":"cust_123"}' }], _meta: { trace: "cust_123" } };
+    const gv = privateView(p, { args: { mode: "digest", clear: ["amount"] } }, undefined, { factResults: { constructor: full } });
+    const c = getAt(gv.predicate, ["facts", "constructor", "resultDigest"]);
+    expect(isCommitment(c)).toBe(true);
+    expect(JSON.stringify(gv.predicate)).not.toContain("trace");
+    const back = restorePaths(gv.predicate, gv.predicate.capture, { facts: { constructor: { resultDigest: { $custody: "disclosed", salt: gv.salts[pathKey(["facts", "constructor", "resultDigest"])], value: full } } } });
+    expect(back.restored.get(pathKey(["facts", "constructor", "resultDigest"]))).toBe("disclosed");
+    expect(restorePaths(gv.predicate, gv.predicate.capture, { facts: { constructor: { resultDigest: { $custody: "disclosed", salt: gv.salts[pathKey(["facts", "constructor", "resultDigest"])], value: { ...full, _meta: { trace: "other" } } } } } }).problems).toHaveLength(1);
+    // and even when every selected field is public: the rest of the result is not
+    const publicFact = privateView({ ...p, facts: { customer: { tool: "customer.lookup", args: {}, value: { verified: true }, resultDigest: digestOf(full), provenance: "observed" as const } } }, { args: { mode: "digest", clear: ["amount"] }, facts: { mode: "digest", clear: ["verified"] } }, undefined, { factResults: { customer: full } }).predicate;
+    expect(withheldPaths(publicFact)).toContain("facts.customer.resultDigest");
+    expect(getAt(publicFact, ["facts", "customer", "resultDigest"])).not.toBe(digestOf(full));
     // the receipt's view built on the authorization's carries the same commitments and salts for the shared parts
     const auth = privateView({ ...p, execution: undefined } as unknown as ReceiptPredicate, { args: { mode: "digest", clear: ["amount"] } });
     const after = privateView(p, { args: { mode: "digest", clear: ["amount"] } }, undefined, {}, auth);
@@ -222,6 +233,25 @@ describe("the view of a statement under a rule", () => {
     expect(after.predicate.request.argsDigest).toBe(auth.predicate.request.argsDigest);
     expect(withheldPaths(after.predicate)).toEqual([...withheldPaths(auth.predicate), "execution.result.content", "execution.result._meta"]);
     for (const w of auth.predicate.capture!.withheld) expect(after.salts[pathKey(w)]).toBe(auth.salts[pathKey(w)]);
+  });
+
+  it("upstream-authored strings outside the three sides are withheld under any private rule: consumed fact ids, a bind that is not a path, and the metadata, body, and envelope beside a result left in clear", () => {
+    const p = predicate({
+      request: { args: { amount: 2500, reason: "cust_123 asked" }, argsDigest: "x", provenance: "claimed" },
+      consumed: { factIds: ["fact:cust_123"], provenance: "observed" },
+      execution: { status: "executed", result: { content: [{ type: "text", text: "ok" }], _meta: { "x/trace": "cust_123" } }, resultDigest: "y", provenance: "claimed", upstream: { provider: "stripe-webhook", rawBody: "{\"customer\":\"cust_123\"}", signature: "t=1,v1=00", bind: "data.object.id" } },
+    });
+    // args private, result explicitly clear: the content stays, everything an upstream wrote beside it does not
+    const v = privateView(p, { args: { mode: "digest", clear: ["amount"] }, result: { mode: "clear" } }).predicate;
+    expect(withheldPaths(v).sort()).toEqual(["request.args.reason", "consumed.factIds", "execution.result._meta", "execution.upstream.rawBody"].sort());
+    expect((v.execution as { result: { content: unknown } }).result.content).toEqual([{ type: "text", text: "ok" }]);
+    expect((v.execution as { upstream: { bind: string } }).upstream.bind).toBe("data.object.id");
+    expect(JSON.stringify(v)).not.toContain("cust_123");
+    // a bind that is not a path is data; an empty consumed list is structural
+    const odd = privateView(predicate({ consumed: { factIds: [], provenance: "observed" }, execution: { status: "executed", result: { content: [] }, resultDigest: "y", provenance: "claimed", upstream: { provider: "github-delivery", rawBody: "{}", signature: "sha256=00", bind: "note cust_123" } } }), { args: { mode: "digest" } }).predicate;
+    expect(withheldPaths(odd)).toContain("execution.upstream.bind");
+    expect(withheldPaths(odd)).not.toContain("consumed.factIds");
+    expect(JSON.stringify(odd)).not.toContain("cust_123");
   });
 
   it("a reviewer who can guess a withheld value cannot confirm the guess from the receipt, in either mode (issue #126)", () => {
@@ -327,6 +357,9 @@ describe("private evidence through the gateway", () => {
     // the lookup's arguments are copied from the call: the customer id is in clear there as in the request, and nothing else leaks through them
     expect(p.facts.customer!.args).toEqual({ customer_id: "cust_123" });
     expect(paths.filter((w) => w.startsWith("facts.customer.args"))).toEqual([]);
+    // the lookup's full result is committed to, never digested in clear: the receipt shows the selected value only
+    expect(isCommitment(p.facts.customer!.resultDigest)).toBe(true);
+    expect(paths).toContain("facts.customer.resultDigest");
     expect(file).not.toMatch(/refund_id|re_[0-9a-f]{8}/);
   });
 
@@ -528,6 +561,41 @@ describe("private evidence through the gateway", () => {
     }
   });
 
+  it("a secret that the lookup's full result carries only in its metadata, beside a public selected fact, is not confirmable from the fact's digest, in either mode", async () => {
+    for (const mode of ["digest", "encrypted"] as const) {
+      const fxm = buildFixture(mkdtempSync(join(tmpdir(), `capture-factmeta-${mode}-`)));
+      const cfg = JSON.parse(readFileSync(fxm.configFile, "utf8"));
+      // the stand-in repeats the id it looked up in the record and in the result's metadata; the policy reads only `verified`
+      cfg.upstream.args[2] = resolve(import.meta.dirname, "..", "scripts", "fake-canary.ts");
+      cfg.facts = [{ name: "customer", tool: "customer.lookup", args: { customer_id: "$args.account_ref" }, forTools: ["stripe.refund"] }];
+      cfg.capture = { "*": { args: { mode, clear: ["customer_id", "amount"] }, facts: { mode, clear: ["verified"] } } };
+      cfg.captureKeyEnv = "TEST_CAPTURE_KEY";
+      writeFileSync(fxm.configFile, JSON.stringify(cfg));
+      const gwm = await createGateway(loadConfig(fxm.configFile));
+      try {
+        const secret = `SECRET_${mode}_${randomBytes(4).toString("hex")}`;
+        const r = await gwm.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_1", account_ref: secret, amount: 2500 } });
+        expect(r.isError).toBeFalsy();
+        const bundle = bundleOf2(fxm, r);
+        const p = decode(bundle).predicate;
+        expect((p.facts.customer!.value as { verified: unknown }).verified).toBe(true);
+        expect(isCommitment(p.facts.customer!.resultDigest)).toBe(true);
+        expect(leakText(bundle)).not.toContain(secret);
+        const o = { issuerKeys: [loadPublicKey(fxm.gatewayPub)], principalKeys: [loadPublicKey(fxm.principalPub)], logFile: fxm.logFile };
+        const v = verifyBundle(bundle, o);
+        expect(v.ok, formatReport(v)).toBe(true);
+        expect(check("withheld facts.customer.resultDigest", v).detail).toMatch(/committed, not recomputed/);
+        if (mode === "encrypted") {
+          const withKey = verifyBundle(bundle, { ...o, captureKey: key });
+          expect(withKey.ok, formatReport(withKey)).toBe(true);
+          expect(check("withheld facts.customer.resultDigest", withKey).detail).toBe("holds against the decrypted value");
+        }
+      } finally {
+        await gwm.close();
+      }
+    }
+  });
+
   it("a pre-committed call's authorization and receipt carry the same commitments and salts, so the receipt still names the authorization", async () => {
     const fx8 = buildFixture(mkdtempSync(join(tmpdir(), "capture-precommit-")));
     const cfg = JSON.parse(readFileSync(fx8.configFile, "utf8"));
@@ -548,7 +616,7 @@ describe("private evidence through the gateway", () => {
       expect(Object.keys(salts).sort()).toEqual(p.capture!.withheld.map(pathKey).sort());
       expect(p.request.argsDigest).toBe(digestOf({ customer_id: "cust_123", amount: 2500, reason: "dup" }, saltFor(p.capture, salts, ["request", "args"])));
       expect(ap.facts.customer!.value).toEqual(p.facts.customer!.value);
-      expect(ap.facts.customer!.resultDigest).toBe(p.facts.customer!.resultDigest);
+      expect(ap.facts.customer!.resultDigest).toEqual(p.facts.customer!.resultDigest);
       expect(ap.capture!.withheld.map((w: Path) => w.join("."))).toEqual(withheldPaths(p).filter((w) => w.startsWith("request.") || w.startsWith("facts.") || w.startsWith("policy.")));
       expect(withheldPaths(p)).toContain("execution.result.content");
       expect(leakText(bundle)).not.toContain("cust_123");
@@ -586,6 +654,19 @@ describe("private evidence through the gateway", () => {
     const refused = verifyBundle(bundle, { ...opts, disclosed: unfinished });
     expect(refused.ok).toBe(false);
     expect(check("execution result digest", refused).detail).toMatch(/carries a salt but no value/);
+    // --out writes decrypted values and salts: owner-only, whatever the umask, and whatever mode a file already there had
+    const out = join(fx.dir, "disclosure-out.json");
+    writeFileSync(out, "{}");
+    chmodSync(out, 0o644);
+    const before = process.umask(0o022);
+    try {
+      const written = run("--out", out);
+      expect(written.status, written.stderr).toBe(0);
+    } finally {
+      process.umask(before);
+    }
+    expect(statSync(out).mode & 0o777).toBe(0o600);
+    expect(getAt(JSON.parse(readFileSync(out, "utf8")), ["request", "args", "reason"])).toMatchObject({ value: "fraud" });
     // a receipt id from a bundle never becomes part of a path unchecked
     const st = decode(bundle);
     const forged = { ...bundle, envelope: { ...bundle.envelope, payload: Buffer.from(JSON.stringify({ ...st, predicate: { ...st.predicate, receiptId: "../../etc/passwd" } })).toString("base64") } };
@@ -617,8 +698,9 @@ describe("private evidence through the SDK", () => {
     cfg.captureKeyEnv = "TEST_CAPTURE_KEY";
     writeFileSync(fx.configFile, JSON.stringify(cfg));
     const sdk = createSdkIssuer(loadSdkConfig(fx.configFile));
-    const bundle = await sdk.record({ tool: "stripe.refund", args: { amount: 900, customer_id: "cust_9" } }, { status: "executed", result: { refund_id: "re_9", card_last4: "4242" } });
-    expect(leakText(bundle)).not.toMatch(/cust_9|4242/);
+    // sentinels that cannot occur by chance in base64 or hex
+    const bundle = await sdk.record({ tool: "stripe.refund", args: { amount: 900, customer_id: "cust_SDK_nine" } }, { status: "executed", result: { refund_id: "re_9", card_last4: "ending 4242" } });
+    expect(leakText(bundle)).not.toMatch(/cust_SDK_nine|ending 4242/);
     const o = { issuerKeys: [loadPublicKey(fx.appPub)], principalKeys: [], logFile: fx.logFile };
     const bare = verifyBundle(bundle, o);
     expect(bare.ok, formatReport(bare)).toBe(true);

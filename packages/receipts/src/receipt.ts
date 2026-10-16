@@ -31,8 +31,8 @@ export interface FactRecord {
   args: Record<string, unknown>;
   /** the value as recorded; under a capture rule, commitments where fields were withheld (the receipt's `capture` note names them) */
   value: unknown;
-  /** the digest of the lookup's full result; salted from the fact's field salts when any are withheld */
-  resultDigest: string;
+  /** the digest of the lookup's full result; under a capture rule a commitment to that result (the receipt shows only the selected value, the rest is private), named in the `capture` note */
+  resultDigest: string | Commitment;
   provenance: "observed";
 }
 
@@ -57,7 +57,7 @@ export interface ReceiptPredicate {
    * in its result _meta under "agent-custody/facts" on an earlier call in the session. Observed, because the gateway
    * saw those results itself. Absent on SDK receipts. This is what the agent relied on, as an upper bound.
    */
-  consumed?: { factIds: string[]; provenance: "observed" };
+  consumed?: { factIds: string[] | Commitment; provenance: "observed" };
   /** null when the issuer evaluated no policy. Under a capture rule a non-empty `errors` is a commitment: the evaluator's messages can repeat a withheld value. */
   policy: (Omit<PolicyDecision, "errors"> & { errors: string[] | Commitment; provenance: Provenance }) | null;
   /**

@@ -82,7 +82,7 @@ describe("the gateway over HTTP", () => {
       const readerLookup = (await reader.client.callTool({ name: "customer.lookup", arguments: { customer_id: "cust_123" } })) as CallToolResult;
       const refunderNext = statementOf(receipt(String(lookup._meta?.[RECEIPT_META_KEY]))).predicate;
       const readerNext = statementOf(receipt(String(readerLookup._meta?.[RECEIPT_META_KEY]))).predicate;
-      expect(refunderNext.consumed?.factIds.length).toBeGreaterThanOrEqual(0);
+    expect((refunderNext.consumed?.factIds as string[]).length).toBeGreaterThanOrEqual(0);
       expect(readerNext.consumed?.factIds).toEqual([]);
       expect(readerNext.agent.id).toBe("read-agent");
     } finally {

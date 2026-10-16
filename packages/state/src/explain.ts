@@ -43,7 +43,8 @@ function loadBundle(receiptsDir: string, receiptId: string): ReceiptBundle {
 export async function buildActionPack(receiptsDir: string, receiptId: string, ledger?: Ledger): Promise<ActionPack> {
   const receipt = loadBundle(receiptsDir, receiptId);
   const p = decodeStatement(receipt).predicate;
-  const consumedIds = p.consumed?.factIds ?? [];
+  // under a capture rule the ids are a commitment in the receipt: nothing to look up, and the explanation says so
+  const consumedIds = Array.isArray(p.consumed?.factIds) ? p.consumed.factIds : [];
   const consumed: ActionPack["consumed"] = { facts: [], unknown: [] };
   const written: Fact[] = [];
   const status: ActionPack["status"] = {};
@@ -170,8 +171,9 @@ export function formatExplain(pack: ActionPack, verification: VerifyResult | nul
   if (p.policy) more(`policy ${p.policy.policyDigest.slice(0, 12)} decided ${p.policy.decision}${p.policy.reasons.length ? ` by ${p.policy.reasons.join(", ")}` : ""}${errors.length ? `; errors: ${errors.join("; ")}` : ""}`);
   const facts = Object.entries(p.facts);
   row("WHAT THE AGENT SAW", facts.length ? facts.map(([k, f]) => `${k} = ${JSON.stringify(f.value)} (fetched by the gateway via ${f.tool})`).join("; ") : "no facts fetched for this call");
-  const shown = p.consumed?.factIds ?? [];
-  if (!withLedger) more(shown.length ? `${shown.length} belief(s) shown before this call; open with a ledger to see them` : "no beliefs shown before this call");
+  const shown = Array.isArray(p.consumed?.factIds) ? p.consumed.factIds : [];
+  if (p.consumed && !Array.isArray(p.consumed.factIds)) more("the beliefs shown before this call are withheld under the capture rule");
+  else if (!withLedger) more(shown.length ? `${shown.length} belief(s) shown before this call; open with a ledger to see them` : "no beliefs shown before this call");
   else if (shown.length === 0) more("no beliefs shown before this call");
   else {
     more(`${shown.length} belief(s) shown before this call:`);

@@ -50,7 +50,7 @@ export function hecEvent(p: ReceiptPredicate, bundle: ReceiptBundle, cfg: Splunk
       log_leaf_index: bundle.inclusion.leafIndex,
       log_tree_size: bundle.inclusion.treeSize,
       authorization_leaf_index: auth ? auth.inclusion.leafIndex : null,
-      consumed_count: p.consumed?.factIds.length ?? 0,
+      consumed_count: (Array.isArray(p.consumed?.factIds) ? p.consumed.factIds.length : 0) ?? 0,
       model: p.model.id,
       session: p.session.id,
     },

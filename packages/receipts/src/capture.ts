@@ -206,15 +206,18 @@ export function setAt<T>(root: T, path: Path, value: unknown): T {
 // ---- the choke point ----
 
 /** The structural top-level parts of a statement: ids, keys, times, the grant, the names. Never withheld. */
-const CLEAR_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "session", "model", "tool", "consumed", "authorization", "capture"]);
+const CLEAR_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "session", "model", "tool", "authorization", "capture"]);
 /** Inside the parts that carry values: what stays in clear beside them. */
 const CLEAR_IN = {
   request: new Set(["argsDigest", "provenance"]),
   fact: new Set(["tool", "resultDigest", "provenance"]),
   policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]),
   execution: new Set(["status", "resultDigest", "provenance"]),
-  upstream: new Set(["provider", "signature", "bind"]),
+  upstream: new Set(["provider", "signature"]),
+  consumed: new Set(["provenance"]),
 };
+/** a provider's bind is a path into the delivery body, which the verifier follows; anything else under that name is upstream-authored data */
+const BIND_PATH = /^[A-Za-z0-9_.[\]-]{1,256}$/;
 /** The result's error flag is its status, so it stays in clear when it is the boolean flag and nothing else; its metadata carries whatever an upstream put there, so it never does. */
 const RESULT_ALWAYS_CLEAR = new Set(["isError"]);
 const RESULT_NEVER_CLEAR = new Set(["_meta"]);
@@ -223,7 +226,7 @@ const RESULT_NEVER_CLEAR = new Set(["_meta"]);
 export interface CaptureContext {
   /** per fact name: the lookup arguments that may stay in clear under a private args rule (constants, or copies of call arguments the rule keeps in clear) */
   clearFactArgs?: Record<string, string[]>;
-  /** per fact name: the lookup's full result, so its digest can be salted */
+  /** per fact name: the lookup's full result, which the receipt's `resultDigest` then commits to; without it the digest the producer computed is withheld */
   factResults?: Record<string, unknown>;
 }
 
@@ -305,12 +308,19 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
             if (argsSide) object(["facts", name, "args"], v, { clear: new Set(ownOf(ctx.clearFactArgs, name) ?? []), key: argsSide.key });
           } else if (!CLEAR_IN.fact.has(f)) hide(["facts", name, f], v, k);
         }
-        // the fact's digest is over the lookup's full result, which may carry the value and repeat the arguments:
-        // salted from the fact's salts when the producer gave the full result, and withheld outright when it did not
-        // and any part of the fact is withheld, since an unsalted digest over a withheld value would confirm a guess
+        // The fact's digest is over the lookup's full result, of which the receipt shows only the selected value: the
+        // rest (metadata, other content) is never public under a private rule, whatever the selected fields are. So
+        // the digest becomes a commitment to the full result (disclosed or decrypted like any value, and checked at
+        // `withheld facts.<name>.resultDigest`), or, when the producer did not give the full result, the digest
+        // string itself is withheld: an unsalted digest over private data would confirm a guess.
         const full = ownOf(ctx.factResults, name);
-        if (full !== undefined) out = setAt(out, ["facts", name, "resultDigest"], digest(full, ["facts", name]));
-        else if (withheld.some((w) => under(w, ["facts", name]))) hide(["facts", name, "resultDigest"], fact.resultDigest, k);
+        const digestPath = ["facts", name, "resultDigest"];
+        if (full !== undefined) {
+          const w = withhold(full, factsSide ? factsSide.key : k);
+          out = setAt(out, digestPath, w.commitment);
+          salts[pathKey(digestPath)] = w.salt;
+          withheld.push(digestPath);
+        } else hide(digestPath, fact.resultDigest, k);
       }
     } else if (key_ === "policy" && isObject(value)) {
       for (const [f, v] of Object.entries(value)) {
@@ -322,17 +332,27 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
       for (const [f, v] of Object.entries(value)) {
         if (f === "result") {
           if (resultSide) object(["execution", "result"], v, resultSide, RESULT_ALWAYS_CLEAR, RESULT_NEVER_CLEAR);
+          // a result left in clear by the rule still carries its metadata, which an upstream wrote and which may repeat the arguments: withheld under any private rule
+          else if (isObject(v) && own(v, "_meta")) hide(["execution", "result", "_meta"], v._meta, k);
         } else if (f === "upstream" && isObject(v)) {
-          // a provider's delivery and an upstream's signed envelope are the result in another form (the signed payload
-          // may carry any claim the upstream chose): both go with the result; a provider's signature and binding stay
+          // A provider's delivery body and an upstream's signed envelope are upstream-authored (the signed payload may
+          // carry any claim the upstream chose), so under any private rule they are withheld, with the result side's key
+          // when the result is private and the rule's otherwise. A provider's signature stays, and its bind stays when
+          // it is the path the verifier follows into the body, and nothing else.
           for (const [uf, uv] of Object.entries(v)) {
-            if (uf === "rawBody" || uf === "envelope") {
-              if (resultSide) hide(["execution", "upstream", uf], uv, resultSide.key);
-            } else if (!CLEAR_IN.upstream.has(uf)) hide(["execution", "upstream", uf], uv, k);
+            if (uf === "rawBody" || uf === "envelope") hide(["execution", "upstream", uf], uv, resultSide ? resultSide.key : k);
+            else if (uf === "bind" && typeof uv === "string" && BIND_PATH.test(uv)) continue;
+            else if (!CLEAR_IN.upstream.has(uf)) hide(["execution", "upstream", uf], uv, k);
           }
         } else if (!CLEAR_IN.execution.has(f)) hide(["execution", f], v, k);
       }
       if (own(value, "result")) out = setAt(out, ["execution", "resultDigest"], digest(value.result, ["execution", "result"]));
+    } else if (key_ === "consumed" && isObject(value)) {
+      // the fact ids an upstream declared it served are upstream-chosen strings: withheld under a private rule, an empty list being structural
+      for (const [f, v] of Object.entries(value)) {
+        if (f === "factIds" && Array.isArray(v) && v.length === 0) continue;
+        if (!CLEAR_IN.consumed.has(f)) hide(["consumed", f], v, k);
+      }
     } else hide([key_], value, k);
   }
   if (withheld.length) out.capture = { mode, withheld } satisfies CaptureNote;

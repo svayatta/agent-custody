@@ -4,7 +4,7 @@ import { captureKeyFrom, getAt, pathText, restorePaths, setAt } from "./capture.
 import { saltsFileFor } from "./retention.ts";
 import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { loadConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
 import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
@@ -528,7 +528,9 @@ async function main(argv: string[]): Promise<number> {
       const how = saltsWritten ? `; their salts are written in the file for the holder to add \"value\" beside, and the file does not verify until then: do not hand it over unfinished` : values["include-salts"] ? ` (no salts file at ${saltsFile})` : `; --include-salts writes their salts from ${saltsFile} for the holder to complete`;
       const note = notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them${how}.` : "";
       if (values.out) {
-        writeFileSync(values.out, text);
+        // decrypted values and salts: the owner's alone, whatever the umask, and whatever mode a file already there had
+        writeFileSync(values.out, text, { mode: 0o600 });
+        chmodSync(values.out, 0o600);
         console.log(`disclosure for receipt ${p.receiptId} written to ${values.out}; verify it with --disclose ${values.out}.${note}`);
       } else {
         console.log(text);

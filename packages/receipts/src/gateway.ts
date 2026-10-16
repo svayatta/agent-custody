@@ -213,9 +213,10 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
 
   /** The facts for a call, the argument template of the fact config each one came from (two configs may share a name), and each lookup's full result. */
   async function gatherFacts(tool: string, args: Record<string, unknown>, meta: Record<string, unknown>): Promise<{ facts: Record<string, FactRecord>; templates: Record<string, Record<string, string>>; results: Record<string, unknown> }> {
-    const facts: Record<string, FactRecord> = {};
-    const templates: Record<string, Record<string, string>> = {};
-    const results: Record<string, unknown> = {};
+    // null-prototype, so a fact named __proto__ or constructor is a fact and not a prototype
+    const facts: Record<string, FactRecord> = Object.create(null);
+    const templates: Record<string, Record<string, string>> = Object.create(null);
+    const results: Record<string, unknown> = Object.create(null);
     for (const f of cfg.facts.filter((f: FactConfig) => f.forTools.includes(tool))) {
       const fargs = resolveFactArgs(f.args, args, f.optional);
       if (fargs === null) continue;
