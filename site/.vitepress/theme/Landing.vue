@@ -120,7 +120,7 @@ const keywords = (code: string) => code.split(/(\bpermit\b|\bwhen\b)/).map((s) =
           <span>agent-custody</span>
         </a>
         <nav class="navlinks" aria-label="Site">
-          <a href="#story">The demo</a><a href="#how">How it works</a><a href="#policies">Policies</a><a href="/use-cases">Use cases</a><a href="/pricing">Pricing</a><a href="/guide/getting-started">Docs</a>
+          <a href="#film">Overview</a><a href="#story">The demo</a><a href="#how">How it works</a><a href="#policies">Policies</a><a href="/use-cases">Use cases</a><a href="/pricing">Pricing</a><a href="/guide/getting-started">Docs</a>
         </nav>
         <div class="right">
           <button class="icon-btn" type="button" :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'" @click="isDark = !isDark">
@@ -142,7 +142,7 @@ const keywords = (code: string) => code.split(/(\bpermit\b|\bwhen\b)/).map((s) =
             <h1>Proof of what your AI agents did.</h1>
             <p class="lede">A gateway between an agent and its tools. It checks every call against a grant a person signed and a policy, forwards or denies it, and issues a signed receipt either way. Anyone with the public keys can verify the receipt, offline.</p>
             <div class="ctas">
-              <a class="btn primary" href="#run">Run the refund demo locally →</a>
+              <a class="btn primary" href="#run">Run the refund demo locally</a>
               <a class="btn" :href="verifyHref">Verify a receipt in your browser</a>
             </div>
             <div class="cmd"><span class="prompt" aria-hidden="true">$</span><code>{{ command }}</code><button type="button" aria-live="polite" @click="copy('hero')">{{ copied === "hero" ? "Copied" : "Copy" }}</button></div>
