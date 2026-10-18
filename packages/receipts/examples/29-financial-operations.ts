@@ -11,7 +11,7 @@ import { OPERATION_META_KEY } from "../src/operations.ts";
 import { formatReport, verifyBundle } from "../src/verify.ts";
 import { out, step } from "./_out.ts";
 
-const fx = await financialFixture(out("28-financial-operations"));
+const fx = await financialFixture(out("29-financial-operations"));
 let host = await createGatewayHost(loadConfig(fx.configFile));
 const grant = JSON.parse(readFileSync(join(fx.dir, "grant.json"), "utf8"));
 const id = randomUUID(); // Persist before sending; reuse exactly this UUID when a call times out.

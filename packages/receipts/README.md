@@ -10,11 +10,11 @@ Two producers, one receipt format, one verifier.
 Anyone holding the public keys can verify a receipt offline. The agent is not trusted. The layer around it is, and the receipt says exactly how far that trust extends, starting with who issued it. What the receipt file carries of a call is a choice per tool: a field can be withheld as a commitment or encrypted under your key, and the verifier recomputes the digests when it is shown the values.
 
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
-- [Tutorials](docs/tutorials.md): twenty-eight runnable examples, one per aspect of the code, all executed by the test suite
+- [Tutorials](docs/tutorials.md): twenty-nine runnable examples, one per aspect of the code, all executed by the test suite
 - [Financial operations](docs/financial-operations.md): durable operation ids, provider idempotency keys, atomic daily budget reservations, and reconciliation receipts for uncertain outcomes
 - [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop, and the gateway as an A2A agent between agents that delegate to each other, and private evidence: what the receipt file carries of each call
 - [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin and Google ADK callbacks through the Python package, and wrapping tool functions in anything else
-- [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples
+- [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples, and replaying history against a proposed policy with `policy simulate`
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
 - [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, the EU AI Act, and UK GDPR, with what none of them claims
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
@@ -182,7 +182,7 @@ Every field carries a provenance label. This is the design decision that matters
 bun install                              # from the repository root, once for the workspace
 cd packages/receipts
 node scripts/demo.ts                     # gateway: keys, grant, policy, four tool calls, verification, a tampering attempt; then the SDK wrapping the same tool
-node examples/01-keys-and-signing.ts     # first of twenty-seven step-by-step examples, see docs/tutorials.md
+node examples/01-keys-and-signing.ts     # first of twenty-nine step-by-step examples, see docs/tutorials.md
 bun run test                             # this package; `bun run test` at the root runs every package
 ```
 
@@ -243,6 +243,7 @@ src/checkpoints.ts signed heads published on a schedule, to files and to Postgre
 src/log-store.ts   the log server's backends: the file, and Postgres with tenants, hashed tokens, one writer per tenant, rate limits
 src/log-sink.ts    where leaves go: the local file, or a remote log over HTTP; plus the reference log server
 src/policy.ts      Cedar evaluation wrapper, fail-closed
+src/simulate.ts    replay recorded policy decisions against a proposed Cedar policy, grouped changes and run digest
 src/delegation.ts  signed delegation grants
 src/receipt.ts     receipt and authorization statement types and provenance labels
 src/issue.ts       sign, log, and write a receipt, or commit an authorization first; shared by both producers
@@ -261,12 +262,12 @@ src/upstream.ts    attested execution: an upstream signs its result for the rece
 src/capture.ts     private evidence: per-tool capture rules applied by the issuer to the whole statement, withheld values as salted commitments or encrypted under the customer's key, restore and reveal
 vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them
 src/verify.ts      offline verification, the human-readable report, and the audit that a later log extends an earlier one
-src/cli.ts         keygen, grant, gateway, hook, serve, log, prune, verify, reveal, audit
+src/cli.ts         keygen, grant, gateway, hook, serve, log, prune, verify, reveal, audit, policy simulate
 src/retention.ts   pruning the log: leaves become their hashes, bundles are removed, proofs survive
 src/index.ts       the package's public surface; adapters are exported on ./sdk/<framework> subpaths
 tsconfig.build.json  emits dist/ (JavaScript plus declarations) for consumers; the repo itself runs the .ts directly
 scripts/           fake Stripe upstream (signs its results with --key), a second fake upstream, fixture builders for gateway and SDK, demo
-examples/          twenty-seven runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
+examples/          twenty-nine runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
 test/              unit tests per module, end-to-end gateway test, SDK and hook tests,
                    adapter tests against the real packages, and a test that runs every policy in docs/policies.md
 docs/              tutorials, usage (gateway), sdk, policies, verification
@@ -279,6 +280,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 **Done**
 
 - Financial operations: stable caller-retained UUIDs, provider idempotency keys, atomic budget reservations across processes, explicit financial outcomes beside API execution, and provider-bound reconciliation receipts; fault tests kill the gateway after acceptance and verify that a restart never repeats the refund.
+- Policy simulation: `policy simulate` verifies local receipts and replays their recorded arguments, facts, and grant against a proposed Cedar policy. Every changed decision is listed by tool and reason with its receipt id, and the report pins the proposed policy digest. A call with no receipt but a surviving authorization file, and a receipt with withheld inputs, make the report incomplete unless `--capture-key-env` or `--disclose` opens them. [Guide](docs/policies.md#simulating-a-policy-against-recorded-history), tutorial 28.
 - Gateway: MCP proxy, signed delegation, gateway-fetched facts, Cedar policy, denial receipts, Merkle log, offline verifier.
 - Receipt schema carries the issuer kind, so a verifier reads gateway versus SDK before anything else.
 - SDK core: policy decision, record, and a generic `wrap(tool, fn)` for any framework whose tools are functions.

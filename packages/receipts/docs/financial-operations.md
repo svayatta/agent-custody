@@ -1,6 +1,6 @@
 # Safe financial operations
 
-An API response is evidence of an API call. Settlement is a separate outcome. Configure `operations` on the gateway to give each payment a durable identity, reserve its amount before forwarding, and close uncertain outcomes with a signed provider reconciliation receipt. [Example 28](../examples/28-financial-operations.ts) runs a payments stand-in, drops a response after acceptance, restarts the gateway, and verifies the reconciliation.
+An API response is evidence of an API call. Settlement is a separate outcome. Configure `operations` on the gateway to give each payment a durable identity, reserve its amount before forwarding, and close uncertain outcomes with a signed provider reconciliation receipt. [Example 29](../examples/29-financial-operations.ts) runs a payments stand-in, drops a response after acceptance, restarts the gateway, and verifies the reconciliation.
 
 ## Configuration
 
