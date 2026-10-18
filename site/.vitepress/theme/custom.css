@@ -1,6 +1,68 @@
+/*
+ * The docs pages use the VitePress default theme.
+ * These variables give the docs pages the same colours as the landing page.
+ * The tokens match the stone palette and the amber brand colour in Landing.vue.
+ * The font stays Inter, which VitePress bundles.
+ * Change a colour here and in Landing.vue together.
+ */
 :root {
   --vp-c-brand-1: #b45309;
-  --vp-c-brand-2: #d97706;
+  --vp-c-brand-2: #92400e;
+  --vp-c-brand-3: #b45309;
+  --vp-c-brand-soft: #fef3c7;
+
+  --vp-c-bg: #ffffff;
+  --vp-c-bg-alt: #fafaf9;
+  --vp-c-bg-elv: #ffffff;
+  --vp-c-bg-soft: #f5f5f4;
+  --vp-c-border: #d6d3d1;
+  --vp-c-divider: #e7e5e4;
+  --vp-c-gutter: #e7e5e4;
+  /* text-2 and text-3 carry readable text, so both stay at 4.5:1 or more on white */
+  --vp-c-text-1: #1c1917;
+  --vp-c-text-2: #57534e;
+  --vp-c-text-3: #78716c;
+
+  --vp-button-brand-bg: #b45309;
+  --vp-button-brand-border: #b45309;
+  --vp-button-brand-text: #ffffff;
+  --vp-button-brand-hover-bg: #92400e;
+  --vp-button-brand-hover-border: #92400e;
+  --vp-button-brand-hover-text: #ffffff;
+  --vp-button-brand-active-bg: #78350f;
+  --vp-button-brand-active-border: #78350f;
+  --vp-button-brand-active-text: #ffffff;
+
+  --vp-code-block-bg: #fafaf9;
+}
+.dark {
+  /* amber on near-black: #f59e0b and #fbbf24 pass AA, #b45309 does not */
+  --vp-c-brand-1: #f59e0b;
+  --vp-c-brand-2: #fbbf24;
   --vp-c-brand-3: #f59e0b;
+  --vp-c-brand-soft: rgba(245, 158, 11, 0.16);
+
+  --vp-c-bg: #0c0a09;
+  --vp-c-bg-alt: #1c1917;
+  --vp-c-bg-elv: #1c1917;
+  --vp-c-bg-soft: #1c1917;
+  --vp-c-border: #44403c;
+  --vp-c-divider: #292524;
+  --vp-c-gutter: #292524;
+  --vp-c-text-1: #fafaf9;
+  --vp-c-text-2: #a8a29e;
+  --vp-c-text-3: #8a847f;
+
+  --vp-button-brand-bg: #f59e0b;
+  --vp-button-brand-border: #f59e0b;
+  --vp-button-brand-text: #1c1917;
+  --vp-button-brand-hover-bg: #fbbf24;
+  --vp-button-brand-hover-border: #fbbf24;
+  --vp-button-brand-hover-text: #1c1917;
+  --vp-button-brand-active-bg: #d97706;
+  --vp-button-brand-active-border: #d97706;
+  --vp-button-brand-active-text: #1c1917;
+
+  --vp-code-block-bg: #1c1917;
 }
 .vp-doc table { display: table; width: 100%; }
