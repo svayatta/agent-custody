@@ -32,9 +32,19 @@ The gateway's log client retries a 429 three times with backoff and then fails t
 | `POST /api/verify-email/resend` | `{}` | sends the verification link again; `{ "ok": true, "emailVerified" }` |
 | `POST /api/register` | `{ "email", "password" (10+ chars) }` creates the account only (the page then shows the tenant setup) and sends the verification link, answering `{ "email", "tenant": null, "emailVerified": false }`; with `"tenant"` (3–40 chars, `[a-z0-9-]`), `"name"`, `"company"`, `"role"`?, `"phone"`?, `"telegram"`? as well, the tenant is created in the same call, as before |
 | `POST /api/onboard` | `{ "tenant", "name", "company", "role"?, "phone"?, "telegram"? }` | the same response as a one-call register; `409` when the account already has a tenant or the id is taken | `{ "tenant", "logId", "plan": "free", "token": "<64 hex, shown once>", "tokenHash": "<12 hex>", "welcome": "<the welcome sheet>", "setup": { "log", "logId", "checkpoints", "keys", "keyid", "env", "config", "verify", "audit", "export" } (the sheet as data; the page shows it as numbered steps, and again under Setup), "exportCommand": "…" }` and a session cookie; with mail configured, one email to the address with the sheet (never the key) and one to the operator with the contact details; `400` on validation, `409` if the email or tenant is taken, `429` after five registrations from one address |
-| `POST /api/login` | `{ "email", "password" }` | `{ "email" }` and the cookie; `401` otherwise; throttled per address |
+| `POST /api/login` | `{ "email", "password" }` | `{ "email" }` and the cookie; `401` otherwise; throttled per address. When the account has [MFA](#two-step-sign-in) on: `{ "mfa": true }` and a five-minute `custody_mfa` cookie, and no session. Refused for a member of a tenant that enforces [single sign-on](#single-sign-on) |
+| `POST /api/login/mfa` | `{ "code" }` | needs the `custody_mfa` cookie; `{ "email" }` and the session cookie; `401` for a wrong or used code; `429` after five wrong codes for the account |
+| `POST /api/mfa/setup` | `{}` | `{ "secret": "<base32>", "uri": "otpauth://…" }`; `409` when MFA is on already |
+| `POST /api/mfa/enable` | `{ "code" }` | `{ "mfa": true }` once the code from the new secret is valid |
+| `POST /api/mfa/disable` | `{ "code" }` | `{ "mfa": false }` with a current code |
 | `POST /api/logout` | `{}` | `{ "ok": true }` |
-| `GET /api/me` | | `{ "email", "tenant", "logId", "plan", "used", "quota", "disabled", "billing": true\|false }`; before onboarding, `{ "email", "tenant": null, "profile", "billing" }`; both carry `"emailVerified"`, `"identities"` (the linked providers), `"providers"` (the ones offered), and `"mail"` (whether the portal can send) |
+| `GET /api/me` | | `{ "email", "tenant", "role", "logId", "plan", "used", "quota", "disabled", "billing": true\|false }`; before onboarding, `{ "email", "tenant": null, "profile", "billing" }`; the second also carries `"invites"` (`[{ "tenant", "role" }]`); both carry `"emailVerified"`, `"identities"` (the linked providers), `"providers"` (the ones offered), `"mail"` (whether the portal can send), and `"mfa"` |
+| `GET /api/members` | | `{ "members": [{ "id", "email", "role", "joinedAt", "mfa" }], "invites": [{ "email", "role", "invitedBy", "createdAt" }] }` |
+| `POST /api/members` | `{ "email", "role" }` | invites the address: `{ "invited", "role" }`; `403` when a non-owner grants `owner` |
+| `POST /api/members/<userId>/role` | `{ "role" }` | `{ "role" }`; `403` when a non-owner touches an owner; `409` for the last owner |
+| `POST /api/members/<userId>/remove` | `{}` | `{ "removed": true }`; `403` when a non-owner removes an owner; `409` for the last owner |
+| `POST /api/invites/remove` | `{ "email" }` | `{ "removed": true\|false }` |
+| `POST /api/invites/accept` | `{ "tenant" }` | for an account with no tenant and a verified address: `{ "tenant", "role" }`; `403` for an unverified address, `404` for no invite or one older than seven days, `409` when the account has a tenant already |
 | `GET /api/overview` | | `{ "tenant", "logId", "plan", "used", "quota", "treeSize", "rootHash", "latestCheckpoint": { "treeSize", "signedAt" } \| null, "months": [{ "month": "2026-09", "appends": 37 }, …6], "keys": [{ "label", "hash", "createdAt", "revokedAt" }], "audit": [{ "id", "at", "actor", "action", "tenantId", "detail" }], "billing": { "status" } \| null, "urls": { "log", "keys", "checkpoints" }, "exportCommand", "welcome", "setup" (as on register), "stripe": true\|false }` |
 | `GET /api/keys` | | `{ "keys": [...] }` |
 | `POST /api/keys` | `{ "label" }` | `{ "token": "<shown once>", "tokenHash": "<12 hex>", "label" }` |
@@ -49,6 +59,39 @@ The gateway's log client retries a 429 three times with backoff and then fails t
 | `GET /health` | | `{ "ok": true, "stripe": true\|false }` |
 
 Every write needs `Content-Type: application/json`; the cookie is `HttpOnly; SameSite=Strict`. Every action is in the tenant's audit trail as `portal:<email>`, and plan changes made by Stripe as `stripe:<event>`.
+
+### Roles
+
+Every member of a tenant has one role. A role includes the roles above it in this table.
+
+| role | may |
+| --- | --- |
+| `readonly` | every `GET` |
+| `reviewer` | also publish and remove policy versions |
+| `admin` | also mint and revoke API keys, invite, cancel invites, change a member's role, and remove a member, but never touch an owner and never grant `owner` |
+| `owner` | everything, billing included |
+
+A write route that is not in this table needs `admin`. The last owner of a tenant cannot be removed or demoted. An invite lasts seven days. An account belongs to one tenant. The members page of the portal shows the same operations.
+
+### Two-step sign-in
+
+An account can turn on MFA with a time-based one-time password (TOTP, RFC 6238: 6 digits, 30-second step) from any authenticator app. Setup is `POST /api/mfa/setup`, then `POST /api/mfa/enable` with the first code. After that, a password, GitHub, or Google sign-in ends with a code step, `POST /api/login/mfa`. The `custody_mfa` cookie that the first step sets lasts five minutes and is never a session. A code works once. Wrong codes are throttled per address and per account. An operator turns MFA off for an account that lost its authenticator with `log-admin user mfa-reset <email>` (see [the operator's side](#the-operators-side)).
+
+### Single sign-on
+
+An enterprise tenant can sign in through its own identity provider (IdP). Only the operator sets it up, with `log-admin sso set`. A tenant has OIDC (authorization code with PKCE) or SAML 2.0. A domain belongs to one tenant.
+
+| route | response |
+| --- | --- |
+| `GET /auth/sso?email=` | finds the tenant that owns the domain of the address and starts its sign-in |
+| `GET /auth/sso/<tenant>` | starts the sign-in at the tenant's IdP |
+| `GET /auth/sso/<tenant>/callback` | OIDC: exchanges the code, checks the `id_token` signature against the IdP's JWKS (RS256 or ES256 only), the issuer, the audience, the nonce, and the expiry, then signs the user in |
+| `GET /auth/sso/<tenant>/saml` | the service provider metadata to give to the IdP |
+| `POST /auth/sso/<tenant>/saml/acs` | SAML: reads only the signed assertion, whose bearer `SubjectConfirmationData` must answer the request id in the cookie, then signs the user in |
+
+A sign-in creates the account or links it, and joins it to the tenant with the tenant's default role. The email domain must be one of the tenant's. An unverified password account with the same address and no tenant or provider is replaced, so its password and sessions stop working; any other unverified account with that address is refused. The portal skips its own MFA, because the IdP owns it. SAML needs the optional package `@node-saml/node-saml` beside the CLI.
+
+With `--enforce`, members of the tenant cannot sign in with a password, GitHub, or Google. The sessions that members had before end. Invites are refused, because members join through the IdP.
 
 Two emails follow a registration when the operator has mail configured: the setup sheet at once, and about an hour later a personal note from the founder asking which stack the agents are on and offering to do the integration, sent once by an hourly job (`portal-followup`).
 
@@ -76,4 +119,15 @@ Writes `log.jsonl` (every leaf hash, in the format `verify --log` and `audit --l
 
 ## The operator's side
 
-For whoever runs a log: `agent-custody log-admin --db-env DATABASE_URL tenant add|list|disable|plan`, `token add|list|revoke`, `audit`, `import`; the admin page at `/admin` (or on its own host, `ADMIN_HOST` in the deployment) behind the admin token with the same operations, the registrations list (who signed up through the portal, plan, billing state, appends this month, leaves in total, with totals and a CSV), usage per tenant per month, a CSV for invoicing, and the activity list. The [runbook](https://github.com/svayatta/agent-custody/blob/main/deploy/RUNBOOK.md) is the operating manual.
+For whoever runs a log: `agent-custody log-admin --db-env DATABASE_URL tenant add|list|disable|plan`, `token add|list|revoke`, `audit`, `import`, `user mfa-reset <email>`, `sso set|show|remove`; the admin page at `/admin` (or on its own host, `ADMIN_HOST` in the deployment) behind the admin token with the same operations, the registrations list (who signed up through the portal, plan, billing state, appends this month, leaves in total, with totals and a CSV), usage per tenant per month, a CSV for invoicing, and the activity list. The [runbook](https://github.com/svayatta/agent-custody/blob/main/deploy/RUNBOOK.md) is the operating manual.
+
+Single sign-on for a tenant, set by the operator only:
+
+```bash
+agent-custody log-admin --db-env DATABASE_URL sso set acme --oidc-issuer https://idp.example.com --oidc-client-id <id> --oidc-secret-env ACME_OIDC_SECRET --domains acme.com,acme.io --default-role readonly --enforce
+agent-custody log-admin --db-env DATABASE_URL sso set acme --saml-entry-point https://idp.example.com/sso --saml-cert idp.pem --saml-idp-issuer <id> --domains acme.com
+agent-custody log-admin --db-env DATABASE_URL sso show acme
+agent-custody log-admin --db-env DATABASE_URL sso remove acme
+```
+
+`sso set` reads the client secret from the named environment variable at that moment and stores it in the portal's table. `--default-role` is the role of a new member (`readonly` if unset, never `owner`). `sso set` replaces the whole setting, so give every flag each time. `--enforce` turns on the rules in [Single sign-on](#single-sign-on). The redirect URI to register at the IdP is `https://<PORTAL_HOST>/auth/sso/<tenant>/callback`. `user mfa-reset <email>` turns MFA off for one portal account; it prints an error when the address has no account.

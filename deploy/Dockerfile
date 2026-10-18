@@ -4,7 +4,7 @@
 FROM node:24-alpine
 
 ARG AGENT_CUSTODY_VERSION=0.3.0
-RUN npm install -g "@agent-custody/receipts@${AGENT_CUSTODY_VERSION}" pg@8 \
+RUN npm install -g "@agent-custody/receipts@${AGENT_CUSTODY_VERSION}" pg@8 @node-saml/node-saml@5 \
   && adduser -D -u 10001 custody \
   && mkdir -p /data/keys /checkpoints /witnessed \
   && chown -R custody:custody /data /checkpoints /witnessed

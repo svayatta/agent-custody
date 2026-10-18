@@ -100,6 +100,18 @@ Each row names the attacker, the move, the defence, and whether the defence is a
 | Steal a tenant token | Tokens are bearer secrets; a stolen one appends noise to that tenant's log until revoked. Rate limits bound the damage per second; the tenant's usage shows it. | deployment |
 | Escape a per-address limit by forging `X-Forwarded-For` | Behind the proxy the deployment runs, the limiter keys on the address the proxy appended, the rightmost entry, never on one the client supplied. | deployment |
 
+### On the portal accounts
+
+The portal is not part of the evidence: it publishes policy names and mints log tokens. A stolen account can mint a token, so the portal limits who may.
+
+| attack | defence | kind |
+| --- | --- | --- |
+| Guess or steal a member's password | Optional TOTP MFA on the account. A code works once, wrong codes are throttled per address and per account, and the half-signed-in cookie is never a session. A GitHub or Google sign-in goes through the same code step. | deployment |
+| A member acts beyond their job | Four roles: `readonly` reads, `reviewer` also publishes policy versions, `admin` also manages keys and members below owner, `owner` also manages billing and owners. A new write route needs `admin` unless it is listed. The last owner cannot be removed or demoted. | deployment |
+| Claim an invited address to join a tenant | An invite is accepted only by an account with a verified address, and an account belongs to one tenant. | deployment |
+| Sign in through an IdP the tenant does not own | The operator sets single sign-on, never the tenant. An IdP is trusted only for the email domains of its tenant, and a domain belongs to one tenant. The portal checks the OIDC `id_token` signature against the IdP's key set, or the signed SAML assertion through a maintained library, and ties the sign-in to the request that started it. | deployment |
+| Keep access after leaving the company | With enforcement on, members sign in only through the IdP, so removal at the IdP ends access at the next sign-in. Sessions that began earlier end when enforcement is turned on. A member removed in the portal loses access at once. An API key that the member minted stays valid until an admin revokes it. | deployment |
+
 ## What is not defended
 
 Stated plainly, because a security review that finds these itself will not believe the rest.

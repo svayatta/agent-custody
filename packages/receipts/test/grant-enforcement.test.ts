@@ -97,6 +97,8 @@ describe("the grant on every call", () => {
       expect(text(no)).toMatch(/delegation grant has been revoked/);
       expect(() => host.open(grant)).toThrow(/has been revoked/);
       expect(host.revoked()).toEqual([session.grantDigest]);
+      const other = host.open(createDelegation(loadPrivateKey(join(fx.dir, "keys", "principal.key")), { version: "0.1", principal: "user_456", agent: "billing-agent", scopes: ["customer.lookup"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString(), agentKey: publicKeyToPem(generateKeyPair().publicKey) }));
+      expect((await other.handleCall({ name: "customer.lookup", arguments: { customer_id: "cust_123" } })).isError).toBeFalsy();
     } finally {
       await host.close();
     }
