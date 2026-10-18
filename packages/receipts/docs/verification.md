@@ -62,6 +62,8 @@ policy          observed    allow [policy1] policy ba4e4461ffc4
 execution       observed    executed
 ```
 
+A refused call's `execution` row carries the reason the receipt records, for example `denied: delegation grant has been revoked`, and so does a `withheld` one. Under a capture rule the reason is a commitment, and the row says `(reason withheld under the capture rule)` rather than printing it.
+
 ## What each check means
 
 | check | what it establishes | what a failure usually means |

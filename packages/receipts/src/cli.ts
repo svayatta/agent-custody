@@ -58,7 +58,7 @@ const USAGE = `agent-custody <command>
   prune   --log <log.jsonl> --before <ISO instant> [--receipts <dir>]
           retention on the receipt log: replaces older leaves with their hashes, so proofs still verify and the content is gone
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
-  verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--json]
+  verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]
   log     ... --db-env NAME                     the same server over Postgres: tenants and tokens from the database, one writer per tenant,
                                                  root paths serve the tenant "default" (created with --log-id). Needs the pg package.
   log     ... (--key <log.key> [--retired-key <pub>]... | --signer-url <url> [--signer-token-env NAME]) [--checkpoint-dir <dir>] [--checkpoint-every <seconds>] [--checkpoint-heartbeat <seconds>]
