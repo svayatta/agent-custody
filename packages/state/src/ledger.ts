@@ -351,7 +351,7 @@ export class Ledger {
 
   /**
    * Runs one step at a time per fact id in this process, so the check of an assert and of a repair cannot interleave.
-   * Two processes that share a store need a unique constraint on the fact id for the same guarantee.
+   * Two processes that share a store need the check and the append in one transaction (for example a per-fact-id advisory lock), which this version does not do.
    */
   private async exclusive<T>(factId: string, step: () => Promise<T>): Promise<T> {
     const run = (this.locks.get(factId) ?? Promise.resolve()).then(step);

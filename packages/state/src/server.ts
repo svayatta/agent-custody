@@ -177,19 +177,24 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
     } catch (e) {
       return { outcome: "failed", error: `${store.name}: ${e instanceof Error ? e.message : String(e)}` };
     }
-    if (!store.verifyDeleted) return { outcome: "unverified" };
+    return { outcome: await verifyEntry(store, entry) };
+  }
+
+  /** Asks the store's search whether a deleted entry is gone. A store without a check cannot say. */
+  async function verifyEntry(store: Store, entry: StoreEntry): Promise<RemovalOutcome> {
+    if (!store.verifyDeleted) return "unverified";
     const attempts = Math.max(1, opts.verify?.attempts ?? 3);
     const delayMs = opts.verify?.delayMs ?? 200;
     for (let i = 0; i < attempts; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, delayMs * 2 ** (i - 1)));
       try {
-        if (await store.verifyDeleted(entry)) return { outcome: "verified" };
+        if (await store.verifyDeleted(entry)) return "verified";
       } catch {
         // The store could not be asked; that is not the same as the value being gone.
-        return { outcome: "unverified" };
+        return "unverified";
       }
     }
-    return { outcome: "stillIndexed" };
+    return "stillIndexed";
   }
 
   /** Removes a fact from every store it was written to. */
@@ -255,9 +260,9 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
           continue;
         }
         let { outcome, error } = await removeEntry(store, entry);
-        // Another server may have removed the entry already, and the store may then fail the delete. The listing of
-        // the store, not a similarity search, says whether the entry is gone.
-        if (error && (await store.list().then((now) => !now.some((e) => e.externalId === entry.externalId), () => false))) ({ outcome, error } = { outcome: "verified", error: undefined });
+        // Another server may have removed the entry already, and the store may then fail the delete. When the listing of
+        // the store no longer holds the entry, the delete is done, and the usual check decides the outcome.
+        if (error && (await store.list().then((now) => !now.some((e) => e.externalId === entry.externalId), () => false))) ({ outcome, error } = { outcome: await verifyEntry(store, entry), error: undefined });
         if (error) stillHeld.push(error);
         repaired.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, outcome, eventId: ev.eventId });
       }
