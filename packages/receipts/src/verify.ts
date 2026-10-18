@@ -132,14 +132,15 @@ export function structuralProblem(p: unknown): string | null {
   }
   if (typeof p.receiptId !== "string" || typeof p.timestamp !== "string") return "receiptId or timestamp is not a string";
   if (!isObject(p.issuer) || !isObject(p.principal) || !isObject(p.agent) || !isObject(p.session) || !isObject(p.model)) return "issuer, principal, agent, session, or model is not an object";
+  if (p.principal.provenance === "attested" && typeof p.principal.keyid !== "string") return "an attested principal has no keyid";
   if (!isObject(p.tool) || typeof p.tool.name !== "string") return "tool.name is not a string";
   if (!isObject(p.request) || typeof p.request.argsDigest !== "string" || !isObject(p.request.args)) return "request.args or request.argsDigest is not what it should be";
   if (!isObject(p.execution) || !["executed", "failed", "denied", "error", "withheld"].includes(String(p.execution.status))) return "execution.status is not a status";
-  if (p.policy !== null && (!isObject(p.policy) || (p.policy.decision !== "allow" && p.policy.decision !== "deny") || !Array.isArray(p.policy.reasons))) return "policy is neither null nor a decision";
+  if (p.policy !== null && (!isObject(p.policy) || (p.policy.decision !== "allow" && p.policy.decision !== "deny") || !Array.isArray(p.policy.reasons) || typeof p.policy.policyDigest !== "string")) return "policy is neither null nor a decision";
   if (!isObject(p.facts) || Object.values(p.facts).some((f) => !isObject(f) || typeof f.tool !== "string")) return "facts is not a map of facts";
   if (p.consumed !== undefined && !isObject(p.consumed)) return "consumed is not an object";
   if (p.delegation !== undefined && (!isObject(p.delegation) || !isObject(p.delegation.envelope))) return "delegation is not a signed envelope";
-  if (p.authorization !== undefined && (!isObject(p.authorization) || !isObject(p.authorization.envelope))) return "authorization is not a bundle";
+  if (p.authorization !== undefined && (!isObject(p.authorization) || !isObject(p.authorization.envelope) || !isObject(p.authorization.treeHead) || !isObject(p.authorization.inclusion))) return "authorization is not a bundle";
   if (p.operation !== undefined) {
     const problem = operationProblem(p.operation);
     if (problem) return problem;

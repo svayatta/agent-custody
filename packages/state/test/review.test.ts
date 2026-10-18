@@ -181,19 +181,24 @@ describe("a record that was changed after it was issued", () => {
     const good = save("gateway-precommit-executed", () => {});
     const noReasons = save("gateway-executed", (p) => { delete p.policy.reasons; });
     const wrongType = save("gateway-executed-proto-key", (p) => { p.timestamp = { not: "a time" }; });
+    // Parts that the spec requires and the pages read: the policy digest, an authorization's proof, an attested principal's key id.
+    const noDigest = save("gateway-denied", (p) => { delete p.policy.policyDigest; });
+    const noInclusion = save("gateway-precommit-spliced", (p) => { delete p.authorization.inclusion; });
+    const noKeyid = save("gateway-executed-private", (p) => { delete p.principal.keyid; });
+    const damaged = [noReasons, wrongType, noDigest, noInclusion, noKeyid];
     // A timestamp that is a string but not a date breaks nothing that a page reads, so the record is not damaged.
     const oddTime = save("gateway-private-clear-result-upstream-attested", (p) => { p.timestamp = "not a date"; });
     const o = { receiptsDir: dir, keys };
 
     const out = join(dir, "site");
-    expect(await writeReview(o, out)).toEqual({ receipts: 4 });
+    expect(await writeReview(o, out)).toEqual({ receipts: 7 });
     expect(readFileSync(join(out, "r", `${good}.html`), "utf8")).toContain("RESULT: VERIFIED");
     const odd = readFileSync(join(out, "r", `${oddTime}.html`), "utf8");
     expect(odd).toContain("RESULT: NOT VERIFIED");
     expect(odd).not.toContain("the record has the parts of a receipt");
     expect(existsSync(join(out, "r", `${oddTime}.case.json`))).toBe(true);
-    expect(existsSync(join(out, "r", `${noReasons}.case.json`))).toBe(false);
-    for (const id of [noReasons, wrongType]) {
+    for (const id of damaged) expect(existsSync(join(out, "r", `${id}.case.json`))).toBe(false);
+    for (const id of damaged) {
       const page = readFileSync(join(out, "r", `${id}.html`), "utf8");
       expect(page).toContain("RESULT: NOT VERIFIED");
       expect(page).toContain("FAIL  the record has the parts of a receipt");
@@ -202,7 +207,7 @@ describe("a record that was changed after it was issued", () => {
 
     const running = await serveReview(o, { port: 0 });
     try {
-      for (const id of [noReasons, wrongType]) {
+      for (const id of damaged) {
         const res = await fetch(new URL(`r/${id}`, running.url));
         expect(res.status).toBe(200);
         expect(await res.text()).toContain("RESULT: NOT VERIFIED");
