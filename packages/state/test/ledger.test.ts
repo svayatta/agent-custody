@@ -51,7 +51,7 @@ describe.each(backends)("fact ledger on %s", (name, file) => {
     const l = new Ledger(file(), clock());
     const first = await l.repair({ factId: "orphan-2", store: "vec", externalId: "row-1", actor: "ops", reason: "append failed" });
     expect(await l.repair({ factId: "orphan-2", store: "vec", externalId: "row-1", actor: "ops", reason: "again" })).toEqual(first);
-    await expect(l.assert({ factId: "orphan-2", subject: "acct:42", predicate: "plan", value: "pro", space: "org", actor: "agent:support" })).rejects.toThrow(/was repaired/);
+    await expect(l.assert({ factId: "orphan-2", subject: "acct:42", predicate: "plan", value: "pro", space: "org", actor: "agent:support" })).rejects.toThrow(/claimed by a repair/);
     expect(await l.history("orphan-2")).toEqual([first]);
     expect(await l.get("orphan-2")).toBeUndefined();
   });

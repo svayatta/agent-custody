@@ -642,7 +642,7 @@ describe("repair: store entries whose ledger append failed", () => {
     const client = await connect(ledger, [vec]);
     const r = (await client.callTool(write("acct:6"))) as CallToolResult;
     expect(r.isError).toBe(true);
-    expect((r.content[0] as { text: string }).text).toMatch(/was repaired/);
+    expect((r.content[0] as { text: string }).text).toMatch(/claimed by a repair/);
     expect(vec.rows.size).toBe(0);
     expect(await ledger.asOf()).toEqual([]);
     expect((await ledger.export()).map((e) => e.kind)).toEqual(["repair"]);
@@ -666,6 +666,57 @@ describe("repair: store entries whose ledger append failed", () => {
     expect(vec.rows.size).toBe(0);
     await first.close();
     await second.close();
+  });
+
+  it("does not certify a delete the store refused because a similarity search misses the entry", async () => {
+    const { ledger } = flakyLedger();
+    const vec = memoryStore("vec");
+    vec.rows.set("x", { externalId: "x", factId: "orphan-x", text: "t", storedAt: hourAgo() });
+    vec.delete = async () => Promise.reject(new Error("503"));
+    vec.verifyDeleted = async () => true;
+    const client = await connect(ledger, [vec]);
+    const r = await repair(client);
+    expect(r.isError).toBe(true);
+    expect(r.out.stillHeld).toEqual(["vec: 503"]);
+    expect(r.out.repaired).toMatchObject([{ outcome: "failed" }]);
+    expect(vec.rows.size).toBe(1);
+    await client.close();
+  });
+
+  it("returns the outcomes of the entries it removed when the ledger cannot answer for a later one", async () => {
+    const events = openStore(join(mkdtempSync(join(tmpdir(), "memory-repair-")), "ledger.jsonl"));
+    const down = { on: false };
+    const ledger = new Ledger(new Proxy(events, { get: (t, k) => (k === "eventsFor" ? async (id: string) => (down.on ? Promise.reject(new Error("ledger down")) : t.eventsFor(id)) : Reflect.get(t, k)) }));
+    const vec = memoryStore("vec");
+    for (const id of ["o1", "o2"]) vec.rows.set(id, { externalId: id, factId: `fact-${id}`, text: "t", storedAt: hourAgo() });
+    const del = vec.delete;
+    vec.delete = async (e) => ((down.on = true), del(e));
+    const client = await connect(ledger, [vec]);
+    const r = await repair(client);
+    expect(r.isError).toBe(true);
+    expect(r.out.repaired).toMatchObject([{ externalId: "o1", outcome: "verified" }]);
+    expect(r.out.unrecorded).toMatchObject([{ externalId: "o2", error: "ledger down" }]);
+    expect([...vec.rows.keys()]).toEqual(["o2"]);
+    await client.close();
+  });
+
+  it("runs one sweep at a time in a process, so overlapping sweeps report an entry once", async () => {
+    const { ledger } = flakyLedger();
+    // A store that lists a snapshot, hands it over late, and accepts a delete of a missing entry, with no check of its own: only the queue
+    // keeps the second sweep from listing the entry before the first has removed it.
+    const vec = memoryStore("vec");
+    vec.rows.set("x", { externalId: "x", factId: "orphan-x", text: "t", storedAt: hourAgo() });
+    const list = vec.list!;
+    vec.list = async () => {
+      const listing = await list();
+      await new Promise((r) => setTimeout(r, 20));
+      return listing;
+    };
+    vec.verifyDeleted = undefined;
+    const client = await connect(ledger, [vec]);
+    const results = await Promise.all([repair(client), repair(client)]);
+    expect(results.flatMap((r) => r.out.repaired)).toHaveLength(1);
+    await client.close();
   });
 
   it("retries an entry whose removal failed, with the repair event it already has", async () => {

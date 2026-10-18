@@ -242,20 +242,22 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
         seen.add(entry.externalId);
         // A young entry may be a write in progress. So is one whose time is missing or does not parse.
         if (!(Date.parse(entry.storedAt ?? "") < cutoff)) continue;
-        if (await ledger.get(entry.factId)) continue;
         // The ledger records the repair first, as a retraction does. A write that is still in progress then fails at
         // its own append, and a write that has appended makes this refuse. Either way the first record wins.
         let ev;
         try {
+          if (await ledger.get(entry.factId)) continue;
           ev = await ledger.repair({ factId: entry.factId, store: store.name, externalId: entry.externalId, actor: who.actor, reason: a.reason, source: { receiptId: who.receiptId } });
         } catch (e) {
-          // The ledger now knows the fact: the write won, and its entry stays. Otherwise nothing was removed.
-          if (!(await ledger.get(entry.factId))) unrecorded.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, error: e instanceof Error ? e.message : String(e) });
+          // The ledger now knows the fact: the write won, and its entry stays. Otherwise nothing was removed. A ledger
+          // that cannot answer does not stop the sweep: the entries that it already removed keep their outcomes.
+          if (!(await ledger.get(entry.factId).catch(() => undefined))) unrecorded.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, error: e instanceof Error ? e.message : String(e) });
           continue;
         }
         let { outcome, error } = await removeEntry(store, entry);
-        // Another server may have removed the entry already, and the store may then fail the delete. Gone is gone.
-        if (error && (await store.verifyDeleted?.(entry).catch(() => false))) ({ outcome, error } = { outcome: "verified", error: undefined });
+        // Another server may have removed the entry already, and the store may then fail the delete. The listing of
+        // the store, not a similarity search, says whether the entry is gone.
+        if (error && (await store.list().then((now) => !now.some((e) => e.externalId === entry.externalId), () => false))) ({ outcome, error } = { outcome: "verified", error: undefined });
         if (error) stillHeld.push(error);
         repaired.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, outcome, eventId: ev.eventId });
       }

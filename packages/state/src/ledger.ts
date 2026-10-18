@@ -256,7 +256,7 @@ export class Ledger {
   private async appendAssert(input: AssertInput): Promise<AssertEvent> {
     await this.validateAssert(input);
     // A repair removed the stores' entries of this id, so an assert now would give the ledger a fact that no store holds.
-    if (input.factId !== undefined && (await this.store.eventsFor(input.factId)).some((e) => e.kind === "repair")) throw new Error(`fact ${input.factId} was repaired: the stores no longer hold it, so the ledger refuses to record it`);
+    if (input.factId !== undefined && (await this.store.eventsFor(input.factId)).some((e) => e.kind === "repair")) throw new Error(`fact ${input.factId} was claimed by a repair, so the ledger refuses to record it`);
     const txTime = this.now().toISOString();
     const validFrom = input.validFrom ?? txTime;
     const event: AssertEvent = {
