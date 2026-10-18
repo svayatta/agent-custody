@@ -82,8 +82,8 @@ const FactSchema = z.object({
 const OperationBudgetSchema = z.object({ id: z.string().min(1).max(128), currency: z.string().regex(/^[A-Z]{3}$/), limit: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) });
 const OperationReconcileSchema = z.object({
   tool: z.string().min(1),
-  /** Only operation identifiers may be substituted; reconciliation never takes new caller arguments. */
-  args: z.record(z.string(), z.string()).refine((args) => Object.values(args).every((v) => !v.startsWith("$") || v === "$operation.id" || v === "$operation.idempotencyKey"), { message: "reconciliation templates only support $operation.id and $operation.idempotencyKey" }),
+  /** Only the gateway-derived idempotency key may be substituted. The agent's operation id never reaches a receipt, and reconciliation never takes new caller arguments. */
+  args: z.record(z.string(), z.string()).refine((args) => Object.values(args).every((v) => !v.startsWith("$") || v === "$operation.idempotencyKey"), { message: "reconciliation templates only support $operation.idempotencyKey" }),
   statusPath: z.string().min(1).max(512).refine((path) => path.split(".").every((part) => part.length > 0), { message: "reconciliation statusPath must have nonempty dot-separated parts" }),
   /** The provider record must echo this operation's idempotency key before it may close the reservation. */
   identityPath: z.string().min(1).max(512).refine((path) => path.split(".").every((part) => part.length > 0), { message: "reconciliation identityPath must have nonempty dot-separated parts" }).default("idempotencyKey"),

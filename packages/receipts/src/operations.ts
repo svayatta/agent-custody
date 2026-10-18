@@ -1,6 +1,7 @@
 // A side effect is claimed durably before it may be forwarded. An existing claim is never forwarded again,
 // even after a crash: only a provider reconciliation read may resolve its outcome and release its reservation.
-import { closeSync, constants, lstatSync, mkdirSync, openSync, chmodSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { closeSync, constants, lstatSync, mkdirSync, openSync, chmodSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { digestOf } from "./crypto.ts";
@@ -8,10 +9,44 @@ import { digestOf } from "./crypto.ts";
 export const OPERATION_META_KEY = "agent-custody/operation";
 export type OperationStatus = "submitted" | "pending" | "confirmed" | "failed" | "unknown";
 
+/**
+ * A stamp that tells one process from a later process with the same PID: the kernel start time of the process.
+ * The prefix names the source, so two stamps from different sources never compare equal. Returns undefined when
+ * the start time cannot be read.
+ */
+export function processStamp(pid: number): string | undefined {
+  try {
+    // Linux: field 22 of /proc/<pid>/stat, in clock ticks since boot. The command name (field 2) may hold spaces.
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const field = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    if (field) return `proc:${field}`;
+  } catch { /* no /proc: try ps */ }
+  try {
+    const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (started) return `ps:${started}`;
+  } catch { /* unreadable */ }
+  return undefined;
+}
+let own: { stamp: string | undefined } | undefined;
+
+/**
+ * Whether the process that created an operation may still run. A process that is gone is not alive. A live process
+ * with the same PID but another start time is a different process (a container restart gives PID 1 again). When a
+ * start time cannot be compared, the answer is "alive": recovery waits, and never releases a live forward.
+ */
+export function ownerAlive(op: Pick<OperationRecord, "ownerPid" | "ownerStart">): boolean {
+  try { process.kill(op.ownerPid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; }
+  const now = op.ownerStart === undefined ? undefined : processStamp(op.ownerPid);
+  if (op.ownerStart === undefined || now === undefined || op.ownerStart.split(":")[0] !== now.split(":")[0]) return true;
+  return now === op.ownerStart;
+}
+
 export interface OperationRecord {
   id: string;
   /** Creator process on this machine. A live submitted call cannot be reconciled underneath its forward. */
   ownerPid: number;
+  /** `processStamp` of the creator, so that a later process with the same PID is not taken for it. */
+  ownerStart?: string;
   issuerKeyid: string;
   providerDigest?: string;
   idempotencyKey: string;
@@ -28,6 +63,8 @@ export interface OperationRecord {
   originalReceiptId: string;
   /** Signed authorization or execution bundle, saved before forwarding or returning it to the caller. */
   original?: unknown;
+  /** The call as the gateway decided it, kept until `original` exists. It lets recovery sign a receipt for a call that was never forwarded. Holds raw request values: keep the database private. */
+  unsent?: unknown;
   result?: unknown;
   reconciliation?: unknown;
   updatedAt: string;
@@ -49,11 +86,14 @@ export interface OperationReservation {
   originalReceiptId: string;
   /** Normally omitted; the gateway always uses the current UTC date. */
   period?: string;
+  /** See `OperationRecord.unsent`. */
+  unsent?: unknown;
 }
 
 export interface OperationUpdate {
   status?: OperationStatus;
   original?: unknown;
+  unsent?: unknown;
   result?: unknown;
   reconciliation?: unknown;
 }
@@ -135,6 +175,7 @@ export class OperationStore {
       const operation: OperationRecord = {
         id: input.id,
         ownerPid: process.pid,
+        ...((own ??= { stamp: processStamp(process.pid) }).stamp !== undefined ? { ownerStart: own.stamp } : {}),
         issuerKeyid: input.issuerKeyid,
         ...(input.providerDigest !== undefined ? { providerDigest: input.providerDigest } : {}),
         idempotencyKey: digestOf({ issuerKeyid: input.issuerKeyid, providerDigest: input.providerDigest ?? null, tool: input.tool, principal: input.principal, agent: input.agent, id: input.id }),
@@ -148,6 +189,7 @@ export class OperationStore {
         period,
         status: "submitted",
         originalReceiptId: input.originalReceiptId,
+        ...(input.unsent !== undefined ? { unsent: input.unsent } : {}),
         updatedAt: new Date().toISOString(),
       };
       this.db.prepare("INSERT INTO operations (id, budget, currency, period, amount, status, json) VALUES (?, ?, ?, ?, ?, ?, ?)").run(operation.id, operation.budget, operation.currency, operation.period, operation.amount, operation.status, JSON.stringify(operation));

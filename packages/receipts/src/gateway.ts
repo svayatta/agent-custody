@@ -19,12 +19,14 @@ import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
 import { captureKeyFrom, effectiveRule } from "./capture.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
-import type { AuthorizationBundle, FactRecord, OperationEvidence, ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "./receipt.ts";
-import { OPERATION_META_KEY, OperationStore, type OperationRecord, type OperationStatus } from "./operations.ts";
+import type { AuthorizationBundle, AuthorizationPredicate, FactRecord, OperationEvidence, ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "./receipt.ts";
+import { OPERATION_META_KEY, OperationStore, ownerAlive, type OperationRecord, type OperationStatus } from "./operations.ts";
 
 export const GATEWAY_VERSION = "0.1.0";
 export const RECEIPT_META_KEY = "agent-custody/receipt";
 export const MODEL_META_KEY = "agent-custody/model";
+/** Set by the gateway on the answer to a retry of a financial operation: the receipt of the retry itself. `agent-custody/receipt` stays the receipt that holds the operation's outcome. */
+export const RETRY_RECEIPT_META_KEY = "agent-custody/retry-receipt";
 /** Set by the gateway on the call it forwards upstream: the receipt id, and the agent and principal from the attested grant. */
 export const AGENT_META_KEY = "agent-custody/agent";
 export const PRINCIPAL_META_KEY = "agent-custody/principal";
@@ -230,7 +232,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   const providerDigest = (tool: string) => digestOf({ upstream: upstreamConfigs.find((u) => u.name === owner.get(tool)), reconciliationUpstream: upstreamConfigs.find((u) => u.name === owner.get(operationRule(tool)!.reconcile.tool)), rule: operationRule(tool) });
   const lookupFor = (op: OperationRecord) => {
     const rule = operationRule(op.tool)!;
-    return { tool: rule.reconcile.tool, args: Object.fromEntries(Object.entries(rule.reconcile.args).map(([key, value]) => [key, value === "$operation.id" ? op.id : value === "$operation.idempotencyKey" ? op.idempotencyKey : value])), statusPath: rule.reconcile.statusPath, identityPath: rule.reconcile.identityPath, confirmed: rule.reconcile.confirmed, failed: rule.reconcile.failed };
+    return { tool: rule.reconcile.tool, args: Object.fromEntries(Object.entries(rule.reconcile.args).map(([key, value]) => [key, value === "$operation.idempotencyKey" ? op.idempotencyKey : value])), statusPath: rule.reconcile.statusPath, identityPath: rule.reconcile.identityPath, confirmed: rule.reconcile.confirmed, failed: rule.reconcile.failed };
   };
   const operationEvidence = (op: OperationRecord, status = op.status): OperationEvidence => ({ id: op.id, idempotencyKey: op.idempotencyKey, status, originalReceiptId: op.originalReceiptId, budget: { id: op.budget, currency: op.currency, period: op.period }, lookupDigest: digestOf(lookupFor(op)), provenance: "observed" });
   const outcome = (op: OperationRecord, result: CallToolResult): OperationStatus => {
@@ -390,7 +392,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
           if (args[financial.currencyField] !== budget.currency) throw new Error(`operation currency must match budget ${budget.id}`);
           const amount = args[financial.amountField];
           if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount <= 0) throw new Error("operation amount must be a positive safe integer in minor units");
-          const reserved = operations!.reserve({ id: operationId, issuerKeyid: issuer.keyid, providerDigest: providerDigest(tool), principal: delegation.principal, agent: delegation.agent, tool, argsDigest: digestOf(args), budget: budget.id, currency: budget.currency, amount, limit: budget.limit, originalReceiptId: receiptId });
+          const reserved = operations!.reserve({ id: operationId, issuerKeyid: issuer.keyid, providerDigest: providerDigest(tool), principal: delegation.principal, agent: delegation.agent, tool, argsDigest: digestOf(args), budget: budget.id, currency: budget.currency, amount, limit: budget.limit, originalReceiptId: receiptId, unsent: { ...head, policy: { ...policy, provenance: "observed" } } });
           operation = reserved.operation;
           createdOperation = reserved.created;
           head.operation = operationEvidence(operation, operation.status === "submitted" && !createdOperation ? "unknown" : operation.status);
@@ -399,13 +401,17 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         }
       }
 
+      /** The answer to a retry of an existing operation: the stored outcome, which the retry receipt below records as withheld. */
+      let cached: CallToolResult | undefined;
       if (!execution && operation && !createdOperation) {
         // An existing reservation can mean another process is still forwarding, or died immediately afterwards.
         // Never repeat the side effect. Reconciliation is the only path from an uncertain operation to closure.
+        // The retry gets a receipt of its own, so that the log shows the agent asked again and what it was told.
         const settled = operation.reconciliation as { bundle?: ReceiptBundle; predicate?: ReceiptPredicate } | undefined;
         const result = settled?.bundle && settled.predicate && "result" in settled.predicate.execution ? settled.predicate.execution.result as CallToolResult : operation.result as CallToolResult | undefined;
         const receipt = settled?.bundle ? settled.predicate!.receiptId : operation.originalReceiptId;
-        return { ...(result ?? { isError: true, content: [{ type: "text" as const, text: `Operation outcome is ${head.operation!.status}; reconcile with the provider before taking further action` }] }), _meta: { ...result?._meta, [RECEIPT_META_KEY]: receipt, [OPERATION_META_KEY]: head.operation, ...(operation.original && !existsSync(`${cfg.receiptsDir}/${operation.originalReceiptId}.json`) ? { "agent-custody/authorization": operation.original } : {}) } };
+        cached = { ...(result ?? { isError: true, content: [{ type: "text" as const, text: `Operation outcome is ${head.operation!.status}; reconcile with the provider before taking further action` }] }), _meta: { ...result?._meta, [RECEIPT_META_KEY]: receipt, ...(operation.original && !existsSync(`${cfg.receiptsDir}/${operation.originalReceiptId}.json`) ? { "agent-custody/authorization": operation.original } : {}) } };
+        execution = { status: "withheld", reason: `existing operation: not forwarded again; the stored outcome is ${head.operation!.status}`, provenance: "observed" };
       }
 
       if (!execution && (policy.decision === "allow" || financial && forward) && consequential(tool)) {
@@ -414,7 +420,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         // observe mode nothing is withheld, and the missing authorization is printed instead.
         try {
           authorization = await issuer.authorize({ ...head, policy: { ...policy, provenance: "observed" } }, captureCtx);
-          if (operation) operation = operations!.update(operation.id, { original: authorization });
+          if (operation) operation = operations!.update(operation.id, { original: authorization, unsent: undefined });
         } catch (e) {
           if (cfg.mode === "observe" && !financial) console.error(`agent-custody gateway (observe mode): the log did not commit the authorization for ${tool}, receipt ${receiptId}; the call was forwarded without it: ${String(e instanceof Error ? e.message : e)}`);
           else execution = { status: "withheld", reason: `the log did not commit the authorization, so the call was not forwarded: ${String(e instanceof Error ? e.message : e)}`, provenance: "observed" };
@@ -448,7 +454,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       }
 
       // Only a call known never to have been forwarded may release a reservation without a provider record.
-      if (operation && createdOperation && !attemptedOperation) operation = operations!.update(operation.id, { status: "failed" });
+      if (operation && createdOperation && !attemptedOperation) operation = operations!.update(operation.id, { status: "failed", unsent: undefined });
       if (operation) head.operation = operationEvidence(operation, operation.status === "submitted" && !createdOperation ? "unknown" : operation.status);
       const issued = await issuer.issue({
         ...head,
@@ -469,6 +475,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         case "error":
           return refuse(`Upstream error: ${execution.error as string}`);
         case "withheld":
+          if (cached) return { ...cached, _meta: { ...cached._meta, [OPERATION_META_KEY]: head.operation, [RETRY_RECEIPT_META_KEY]: receiptId } };
           return refuse(`Not executed: ${execution.reason as string}`);
         default: {
           const result = forwarded ?? (execution.result as CallToolResult);
@@ -509,15 +516,27 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       if (intent?.bundle) return intent.bundle;
       if (!intent) {
         if (op.status === "failed") throw new Error("operation was never forwarded and needs no provider reconciliation");
-        if (op.status === "submitted") {
-          // SQLite is shared on this machine. A live creator may still be about to send, or awaiting its response;
-          // reconciliation cannot release its budget underneath that forward. PID reuse fails closed.
-          let alive = true;
-          try { process.kill(op.ownerPid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false; }
-          if (alive) throw new Error("operation is still submitted by a live process; wait for its outcome before reconciling");
-        }
+        // SQLite is shared on this machine. A live creator may still be about to send, or awaiting its response;
+        // reconciliation cannot release its budget underneath that forward. A process with the same PID but another
+        // start time is not the creator. A start time that cannot be read fails closed.
+        if (op.status === "submitted" && ownerAlive(op)) throw new Error("operation is still submitted by a live process; wait for its outcome before reconciling");
         const original = op.original as ReceiptBundle | AuthorizationBundle | undefined;
-        if (!original) throw new Error("operation has no committed authorization; it was not forwarded");
+        if (!original) {
+          // The authorization is saved before the forward. A dead creator and no authorization prove that the call was
+          // never sent. Close it with a receipt that says so, then release the reservation.
+          const unsent = op.unsent as AuthorizationPredicate | undefined;
+          if (!unsent) throw new Error("operation has no committed authorization and no record of the call; it was not forwarded");
+          const predicate: ReceiptPredicate = {
+            ...unsent, receiptId: op.originalReceiptId, timestamp: new Date().toISOString(),
+            session: { id: null, toolUseId: null, provenance: "claimed" }, model: { id: null, provenance: "claimed" },
+            operation: operationEvidence(op, "failed"),
+            execution: { status: "withheld", reason: "the gateway stopped before it forwarded the call; the call was not forwarded", provenance: "observed" },
+          };
+          intent = operations.claimReconciliation(op.id, { predicate }) as { predicate: ReceiptPredicate; bundle?: ReceiptBundle };
+        }
+      }
+      if (!intent) {
+        const original = op.original as ReceiptBundle | AuthorizationBundle;
         const checked = dsseVerify(original.envelope, [gatewayKey]);
         if (!checked.ok) throw new Error("stored original operation signature is invalid");
         const initial = (checked.payload as ReceiptStatement).predicate;
@@ -534,7 +553,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
           principal: initial.principal, agent: initial.agent, delegation: initial.delegation,
           session: { id: null, toolUseId: null, provenance: "claimed" }, model: { id: null, provenance: "claimed" },
           tool: initial.tool, request: { args: lookup.args, argsDigest: digestOf(lookup.args), provenance: "claimed" },
-          facts: {}, policy: { decision: "allow", reasons: [], errors: [], policyDigest: pDigest, provenance: "observed" },
+          facts: {}, policy: { decision: "allow", reasons: ["reconciliation: the gateway read the provider record and evaluated no policy"], errors: [], policyDigest: pDigest, provenance: "observed" },
           operation: operationEvidence(op, status), reconciliation: { original, lookup },
           execution: { status: "executed", result, resultDigest: digestOf(result), provenance: "observed" },
         };
@@ -542,9 +561,11 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       }
       // Commit the receipt before releasing a failed reservation. A crash before this update retains the amount;
       // the persisted intent allows another operator/process to finish precisely the same resolution.
-      const bundle = intent.bundle ?? await issuer.issue(intent.predicate, undefined, (prepared) => operations.prepareReconciliation(op.id, prepared) as PreparedReceipt);
+      // A receipt for an unsent call holds the call's own values, so the issuer applies the capture rule of its tool.
+      const ctx = intent.predicate.reconciliation ? undefined : { unknownTool: !owner.has(intent.predicate.tool.name) };
+      const bundle = intent.bundle ?? await issuer.issue(intent.predicate, ctx, (prepared) => operations.prepareReconciliation(op.id, prepared) as PreparedReceipt);
       const retained = operations.get(op.id)!.reconciliation as object;
-      operations.update(op.id, { status: intent.predicate.operation!.status, reconciliation: { ...retained, bundle }, result: (intent.predicate.execution as { result: unknown }).result });
+      operations.update(op.id, { status: intent.predicate.operation!.status, reconciliation: { ...retained, bundle }, result: (intent.predicate.execution as { result?: unknown }).result, unsent: undefined });
       return bundle;
     },
     async close() {

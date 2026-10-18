@@ -25,7 +25,7 @@ async function fixture(options: { crash?: boolean; encrypted?: boolean; private?
     ...(options.private || options.encrypted ? { capture: { rules: { "stripe.refund": { args: { mode: key ? "encrypted" : "digest" }, result: { mode: key ? "encrypted" : "digest" } } }, key } } : {}),
   });
   const receiptId = randomUUID(), operationId = randomUUID();
-  const lookup = { tool: "stripe.refund.get", args: { operation_id: operationId }, statusPath: "refund.status", identityPath: "idempotencyKey", confirmed: ["succeeded"], failed: ["failed", "canceled"] };
+  const lookup = { tool: "stripe.refund.get", args: { key: digestOf(operationId) }, statusPath: "refund.status", identityPath: "idempotencyKey", confirmed: ["succeeded"], failed: ["failed", "canceled"] };
   const args = { amount: 700, reason: "request-secret-canary" };
   const operation = { id: operationId, idempotencyKey: digestOf(operationId), lookupDigest: digestOf(lookup), status: "submitted" as const, budget: { id: "refunds", currency: "USD", period: "2026-01-01" }, originalReceiptId: receiptId, provenance: "observed" as const };
   const auth: AuthorizationPredicate = {
@@ -65,7 +65,7 @@ async function fixture(options: { crash?: boolean; encrypted?: boolean; private?
     edit(p);
     return issuer.issue(p);
   };
-  return { dir, issuer, key, opts, browserOpts, bundle, predicate, original, check, changed, record };
+  return { dir, operationId, issuer, key, opts, browserOpts, bundle, predicate, original, check, changed, record };
 }
 
 describe("financial outcome reconciliation evidence", () => {
@@ -99,11 +99,28 @@ describe("financial outcome reconciliation evidence", () => {
     for (const edit of [
       (p: ReceiptPredicate) => { p.operation!.status = "failed"; },
       (p: ReceiptPredicate) => { p.reconciliation!.lookup.confirmed = ["pending"]; p.execution = { status: "executed", result: f.record("pending"), resultDigest: digestOf(f.record("pending")), provenance: "observed" }; },
-      (p: ReceiptPredicate) => { p.reconciliation!.lookup.args.operation_id = randomUUID(); p.request.args = p.reconciliation!.lookup.args; p.request.argsDigest = digestOf(p.request.args); },
+      (p: ReceiptPredicate) => { p.reconciliation!.lookup.args.key = "0".repeat(64); p.request.args = p.reconciliation!.lookup.args; p.request.argsDigest = digestOf(p.request.args); },
       (p: ReceiptPredicate) => { if ("resultDigest" in p.execution) p.execution.resultDigest = "0".repeat(64); },
       (p: ReceiptPredicate) => { p.operation!.id = randomUUID(); },
       (p: ReceiptPredicate) => { p.operation!.budget.period = "2026-01-02"; },
     ]) await f.check(await f.changed(edit), false);
+  });
+
+  it("verifies a withheld retry that names the original receipt, and refuses a retry that claims to have executed", async () => {
+    const f = await fixture();
+    const retry = (p: ReceiptPredicate) => { delete p.reconciliation; p.execution = { status: "withheld", reason: "existing operation", provenance: "observed" }; };
+    await f.check(await f.changed(retry));
+    const executed = await f.changed((p) => { retry(p); p.execution = { status: "executed", result: f.record("succeeded"), resultDigest: digestOf(f.record("succeeded")), provenance: "observed" }; });
+    expect(failed(await f.check(executed, false))).toContain("operation names this original receipt");
+  });
+
+  it("links the original and the reconciliation when the agent's operation id is withheld from both", async () => {
+    const f = await fixture({ private: true });
+    const original = JSON.parse(Buffer.from(f.original.envelope.payload, "base64").toString()).predicate;
+    expect(original.operation).not.toHaveProperty("id");
+    expect(JSON.stringify(original) + JSON.stringify(decode(f.bundle).predicate)).not.toContain(f.operationId);
+    expect(decode(f.bundle).predicate.operation).not.toHaveProperty("id");
+    await f.check(f.bundle);
   });
 
   it("rejects pending or erroneous provider reads, malformed originals, and nested reconciliations", async () => {

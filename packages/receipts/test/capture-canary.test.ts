@@ -10,7 +10,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { loadPrivateKey, loadPublicKey } from "../src/crypto.ts";
-import { createGateway, createGatewayHost, RECEIPT_META_KEY, type Gateway } from "../src/gateway.ts";
+import { createGateway, createGatewayHost, RECEIPT_META_KEY, RETRY_RECEIPT_META_KEY, type Gateway } from "../src/gateway.ts";
 import { OPERATION_META_KEY } from "../src/operations.ts";
 import { financialFixture } from "../scripts/financial-fixture.ts";
 import { fileLog, type LogSink } from "../src/log-sink.ts";
@@ -102,13 +102,22 @@ describe("the canary", () => {
       const params = { name: "stripe.refund", arguments: { amount: 60, currency: "GBP", note: CANARY }, _meta: { [OPERATION_META_KEY]: id } };
       const first = await session.handleCall(params);
       expect(JSON.stringify(first)).toContain(CANARY);
-      expect(await session.handleCall(params)).toEqual(first);
+      // the retry gets the stored answer and a receipt of its own
+      const retry = await session.handleCall(params);
+      const { [RETRY_RECEIPT_META_KEY]: retryReceipt, ...retryMeta } = retry._meta!;
+      expect({ ...retry, _meta: retryMeta }).toEqual(first);
+      expect(retryReceipt).toEqual(expect.any(String));
       fx.records.values().next().value!.status = "succeeded";
       const closed = await host.reconcile(id);
       expect(bundleText(closed)).not.toContain(CANARY);
       expect(onDisk(fx.receiptsDir, fx.logFile)).not.toContain(CANARY);
       expect(exports.seen.join("\n")).not.toContain(CANARY);
-      expect(exports.spans).toHaveLength(2);
+      // the id is the agent's: a UUID-shaped canary must not reach a statement, a file, the log, or an exporter
+      expect(bundleText(closed)).not.toContain(id);
+      expect(onDisk(fx.receiptsDir, fx.logFile)).not.toContain(id);
+      expect(exports.seen.join("\n")).not.toContain(id);
+      // the call, its retry, and the reconciliation
+      expect(exports.spans).toHaveLength(3);
       const v = verifyBundle(closed, { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], logFile: fx.logFile });
       expect(v.ok, formatReport(v)).toBe(true);
       expect(decode(closed).predicate.operation?.budget).not.toHaveProperty("amount");

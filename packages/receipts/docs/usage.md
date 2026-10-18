@@ -143,7 +143,7 @@ You will not normally run this by hand. The agent host spawns it, as below.
 
 ## Financial operations
 
-For payments, configure `operations` to bind a caller-retained operation UUID to the full call, reserve its amount atomically, and pass an idempotency key to the provider. Existing operations are never forwarded again on retry. API execution and financial settlement have separate statuses; uncertain outcomes hold their reservations until an operator's provider read commits a reconciliation receipt. The [financial operations guide](financial-operations.md) has the config, provider contract, and `agent-custody reconcile` command. [Tutorial 28](../examples/28-financial-operations.ts) runs the lost-response/restart scenario offline.
+For payments, configure `operations` to bind a caller-retained operation UUID to the full call, reserve its amount atomically, and pass an idempotency key to the provider. Existing operations are never forwarded again on retry, and an allowed retry gets a `withheld` receipt of its own. API execution and financial settlement have separate statuses; uncertain outcomes hold their reservations until an operator's provider read commits a reconciliation receipt. The [financial operations guide](financial-operations.md) has the config, provider contract, and `agent-custody reconcile` command. [Tutorial 28](../examples/28-financial-operations.ts) runs the lost-response/restart scenario offline.
 
 ## Private evidence
 

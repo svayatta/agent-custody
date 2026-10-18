@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { GatewayConfigSchema, loadConfig } from "../src/config.ts";
-import { OperationStore, type OperationReservation } from "../src/operations.ts";
+import { OperationStore, ownerAlive, processStamp, type OperationReservation } from "../src/operations.ts";
 import { buildFixture } from "../scripts/fixture.ts";
 
 const database = () => join(mkdtempSync(join(tmpdir(), "custody-operations-")), "operations.sqlite");
@@ -142,6 +142,32 @@ describe("durable financial operation reservations", () => {
   });
 });
 
+describe("operation owner liveness", () => {
+  const own = processStamp(process.pid);
+
+  it("reads a start time for this process, and takes a gone process, or a later process with its PID, for dead", async () => {
+    expect(own).toMatch(/^(proc|ps):./);
+    expect(ownerAlive({ ownerPid: process.pid, ownerStart: own! })).toBe(true);
+    // the same PID, another start time: a restarted container whose gateway is PID 1 again
+    expect(ownerAlive({ ownerPid: process.pid, ownerStart: `${own!.split(":")[0]}:another start` })).toBe(false);
+    const child = spawn(process.execPath, ["-e", ""]);
+    const pid = child.pid!;
+    await new Promise((resolveExit) => child.once("exit", resolveExit));
+    expect(ownerAlive({ ownerPid: pid, ownerStart: own! })).toBe(false);
+    expect(ownerAlive({ ownerPid: pid })).toBe(false);
+  });
+
+  it("waits when the start times cannot be compared", () => {
+    expect(ownerAlive({ ownerPid: process.pid })).toBe(true);
+    expect(ownerAlive({ ownerPid: process.pid, ownerStart: `${own!.startsWith("proc:") ? "ps" : "proc"}:other source` })).toBe(true);
+  });
+
+  it("stamps the creator of a new operation", () => {
+    const store = new OperationStore(database());
+    try { expect(store.reserve(input()).operation.ownerStart).toBe(own); } finally { store.close(); }
+  });
+});
+
 describe("financial operation configuration", () => {
   const config = () => {
     const fx = buildFixture(mkdtempSync(join(tmpdir(), "custody-operation-config-")));
@@ -170,6 +196,8 @@ describe("financial operation configuration", () => {
       (c: any) => { c.facts = [{ name: "balance", tool: "payments.transfer", args: {}, forTools: ["anything"] }]; },
       (c: any) => { c.operations.tools[0].reconcile.failed = ["succeeded"]; },
       (c: any) => { c.operations.tools[0].reconcile.args.key = "$args.secret"; },
+      // the agent's operation id never reaches a receipt, so a lookup template cannot copy it into one
+      (c: any) => { c.operations.tools[0].reconcile.args.key = "$operation.id"; },
       (c: any) => { c.operations.tools[0].reconcile.statusPath = "body..status"; },
       (c: any) => { delete c.logFile; c.log = { url: "https://log.example" }; },
     ];

@@ -174,7 +174,7 @@ const isObj = (v: unknown): v is Record<string, any> => !!v && typeof v === "obj
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const hex64 = (v: unknown) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
 function operationProblem(o: unknown): string | null {
-  if (!isObj(o) || typeof o.id !== "string" || !UUID.test(o.id) || typeof o.originalReceiptId !== "string" || !UUID.test(o.originalReceiptId)) return "operation ids are not UUIDs";
+  if (!isObj(o) || (o.id !== undefined && (typeof o.id !== "string" || !UUID.test(o.id))) || typeof o.originalReceiptId !== "string" || !UUID.test(o.originalReceiptId)) return "operation ids are not UUIDs";
   if (!hex64(o.idempotencyKey) || !hex64(o.lookupDigest)) return "operation idempotencyKey or lookupDigest is not a sha256";
   if (!["submitted", "pending", "confirmed", "failed", "unknown"].includes(String(o.status)) || o.provenance !== "observed") return "operation status or provenance is invalid";
   if (!isObj(o.budget) || typeof o.budget.id !== "string" || !o.budget.id.length || o.budget.id.length > 128 || typeof o.budget.currency !== "string" || !/^[A-Z]{3}$/.test(o.budget.currency) || typeof o.budget.period !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(o.budget.period)) return "operation budget is invalid";
@@ -239,7 +239,7 @@ async function verifyOriginalAuthorization(bundle: Bundle, opts: Options): Promi
 }
 
 const STRUCTURAL_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "authorization", "capture"]);
-const STRUCTURAL_IN: Record<string, Set<string>> = { request: new Set(["argsDigest", "provenance"]), execution: new Set(["status", "provenance"]), policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]), consumed: new Set(["provenance"]), session: new Set(["provenance"]), model: new Set(["provenance"]), operation: new Set(["id", "idempotencyKey", "lookupDigest", "status", "budget", "originalReceiptId", "provenance"]), reconciliation: new Set(["original", "lookup"]) };
+const STRUCTURAL_IN: Record<string, Set<string>> = { request: new Set(["argsDigest", "provenance"]), execution: new Set(["status", "provenance"]), policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]), consumed: new Set(["provenance"]), session: new Set(["provenance"]), model: new Set(["provenance"]), operation: new Set(["idempotencyKey", "lookupDigest", "status", "budget", "originalReceiptId", "provenance"]), reconciliation: new Set(["original", "lookup"]) };
 const pathTextOf = (w: string[]) => w.map((s) => (/^[A-Za-z0-9_$-]+$/.test(s) ? s : JSON.stringify(s))).join(".");
 /** mirrors src/verify.ts structuralProblem: a capture note may never name what a verifier reads to run its checks, and those parts must be what every check assumes */
 export function structuralProblem(p: unknown): string | null {
@@ -302,9 +302,11 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   if (p.operation) {
     add("operation observed by gateway", p.issuer.kind === "gateway" && p.operation.provenance === "observed");
     if (!p.reconciliation) {
-      add("operation names this original receipt", p.operation.originalReceiptId === p.receiptId);
+      // A retry of an existing operation has a receipt of its own. It is withheld (never forwarded again) and names the original.
+      const retry = p.operation.originalReceiptId !== p.receiptId;
+      add("operation names this original receipt", !retry || p.execution.status === "withheld");
       const refused = p.execution.status === "withheld" || p.execution.status === "denied";
-      add("operation awaits provider reconciliation", ["submitted", "pending", "unknown"].includes(p.operation.status) || refused && p.operation.status === "failed");
+      add("operation awaits provider reconciliation", retry || ["submitted", "pending", "unknown"].includes(p.operation.status) || refused && p.operation.status === "failed");
       add("operation carries committed authorization", refused || !!p.authorization);
     }
   }
@@ -455,7 +457,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
     add("reconciliation original evidence verifies", eligible && originalOk);
     const o = original?.operation;
     const op = p.operation;
-    const linked = !!o && !!op && !operationProblem(o) && ["submitted", "pending", "unknown"].includes(o.status) && o.originalReceiptId === original!.receiptId && op.originalReceiptId === original!.receiptId && p.receiptId !== original!.receiptId && op.id === o.id && op.idempotencyKey === o.idempotencyKey && op.lookupDigest === o.lookupDigest && canonicalize(op.budget) === canonicalize(o.budget) && canonicalize(p.principal) === canonicalize(original!.principal) && canonicalize(p.agent) === canonicalize(original!.agent) && canonicalize(p.tool) === canonicalize(original!.tool) && canonicalize(p.delegation) === canonicalize(original!.delegation) && p.issuer.keyid === original!.issuer.keyid && Date.parse(p.timestamp) >= Date.parse(original!.timestamp);
+    const linked = !!o && !!op && !operationProblem(o) && ["submitted", "pending", "unknown"].includes(o.status) && o.originalReceiptId === original!.receiptId && op.originalReceiptId === original!.receiptId && p.receiptId !== original!.receiptId && (op.id === undefined || o.id === undefined || op.id === o.id) && op.idempotencyKey === o.idempotencyKey && op.lookupDigest === o.lookupDigest && canonicalize(op.budget) === canonicalize(o.budget) && canonicalize(p.principal) === canonicalize(original!.principal) && canonicalize(p.agent) === canonicalize(original!.agent) && canonicalize(p.tool) === canonicalize(original!.tool) && canonicalize(p.delegation) === canonicalize(original!.delegation) && p.issuer.keyid === original!.issuer.keyid && Date.parse(p.timestamp) >= Date.parse(original!.timestamp);
     add("reconciliation links the original operation", linked);
     add("reconciliation lookup matches authorization", !!o && (await digestOf(r.lookup)) === o.lookupDigest);
     const lookupArgs = region(["request", "args"]);
@@ -492,7 +494,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
       if (p.operation || ap.operation) {
         const o = p.operation;
         const aop = ap.operation;
-        add("authorization names this operation", !!o && !!aop && !operationProblem(aop) && aop.status === "submitted" && aop.id === o.id && aop.idempotencyKey === o.idempotencyKey && aop.lookupDigest === o.lookupDigest && aop.originalReceiptId === o.originalReceiptId && canonicalize(aop.budget) === canonicalize(o.budget));
+        add("authorization names this operation", !!o && !!aop && !operationProblem(aop) && aop.status === "submitted" && (aop.id === undefined || o.id === undefined || aop.id === o.id) && aop.idempotencyKey === o.idempotencyKey && aop.lookupDigest === o.lookupDigest && aop.originalReceiptId === o.originalReceiptId && canonicalize(aop.budget) === canonicalize(o.budget));
       }
       const ath = await dsseVerify(a.treeHead, [...logKeys, ...opts.issuerKeys]);
       add("authorization tree head signature", ath.ok && a.treeHead.payloadType === TREEHEAD_TYPE, ath.ok ? `keyid ${short(ath.keyid)}` : ath.error);

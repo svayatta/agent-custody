@@ -342,6 +342,8 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
   if (prior) {
     for (const part of SHARED_WITH_AUTHORIZATION) if (own(prior.predicate as unknown as Record<string, unknown>, part)) out[part] = (prior.predicate as unknown as Record<string, unknown>)[part];
     for (const w of prior.predicate.capture?.withheld ?? []) {
+      // a part the receipt does not share (the operation, whose status changes) is withheld again below, once
+      if (!SHARED_WITH_AUTHORIZATION.includes(w[0]!)) continue;
       withheld.push(w);
       const s = ownOf(prior.salts, pathKey(w));
       if (s) salts[pathKey(w)] = s;
@@ -472,13 +474,14 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
         if (!CLEAR_IN.consumed.has(f)) hide(["consumed", f], v, k);
       }
     } else if (key_ === "operation" && isObject(value)) {
-      // Only bounded operation identities and operator configuration are public. In particular, the amount is
-      // never duplicated here: it belongs to the captured request. New fields start private, together at $rest.
-      object(["operation"], value, { clear: new Set(["id", "idempotencyKey", "lookupDigest", "status", "budget", "originalReceiptId", "provenance"]), key: k });
+      // Only gateway-derived identities and operator configuration are public. The id is not: the agent chose it
+      // (a caller may use an order or customer UUID), so it is withheld. The idempotencyKey links the receipts. The
+      // amount is never duplicated here: it belongs to the captured request. New fields start private, together at $rest.
+      object(["operation"], value, { clear: new Set(["idempotencyKey", "lookupDigest", "status", "budget", "originalReceiptId", "provenance"]), key: k });
       if (isObject(value.budget)) object(["operation", "budget"], value.budget, { clear: new Set(["id", "currency", "period"]), key: k });
     } else if (key_ === "reconciliation" && isObject(value)) {
       // original is the immutable, already captured bundle written by this issuer. The lookup consists solely of
-      // operator configuration and the bounded operation id/key; the provider response lives in execution.result.
+      // operator configuration and the gateway-derived idempotency key; the provider response lives in execution.result.
       object(["reconciliation"], value, { clear: new Set(["original", "lookup"]), key: k });
       if (isObject(value.lookup)) object(["reconciliation", "lookup"], value.lookup, { clear: new Set(["tool", "args", "statusPath", "identityPath", "confirmed", "failed"]), key: k });
     } else hide([key_], value, k);
