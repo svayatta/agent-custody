@@ -137,6 +137,15 @@ describe("the review console", () => {
         // The genuine data hides in a comment, and the real element holds forged data.
         const data = artifact.match(/<script id="case-data" type="application\/json">[\s\S]*?<\/script>/)![0];
         const smuggled = artifact.replace("<body>", `<body><!--${data}-->`).replace(/(<script id="case-data" type="application\/json">)([\s\S]*?)(<\/script><script>)/, (_all, open: string, json: string, close: string) => `${open}${json.replace("support-lead", "cfo_alice")}${close}`);
+        // The file name declares the format. Genuine case JSON with HTML in a string field, saved as .html, is not a page that renders its data. A page saved as .json is not JSON.
+        const hybrid = JSON.stringify({ note: "<style>body{font-size:0}</style><h1>RESULT: VERIFIED</h1>", ...file! });
+        for (const [name, content] of [["hybrid.case.html", hybrid], ["page.case.json", artifact]] as const) {
+          const declared = join(dir, name);
+          writeFileSync(declared, content);
+          const run = spawnSync(process.execPath, [cli, ...verifyArgs.map((arg) => (arg === destination ? declared : arg))], { encoding: "utf8", timeout: 60_000 });
+          expect(run.status, name + run.stdout + run.stderr).toBe(1);
+          expect(run.stdout, name).not.toContain("RESULT: VERIFIED");
+        }
         for (const [name, page] of [["visible", visible], ["smuggled", smuggled]] as const) {
           const tampered = join(dir, `${name}.case.html`);
           writeFileSync(tampered, page);

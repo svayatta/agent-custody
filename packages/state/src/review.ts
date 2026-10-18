@@ -258,8 +258,9 @@ export function reviewHandler(o: ReviewOptions): (req: IncomingMessage, res: Ser
         const pack = await buildActionPack(o.receiptsDir, m[1]!, o.ledger);
         return send(200, "text/html; charset=utf-8", renderReceipt(pack, verifyOf(pack.receipt, o), o, "/", `/r/${m[1]}.json`));
       } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") throw e;
-        // A malformed record is shown as NOT VERIFIED with the reason, never as a server error.
+        // A part that is missing or has the wrong type makes a read throw a TypeError. That is a defect of the record.
+        // A ledger or I/O error is not, and it stays an error (404 for a missing file, else 500).
+        if (!(e instanceof TypeError)) throw e;
         return send(200, "text/html; charset=utf-8", renderDamaged(m[1]!, e, "/", `/r/${m[1]}.json`));
       }
     } catch (e) {
@@ -302,7 +303,9 @@ export async function writeReview(o: ReviewOptions, outDir: string): Promise<{ r
       writeFileSync(join(outDir, "r", `${r.file}.case.json`), JSON.stringify(file, null, 2));
       writeFileSync(join(outDir, "r", `${r.file}.case.html`), renderCaseFile(file));
     } catch (e) {
-      // One malformed record must not stop the export. Its page says NOT VERIFIED and why, and it has no case file.
+      // A defect of the record (a TypeError) must not stop the export. Its page says NOT VERIFIED and why, and it has no case file.
+      // A ledger or I/O error is not a defect of the record, and it fails the export.
+      if (!(e instanceof TypeError)) throw e;
       writeFileSync(join(outDir, "r", `${r.file}.html`), renderDamaged(r.file, e, "../index.html", `${r.file}.json`));
       writeFileSync(join(outDir, "r", `${r.file}.json`), readFileSync(join(o.receiptsDir, `${r.file}.json`), "utf8"));
     }

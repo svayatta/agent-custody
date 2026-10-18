@@ -104,11 +104,10 @@ export async function buildCaseFile(options: CaseFileOptions, receiptId: string)
   return file;
 }
 
-/** Reads a case file from its JSON text, or from the `case-data` script of a rendered `.case.html`. It does not validate: `verifyCaseFile` does. */
-export function parseCaseFile(text: string): CaseFile {
-  if (!/^\s*</.test(text)) return JSON.parse(text);
-  // The renderer escapes every "<" in the data, so the first closing tag ends the data. A browser reads the first element with this id too.
-  const data = /<script id="case-data" type="application\/json">([\s\S]*?)<\/script>/.exec(text)?.[1];
+/** Reads the case file from the `case-data` script of a rendered `.case.html`. It does not validate: `verifyCaseFile` does. */
+export function parseCaseHtml(html: string): CaseFile {
+  // The renderer escapes every "<" in the data, so the first closing tag ends the data.
+  const data = /<script id="case-data" type="application\/json">([\s\S]*?)<\/script>/.exec(html)?.[1];
   if (data === undefined) throw new Error("this HTML file has no case-data script");
   return JSON.parse(data);
 }
@@ -176,7 +175,7 @@ export function verifyCaseFile(file: CaseFile, trustedKeys?: CaseFileOptions["ke
  * build of this package fails as well; then the reader trusts the rebuilt `answers` and not the page.
  */
 export function verifyCaseHtml(html: string, trustedKeys?: CaseFileOptions["keys"]): CaseFileVerification {
-  const file = parseCaseFile(html);
+  const file = parseCaseHtml(html);
   const result = verifyCaseFile(file, trustedKeys);
   let same = false;
   try { same = renderCaseFile(file) === html; }

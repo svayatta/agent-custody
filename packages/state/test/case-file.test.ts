@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { createIssuer, generateKeyPair, publicKeyFromPem, type ReceiptBundle } from "@agent-custody/receipts";
-import { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile, verifyCaseHtml, type CaseFile } from "../src/case-file.ts";
+import { buildCaseFile, parseCaseHtml, renderCaseFile, verifyCaseFile, verifyCaseHtml, type CaseFile } from "../src/case-file.ts";
 import { decodeStatement, formatExplain } from "../src/explain.ts";
 import { Ledger } from "../src/ledger.ts";
 
@@ -132,7 +132,7 @@ describe("offline case files", () => {
       const forged = structuredClone(file);
       forged.explanation = forged.explanation.replace(pattern, replacement);
       expect(forged.explanation).not.toBe(file.explanation);
-      for (const result of [verifyCaseFile(forged), verifyCaseFile(forged, keys), verifyCaseFile(parseCaseFile(renderCaseFile(forged)))]) {
+      for (const result of [verifyCaseFile(forged), verifyCaseFile(forged, keys), verifyCaseFile(parseCaseHtml(renderCaseFile(forged)))]) {
         expect(result.ok).toBe(false);
         expect(answers(result).ok).toBe(false);
         expect(result.receipts[file.receiptId]!.ok).toBe(true);
@@ -143,10 +143,9 @@ describe("offline case files", () => {
   it("reads a rendered HTML case through the same checks, and tells a reader that the page does not check itself", async () => {
     const { file, keys } = await fixture();
     const html = renderCaseFile(file);
-    expect(parseCaseFile(html)).toEqual(file);
-    expect(parseCaseFile(JSON.stringify(file))).toEqual(file);
-    expect(verifyCaseFile(parseCaseFile(html), keys).ok).toBe(true);
-    expect(() => parseCaseFile("<!doctype html><p>nothing here</p>")).toThrow("no case-data script");
+    expect(parseCaseHtml(html)).toEqual(file);
+    expect(verifyCaseFile(parseCaseHtml(html), keys).ok).toBe(true);
+    expect(() => parseCaseHtml("<!doctype html><p>nothing here</p>")).toThrow("no case-data script");
     expect(html).toContain("This page does not check itself independently");
     expect(html).toContain("--verify-case &lt;this file&gt;");
     expect((await runBrowser(html)).report).toContain("NOT CHECKED here: the ten answers");
@@ -154,7 +153,7 @@ describe("offline case files", () => {
     const forged = structuredClone(file);
     forged.explanation = forged.explanation.replace(/^(WHO AUTHORIZED IT\s+).*$/m, "$1cfo_alice");
     expect(forged.explanation).not.toBe(file.explanation);
-    expect(verifyCaseFile(parseCaseFile(renderCaseFile(forged)), keys).ok).toBe(false);
+    expect(verifyCaseFile(parseCaseHtml(renderCaseFile(forged)), keys).ok).toBe(false);
   });
 
   it("fails a page whose visible text or number of data copies differs from its data, and prints the rebuilt answers", async () => {
@@ -176,7 +175,7 @@ describe("offline case files", () => {
     lie.explanation = lie.explanation.replace(/^(WHO AUTHORIZED IT\s+).*$/m, "$1cfo_alice (manual sign-off)");
     const data = html.match(/<script id="case-data" type="application\/json">[\s\S]*?<\/script>/)![0];
     const smuggled = renderCaseFile(lie).replace("<body>", `<body><!--${data}-->`);
-    expect(parseCaseFile(smuggled)).toEqual(file);
+    expect(parseCaseHtml(smuggled)).toEqual(file);
     expect(verifyCaseHtml(smuggled, keys).ok).toBe(false);
   });
 

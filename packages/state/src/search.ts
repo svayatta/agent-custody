@@ -48,6 +48,7 @@ const object = (value: unknown): value is Record<string, unknown> => value !== n
 // searched, and the result says `truncated`, so that a reader never mistakes a skipped value for an absent one.
 const MAX_DEPTH = 64;
 const MAX_JSON_TEXT = 65_536;
+const JSON_START = /^\s*[\[{]/;
 interface Trie { end: boolean; kids: Map<string, Trie> }
 const HIDDEN = Symbol("hidden");
 
@@ -98,13 +99,13 @@ export function receiptSearchTerms(predicate: Predicate): { transactionIds: stri
   // `at` is the trie node of the value's path. It is never a withheld node. It is undefined when no withheld path runs below.
   const walk = (value: unknown, at: Trie | undefined, result: boolean, depth: number): void => {
     if (depth > MAX_DEPTH) {
-      if (value !== null && typeof value === "object") truncated = true;
+      if ((value !== null && typeof value === "object") || (typeof value === "string" && JSON_START.test(value))) truncated = true;
       return;
     }
     if (typeof value === "string") {
       // JSON.parse only accepts the entire text. A sentence that happens to mention an id is not an identifier.
-      if (value.length > MAX_JSON_TEXT && /^\s*[\[{]/.test(value)) truncated = true;
-      else if (/^\s*[\[{]/.test(value)) {
+      if (value.length > MAX_JSON_TEXT && JSON_START.test(value)) truncated = true;
+      else if (JSON_START.test(value)) {
         try {
           walk(JSON.parse(value), at, result, depth + 1);
         } catch {

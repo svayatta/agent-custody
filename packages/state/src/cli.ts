@@ -18,7 +18,7 @@ import { loadScenarios, signReport, verifyReport } from "./evals-file.ts";
 import { buildPack, formatPack, signPack, verifyPack } from "./pack.ts";
 import { buildActionPack, formatExplain, signActionPack, verifyActionPack } from "./explain.ts";
 import { serveReview, writeReview } from "./review.ts";
-import { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile, verifyCaseHtml } from "./case-file.ts";
+import { buildCaseFile, renderCaseFile, verifyCaseFile, verifyCaseHtml } from "./case-file.ts";
 import { validateReceiptSearch } from "./search.ts";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -240,7 +240,8 @@ async function main(argv: string[]): Promise<number> {
       const keys = hasKeys ? { issuerKeys: (values["issuer-key"] ?? []).map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), ...(values["log-key"]?.length ? { logKeys: values["log-key"].map(loadPublicKey) } : {}), ...(values["upstream-key"]?.length ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}), ...(values["log-id"] ? { logId: values["log-id"] } : {}) } : undefined;
       if (values["verify-case"]) {
         const text = readFileSync(values["verify-case"], "utf8");
-        const result = /^\s*</.test(text) ? verifyCaseHtml(text, keys) : verifyCaseFile(parseCaseFile(text), keys);
+        // The file name says which format the reader gets: a browser renders .html as HTML whatever it starts with.
+        const result = /\.x?html?$/i.test(values["verify-case"]) ? verifyCaseHtml(text, keys) : verifyCaseFile(JSON.parse(text), keys);
         if (values.json) console.log(JSON.stringify(result, null, 2));
         else {
           for (const c of result.checks) console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? `  (${c.detail})` : ""}`);

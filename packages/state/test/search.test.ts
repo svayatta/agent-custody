@@ -140,7 +140,7 @@ describe("receipt search", () => {
 });
 
 describe("search cost on hostile input", () => {
-  const nest = (depth: number, inner: unknown) => {
+  const nest = (depth: number, inner: Record<string, unknown>) => {
     let value = inner;
     for (let i = 0; i < depth; i++) value = { next: value };
     return value;
@@ -171,6 +171,12 @@ describe("search cost on hostile input", () => {
     expect(receiptSearchTerms(predicate({ a: nest(10, { customer_id: "customer-1" }) }))).not.toHaveProperty("truncated");
     expect(receiptSearchTerms(predicate({ note: "x".repeat(100_000) }))).not.toHaveProperty("truncated");
     expect(receiptSearchTerms(predicate({ a: nest(300, {}) })).truncated).toBe(true);
+    // JSON text on each side of the depth cap: the text is searched, or the result says that it is not.
+    const text = JSON.stringify({ payment_intent: "pi_text" });
+    expect(receiptSearchTerms(predicate(nest(60, { note: text })))).toEqual({ transactionIds: ["pi_text"], customerIds: [] });
+    for (const depth of [63, 64, 65]) expect(receiptSearchTerms(predicate(nest(depth, { note: text }))).truncated, `string at ${depth}`).toBe(true);
+    expect(receiptSearchTerms(predicate(nest(63, { notes: [text] }))).truncated).toBe(true);
+    expect(receiptSearchTerms(predicate(nest(64, { note: "plain prose" }))).truncated).toBeUndefined();
     expect(receiptSearchTerms(predicate({}, { content: [{ type: "text", text: `[${" ".repeat(70_000)}]` }] })).truncated).toBe(true);
     expect(receiptSearchTerms(predicate({ memo: "[".repeat(200) + "]".repeat(200) })).truncated).toBe(true);
   });

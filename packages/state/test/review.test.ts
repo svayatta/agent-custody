@@ -206,6 +206,27 @@ describe("a record that was changed after it was issued", () => {
     }
   });
 
+  it("keeps a ledger outage an error: the export fails and the live page answers 500, never a NOT VERIFIED page", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "review-outage-"));
+    const bundle = structuredClone(vector.bundle) as ReceiptBundle;
+    const id = decodeStatement(bundle).predicate.receiptId;
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify(bundle));
+    const down = () => Promise.reject(new Error("connect ECONNREFUSED 127.0.0.1:5432"));
+    const ledger = { get: down, facts: down, history: down } as unknown as Ledger;
+    const o = { receiptsDir: dir, keys, ledger };
+
+    await expect(writeReview(o, join(dir, "site"))).rejects.toThrow("ECONNREFUSED");
+    expect(existsSync(join(dir, "site", "r", `${id}.html`))).toBe(false);
+    const running = await serveReview(o, { port: 0 });
+    try {
+      const res = await fetch(new URL(`r/${id}`, running.url));
+      expect(res.status).toBe(500);
+      expect(await res.text()).toContain("ECONNREFUSED");
+    } finally {
+      await running.close();
+    }
+  });
+
   it("keeps a receipt with a value too large to search in the list, marked, when an id filter would drop it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "review-partial-"));
     const bundle = structuredClone(vector.bundle) as ReceiptBundle;
