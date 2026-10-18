@@ -5,6 +5,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { digestOf, dsseSign, dsseVerify, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
+import { isCommitment, type Commitment } from "./capture.ts";
 
 export const UPSTREAM_SIG_META_KEY = "agent-custody/upstream-signature";
 export const UPSTREAM_TYPE = "application/vnd.agent-custody.upstream+json";
@@ -55,21 +56,23 @@ export function checkUpstream(envelope: Envelope, keys: PublicKeyRef[], expected
 
 export interface ProviderAttestation {
   provider: "stripe-webhook" | "github-delivery";
-  /** the delivery body exactly as received; the HMAC is over these bytes */
-  rawBody: string;
-  /** Stripe: the Stripe-Signature header; GitHub: the X-Hub-Signature-256 header */
-  signature: string;
-  /** dot path into the parsed body whose value must appear in the receipt's result, e.g. data.object.id */
-  bind: string;
+  /** the delivery body exactly as received; the HMAC is over these bytes. Under a private capture rule the receipt carries a commitment here instead, and the body is disclosed or revealed to check the delivery (capture.ts) */
+  rawBody: string | Commitment;
+  /** Stripe: the Stripe-Signature header; GitHub: the X-Hub-Signature-256 header. A MAC over the body: withheld with it under a private rule */
+  signature: string | Commitment;
+  /** dot path into the parsed body whose value must appear in the receipt's result, e.g. data.object.id; upstream-chosen, withheld with the body under a private rule */
+  bind: string | Commitment;
   /** GitHub: the X-GitHub-Delivery id, for the record */
   deliveryId?: string;
 }
 
-export type UpstreamEvidence = { envelope: Envelope } | ProviderAttestation;
+/** under a private result rule the envelope, or the delivery body, is a commitment in the receipt, restored by the verifier with the result */
+export type UpstreamEvidence = { envelope: Envelope | Commitment } | ProviderAttestation;
 
 export function isProviderAttestation(v: unknown): v is ProviderAttestation {
   const p = v as Partial<ProviderAttestation> | null;
-  return !!p && (p.provider === "stripe-webhook" || p.provider === "github-delivery") && typeof p.rawBody === "string" && typeof p.signature === "string" && typeof p.bind === "string";
+  const stringOrCommitment = (v: unknown) => typeof v === "string" || isCommitment(v);
+  return !!p && (p.provider === "stripe-webhook" || p.provider === "github-delivery") && stringOrCommitment(p.rawBody) && stringOrCommitment(p.signature) && stringOrCommitment(p.bind);
 }
 
 /** For upstreams wrapping a provider: attaches the provider's own delivery for this call. */
@@ -103,12 +106,15 @@ const pathValue = (body: unknown, path: string): unknown => path.split(".").redu
 
 /** Stripe: header `t=<unix>,v1=<hex>`, HMAC-SHA256 over `<t>.<rawBody>`; GitHub: header `sha256=<hex>` over rawBody. */
 export function checkProvider(att: ProviderAttestation, secrets: ProviderSecrets, ctx: ProviderCheckContext): UpstreamCheck {
+  if (typeof att.rawBody !== "string" || typeof att.signature !== "string" || typeof att.bind !== "string") return { ok: false, error: "the delivery body, signature, or bind is withheld; disclose them or give the capture key" };
+  const signature = att.signature;
+  const bind = att.bind;
   const secret = att.provider === "stripe-webhook" ? secrets.stripe : secrets.github;
   if (!secret) return { ok: false, error: `no ${att.provider === "stripe-webhook" ? "Stripe" : "GitHub"} secret given` };
   const hmac = (data: string) => createHmac("sha256", secret).update(data).digest("hex");
   const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
   if (att.provider === "stripe-webhook") {
-    const parts = Object.fromEntries(att.signature.split(",").map((kv) => kv.split("=") as [string, string]));
+    const parts = Object.fromEntries(signature.split(",").map((kv) => kv.split("=") as [string, string]));
     const t = parts.t;
     const v1 = parts.v1;
     if (!t || !v1) return { ok: false, error: "Stripe-Signature header lacks t or v1" };
@@ -116,7 +122,7 @@ export function checkProvider(att: ProviderAttestation, secrets: ProviderSecrets
     const skew = Math.abs(Number(t) * 1000 - Date.parse(ctx.timestamp)) / 1000;
     if (!(skew <= (ctx.toleranceSeconds ?? 300))) return { ok: false, error: `Stripe timestamp is ${Math.round(skew)}s from the receipt, beyond tolerance` };
   } else {
-    const hex = att.signature.startsWith("sha256=") ? att.signature.slice(7) : "";
+    const hex = signature.startsWith("sha256=") ? signature.slice(7) : "";
     if (!hex || !equal(hmac(att.rawBody), hex)) return { ok: false, error: "GitHub signature does not verify with this secret" };
   }
   let body: unknown;
@@ -125,10 +131,12 @@ export function checkProvider(att: ProviderAttestation, secrets: ProviderSecrets
   } catch {
     return { ok: false, error: "delivery body is not JSON" };
   }
-  const bound = pathValue(body, att.bind);
-  if (bound === undefined || bound === null || bound === "") return { ok: false, error: `delivery has no value at ${att.bind}` };
-  if (!JSON.stringify(ctx.result).includes(JSON.stringify(bound).replace(/^"|"$/g, ""))) return { ok: false, error: `delivery's ${att.bind} (${String(bound)}) does not appear in the receipt's result` };
-  return { ok: true, keyid: `shared secret (${att.provider}, bound on ${att.bind})` };
+  const bound = pathValue(body, bind);
+  if (bound === undefined || bound === null || bound === "") return { ok: false, error: `delivery has no value at ${bind}` };
+  // what the agent received: the content and the flag, never _meta, which carries the delivery itself and so always contains the bound value
+  const received = ctx.result as { content: unknown; isError?: boolean; structuredContent?: unknown };
+  if (!JSON.stringify({ content: received.content, isError: received.isError, structuredContent: received.structuredContent }).includes(JSON.stringify(bound).replace(/^"|"$/g, ""))) return { ok: false, error: `delivery's ${bind} (${String(bound)}) does not appear in the receipt's result` };
+  return { ok: true, keyid: `shared secret (${att.provider}, bound on ${bind})` };
 }
 
 /** For fake providers and tests: a Stripe-Signature header for a body at a time. */

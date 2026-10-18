@@ -57,10 +57,13 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
 function handle(name: string, a: Record<string, unknown>): CallToolResult {
   switch (name) {
     case "customer.lookup": {
+      // an id starting with cust_throw makes the server throw, as many MCP servers do on a failure, instead of answering isError
+      if (String(a.customer_id).startsWith("cust_throw")) throw new Error(`no customer ${String(a.customer_id)}`);
       const c = CUSTOMERS[String(a.customer_id)];
       return c ? json(c) : fail(`no such customer ${String(a.customer_id)}`);
     }
     case "stripe.refund":
+      if (a.reason === "decline") throw new Error(`refund declined for ${String(a.customer_id)}`);
       return json({ refund_id: `re_${randomUUID().slice(0, 8)}`, customer_id: a.customer_id, amount: a.amount, status: "succeeded" });
     case "stripe.payout":
       return json({ payout_id: `po_${randomUUID().slice(0, 8)}`, amount: a.amount, status: "paid" });

@@ -5,7 +5,7 @@ A receipt is verified with public keys alone: no server, no account, no trust in
 ## `verify`
 
 ```bash
-agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub [--log-key log.pub | --log-url https://log.example.com/] [--log-id acme] [--upstream-key upstream.pub] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log log.jsonl] [--json]
+agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub [--log-key log.pub | --log-url https://log.example.com/] [--log-id acme] [--upstream-key upstream.pub] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log log.jsonl] [--disclose disclosure.json] [--capture-key-env NAME] [--json]
 ```
 
 | option | meaning |
@@ -17,6 +17,8 @@ agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principa
 | `--upstream-key` | an upstream that signs its results; the execution then verifies as attested |
 | `--stripe-secret-env`, `--github-secret-env` | shared secrets for provider deliveries carried in the receipt |
 | `--log` | a copy of the log file; the root is recomputed at the receipt's tree size and compared |
+| `--disclose` | a disclosure file: `{ "receiptId", … }` with `{ "$custody": "disclosed", "salt", "value" }` at the paths a capture rule withheld (`request.args.$rest`, `execution.result.$rest`, `execution.error`, `execution.upstream.rawBody`, `execution.upstream.signature`, `execution.upstream.bind`, `execution.upstream.envelope`, `policy.errors`, `facts.<name>.value.$rest`, `facts.<name>.args.<field>`, `facts.<name>.resultDigest`, `consumed.factIds`, `model.id`, `session.id`), any part of them, as `reveal` writes it or as the party that holds the values and the salts hands it over; each value is checked against its commitment under its salt and the digests are recomputed; a value without its salt, or a file for another receipt, is refused |
+| `--capture-key-env` | the environment variable holding the customer's capture key; encrypted fields are decrypted, checked against their commitments, and the digests recomputed; a key that is not theirs fails the checks, naming the key id |
 | `--json` | machine-readable output |
 
 Exit 0 when every check passes, 1 otherwise. The text report is one line per check, `PASS`/`FAIL`, the name, and a detail, ending in `RESULT: VERIFIED` or `RESULT: NOT VERIFIED`. The JSON:
@@ -25,7 +27,7 @@ Exit 0 when every check passes, 1 otherwise. The text report is one line per che
 { "ok": true, "checks": [{ "name": "receipt signature (issuer key)", "ok": true, "detail": "keyid 9d442884f3d4" }, { "name": "delegation signature (principal key)", "ok": true, "detail": "signed by 19b2d2a2a213" }, …], "statement": { "…": "the decoded statement" } }
 ```
 
-In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKeys?, providerSecrets?, logFile?, logId? }): { ok, checks, statement }` and `formatReport(result): string`. Keys are `PublicKeyRef`s from `loadPublicKey(path)` or `publicKeyFromPem(pem)`; `fetchLogKeys(url)` returns `{ doc, keys }` from a key document.
+In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKeys?, providerSecrets?, logFile?, logId?, disclosed?, captureKey? }): { ok, checks, statement }` and `formatReport(result): string`. Keys are `PublicKeyRef`s from `loadPublicKey(path)` or `publicKeyFromPem(pem)`; `fetchLogKeys(url)` returns `{ doc, keys }` from a key document.
 
 ### The checks
 
@@ -33,6 +35,7 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | --- | --- |
 | receipt signature (issuer key) | the bundle was signed by a trusted issuer key; nothing else is decided if this fails |
 | receipt payload type | it is an in-toto statement with the receipt predicate type |
+| structural parts in clear | the capture note, if any, is well formed and names no structural part (ids, the tool, the grant, the status, the decision, the digests, a fact's tool, a provider's name), and those parts are what every later check assumes; nothing else is decided if this fails |
 | issuer kind is known, issuer keyid matches signer | the receipt says who issued it and the signature agrees |
 | gateway receipt carries a delegation, carries a policy decision | gateway receipts embed both |
 | delegation signature (principal key) | the grant was signed by a trusted principal key |
@@ -40,13 +43,42 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | delegation binds principal and agent, valid at receipt time | the grant is for this principal and agent and the receipt's time is inside its window |
 | executed tool within delegated scope | if the tool ran, the grant covered it |
 | principal is claimed, not attested | SDK receipts: the principal is a config string and labelled so |
-| request args digest | the arguments match their digest and the statement's subject |
-| execution result digest, upstream signature, provider delivery | the result matches its digest; the upstream's signature over it verifies when a key is given; a Stripe or GitHub delivery verifies when its secret is given |
+| disclosure names this receipt | only with `--disclose`: the file's `receiptId` is this receipt's |
+| request args digest | the arguments match their digest (salted from the field salts when any argument is withheld) and the statement's subject: recomputed when they are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when values are withheld and neither is given it passes as committed, the detail saying "committed, not recomputed" and how many values are withheld; a path the note names that holds no commitment, or a disclosure that contradicts a commitment, fails it with the path named |
+| execution result digest | executed and failed calls: the result matches `execution.resultDigest` (salted from the field salts when any part is withheld), under the same rules |
+| fact `<name>` value, fact `<name>` args | a captured fact's commitments hold against the disclosed or decrypted value, or pass as committed when neither is given |
+| withheld `<path>` | every other path the capture note names (`execution.error`, `execution.reason`, `policy.errors`, `execution.upstream.rawBody`, a part added later): it holds a commitment, which holds against the disclosed or decrypted value when one is given |
+| upstream signature (upstream key), upstream signature (provider secret) | the upstream's signature over the result verifies when a key is given; a Stripe or GitHub delivery verifies when its secret is given |
+| upstream signature (upstream key) | the upstream's signature over the result verifies when a key is given; a withheld envelope beside a result in clear fails it rather than skipping it, since the issuer keeps a plain attestation in clear beside a clear result; a result whose only withheld part is `_meta` counts as in clear here, since the signature covers the content and `isError`, never `_meta` |
+| upstream signature not checked | only when the result, the delivery body, its signature or bind, or (with the result withheld) the upstream's signed envelope is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |
 | policy decision consistent with execution | an enforced `deny` never sits beside `executed`; a `deny` with `enforced: false` (observe mode) may, and the detail says so |
 | authorization … (five checks) | pre-committed calls: the authorization verifies, names this call, was allowed, is included in the log, and precedes the receipt leaf |
 | tree head signature, tree head names the expected log | the head was signed by an issuer or log key, and by the log the verifier expected |
 | log inclusion proof | the leaf is in the tree the head describes |
 | log file root matches | with `--log`, the copy's root at that size equals the head's |
+
+## `reveal`
+
+The values a receipt withheld under a capture rule in mode `encrypted`, as a disclosure file for `verify --disclose`. Needs the customer's capture key.
+
+```bash
+agent-custody reveal receipts/<id>.json --capture-key-env AGENT_CUSTODY_CAPTURE_KEY --issuer-key keys/gateway.pub [--out disclosure.json] [--include-salts]
+```
+
+| option | meaning |
+| --- | --- |
+| `--capture-key-env` | the environment variable holding the 32-byte key, 64 hex characters or 44 of base64; never the key itself |
+| `--issuer-key` | the issuer's public key; the bundle must verify against it, or nothing is revealed (repeatable) |
+| `--out` | where to write the disclosure; without it, stdout |
+| `--include-salts` | also write the salt of every value the key cannot reveal, from the salts file beside the receipt, for the holder of the values to complete |
+
+Output: `{ "receiptId", … }` with every encrypted value decrypted, checked against its commitment, and written at its own path with the salt the commitment was made with:
+
+```json
+{ "receiptId": "36c85dc9-…", "request": { "args": { "$rest": { "$custody": "disclosed", "salt": "9f3a…", "value": { "reason": "customer called from +44 20 7946 0000 about the card ending 4242" } } } }, "facts": { "customer": { "value": { "$rest": { "$custody": "disclosed", "salt": "…", "value": { "id": "cust_123", "email": "alex@example.com", "verified": true } } } } } }
+```
+
+A value withheld as a digest only carries nothing to reveal, and the command says which paths (`Not revealed, withheld without a value: execution.result.$rest, execution.upstream.envelope; only the party that holds them can disclose them; --include-salts writes their salts from receipts/salts/<id>.json for the holder to complete`). A key other than the one the values were encrypted under is reported as such (`Encrypted under key <keyid>…, not the one given`), and the command fails when that is all it found. With `--include-salts` and the issuer's salts file beside the receipt, it writes `{ "$custody": "disclosed", "salt" }` at each such path for the holder to add `value` to; a file carrying a salt without a value fails verification, so it cannot be handed over unfinished. A key other than the one a value was encrypted under reveals nothing of it, and the path is listed the same way; a decrypted value that does not match its commitment is an error. Exit 0; with `--out` the command prints where the file went and the `verify --disclose` option that reads it. In code: `restorePaths(predicate, note, disclosed?, key?)` and `reveal(commitment, key)`, on the [SDK](./sdk-typescript#private-evidence) page.
 
 ## `audit`
 

@@ -1,5 +1,6 @@
 // The receipt: an in-toto Statement whose predicate records one tool call with per-field provenance.
 import type { Envelope } from "./crypto.ts";
+import type { CaptureNote, Commitment } from "./capture.ts";
 import type { InclusionProof } from "./log.ts";
 import type { PolicyDecision } from "./policy.ts";
 import type { UpstreamEvidence } from "./upstream.ts";
@@ -28,8 +29,10 @@ export type IssuerKind = "gateway" | "sdk";
 export interface FactRecord {
   tool: string;
   args: Record<string, unknown>;
+  /** the value as recorded; under a capture rule, commitments where fields were withheld (the receipt's `capture` note names them) */
   value: unknown;
-  resultDigest: string;
+  /** the digest of the lookup's full result; under a capture rule a commitment to that result (the receipt shows only the selected value, the rest is private), named in the `capture` note */
+  resultDigest: string | Commitment;
   provenance: "observed";
 }
 
@@ -46,6 +49,7 @@ export interface ReceiptPredicate {
   model: { id: string | null; provenance: "claimed" };
   /** upstream names which of several upstreams served the tool; absent when the gateway has one */
   tool: { name: string; provenance: Provenance; upstream?: string };
+  /** `args` as the receipt carries them; `argsDigest` is over the whole call's arguments, salted from the field salts when any are withheld. Withheld fields hold commitments. */
   request: { args: Record<string, unknown>; argsDigest: string; provenance: "claimed" };
   facts: Record<string, FactRecord>;
   /**
@@ -53,9 +57,9 @@ export interface ReceiptPredicate {
    * in its result _meta under "agent-custody/facts" on an earlier call in the session. Observed, because the gateway
    * saw those results itself. Absent on SDK receipts. This is what the agent relied on, as an upper bound.
    */
-  consumed?: { factIds: string[]; provenance: "observed" };
-  /** null when the issuer evaluated no policy. */
-  policy: (PolicyDecision & { provenance: Provenance }) | null;
+  consumed?: { factIds: string[] | Commitment; provenance: "observed" };
+  /** null when the issuer evaluated no policy. Under a capture rule a non-empty `errors` is a commitment: the evaluator's messages can repeat a withheld value. */
+  policy: (Omit<PolicyDecision, "errors"> & { errors: string[] | Commitment; provenance: Provenance }) | null;
   /**
    * Present when the tool is one the gateway treats as consequential: the authorization statement it committed to the
    * log before forwarding the call, with that leaf's inclusion proof and tree head. A verifier checks that it names
@@ -66,20 +70,26 @@ export interface ReceiptPredicate {
   execution:
     | {
         status: "executed" | "failed";
+        /** the result as the receipt carries it; `resultDigest` is over the whole result, salted from the field salts when any are withheld */
         result: unknown;
         resultDigest: string;
         provenance: Provenance;
         /** an upstream's own signature over what it returned, bound to this receipt and checked with the upstream's key; or a provider's delivery, checked with the provider's shared secret */
         upstream?: UpstreamEvidence;
       }
-    | { status: "denied"; reason: string; provenance: Provenance }
-    | { status: "error"; error: string; provenance: Provenance }
+    | { status: "denied"; reason: string | Commitment; provenance: Provenance }
+    | { status: "error"; error: string | Commitment; provenance: Provenance }
     /** the policy allowed the call but the gateway did not forward it, because the log would not commit the authorization first */
-    | { status: "withheld"; reason: string; provenance: Provenance };
+    | { status: "withheld"; reason: string | Commitment; provenance: Provenance };
+  /**
+   * Private evidence: present when a capture rule withheld anything. Names every path in this predicate that holds a
+   * commitment in place of its value, and the mode. A verifier trusts this note, not the shape of the data.
+   */
+  capture?: CaptureNote;
 }
 
 /** What the gateway commits before a consequential call goes out: everything the receipt will say, except the outcome. */
-export type AuthorizationPredicate = Pick<ReceiptPredicate, "receiptId" | "timestamp" | "issuer" | "principal" | "agent" | "delegation" | "tool" | "request" | "facts" | "consumed" | "policy">;
+export type AuthorizationPredicate = Pick<ReceiptPredicate, "receiptId" | "timestamp" | "issuer" | "principal" | "agent" | "delegation" | "tool" | "request" | "facts" | "consumed" | "policy" | "capture">;
 
 export interface AuthorizationStatement {
   _type: "https://in-toto.io/Statement/v1";
