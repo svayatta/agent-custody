@@ -471,6 +471,16 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
         if (f === "factIds" && Array.isArray(v) && v.length === 0) continue;
         if (!CLEAR_IN.consumed.has(f)) hide(["consumed", f], v, k);
       }
+    } else if (key_ === "operation" && isObject(value)) {
+      // Only bounded operation identities and operator configuration are public. In particular, the amount is
+      // never duplicated here: it belongs to the captured request. New fields start private, together at $rest.
+      object(["operation"], value, { clear: new Set(["id", "idempotencyKey", "lookupDigest", "status", "budget", "originalReceiptId", "provenance"]), key: k });
+      if (isObject(value.budget)) object(["operation", "budget"], value.budget, { clear: new Set(["id", "currency", "period"]), key: k });
+    } else if (key_ === "reconciliation" && isObject(value)) {
+      // original is the immutable, already captured bundle written by this issuer. The lookup consists solely of
+      // operator configuration and the bounded operation id/key; the provider response lives in execution.result.
+      object(["reconciliation"], value, { clear: new Set(["original", "lookup"]), key: k });
+      if (isObject(value.lookup)) object(["reconciliation", "lookup"], value.lookup, { clear: new Set(["tool", "args", "statusPath", "identityPath", "confirmed", "failed"]), key: k });
     } else hide([key_], value, k);
   }
   if (withheld.length) out.capture = { mode, withheld } satisfies CaptureNote;

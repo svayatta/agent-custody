@@ -10,7 +10,8 @@ Two producers, one receipt format, one verifier.
 Anyone holding the public keys can verify a receipt offline. The agent is not trusted. The layer around it is, and the receipt says exactly how far that trust extends, starting with who issued it. What the receipt file carries of a call is a choice per tool: a field can be withheld as a commitment or encrypted under your key, and the verifier recomputes the digests when it is shown the values.
 
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
-- [Tutorials](docs/tutorials.md): twenty-seven runnable examples, one per aspect of the code, all executed by the test suite
+- [Tutorials](docs/tutorials.md): twenty-eight runnable examples, one per aspect of the code, all executed by the test suite
+- [Financial operations](docs/financial-operations.md): durable operation ids, provider idempotency keys, atomic daily budget reservations, and reconciliation receipts for uncertain outcomes
 - [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop, and the gateway as an A2A agent between agents that delegate to each other, and private evidence: what the receipt file carries of each call
 - [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin and Google ADK callbacks through the Python package, and wrapping tool functions in anything else
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples
@@ -246,6 +247,7 @@ src/delegation.ts  signed delegation grants
 src/receipt.ts     receipt and authorization statement types and provenance labels
 src/issue.ts       sign, log, and write a receipt, or commit an authorization first; shared by both producers
 src/gateway.ts     the MCP proxy: a host (key, policy, upstreams, log) and a session per grant; scope check, facts, policy, forward, receipt
+src/operations.ts  SQLite operation claims and daily budget reservations, retained across retries and process crashes
 src/gateway-http.ts the gateway over Streamable HTTP: one process, a session per connection, each under the grant it presents
 src/sdk/index.ts   the interceptor: policy decision, record, wrap(tool fn)
 src/sdk/claude.ts  Claude Code command hook and Claude Agent SDK in-process hooks
@@ -276,6 +278,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Done**
 
+- Financial operations: stable caller-retained UUIDs, provider idempotency keys, atomic budget reservations across processes, explicit financial outcomes beside API execution, and provider-bound reconciliation receipts; fault tests kill the gateway after acceptance and verify that a restart never repeats the refund.
 - Gateway: MCP proxy, signed delegation, gateway-fetched facts, Cedar policy, denial receipts, Merkle log, offline verifier.
 - Receipt schema carries the issuer kind, so a verifier reads gateway versus SDK before anything else.
 - SDK core: policy decision, record, and a generic `wrap(tool, fn)` for any framework whose tools are functions.

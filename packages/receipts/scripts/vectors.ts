@@ -15,6 +15,9 @@ import { RECEIPT_TYPE, type ReceiptBundle, type ReceiptStatement } from "../src/
 import { createSdkIssuer } from "../src/sdk/index.ts";
 import { verifyBundle, type VerifyOptions } from "../src/verify.ts";
 import { buildFixture, buildSdkFixture } from "./fixture.ts";
+import { financialFixture } from "./financial-fixture.ts";
+import { OPERATION_META_KEY } from "../src/operations.ts";
+import { randomUUID } from "node:crypto";
 
 const out = join(import.meta.dirname, "..", "vectors");
 const decode = (b: ReceiptBundle) => JSON.parse(Buffer.from(b.envelope.payload, "base64").toString()) as ReceiptStatement;
@@ -297,6 +300,30 @@ addCase({ name: "remote-log-with-log-key", description: "Logged to a log run by 
 addCase({ name: "remote-log-expected-id", description: "The same receipt with the expected log id given. The tree head names vectors-log, so the check passes; the log file is hash-only and its root still matches.", bundle: remoteBundle, issuerKeys: ["app"], principalKeys: [], logKeys: ["log"], logId: "vectors-log", log: rlog });
 addCase({ name: "remote-log-wrong-id", description: "The same receipt with a different expected log id. Only the log-id check fails.", bundle: remoteBundle, issuerKeys: ["app"], principalKeys: [], logKeys: ["log"], logId: "another-log", log: rlog });
 addCase({ name: "remote-log-without-log-key", description: "The same receipt with only the issuer key trusted. The tree head signature fails; nothing about inclusion can be decided.", bundle: remoteBundle, issuerKeys: ["app"], principalKeys: [], logKeys: [], log: rlog });
+
+// ---- financial operations: an unknown payment and provider-bound reconciliation ----
+const ffx = await financialFixture(mkdtempSync(join(tmpdir(), "vectors-financial-")));
+key("financial-gateway", ffx.gatewayPub);
+key("financial-principal", ffx.principalPub);
+const F = { issuerKeys: ["financial-gateway"], principalKeys: ["financial-principal"], logKeys: [] as string[] };
+const fhost = await createGatewayHost(loadConfig(ffx.configFile));
+try {
+  ffx.api.drop = true;
+  const id = randomUUID();
+  const session = fhost.open(JSON.parse(readFileSync(join(ffx.dir, "grant.json"), "utf8")));
+  const response = await session.handleCall({ name: "stripe.refund", arguments: { amount: 60, currency: "GBP" }, _meta: { [OPERATION_META_KEY]: id } });
+  const unknown = bundleFile(ffx.receiptsDir, String(response._meta?.[RECEIPT_META_KEY]));
+  addCase({ name: "financial-unknown", description: "Provider accepted a refund but its response was lost. The operation is unknown, its budget stays reserved, and its committed authorization verifies.", bundle: unknown, ...F, log: logLines(ffx.logFile) });
+  ffx.records.values().next().value!.status = "succeeded";
+  const reconciled = await fhost.reconcile(id);
+  addCase({ name: "financial-reconciled", description: "An observed provider read closes the unknown operation as confirmed. Original identity, precommitted lookup mapping, provider idempotency key, result digest and log order all verify.", bundle: reconciled, ...F, log: logLines(ffx.logFile) });
+  const fkey = loadPrivateKey(join(ffx.dir, "keys", "gateway.key"));
+  for (const [name, description, edit] of [
+    ["financial-wrong-operation", "A re-signed reconciliation whose operation id differs from the embedded original.", (st: ReceiptStatement) => { st.predicate.operation!.id = randomUUID(); }],
+    ["financial-remapped-provider-state", "A re-signed reconciliation changes the terminal provider mapping after authorization.", (st: ReceiptStatement) => { st.predicate.reconciliation!.lookup.confirmed = ["pending"]; }],
+    ["financial-unrelated-provider-record", "The issuer re-signs a provider result carrying another idempotency key, recomputing the result digest. The provider status check still fails.", (st: ReceiptStatement) => { const result = { content: [{ type: "text", text: JSON.stringify({ status: "succeeded", idempotencyKey: "0".repeat(64) }) }] }; st.predicate.execution = { status: "executed", result, resultDigest: digestOf(result), provenance: "observed" }; }],
+  ] as const) addCase({ name, description, bundle: resigned(reconciled, fkey, edit), ...F, log: logLines(ffx.logFile) });
+} finally { await fhost.close(); await ffx.close(); }
 
 writeFileSync(join(out, "receipts.json"), JSON.stringify({ version: "0.2", generated: new Date().toISOString(), note: "Each case: verify `bundle` with the named keys (see `keys`) and, when `log` is not null, a copy of the log whose lines are these leaves. `expected.failing` lists the check names that must fail; `expected.ok` is true only when it is empty.", keys, cases }, null, 2) + "\n");
 

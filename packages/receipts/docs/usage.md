@@ -141,6 +141,10 @@ node src/cli.ts gateway --config ./gateway.json
 
 You will not normally run this by hand. The agent host spawns it, as below.
 
+## Financial operations
+
+For payments, configure `operations` to bind a caller-retained operation UUID to the full call, reserve its amount atomically, and pass an idempotency key to the provider. Existing operations are never forwarded again on retry. API execution and financial settlement have separate statuses; uncertain outcomes hold their reservations until an operator's provider read commits a reconciliation receipt. The [financial operations guide](financial-operations.md) has the config, provider contract, and `agent-custody reconcile` command. [Tutorial 28](../examples/28-financial-operations.ts) runs the lost-response/restart scenario offline.
+
 ## Private evidence
 
 A receipt carries the call as it happened: the arguments, the result, and the facts the policy decided on. Some of that a reviewer has no business seeing: the note on a refund with the caller's phone number, the customer record the policy read, the provider's full answer. `capture` in the config says, per tool, what the receipt file carries of each part:
