@@ -206,6 +206,31 @@ describe("gateway signed approvals", () => {
     expect(verified.checks.find((check) => check.name === "approval payload binding")?.detail).toMatch(/full arguments/);
   });
 
+  it("keeps the approved envelope in clear when a private args rule withholds nothing for this call", async () => {
+    const { fx, gw, predicate } = await fixture((c) => { c.capture = { "*": { args: { mode: "digest", clear: Object.keys(args()) } } }; });
+    const envelope = approve();
+    const result = await call(gw, envelope);
+    expect(result.isError).toBeFalsy();
+    const p = predicate(result);
+    expect(p.capture?.withheld.some((w) => w[0] === "request" && w[1] === "args")).toBeFalsy();
+    expect(p.approval!.envelope).toEqual(envelope);
+    const bundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${String(result._meta?.[RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
+    const verified = verifyBundle(bundle, { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], approvalKeys: [loadPublicKey(join(fx.dir, "keys/approver.pub"))] });
+    expect(verified.checks.filter((check) => !check.ok)).toEqual([]);
+  });
+
+  it("does not show a masked tool name through an approved envelope that stays in clear", async () => {
+    const secretTool = "secret.tool.ACME-merger";
+    const { gw, predicate } = await fixture((c) => { c.approvals!.tools = [{ tool: "*", minApprovers: 1 }]; c.capture = { "*": { args: { mode: "clear" }, result: { mode: "digest" } } }; });
+    const result = await call(gw, approve({ ...binding(), tool: secretTool }), args(), secretTool);
+    expect(result.isError).toBe(true);
+    const p = predicate(result);
+    expect(p.tool.name).toBe("(unknown tool)");
+    expect(JSON.stringify(p)).not.toContain(secretTool);
+    expect(Buffer.from((p.approval!.envelope as unknown as { payload?: string }).payload ?? "", "base64").toString()).not.toContain(secretTool);
+    expect(isCommitment(p.approval!.envelope)).toBe(true);
+  });
+
   it("refuses an approval whose lifetime exceeds the default cap, and honors approvals.maxLifetimeSeconds", async () => {
     const { gw, predicate } = await fixture();
     const tooLong = approve(binding(), new Date(Date.now() + 3_700_000).toISOString());

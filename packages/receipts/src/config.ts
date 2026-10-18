@@ -25,6 +25,8 @@ const RestToolSchema = z.object({
   query: z.array(z.string().min(1)).optional(),
   /** "none" sends no body even on POST */
   body: z.enum(["json", "none"]).default("json"),
+  /** The gateway supplies its durable operation key in this header; callers cannot choose or override it. */
+  idempotencyHeader: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/).optional(),
   /** the JSON Schema the agent sees; default accepts any object */
   inputSchema: z.record(z.string(), z.unknown()).default({ type: "object" }),
 });
@@ -89,6 +91,52 @@ const ApprovalsSchema = z.object({
     fields: z.object({ amount: z.string().min(1).optional(), currency: z.string().min(1).optional(), beneficiary: z.string().min(1).optional() }).optional(),
   })).min(1).refine((tools) => new Set(tools.map((t) => t.tool)).size === tools.length, { message: "approval tool names must be unique" }),
 });
+/** Amounts and limits are integer minor units; one budget is shared by every principal and agent on this database. */
+const OperationBudgetSchema = z.object({ id: z.string().min(1).max(128), currency: z.string().regex(/^[A-Z]{3}$/), limit: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) });
+const OperationReconcileSchema = z.object({
+  tool: z.string().min(1),
+  /** Only the gateway-derived idempotency key may be substituted. The agent's operation id never reaches a receipt, and reconciliation never takes new caller arguments. */
+  args: z.record(z.string(), z.string()).refine((args) => Object.values(args).every((v) => !v.startsWith("$") || v === "$operation.idempotencyKey"), { message: "reconciliation templates only support $operation.idempotencyKey" }),
+  statusPath: z.string().min(1).max(512).refine((path) => path.split(".").every((part) => part.length > 0), { message: "reconciliation statusPath must have nonempty dot-separated parts" }),
+  /** The provider record must echo this operation's idempotency key before it may close the reservation. */
+  identityPath: z.string().min(1).max(512).refine((path) => path.split(".").every((part) => part.length > 0), { message: "reconciliation identityPath must have nonempty dot-separated parts" }).default("idempotencyKey"),
+  confirmed: z.array(z.string().min(1).max(128)).min(1),
+  failed: z.array(z.string().min(1).max(128)).min(1),
+  pending: z.array(z.string().min(1)).default([]),
+}).refine((r) => {
+  const statuses = [...r.confirmed, ...r.failed, ...(r.pending ?? [])];
+  return new Set(statuses).size === statuses.length;
+}, { message: "reconciliation statuses must be distinct" });
+const OperationToolSchema = z.object({
+  tool: z.string().min(1),
+  budget: z.string().min(1),
+  amountField: z.string().min(1).default("amount"),
+  currencyField: z.string().min(1).default("currency"),
+  idempotencyHeader: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/).default("Idempotency-Key"),
+  reconcile: OperationReconcileSchema,
+});
+const OperationsSchema = z.object({
+  database: z.string().min(1),
+  budgets: z.array(OperationBudgetSchema).min(1),
+  tools: z.array(OperationToolSchema).min(1),
+}).superRefine((operations, ctx) => {
+  const budgets = new Set<string>();
+  for (const [i, budget] of operations.budgets.entries()) {
+    if (budgets.has(budget.id)) ctx.addIssue({ code: "custom", path: ["budgets", i, "id"], message: "duplicate operation budget" });
+    budgets.add(budget.id);
+  }
+  const tools = new Set<string>();
+  for (const [i, tool] of operations.tools.entries()) {
+    if (tools.has(tool.tool)) ctx.addIssue({ code: "custom", path: ["tools", i, "tool"], message: "duplicate financial operation tool" });
+    tools.add(tool.tool);
+    if (!budgets.has(tool.budget)) ctx.addIssue({ code: "custom", path: ["tools", i, "budget"], message: "unknown operation budget" });
+  }
+  for (const [i, tool] of operations.tools.entries()) {
+    if (tools.has(tool.reconcile.tool)) ctx.addIssue({ code: "custom", path: ["tools", i, "reconcile", "tool"], message: "a reconciliation read cannot be a financial operation tool" });
+  }
+});
+export type OperationsConfig = z.infer<typeof OperationsSchema>;
+export type OperationToolConfig = z.infer<typeof OperationToolSchema>;
 
 export const GatewayConfigSchema = z.object({
   identity: z.object({ keyFile: z.string() }),
@@ -108,6 +156,8 @@ export const GatewayConfigSchema = z.object({
   precommit: z.array(z.string().min(1)).default([]),
   /** Tools that require a signed, unexpired, single-use approval, in every mode; "*" covers all agent calls. */
   approvals: ApprovalsSchema.optional(),
+  /** Durable idempotency, daily budget reservations, and provider reconciliation for financial operations. */
+  operations: OperationsSchema.optional(),
   /** a JSON file listing digests of revoked grant envelopes (`agent-custody revoke` appends to it); re-read whenever it changes, checked on every call */
   revokedGrants: z.string().min(1).optional(),
   /** private evidence: what the receipt file carries of each tool's arguments, result, and facts */
@@ -129,7 +179,8 @@ export const GatewayConfigSchema = z.object({
 }).refine(hasOneLog, oneLog).refine((c) => (c.upstream ? 1 : 0) + (c.upstreams ? 1 : 0) === 1, { message: "exactly one of upstream or upstreams is required" })
   // a key fetched from the log itself proves nothing about a log that is dishonest from the start, so a remote log that
   // gates consequential calls must have its keys pinned in the config (issue #99)
-  .refine((c) => !c.log || !c.precommit.length || !!c.log.keys?.length, { message: "precommit with a remote log needs log.keys: the log's public key files, pinned, to check its answer before a consequential call is forwarded" });
+  .refine((c) => !c.log || (!c.precommit.length && !c.operations) || !!c.log.keys?.length, { message: "precommit with a remote log needs log.keys: the log's public key files, pinned, to check its answer before a consequential call is forwarded" })
+  .refine((c) => !c.operations || !c.facts.some((fact) => c.operations!.tools.some((tool) => tool.tool === fact.tool)), { message: "a fact lookup cannot invoke a financial operation tool" });
 export type GatewayConfig = z.infer<typeof GatewayConfigSchema>;
 export type FactConfig = z.infer<typeof FactSchema>;
 
@@ -149,6 +200,7 @@ export function loadConfig(path: string): GatewayConfig {
     ...(cfg.log?.keys ? { log: { ...cfg.log, keys: cfg.log.keys.map(r) } } : {}),
     ...(cfg.revokedGrants ? { revokedGrants: r(cfg.revokedGrants) } : {}),
     ...(cfg.approvals ? { approvals: { ...cfg.approvals, trustedKeys: cfg.approvals.trustedKeys.map(r), usedDir: r(cfg.approvals.usedDir) } } : {}),
+    ...(cfg.operations ? { operations: { ...cfg.operations, database: r(cfg.operations.database) } } : {}),
   };
 }
 

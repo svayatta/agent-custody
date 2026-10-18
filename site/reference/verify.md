@@ -47,7 +47,7 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 | executed tool within delegated scope | if the tool ran, the grant covered it |
 | principal is claimed, not attested | SDK receipts: the principal is a config string and labelled so |
 | disclosure names this receipt | only with `--disclose`: the file's `receiptId` is this receipt's |
-| approval signatures (human keys) | a forwarded call carrying an approval record has the required number of distinct signatures from separately trusted `approvalKeys`. A withheld envelope passes as committed until it is disclosed or decrypted, unless the arguments are in clear: then it fails |
+| approval signatures (human keys) | a forwarded call carrying an approval record has the required number of distinct signatures from separately trusted `approvalKeys`. A withheld envelope passes as committed until it is disclosed or decrypted, unless nothing under `request.args` is withheld: then it fails |
 | approval payload binding | that approval names this principal, agent, tool, complete arguments, and mapped amount/currency/beneficiary. If any argument remains withheld, this passes as committed until the arguments are disclosed or decrypted, as `request args digest` does |
 | approval valid at forward time | the recorded check and consumption occurred inside the approval validity window |
 | approval consistent with execution | forwarded calls carrying approval evidence have an approved, consumed record with matching signer observations; denied or withheld calls can verify as authentic refusals despite an invalid approval |
@@ -62,6 +62,10 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 | authorization … (five checks) | pre-committed calls: the authorization verifies, names this call, was allowed, is included in the log, and precedes the receipt leaf |
 | authorization carries this approval | the precommit and receipt carry the same human approval envelope, threshold, and field mapping |
 | authorization approval was valid | for a forwarded call, the precommit itself recorded an approved statement, distinct trusted signer observations, and a check inside the signed approval window |
+| operation …; authorization names this operation | financial evidence is gateway-observed, identifies the original receipt, and carries the committed operation id, provider key, lookup digest, and budget; terminal outcomes need reconciliation unless the call was withheld; a retry of an existing operation is a `withheld` receipt that names the original, and a private receipt withholds the operation id and links by key |
+| reconciliation original …; reconciliation original evidence verifies | the embedded original receipt or crash-surviving authorization verifies with its own signature, grant, commitments and inclusion proof; nested reconciliations are refused |
+| reconciliation links the original operation; reconciliation lookup matches authorization; reconciliation lookup args match request | the original identity and budget are preserved, and the provider lookup and arguments match the mapping committed before forwarding |
+| reconciliation logged after original; reconciliation records a terminal provider outcome; reconciliation provider status | log order holds and the provider record's terminal state and idempotency key match the financial outcome; a withheld result passes as committed until restored |
 | tree head signature, tree head names the expected log | the head was signed by an issuer or log key, and by the log the verifier expected |
 | log inclusion proof | the leaf is in the tree the head describes |
 | log file root matches | with `--log`, the copy's root at that size equals the head's |

@@ -62,7 +62,7 @@ issuer.decide({ tool: "stripe.refund", args: { customer_id: "cust_123", amount: 
 // → { decision: "deny", reasons: [], errors: [], policyDigest: "0e56…" }
 ```
 
-Over the SDK the Cedar context has `args` and `grant: { principal, scopes: [] }` and no `facts`; there is no gateway to fetch any.
+Over the SDK the Cedar context has `args` and `facts: {}`; there is no gateway to fetch facts and no signed grant to supply `context.grant`.
 
 ### `record(event, outcome, policy?)`
 
@@ -84,6 +84,31 @@ Decide, run, record. Throws `PolicyDeniedError` (`.tool`, `.reason`, `.receiptId
 const refund = issuer.wrap("stripe.refund", async (args: { customer_id: string; amount: number }) => stripe.refunds.create(args));
 await refund({ customer_id: "cust_123", amount: 2500 });     // executed, recorded
 ```
+
+## Simulating a policy
+
+Exported from `@agent-custody/receipts`:
+
+```ts
+import { simulatePolicy, formatSimulation } from "@agent-custody/receipts";
+// predicates are the recorded statements from bundles you have verified with verifyBundle.
+const report = simulatePolicy(proposedCedar, predicates);
+console.log(formatSimulation(report));
+```
+
+`simulatePolicy(policyText: string, receipts: Iterable<ReceiptPredicate>, options?: SimulationOptions): SimulationReport` is a pure replay of the recorded policy inputs: `args`, each fact's `value`, and, for gateway receipts, `grant: { principal, scopes }` from the embedded delegation. It neither verifies signatures nor executes tools; use `verifyBundle` first, or the [CLI](./cli). It compares `policy.decision` even in observe mode, rather than the execution status.
+
+| report field | meaning |
+| --- | --- |
+| `runId`, `timestamp` | a UUID for this run and its ISO timestamp |
+| `policyDigest`, `previousPolicyDigests` | sha256 of the proposed text and the sorted distinct original digests |
+| `total`, `evaluated`, `unchanged` | supplied calls, replayed calls, and calls whose decision stayed the same |
+| `changes` | `{ receiptId, tool, previous, proposed }[]`: both decisions for every changed call |
+| `groups` | `{ tool, reason, receiptIds }[]`: changed calls grouped by the proposed reasons or errors |
+| `skipped` | `{ receiptId, tool, reason }[]`: unavailable inputs, missing baseline, or calls stopped before policy evaluation |
+| `complete` | false when any receipt was skipped |
+
+`formatSimulation(report): string` prints the digests, grouped receipt ids and decision changes, counts, and any incomplete calls. `options` takes `captureKey` (a 32-byte `Buffer`) to decrypt withheld inputs, `disclosures` (a `Map` from receipt id to a disclosure file's contents), and `unreplayable` (`SimulationSkip[]`: calls that have no receipt; each counts in `total` and `skipped`). The function reads `receipts` once, so a generator that verifies one bundle at a time keeps memory flat. Types: `SimulationReport`, `SimulationOptions`, `SimulationChange`, `SimulationSkip`, `SimulationGroup`. Withheld arguments or fact values are reported as incomplete; withheld results do not affect replay. Grant restrictions cannot be widened by Cedar. See the [policy guide](https://agent-custody.dev/receipts/policies#simulating-a-policy-against-recorded-history) and [tutorial 28](https://github.com/svayatta/agent-custody/blob/main/packages/receipts/examples/28-policy-simulation.ts).
 
 ## Adapters
 
@@ -149,7 +174,9 @@ For two approvers, `dsseCountersign(createApproval(firstKey, action), secondKey)
 
 ## Private evidence
 
-Exported from `@agent-custody/receipts`. `createIssuer(key, receiptsDir, log, { capture: { rules, key } })` applies the rule to every statement it signs (`issue(predicate, ctx?)`, `authorize(predicate, ctx?)`), which is how the gateway and `createSdkIssuer` get it, and the verifier uses `restorePaths` to put the values back; the behaviour is on the [gateway](./gateway#private-evidence) and [verify](./verify#reveal) pages.
+Exported from `@agent-custody/receipts`. `createIssuer(key, receiptsDir, log, { capture: { rules, key } })` applies the rule to every statement it signs (`issue(predicate, ctx?, retainPrepared?)`, `authorize(predicate, ctx?)`), which is how the gateway and `createSdkIssuer` get it, and the verifier uses `restorePaths` to put the values back; the behaviour is on the [gateway](./gateway#private-evidence) and [verify](./verify#reveal) pages.
+
+The optional synchronous `retainPrepared(candidate): PreparedReceipt` callback durably chooses the signed view before a log append. `PreparedReceipt` contains `{ envelope, view: { predicate, salts } }`; it is private recovery data, including commitment salts, and must never be exported or handed to a verifier. Returning the stored winner lets restarted/concurrent reconciliation attempts append identical bytes and retain the same salts. The issuer checks its signature, statement and receipt id before appending. Ordinary callers omit this callback.
 
 | export | signature | what it does |
 | --- | --- | --- |

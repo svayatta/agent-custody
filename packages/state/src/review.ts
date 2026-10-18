@@ -42,7 +42,7 @@ export function listReceipts(o: ReviewOptions): ReceiptRow[] {
       const bundle = JSON.parse(readFileSync(join(o.receiptsDir, f), "utf8")) as ReceiptBundle;
       const p = decodeStatement(bundle).predicate;
       const verified = o.keys ? verifyBundle(bundle, { issuerKeys: o.keys.issuerKeys, principalKeys: o.keys.principalKeys ?? [], ...(o.keys.logKeys ? { logKeys: o.keys.logKeys } : {}), ...(o.keys.logId ? { logId: o.keys.logId } : {}) }).ok : null;
-      rows.push({ receiptId: p.receiptId, timestamp: p.timestamp, tool: p.tool.name, status: p.execution.status, agent: p.agent.id, principal: p.principal.id, issuer: p.issuer.kind, verified });
+      rows.push({ receiptId: p.receiptId, timestamp: p.timestamp, tool: p.tool.name, status: p.reconciliation ? "reconciled" : p.execution.status, agent: p.agent.id, principal: p.principal.id, issuer: p.issuer.kind, verified });
     } catch {
       // not a bundle; the index is of receipts
     }
@@ -111,7 +111,7 @@ export function renderReceipt(pack: ActionPack, verification: VerifyResult | nul
   const report = verification ? verification.checks.map((c) => `${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? `  (${c.detail})` : ""}`).join("\n") + `\n\nRESULT: ${verification.ok ? "VERIFIED" : "NOT VERIFIED"}` : "Not checked: start the review with --issuer-key and --principal-key to verify every receipt here.";
   const body = `
 <p><a href="${esc(backLink)}">All receipts</a></p>
-<h1>${esc(p.tool.name)} <span class="muted">${esc(p.execution.status)}</span></h1>
+<h1>${esc(p.tool.name)} <span class="muted">${esc(p.reconciliation ? "reconciled" : p.execution.status)}</span></h1>
 <p class="sub">${esc(p.timestamp.replace("T", " ").slice(0, 19))} · receipt <span class="mono">${esc(p.receiptId)}</span> · ${verification ? (verification.ok ? '<span class="ok">verified</span>' : '<span class="bad">NOT VERIFIED</span>') : '<span class="muted">not checked</span>'}</p>
 <h2>What this action is</h2>
 ${explainHtml(formatExplain(pack, verification, !!o.ledger))}

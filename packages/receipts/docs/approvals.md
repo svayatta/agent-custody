@@ -95,7 +95,7 @@ The approval envelope arrives in the agent's `_meta`. It carries the amount, cur
 
 The record keeps the gateway's own observations in clear: the status, the required threshold, the check and consumption times, the signer key ids, and the configured field mapping. A reviewer sees that an approval was checked and when. To check the signatures and the binding, the reviewer restores the envelope and the arguments with the capture key or a disclosure (`approval.envelope` and `request.args.$rest` in the disclosure file). Without them, the verifier passes the approval checks as committed, as it does for `request args digest`, and says so. A tool with a private rule and an approval therefore proves the approval only to a reviewer who holds the key or a disclosure. The browser verifier cannot restore them.
 
-When the rule keeps the arguments whole in clear, for example `args` in mode `clear` with a private `result`, an approved envelope stays in clear. Its payload equals the clear call, and the gateway checked that. A denied envelope is still withheld, because it can carry another call's fields. A verifier fails `approval signatures (human keys)` for a forwarded call whose envelope is withheld beside arguments that are in clear. Otherwise an issuer could skip the binding check whenever the arguments are public.
+When the issuer withholds nothing under `request.args`, an approved envelope stays in clear. This happens when `args` is in mode `clear` with a private `result`. It also happens when a private `args` rule lists every argument of the call in `clear`, or the call has no arguments. The envelope payload then equals the public call, and the gateway checked that. A denied envelope is still withheld, because it can carry another call's fields. So is the envelope of a call whose tool name is masked. The verifiers use the same test: a forwarded, approved call whose note withholds the envelope, but withholds nothing under `request.args`, fails `approval signatures (human keys)`. Otherwise an issuer could skip the binding check whenever the arguments are public.
 
 ### What the receipt can prove about the approval
 
@@ -104,4 +104,4 @@ When the rule keeps the arguments whole in clear, for example `args` in mode `cl
 - The receipt does not record `maxLifetimeSeconds`. The offline verifier cannot check the lifetime cap. Only the gateway enforces it, when it admits the approval.
 - Single use is also not provable offline. See above.
 
-[Tutorial 28](../examples/28-payload-bound-approvals.ts) runs a real gateway with two approvers, refuses changed arguments, an expired approval and an insufficient threshold, forwards the exact approved call, refuses its replay, and verifies every receipt.
+[Tutorial 30](../examples/30-payload-bound-approvals.ts) runs a real gateway with two approvers, refuses changed arguments, an expired approval and an insufficient threshold, forwards the exact approved call, refuses its replay, and verifies every receipt.

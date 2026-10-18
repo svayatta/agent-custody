@@ -38,6 +38,25 @@ export interface FactRecord {
   provenance: "observed";
 }
 
+/** A gateway's durable financial operation identity; execution still describes only the tool/API call. */
+export interface OperationEvidence {
+  id: string;
+  idempotencyKey: string;
+  /** Commits the configured provider read and status mapping before the financial call is forwarded. */
+  lookupDigest: string;
+  status: "submitted" | "pending" | "confirmed" | "failed" | "unknown";
+  /** Amounts stay in the original request, under its capture rule, rather than being copied into public metadata. */
+  budget: { id: string; currency: string; period: string };
+  originalReceiptId: string;
+  provenance: "observed";
+}
+
+/** A later provider read, observed by the gateway, linked to the original signed, logged operation. */
+export interface ReconciliationEvidence {
+  original: ReceiptBundle | AuthorizationBundle;
+  lookup: { tool: string; args: Record<string, unknown>; statusPath: string; identityPath: string; confirmed: string[]; failed: string[] };
+}
+
 export interface ReceiptPredicate {
   receiptId: string;
   timestamp: string;
@@ -71,6 +90,9 @@ export interface ReceiptPredicate {
    * side effect exists only after the side effect.
    */
   authorization?: AuthorizationBundle;
+  operation?: OperationEvidence;
+  /** The provider read's full result is execution.result and follows the ordinary result capture rule. */
+  reconciliation?: ReconciliationEvidence;
   execution:
     | {
         status: "executed" | "failed";
@@ -93,7 +115,7 @@ export interface ReceiptPredicate {
 }
 
 /** What the gateway commits before a consequential call goes out: everything the receipt will say, except the outcome. */
-export type AuthorizationPredicate = Pick<ReceiptPredicate, "receiptId" | "timestamp" | "issuer" | "principal" | "agent" | "delegation" | "approval" | "tool" | "request" | "facts" | "consumed" | "policy" | "capture">;
+export type AuthorizationPredicate = Pick<ReceiptPredicate, "receiptId" | "timestamp" | "issuer" | "principal" | "agent" | "delegation" | "approval" | "tool" | "request" | "facts" | "consumed" | "policy" | "capture" | "operation">;
 
 export interface AuthorizationStatement {
   _type: "https://in-toto.io/Statement/v1";

@@ -1,5 +1,5 @@
 // Aspect: payload-bound human approvals. Source: src/approval.ts, src/gateway.ts, src/verify.ts
-// Run:    node examples/28-payload-bound-approvals.ts
+// Run:    node examples/30-payload-bound-approvals.ts
 //
 // Two approvers sign the exact refund, independently of the agent's delegation. Changed amounts, recipients,
 // and extra arguments cannot borrow that approval. The gateway burns the id before forwarding and refuses
@@ -16,7 +16,7 @@ import { verifyBundle } from "../src/verify.ts";
 import { buildFixture } from "../scripts/fixture.ts";
 import { out, step } from "./_out.ts";
 
-const fx = buildFixture(out("28-payload-bound-approvals"));
+const fx = buildFixture(out("30-payload-bound-approvals"));
 const first = generateKeyPair();
 const second = generateKeyPair();
 const firstFiles = writeKeyPair(first, join(fx.dir, "keys"), "approver");

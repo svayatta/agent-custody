@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { APPROVAL_TYPE, createApproval, type ApprovalRecord } from "../src/approval.ts";
-import { privateView, withhold } from "../src/capture.ts";
+import { isCommitment, privateView, withhold } from "../src/capture.ts";
 import { digestOf, dsseCountersign, dsseSign, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "../src/crypto.ts";
 import { createIssuer } from "../src/issue.ts";
 import { buildStatement, RECEIPT_TYPE, type ReceiptBundle, type ReceiptPredicate } from "../src/receipt.ts";
@@ -224,6 +224,48 @@ describe("independent approval verification", () => {
     // the same receipt with the arguments withheld too is the private receipt, which passes as committed
     const privateIssuer = createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules: { "stripe.refund": { args: { mode: "digest" as const } } } } });
     expect(failing(await privateIssuer.issue(structuredClone(base)))).toEqual([]);
+  });
+
+  it("fails a precommit that withholds the envelope beside arguments in clear, even when the receipt carries the same commitment", async () => {
+    const commitment = withhold(approval).commitment;
+    const note = { mode: "digest" as const, withheld: [["approval", "envelope"]] };
+    const p = structuredClone(base);
+    const { execution, session, model, ...head } = p;
+    const sealedApproval = { ...record, envelope: commitment as never };
+    p.authorization = await issuer.authorize({ ...head, approval: sealedApproval, capture: note });
+    p.approval = sealedApproval;
+    p.capture = note;
+    const names = failing(await issuer.issue(p));
+    expect(names).toContain("authorization approval was valid");
+    expect(names).not.toContain("authorization carries this approval");
+  });
+
+  it("keeps an envelope in clear when the authorization showed it and the approval was then refused at forward time", async () => {
+    const rules = { "stripe.refund": { args: { mode: "clear" as const }, result: { mode: "digest" as const } } };
+    const clearArgsIssuer = createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules } });
+    const p = structuredClone(base);
+    const { execution, session, model, ...head } = p;
+    p.authorization = await clearArgsIssuer.authorize(head);
+    p.approval = { ...record, status: "denied", reason: "approval has expired", approverKeyids: [] };
+    p.execution = { status: "withheld", reason: "approval rejected before the call was forwarded: approval has expired", provenance: "observed" };
+    const refused = await clearArgsIssuer.issue(p);
+    const visible = JSON.parse(Buffer.from(refused.envelope.payload, "base64").toString()).predicate as ReceiptPredicate;
+    expect(visible.approval!.envelope).toEqual(approval);
+    expect(isCommitment(visible.approval!.reason)).toBe(true);
+    expect(failing(refused, { ...opts, approvalKeys: [] })).toEqual([]);
+  });
+
+  it("keeps an envelope in clear when a private args rule withholds nothing for this call, and withholds it for a masked tool name", async () => {
+    const listed = createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules: { "stripe.refund": { args: { mode: "digest" as const, clear: Object.keys(args) } } } } });
+    const bundle = await listed.issue(structuredClone(base));
+    const visible = JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()).predicate as ReceiptPredicate;
+    expect(visible.capture?.withheld.some((w) => w[0] === "request" && w[1] === "args")).toBeFalsy();
+    expect(visible.approval!.envelope).toEqual(approval);
+    expect(verifyBundle(bundle, opts).checks.find((c) => c.name === "approval payload binding")?.ok).toBe(true);
+    // the tool name is masked as text the agent chose, and the envelope signs that real name
+    const masked = JSON.parse(Buffer.from((await listed.issue(structuredClone(base), { unknownTool: true })).envelope.payload, "base64").toString()).predicate as ReceiptPredicate;
+    expect(masked.tool.name).toBe("(unknown tool)");
+    expect(isCommitment(masked.approval!.envelope)).toBe(true);
   });
 
   it("does not require human keys for the precommit of a call that was withheld after the approval was consumed", async () => {

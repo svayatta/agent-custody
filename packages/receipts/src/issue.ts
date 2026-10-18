@@ -3,10 +3,16 @@ import { chmodSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { SALTS_DIR, saltsFileFor } from "./retention.ts";
 import { join } from "node:path";
 import { effectiveRule, getAt, privateView, type CaptureConfig, type CaptureContext, type PrivateView } from "./capture.ts";
-import { canonicalize, dsseSign, type KeyPair } from "./crypto.ts";
+import { canonicalize, dsseSign, dsseVerify, type Envelope, type KeyPair } from "./crypto.ts";
 import { fileLog, type LogSink } from "./log-sink.ts";
 import type { ReceiptExporter } from "./otel.ts";
 import { buildAuthorizationStatement, buildStatement, RECEIPT_TYPE, type AuthorizationBundle, type AuthorizationPredicate, type ReceiptBundle, type ReceiptPredicate } from "./receipt.ts";
+
+/** Private recovery data: includes commitment salts. Persist only in an owner-only store, never in a receipt or export. */
+export interface PreparedReceipt {
+  envelope: Envelope;
+  view: PrivateView<ReceiptPredicate>;
+}
 
 export interface Issuer {
   keyid: string;
@@ -16,7 +22,7 @@ export interface Issuer {
    * bundle. Rejects if the log refuses the leaf; no bundle is written then. The predicate is the call in full; what
    * is signed, written, and exported is the view.
    */
-  issue(predicate: ReceiptPredicate, ctx?: CaptureContext): Promise<ReceiptBundle>;
+  issue(predicate: ReceiptPredicate, ctx?: CaptureContext, retainPrepared?: (prepared: PreparedReceipt) => PreparedReceipt): Promise<ReceiptBundle>;
   /** The same for an authorization, signed and committed before a consequential call is forwarded. Rejects if the log refuses; the caller must then not forward. */
   authorize(predicate: AuthorizationPredicate, ctx?: CaptureContext): Promise<AuthorizationBundle>;
 }
@@ -66,13 +72,21 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
   return {
     keyid: key.keyid,
     log: sink,
-    async issue(predicate, ctx) {
+    async issue(predicate, ctx, retainPrepared) {
       ensureSaltsDir();
       // the authorization's view stays until the log has taken the receipt: a producer that retries after a refusal gets the same commitments and salts
       const prior = committed.get(predicate.receiptId)?.view;
-      const pv = view(predicate, ctx, prior);
+      const candidate = view(predicate, ctx, prior);
+      // A durable producer may retain the first signed view, salts included, before any append. Concurrent and
+      // restarted issuers then commit exactly those bytes rather than re-salting the same logical receipt.
+      const prepared = retainPrepared ? retainPrepared({ envelope: dsseSign(RECEIPT_TYPE, buildStatement(candidate.predicate), key), view: candidate }) : { envelope: dsseSign(RECEIPT_TYPE, buildStatement(candidate.predicate), key), view: candidate };
+      const pv = prepared.view;
       const v = pv.predicate;
-      const envelope = dsseSign(RECEIPT_TYPE, buildStatement(v), key);
+      const envelope = prepared.envelope;
+      if (retainPrepared) {
+        const checked = dsseVerify(envelope, [key]);
+        if (!checked.ok || envelope.payloadType !== RECEIPT_TYPE || v.receiptId !== predicate.receiptId || canonicalize(checked.payload) !== canonicalize(buildStatement(v))) throw new Error("prepared receipt does not match this issuer, predicate, or receipt id");
+      }
       const entry = await sink.append(canonicalize(envelope));
       committed.delete(predicate.receiptId);
       // the salts once the log has taken the leaf: a receipt the log refused leaves nothing behind
