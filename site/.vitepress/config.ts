@@ -67,10 +67,6 @@ export default withMermaid(
     // Pages live at the repository root, so the public dir must be named explicitly; and the site's dependencies live under site/ (Bun installs are isolated).
     vite: { publicDir: resolve(__dirname, "..", "public"), resolve: { alias: [{ find: /^vue$/, replacement: resolve(__dirname, "..", "node_modules", "vue") }, { find: /^vue\/(.*)$/, replacement: resolve(__dirname, "..", "node_modules", "vue") + "/$1" }] } },
     lastUpdated: false,
-    // The home page's faces, Archivo and IBM Plex Mono; only that page loads them, the docs keep the theme's type.
-    transformHead: ({ pageData }) => pageData.relativePath === "site/index.md" || pageData.relativePath === "index.md"
-      ? [["link", { rel: "preconnect", href: "https://fonts.googleapis.com" }], ["link", { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" }], ["link", { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" }]]
-      : [],
     themeConfig: {
       logo: "/logo.svg?v=2",
       // Five entries (issue #52). Receipts, State, Python, the spec, and security live in the sidebar under Docs.
