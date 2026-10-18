@@ -199,3 +199,21 @@ const d = evaluate(policy, {
 ```
 
 Write one case per branch of every `when` clause, plus one for the missing-attribute path.
+
+## Simulating a policy against recorded history
+
+Use `policy simulate` before enforcing a tighter policy. It verifies local receipt bundles with your public keys, then evaluates the proposed Cedar text against the arguments and fact values each receipt recorded at call time. Gateway receipts also supply the principal and scopes from their signed delegation as `context.grant`; SDK receipts keep their original context of `args` and `facts: {}`. Replay runs offline, without fetching new facts or executing tools.
+
+```bash
+agent-custody policy simulate --policy proposed.cedar --receipts receipts \
+  --issuer-key keys/gateway.pub --principal-key keys/principal.pub \
+  --out simulation.json
+```
+
+For SDK receipts, use the application's public key as `--issuer-key`; no principal key is needed. Add `--log-key keys/log.pub` when another key signed the log's tree heads. Each key flag may be repeated when the history spans several keys. The directory is read in filename order, without recursion; standalone `*.authorization.json` files are excluded. A malformed or unverifiable bundle, or invalid Cedar syntax in the proposed policy, fails the command.
+
+The report lists every call whose `allow` or `deny` decision changes, grouped by tool and the proposed decision's policy ids or evaluation errors, with the receipt ids and both decisions. A call executed in observe mode may already have a recorded deny: replay compares that recorded decision, not whether the tool ran. Calls with the same decision stay unchanged even when different policy ids match. Cedar evaluation errors remain denials.
+
+Every run records a `runId`, `timestamp`, the proposed text's sha256 as `policyDigest`, and the original digests as `previousPolicyDigests`. `--out` saves the full JSON report, and `--json` prints it to stdout. Changes alone exit 0. A report that cannot replay every call says `INCOMPLETE` and exits 1: `skipped` names each receipt and why. This includes record-only receipts with no policy baseline, withheld arguments or fact values, and calls stopped before Cedar could evaluate. Grant failures cannot become permits through a policy change. Withheld results alone do not prevent replay.
+
+The report is an analysis of the supplied receipt directory; it does not prove that the directory contains the whole history. Keep the report beside the proposed policy and review the changed receipt ids before switching from observe mode to enforcement. [Tutorial 28](../examples/28-policy-simulation.ts) records three refunds, stops the gateway, and replays them against a lower limit.
