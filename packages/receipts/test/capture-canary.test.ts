@@ -6,11 +6,13 @@
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { loadPrivateKey, loadPublicKey } from "../src/crypto.ts";
-import { createGateway, RECEIPT_META_KEY, type Gateway } from "../src/gateway.ts";
+import { createGateway, createGatewayHost, RECEIPT_META_KEY, RETRY_RECEIPT_META_KEY, type Gateway } from "../src/gateway.ts";
+import { OPERATION_META_KEY } from "../src/operations.ts";
+import { financialFixture } from "../scripts/financial-fixture.ts";
 import { fileLog, type LogSink } from "../src/log-sink.ts";
 import { spanFor } from "../src/otel.ts";
 import type { ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "../src/receipt.ts";
@@ -88,6 +90,40 @@ async function everyGatewayPath(gw: Gateway, gwWithheld: Gateway): Promise<{ nam
 const TOOLS: Record<string, string> = { "out of scope": "stripe.payout" };
 
 describe("the canary", () => {
+  it("financial retries and reconciliation keep withheld payment details out of receipts, authorizations, log, and exporters", async () => {
+    const fx = await financialFixture(mkdtempSync(join(tmpdir(), "canary-financial-")));
+    fx.config.capture = { "*": { args: { mode: "digest" }, result: { mode: "digest" } } };
+    writeFileSync(fx.configFile, JSON.stringify(fx.config));
+    const exports = keepExports();
+    const host = await createGatewayHost(loadConfig(fx.configFile), { exporter: exports.exporter });
+    try {
+      const session = host.open(JSON.parse(readFileSync(join(fx.dir, "grant.json"), "utf8")));
+      const id = randomUUID();
+      const params = { name: "stripe.refund", arguments: { amount: 60, currency: "GBP", note: CANARY }, _meta: { [OPERATION_META_KEY]: id } };
+      const first = await session.handleCall(params);
+      expect(JSON.stringify(first)).toContain(CANARY);
+      // the retry gets the stored answer and a receipt of its own
+      const retry = await session.handleCall(params);
+      const { [RETRY_RECEIPT_META_KEY]: retryReceipt, ...retryMeta } = retry._meta!;
+      expect({ ...retry, _meta: retryMeta }).toEqual(first);
+      expect(retryReceipt).toEqual(expect.any(String));
+      fx.records.values().next().value!.status = "succeeded";
+      const closed = await host.reconcile(id);
+      expect(bundleText(closed)).not.toContain(CANARY);
+      expect(onDisk(fx.receiptsDir, fx.logFile)).not.toContain(CANARY);
+      expect(exports.seen.join("\n")).not.toContain(CANARY);
+      // the id is the agent's: a UUID-shaped canary must not reach a statement, a file, the log, or an exporter
+      expect(bundleText(closed)).not.toContain(id);
+      expect(onDisk(fx.receiptsDir, fx.logFile)).not.toContain(id);
+      expect(exports.seen.join("\n")).not.toContain(id);
+      // the call, its retry, and the reconciliation
+      expect(exports.spans).toHaveLength(3);
+      const v = verifyBundle(closed, { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], logFile: fx.logFile });
+      expect(v.ok, formatReport(v)).toBe(true);
+      expect(decode(closed).predicate.operation?.budget).not.toHaveProperty("amount");
+    } finally { await host.close(); await fx.close(); }
+  });
+
   it("under one private rule, a secret in the arguments reaches nothing in clear on any path through the gateway: statement, authorization, files, log, exporters", async () => {
     const fx = buildFixture(mkdtempSync(join(tmpdir(), "canary-gateway-")));
     const cfg = JSON.parse(readFileSync(fx.configFile, "utf8"));

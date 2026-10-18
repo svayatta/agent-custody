@@ -70,7 +70,7 @@ export function scanReceipts(o: ReviewOptions, query: ReceiptSearch = o.search ?
       const file = f.slice(0, -".json".length);
       const problem = file !== p.receiptId ? "file name does not match receipt id" : !RECEIPT_ID.test(file) ? "receipt id is malformed" : undefined;
       const verified = problem ? false : verifyOf(bundle, o)?.ok ?? null;
-      rows.push({ receiptId: String(p.receiptId), timestamp: String(p.timestamp), tool: p.tool.name, status: p.execution.status, agent: p.agent.id, principal: p.principal.id, issuer: p.issuer.kind, verified, ...terms, file, ...(problem ? { problem } : {}) });
+      rows.push({ receiptId: String(p.receiptId), timestamp: String(p.timestamp), tool: p.tool.name, status: p.reconciliation ? "reconciled" : p.execution.status, agent: p.agent.id, principal: p.principal.id, issuer: p.issuer.kind, verified, ...terms, file, ...(problem ? { problem } : {}) });
     } catch {
       unreadable++;
     }
@@ -197,7 +197,7 @@ export function renderReceipt(pack: ActionPack, verification: VerifyResult | nul
   const report = verification || mismatch ? `${lines.join("\n")}\n\nRESULT: ${failed ? "NOT VERIFIED" : "VERIFIED"}` : "Not checked: start the review with --issuer-key and --principal-key to verify every receipt here.";
   const body = `
 <p><a href="${esc(backLink)}">All receipts</a></p>
-<h1>${esc(p.tool.name)} <span class="muted">${esc(p.execution.status)}</span></h1>
+<h1>${esc(p.tool.name)} <span class="muted">${esc(p.reconciliation ? "reconciled" : p.execution.status)}</span></h1>
 <p class="sub">${esc(p.timestamp.replace("T", " ").slice(0, 19))} · receipt <span class="mono">${esc(p.receiptId)}</span> · ${failed ? '<span class="bad">NOT VERIFIED</span>' : verification ? '<span class="ok">verified</span>' : '<span class="muted">not checked</span>'}</p>
 <h2>What this action is</h2>
 ${explainHtml(formatExplain(pack, verification, !!o.ledger))}

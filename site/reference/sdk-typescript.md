@@ -144,7 +144,9 @@ Types: `AgentCard`, `ResolvedCard`, `A2aServerOptions`, `RunningA2aServer`.
 
 ## Private evidence
 
-Exported from `@agent-custody/receipts`. `createIssuer(key, receiptsDir, log, { capture: { rules, key } })` applies the rule to every statement it signs (`issue(predicate, ctx?)`, `authorize(predicate, ctx?)`), which is how the gateway and `createSdkIssuer` get it, and the verifier uses `restorePaths` to put the values back; the behaviour is on the [gateway](./gateway#private-evidence) and [verify](./verify#reveal) pages.
+Exported from `@agent-custody/receipts`. `createIssuer(key, receiptsDir, log, { capture: { rules, key } })` applies the rule to every statement it signs (`issue(predicate, ctx?, retainPrepared?)`, `authorize(predicate, ctx?)`), which is how the gateway and `createSdkIssuer` get it, and the verifier uses `restorePaths` to put the values back; the behaviour is on the [gateway](./gateway#private-evidence) and [verify](./verify#reveal) pages.
+
+The optional synchronous `retainPrepared(candidate): PreparedReceipt` callback durably chooses the signed view before a log append. `PreparedReceipt` contains `{ envelope, view: { predicate, salts } }`; it is private recovery data, including commitment salts, and must never be exported or handed to a verifier. Returning the stored winner lets restarted/concurrent reconciliation attempts append identical bytes and retain the same salts. The issuer checks its signature, statement and receipt id before appending. Ordinary callers omit this callback.
 
 | export | signature | what it does |
 | --- | --- | --- |

@@ -51,6 +51,7 @@ const USAGE = `agent-custody <command>
                                                    for verify --disclose; needs the customer's capture key
   revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them
+  reconcile --config <gateway.json> --operation <uuid>   operator-only provider lookup; commits a receipt before closing an unknown/pending financial operation
   gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]
                                                    stdio: one gateway for the grant the config names. --http: one shared gateway, MCP over
                                                    Streamable HTTP at /mcp, each connection presenting its own grant as Authorization: Bearer
@@ -136,6 +137,18 @@ function loadTenants(path: string): Record<string, { file: string; tokens?: stri
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
+    case "reconcile": {
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, operation: { type: "string" } } });
+      if (!values.config || !values.operation) throw new Error("reconcile needs --config and --operation");
+      const cfg = loadConfig(values.config);
+      const host = await createGatewayHost(cfg);
+      try {
+        const bundle = await host.reconcile(values.operation);
+        const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString("utf8")) as ReceiptStatement).predicate;
+        console.log(JSON.stringify({ operation: values.operation, status: p.operation!.status, receipt: join(cfg.receiptsDir, `${p.receiptId}.json`) }));
+        return 0;
+      } finally { await host.close(); }
+    }
     case "keygen": {
       const { values } = parseArgs({ args: rest, options: { dir: { type: "string" }, name: { type: "string" } } });
       if (!values.dir || !values.name) throw new Error("keygen needs --dir and --name");
