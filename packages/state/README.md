@@ -102,8 +102,10 @@ Receipts are the other place a value lives: the receipt that recorded the write 
 When a belief turns out wrong, the next question is what relied on it. Two records answer it together. Every gateway receipt carries `consumed`: the fact ids the agent had been shown, through the gateway, before that call, which the memory server declares on each read. Every fact in the ledger carries the receipt that wrote it. Walking forward from a fact through those two links gives every later call and every belief written in those calls, transitively, and whether the root was retracted and which derived beliefs are still believed.
 
 ```bash
-agent-custody-memory blast --ledger ./ledger.jsonl --receipts ./receipts --fact <factId>
+agent-custody-memory blast --ledger ./ledger.jsonl --receipts ./receipts --fact <factId> [--capture-key-env NAME]
 ```
+
+A receipt issued under a private capture rule withholds what the agent had been shown. The query never counts such a call as having relied on nothing: it lists every one made since the ledger learned the fact (by transaction time: a fact valid from tomorrow is readable today) under `INCOMPLETE`, and the capture key, for receipts in mode `encrypted`, lets it see through.
 
 ```
 fact 3f2a…: acct:42 plan = "enterprise" (space team:support, by support-agent, attested)

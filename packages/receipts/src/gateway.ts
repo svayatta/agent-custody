@@ -17,6 +17,7 @@ import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
+import { captureKeyFrom, effectiveRule } from "./capture.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
 
@@ -127,7 +128,13 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   const trusted = cfg.trustedPrincipalKeys.map(loadPublicKey);
   const policyText = readFileSync(cfg.policyFile, "utf8");
   const pDigest = policyDigest(policyText);
-  const issuer = createIssuer(gatewayKey, cfg.receiptsDir, options.log ?? openLog(cfg, gatewayKey), { exporter: options.exporter ?? openExporter(cfg) });
+  // Private evidence: the key that encrypts withheld fields, read once; a rule in mode encrypted without it is a config error.
+  const captureKey = cfg.captureKeyEnv ? captureKeyFrom(process.env[cfg.captureKeyEnv] ?? (() => { throw new Error(`capture key: environment variable ${cfg.captureKeyEnv} is not set`); })()) : undefined;
+  for (const [tool, rule] of Object.entries(cfg.capture ?? {})) {
+    for (const side of [rule.args, rule.result, rule.facts]) if (side?.mode === "encrypted" && !captureKey) throw new Error(`capture for ${tool} uses mode encrypted, which needs captureKeyEnv`);
+  }
+  // The rules are applied by the issuer to every statement it signs, the authorization included: the gateway hands it the call in full.
+  const issuer = createIssuer(gatewayKey, cfg.receiptsDir, options.log ?? openLog(cfg, gatewayKey), { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
   const precommit = new Set(cfg.precommit);
   const consequential = (tool: string) => precommit.has("*") || precommit.has(tool);
   // A fact lookup runs before the policy can decide, because the policy decides on it. It is therefore a read the
@@ -204,17 +211,30 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     return (await upstreams.get(via)!.callTool({ name, arguments: args, ...(meta ? { _meta: meta } : {}) })) as CallToolResult;
   };
 
-  async function gatherFacts(tool: string, args: Record<string, unknown>, meta: Record<string, unknown>): Promise<Record<string, FactRecord>> {
-    const facts: Record<string, FactRecord> = {};
+  /** The facts for a call, the argument template of the fact config each one came from (two configs may share a name), and each lookup's full result. */
+  async function gatherFacts(tool: string, args: Record<string, unknown>, meta: Record<string, unknown>): Promise<{ facts: Record<string, FactRecord>; templates: Record<string, Record<string, string>>; results: Record<string, unknown> }> {
+    // null-prototype, so a fact named __proto__ or constructor is a fact and not a prototype
+    const facts: Record<string, FactRecord> = Object.create(null);
+    const templates: Record<string, Record<string, string>> = Object.create(null);
+    const results: Record<string, unknown> = Object.create(null);
     for (const f of cfg.facts.filter((f: FactConfig) => f.forTools.includes(tool))) {
       const fargs = resolveFactArgs(f.args, args, f.optional);
       if (fargs === null) continue;
-      // Lookups carry the same metadata as the forwarded call: they are the gateway acting for this receipt.
-      const result = await callUpstream(f.tool, fargs, meta);
+      // Lookups carry the same metadata as the forwarded call: they are the gateway acting for this receipt. A failed
+      // lookup, answered isError or thrown, denies the call with the answer in policy.errors; the issuer withholds it
+      // under a private rule.
+      let result: CallToolResult;
+      try {
+        result = await callUpstream(f.tool, fargs, meta);
+      } catch (e) {
+        throw new Error(`fact "${f.name}" lookup via ${f.tool} failed: ${String(e instanceof Error ? e.message : e)}`);
+      }
       if (result.isError) throw new Error(`fact "${f.name}" lookup via ${f.tool} failed: ${JSON.stringify(extractValue(result))}`);
       facts[f.name] = { tool: f.tool, args: fargs, value: extractValue(result), resultDigest: digestOf(result), provenance: "observed" };
+      templates[f.name] = f.args;
+      results[f.name] = result;
     }
-    return facts;
+    return { facts, templates, results };
   }
 
   function open(grantEnvelope: Envelope): Gateway {
@@ -259,8 +279,12 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       const upstreamMeta = { [RECEIPT_META_KEY]: receiptId, [AGENT_META_KEY]: delegation.agent, [PRINCIPAL_META_KEY]: delegation.principal };
 
       let facts: Record<string, FactRecord> = {};
+      let factTemplates: Record<string, Record<string, string>> = {};
+      let factResults: Record<string, unknown> = {};
       let policy: PolicyDecision;
       let execution: ReceiptPredicate["execution"] | undefined;
+      /** what the upstream answered, in full: the agent gets this; the receipt gets the captured view */
+      let forwarded: CallToolResult | undefined;
       let authorization: AuthorizationBundle | undefined;
 
       // The grant is enforced in every mode: a call outside its scopes, or after it expired or was revoked, is denied
@@ -273,7 +297,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         policy = { decision: "deny", reasons: [], errors: [`tool "${tool}" is not in the delegation scopes`], policyDigest: pDigest };
       } else {
         try {
-          facts = await gatherFacts(tool, args, upstreamMeta);
+          ({ facts, templates: factTemplates, results: factResults } = await gatherFacts(tool, args, upstreamMeta));
           const factValues = Object.fromEntries(Object.entries(facts).map(([k, f]) => [k, f.value]));
           policy = evaluate(policyText, {
             agentId: delegation.agent,
@@ -289,6 +313,16 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       if (cfg.mode === "observe" && !problem && inScope) policy = { ...policy, enforced: false };
       const forward = policy.decision === "allow" || policy.enforced === false;
 
+      // Private evidence is applied by the issuer to the whole statement. What it cannot know by itself: a fact's lookup
+      // arguments are copied from the call, so a fact argument may stay in clear only when its template is a constant or
+      // copies a call argument the args rule keeps in clear (the rule's `clear` names call arguments, and a fact argument
+      // may carry one under another name); the template is the one of the fact config that was used, since fact names
+      // are not unique across tools. And the lookups' full results, behind the facts' digests.
+      // the same rule the issuer will apply: for a name no upstream offers that may be the wildcard, not the name's own
+      const argsClear = new Set(effectiveRule(cfg.capture, tool, !owner.has(tool))?.args?.clear ?? []);
+      const clearFactArgs = Object.fromEntries(Object.entries(factTemplates).map(([name, template]) => [name, Object.entries(template).filter(([, v]) => !v.startsWith("$args.") || argsClear.has(v.slice("$args.".length))).map(([k]) => k)]));
+      // a name no upstream offers is text the agent chose: the issuer selects the rule by it and masks it in the view
+      const captureCtx = { clearFactArgs, factResults, unknownTool: !owner.has(tool) };
       const head = {
         receiptId,
         timestamp,
@@ -307,7 +341,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         // before the side effect does. If the log will not take the authorization, the call is not forwarded; in
         // observe mode nothing is withheld, and the missing authorization is printed instead.
         try {
-          authorization = await issuer.authorize({ ...head, policy: { ...policy, provenance: "observed" } });
+          authorization = await issuer.authorize({ ...head, policy: { ...policy, provenance: "observed" } }, captureCtx);
         } catch (e) {
           if (cfg.mode === "observe") console.error(`agent-custody gateway (observe mode): the log did not commit the authorization for ${tool}, receipt ${receiptId}; the call was forwarded without it: ${String(e instanceof Error ? e.message : e)}`);
           else execution = { status: "withheld", reason: `the log did not commit the authorization, so the call was not forwarded: ${String(e instanceof Error ? e.message : e)}`, provenance: "observed" };
@@ -327,6 +361,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
           const observed = Object.fromEntries(Object.entries(facts).map(([k, f]) => [k, f.value]));
           const result = await callUpstream(tool, args, { ...upstreamMeta, [OBSERVED_META_KEY]: observed });
           const evidence = upstreamEvidenceOf(result);
+          forwarded = result;
           execution = { status: result.isError ? "failed" : "executed", result, resultDigest: digestOf(result), provenance: "observed", ...(evidence ? { upstream: evidence } : {}) };
           noteServedFacts(result);
         } catch (e) {
@@ -343,19 +378,20 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         policy: { ...policy, provenance: "observed" },
         ...(authorization ? { authorization } : {}),
         execution,
-      });
+      }, captureCtx);
 
       const meta = { [RECEIPT_META_KEY]: receiptId };
       const refuse = (text: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: `${text} (receipt ${receiptId})` }], _meta: meta });
       switch (execution.status) {
+        // the agent gets the real result, the real reason, and the real error: what is withheld is withheld from the receipt
         case "denied":
-          return refuse(`Denied by policy: ${execution.reason}`);
+          return refuse(`Denied by policy: ${execution.reason as string}`);
         case "error":
-          return refuse(`Upstream error: ${execution.error}`);
+          return refuse(`Upstream error: ${execution.error as string}`);
         case "withheld":
-          return refuse(`Not executed: ${execution.reason}`);
+          return refuse(`Not executed: ${execution.reason as string}`);
         default: {
-          const result = execution.result as CallToolResult;
+          const result = forwarded ?? (execution.result as CallToolResult);
           return { ...result, _meta: { ...result._meta, ...meta } };
         }
       }

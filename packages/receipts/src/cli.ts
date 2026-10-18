@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { hostname, userInfo } from "node:os";
+import { captureKeyFrom, getAt, pathText, restorePaths, setAt } from "./capture.ts";
+import { saltsFileFor } from "./retention.ts";
+import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { closeSync, constants as fsConstants, existsSync, fchmodSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { loadConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
-import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
+import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
 import type { Envelope } from "./crypto.ts";
 import { createDelegation, decodeDelegation, delegateFrom, grantDigest } from "./delegation.ts";
 import { createGateway, createGatewayHost, serveStdio, writeRevokedGrants } from "./gateway.ts";
@@ -23,7 +26,7 @@ import type { AdminOptions } from "./log-admin.ts";
 import { createRequire } from "node:module";
 import { pruneLog } from "./retention.ts";
 import { serveSidecar } from "./sidecar.ts";
-import { TREEHEAD_TYPE, type ReceiptBundle, type TreeHead } from "./receipt.ts";
+import { TREEHEAD_TYPE, type ReceiptBundle, type TreeHead, type ReceiptStatement } from "./receipt.ts";
 import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
 import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
@@ -43,6 +46,8 @@ const USAGE = `agent-custody <command>
                                                    --agent-key names the agent's own key in the grant, so the agent may delegate
   delegate --key <agent.key> --parent <grant.json> --agent <sub-agent> --scopes <a,b> [--ttl-hours N] [--agent-key <sub.pub>] --out <file>
                                                    a narrower grant for a sub-agent, signed by the agent the parent names; the parent travels inside
+  reveal <bundle> --capture-key-env NAME --issuer-key <pub> [--out <file>] [--include-salts]   the values a receipt withheld (capture mode encrypted), as a disclosure file
+                                                   for verify --disclose; needs the customer's capture key
   revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them
   gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]
@@ -463,6 +468,8 @@ async function main(argv: string[]): Promise<number> {
           "stripe-secret-env": { type: "string" },
           "github-secret-env": { type: "string" },
           log: { type: "string" },
+          disclose: { type: "string" },
+          "capture-key-env": { type: "string" },
           json: { type: "boolean", default: false },
         },
       });
@@ -470,6 +477,8 @@ async function main(argv: string[]): Promise<number> {
       const issuerKeyFiles = [...(values["issuer-key"] ?? []), ...(values["gateway-key"] ?? [])];
       if (!file || issuerKeyFiles.length === 0) throw new Error("verify needs <bundle> --issuer-key (alias --gateway-key)");
       const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
+      const captureKey = values["capture-key-env"] ? captureKeyFrom(secretFrom(values["capture-key-env"])) : undefined;
+      const disclosed = values.disclose ? (JSON.parse(readFileSync(values.disclose, "utf8")) as Record<string, unknown>) : undefined;
       const fetchedLogKeys = values["log-url"] ? (await fetchLogKeys(values["log-url"])).keys : [];
       const logKeys = [...(values["log-key"] ?? []).map(loadPublicKey), ...fetchedLogKeys];
       const result = verifyBundle(bundle, {
@@ -480,9 +489,67 @@ async function main(argv: string[]): Promise<number> {
         ...(values["upstream-key"] ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}),
         ...(values["stripe-secret-env"] || values["github-secret-env"] ? { providerSecrets: { ...(values["stripe-secret-env"] ? { stripe: secretFrom(values["stripe-secret-env"]) } : {}), ...(values["github-secret-env"] ? { github: secretFrom(values["github-secret-env"]) } : {}) } } : {}),
         ...(values.log ? { logFile: values.log } : {}),
+        ...(captureKey ? { captureKey } : {}),
+        ...(disclosed ? { disclosed } : {}),
       });
       console.log(values.json ? JSON.stringify(result, null, 2) : formatReport(result));
       return result.ok ? 0 : 1;
+    }
+    case "reveal": {
+      // The values a receipt withheld, under the customer's key, as a disclosure file: hand it to a reviewer with the
+      // receipt, and `verify --disclose` recomputes every digest from it.
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { "capture-key-env": { type: "string" }, "issuer-key": { type: "string", multiple: true }, out: { type: "string" }, "include-salts": { type: "boolean" } } });
+      const file = positionals[0];
+      if (!file || !values["capture-key-env"] || !values["issuer-key"]?.length) throw new Error("reveal needs <bundle> --capture-key-env NAME --issuer-key <pub> [--out disclosure.json] [--include-salts]");
+      const key = captureKeyFrom(secretFrom(values["capture-key-env"]));
+      const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
+      // only the issuer's own statement is decrypted: a bundle someone assembled around another receipt's ciphertexts is refused before any value comes back
+      const signed = dsseVerify(bundle.envelope, values["issuer-key"].map((f) => loadPublicKey(f)));
+      if (!signed.ok) throw new Error(`reveal: the bundle is not signed by the issuer key given (${signed.error}); nothing is revealed`);
+      const p = (signed.payload as ReceiptStatement).predicate;
+      // Every withheld path the key reveals goes into the disclosure at its own path, value and salt. A path withheld
+      // as a digest only carries no value to reveal, and its salt is not written unless asked for (--include-salts):
+      // a salt beside no value would hand a reviewer the means to confirm guesses, and a file that carries one does
+      // not verify until the holder fills in the value.
+      const back = restorePaths(p, p.capture, undefined, key);
+      for (const x of back.problems) throw new Error(x.error);
+      // the id comes from the bundle: it is checked before it becomes part of a path
+      const saltsFile = saltsFileFor(dirname(file), p.receiptId);
+      const kept = values["include-salts"] && existsSync(saltsFile) ? (JSON.parse(readFileSync(saltsFile, "utf8")) as { salts?: Record<string, string> }).salts ?? {} : {};
+      let disclosure: Record<string, unknown> = { receiptId: p.receiptId };
+      let saltsWritten = 0;
+      for (const path of p.capture?.withheld ?? []) {
+        const k = JSON.stringify(path);
+        if (back.restored.has(k)) disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: back.salts.get(k), value: back.values.get(k) });
+        else if (kept[k]) {
+          disclosure = setAt(disclosure, path, { $custody: "disclosed", salt: kept[k] });
+          saltsWritten++;
+        }
+      }
+      // a value withheld without its value cannot be revealed by anyone but its holder; one encrypted under another key is a different matter, said separately
+      const foreign = back.missing.filter((w) => (getAt(p, w) as { $custody?: string } | undefined)?.$custody === "encrypted");
+      const notRevealed = back.missing.filter((w) => !foreign.includes(w)).map(pathText);
+      const foreignNote = foreign.length ? ` Encrypted under key ${String((getAt(p, foreign[0]!) as { keyid: string }).keyid).slice(0, 12)}…, not the one given: ${foreign.map(pathText).join(", ")}.` : "";
+      if (foreign.length && back.restored.size === 0) throw new Error(`reveal: nothing revealed; the values are encrypted under key ${String((getAt(p, foreign[0]!) as { keyid: string }).keyid).slice(0, 12)}…, not the one given`);
+      const text = JSON.stringify(disclosure, null, 2);
+      const how = saltsWritten ? `; their salts are written in the file for the holder to add \"value\" beside, and the file does not verify until then: do not hand it over unfinished` : values["include-salts"] ? ` (no salts file at ${saltsFile})` : `; --include-salts writes their salts from ${saltsFile} for the holder to complete`;
+      const note = (notRevealed.length ? ` Not revealed, withheld without a value: ${notRevealed.join(", ")}; only the party that holds them can disclose them${how}.` : "") + foreignNote;
+      if (values.out) {
+        // decrypted values and salts: the owner's alone, whatever the umask, whatever mode a file already there had,
+        // and never through a symlink someone left at that name
+        const fd = openSync(values.out, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW, 0o600);
+        try {
+          fchmodSync(fd, 0o600);
+          writeSync(fd, text);
+        } finally {
+          closeSync(fd);
+        }
+        console.log(`disclosure for receipt ${p.receiptId} written to ${values.out}; verify it with --disclose ${values.out}.${note}`);
+      } else {
+        console.log(text);
+        if (note) console.error(note.trim());
+      }
+      return 0;
     }
     case "audit": {
       const { values } = parseArgs({

@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { digestOf, dsseSign, dsseVerify, verifyBundle, type Envelope, type KeyPair, type PublicKeyRef, type ReceiptBundle, type ReceiptStatement, type VerifyOptions, type VerifyResult } from "@agent-custody/receipts";
+import { restorePaths, type CaptureNote } from "@agent-custody/receipts";
 import { blastRadius, loadReceipts, type ReceiptSummary } from "./blast.ts";
 import type { Fact, Ledger } from "./ledger.ts";
 
@@ -23,8 +24,10 @@ export interface ActionPack {
   written: Fact[];
   /** what each written belief is today */
   status: Record<string, "believed" | "retracted" | "forgotten" | "superseded">;
-  /** everything downstream of the written beliefs: later calls that consumed them and beliefs derived, transitively */
-  downstream: { receipts: ReceiptSummary[]; derivedFacts: Fact[]; stillBelieved: Fact[] };
+  /** true when the receipt withholds the ids of the beliefs shown before the call under a capture rule and no key opened them: `consumed` is then empty for want of seeing, not for want of beliefs */
+  consumedWithheld: boolean;
+  /** everything downstream of the written beliefs: later calls that consumed them and beliefs derived, transitively; `withheld` lists later calls whose consumed ids a capture rule withholds, each of which may depend on them, so the other sets are incomplete while it is not empty */
+  downstream: { receipts: ReceiptSummary[]; derivedFacts: Fact[]; stillBelieved: Fact[]; withheld: ReceiptSummary[] };
   /** every receipt cited by the downstream walk, by id, as the full bundle */
   receipts: Record<string, ReceiptBundle>;
   missingReceipts: string[];
@@ -40,14 +43,17 @@ function loadBundle(receiptsDir: string, receiptId: string): ReceiptBundle {
  * Builds the pack. Without a ledger the receipt is explained on its own and the belief questions are answered as
  * unknown rather than as nothing, so a reader can tell "nothing depended on it" from "nobody looked".
  */
-export async function buildActionPack(receiptsDir: string, receiptId: string, ledger?: Ledger): Promise<ActionPack> {
+export async function buildActionPack(receiptsDir: string, receiptId: string, ledger?: Ledger, opts: { captureKey?: Buffer } = {}): Promise<ActionPack> {
   const receipt = loadBundle(receiptsDir, receiptId);
   const p = decodeStatement(receipt).predicate;
-  const consumedIds = p.consumed?.factIds ?? [];
+  // under a capture rule the ids are a commitment in the receipt: the key brings them back; without it there is nothing to look up, and the explanation says so
+  const opened = !Array.isArray(p.consumed?.factIds) && opts.captureKey ? (restorePaths(p, p.capture as CaptureNote | undefined, undefined, opts.captureKey).predicate as { consumed?: { factIds?: unknown } }).consumed?.factIds : undefined;
+  const consumedIds: string[] = Array.isArray(p.consumed?.factIds) ? p.consumed.factIds : Array.isArray(opened) ? opened.filter((id): id is string => typeof id === "string") : [];
+  const consumedWithheld = !!p.consumed && !Array.isArray(p.consumed.factIds) && !Array.isArray(opened);
   const consumed: ActionPack["consumed"] = { facts: [], unknown: [] };
   const written: Fact[] = [];
   const status: ActionPack["status"] = {};
-  const downstream: ActionPack["downstream"] = { receipts: [], derivedFacts: [], stillBelieved: [] };
+  const downstream: ActionPack["downstream"] = { receipts: [], derivedFacts: [], stillBelieved: [], withheld: [] };
   const receipts: Record<string, ReceiptBundle> = {};
   const missingReceipts: string[] = [];
   if (ledger) {
@@ -57,8 +63,9 @@ export async function buildActionPack(receiptsDir: string, receiptId: string, le
       else consumed.unknown.push(id);
     }
     for (const f of await ledger.facts()) if (f.source.receiptId === receiptId) written.push(f);
-    const summaries = loadReceipts(receiptsDir);
+    const summaries = loadReceipts(receiptsDir, opts);
     const seenReceipts = new Map<string, ReceiptSummary>();
+    const seenWithheld = new Map<string, ReceiptSummary>();
     const seenFacts = new Map<string, Fact>();
     const believed = new Set<string>();
     for (const f of written) {
@@ -66,12 +73,14 @@ export async function buildActionPack(receiptsDir: string, receiptId: string, le
       status[f.factId] = history.some((e) => e.kind === "forget") ? "forgotten" : history.some((e) => e.kind === "retract") ? "retracted" : f.validTo !== null ? "superseded" : "believed";
       const b = await blastRadius(ledger, summaries, f.factId);
       for (const r of b.receipts) seenReceipts.set(r.receiptId, r);
+      for (const r of b.withheld) seenWithheld.set(r.receiptId, r);
       for (const d of b.derivedFacts) seenFacts.set(d.factId, d);
       for (const s of b.stillBelieved) believed.add(s.factId);
     }
     downstream.receipts = [...seenReceipts.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     downstream.derivedFacts = [...seenFacts.values()];
     downstream.stillBelieved = downstream.derivedFacts.filter((f) => believed.has(f.factId));
+    downstream.withheld = [...seenWithheld.values()].filter((r) => !seenReceipts.has(r.receiptId)).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const wanted = new Set<string>([...downstream.receipts.map((r) => r.receiptId), ...downstream.derivedFacts.map((f) => f.source.receiptId).filter((x): x is string => !!x)]);
     for (const id of [...wanted].sort()) {
       try {
@@ -83,7 +92,7 @@ export async function buildActionPack(receiptsDir: string, receiptId: string, le
   } else {
     consumed.unknown.push(...consumedIds);
   }
-  return { version: "0.1", generatedAt: new Date().toISOString(), receiptId, receipt, consumed, written, status, downstream, receipts, missingReceipts };
+  return { version: "0.1", generatedAt: new Date().toISOString(), receiptId, receipt, consumed, consumedWithheld, written, status, downstream, receipts, missingReceipts };
 }
 
 export function signActionPack(pack: ActionPack, key: KeyPair): Envelope {
@@ -164,19 +173,24 @@ export function formatExplain(pack: ActionPack, verification: VerifyResult | nul
   if (p.principal.provenance === "attested") row("WHO AUTHORIZED IT", `${p.principal.id}, grant signed by key ${p.principal.keyid.slice(0, 12)}${d ? `, valid ${d.issuedAt} to ${d.expiresAt}` : ""}`);
   else row("WHO AUTHORIZED IT", `${p.principal.id ?? "nobody named"} (claimed; no signed grant)`);
   row("WHAT WAS ALLOWED", d?.scopes ? `tools ${d.scopes.join(", ")}` : "no grant in this receipt");
-  if (p.policy) more(`policy ${p.policy.policyDigest.slice(0, 12)} decided ${p.policy.decision}${p.policy.reasons.length ? ` by ${p.policy.reasons.join(", ")}` : ""}${p.policy.errors.length ? `; errors: ${p.policy.errors.join("; ")}` : ""}`);
+  // under a capture rule a message is a commitment in the receipt; the explanation says so rather than printing it
+  const text = (v: unknown): string => (typeof v === "string" ? v : "(withheld under the capture rule)");
+  const errors: string[] = Array.isArray(p.policy?.errors) ? p.policy.errors : p.policy?.errors ? [text(p.policy.errors)] : [];
+  if (p.policy) more(`policy ${p.policy.policyDigest.slice(0, 12)} decided ${p.policy.decision}${p.policy.reasons.length ? ` by ${p.policy.reasons.join(", ")}` : ""}${errors.length ? `; errors: ${errors.join("; ")}` : ""}`);
   const facts = Object.entries(p.facts);
   row("WHAT THE AGENT SAW", facts.length ? facts.map(([k, f]) => `${k} = ${JSON.stringify(f.value)} (fetched by the gateway via ${f.tool})`).join("; ") : "no facts fetched for this call");
-  const shown = p.consumed?.factIds ?? [];
-  if (!withLedger) more(shown.length ? `${shown.length} belief(s) shown before this call; open with a ledger to see them` : "no beliefs shown before this call");
-  else if (shown.length === 0) more("no beliefs shown before this call");
+  // from the pack, not the receipt: under a capture rule the receipt holds a commitment, and the pack holds what the key opened
+  const shown = pack.consumed.facts.length + pack.consumed.unknown.length;
+  if (pack.consumedWithheld) more("the beliefs shown before this call are withheld under the capture rule; give the capture key to see them");
+  else if (!withLedger) more(shown ? `${shown} belief(s) shown before this call; open with a ledger to see them` : "no beliefs shown before this call");
+  else if (shown === 0) more("no beliefs shown before this call");
   else {
-    more(`${shown.length} belief(s) shown before this call:`);
+    more(`${shown} belief(s) shown before this call:`);
     for (const f of pack.consumed.facts) more(`  ${factLine(f)}`);
     for (const id of pack.consumed.unknown) more(`  ${id.slice(0, 8)} (not in this ledger)`);
   }
-  row("WHAT IT DID", `${p.tool.name} ${JSON.stringify(p.request.args)} -> ${p.execution.status}${p.execution.status === "denied" ? `: ${p.execution.reason}` : p.execution.status === "withheld" ? `: ${p.execution.reason}` : p.execution.status === "error" ? `: ${p.execution.error}` : ""}`);
-  row("WHY", p.policy ? (p.policy.decision === "allow" ? `the policy permitted it${p.policy.reasons.length ? ` (${p.policy.reasons.join(", ")})` : ""}` : p.policy.enforced === false ? `the policy would have refused it, and was in observe mode, so the call went through: ${[...p.policy.reasons, ...p.policy.errors].join("; ") || "no permit matched"}` : `the policy refused it: ${[...p.policy.reasons, ...p.policy.errors].join("; ") || "no permit matched"}`) : "no policy was evaluated");
+  row("WHAT IT DID", `${p.tool.name} ${JSON.stringify(p.request.args)} -> ${p.execution.status}${p.execution.status === "denied" ? `: ${text(p.execution.reason)}` : p.execution.status === "withheld" ? `: ${text(p.execution.reason)}` : p.execution.status === "error" ? `: ${text(p.execution.error)}` : ""}`);
+  row("WHY", p.policy ? (p.policy.decision === "allow" ? `the policy permitted it${p.policy.reasons.length ? ` (${p.policy.reasons.join(", ")})` : ""}` : p.policy.enforced === false ? `the policy would have refused it, and was in observe mode, so the call went through: ${[...p.policy.reasons, ...errors].join("; ") || "no permit matched"}` : `the policy refused it: ${[...p.policy.reasons, ...errors].join("; ") || "no permit matched"}`) : "no policy was evaluated");
   const th = pack.receipt.treeHead.signatures[0]?.keyid ?? "?";
   row("WHAT EVIDENCE", `receipt ${p.receiptId}, leaf ${pack.receipt.inclusion.leafIndex} of a log whose head is signed by ${th.slice(0, 12)}`);
   if (p.authorization) more(`authorization committed as leaf ${p.authorization.inclusion.leafIndex}, before the call was forwarded`);
@@ -192,6 +206,10 @@ export function formatExplain(pack: ActionPack, verification: VerifyResult | nul
       row("DID ANYTHING DEPEND ON THIS", `${w.length} belief(s) written in this call, ${pack.downstream.receipts.length} later call(s) made after seeing them, ${pack.downstream.derivedFacts.length} belief(s) derived`);
       for (const f of w) more(`  wrote ${factLine(f)}: ${pack.status[f.factId]}`);
       for (const r of pack.downstream.receipts) more(`  then ${r.timestamp} ${r.tool} ${r.status} (receipt ${r.receiptId.slice(0, 8)})`);
+      if (pack.downstream.withheld?.length) {
+        more(`  INCOMPLETE: ${pack.downstream.withheld.length} later call(s) withhold what the agent had been shown under a capture rule; each may depend on these beliefs. Give the capture key to see.`);
+        for (const r of pack.downstream.withheld) more(`  maybe ${r.timestamp} ${r.tool} ${r.status} (receipt ${r.receiptId.slice(0, 8)}, consumed ids withheld)`);
+      }
     }
     const open = [...w.filter((f) => pack.status[f.factId] === "believed"), ...pack.downstream.stillBelieved];
     if (open.length === 0) row("WHAT NEEDS REVERSAL", w.length === 0 ? "nothing" : "nothing still believed; every belief from this call and after it is retracted, forgotten, or superseded");
