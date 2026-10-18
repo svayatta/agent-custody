@@ -13,6 +13,8 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { canonicalize, digestOf, sha256Hex } from "./crypto.ts";
 import type { AuthorizationPredicate } from "./receipt.ts";
+// used only inside functions, so the cycle with upstream.ts (which takes isCommitment from here) is resolved before either runs
+import { contentDigest, UPSTREAM_TYPE } from "./upstream.ts";
 
 export type CaptureMode = "clear" | "digest" | "encrypted";
 /** One side of a call: the arguments, the result, or the facts. */
@@ -157,30 +159,69 @@ export function ruleFor(capture: CaptureConfig | undefined, tool: string): Captu
 }
 const ownOf = <T>(o: Record<string, T> | undefined, k: string): T | undefined => (o && Object.hasOwn(o, k) ? o[k] : undefined);
 const PRIVACY: Record<CaptureMode, number> = { clear: 0, digest: 1, encrypted: 2 };
+/** A side as the rule captures it: its mode, and the fields it keeps in clear (null for all of them, a side in clear whole). */
+function sideRule(rule: CaptureRule, side: "args" | "result" | "facts"): { mode: CaptureMode; clear: string[] | null } {
+  const mode = ruleMode(rule);
+  const s = rule[side];
+  if (mode === "clear" || s?.mode === "clear") return { mode: "clear", clear: null };
+  return { mode: s?.mode ?? mode, clear: s?.clear ?? [] };
+}
 /**
  * The rule for a call: the tool's own, else the wildcard. For a name no upstream offers, which is text the agent
- * chose, the more private of the two, and the wildcard when they are as private, so that a rule left for a retired
- * name can never be selected by an agent to widen what is in clear. The gateway and the issuer both call this, so the
- * fact arguments kept in clear and the view agree.
+ * chose, both together, side by side: the more private mode, and only the fields both keep in clear, so that a rule
+ * left for a retired name can never be selected by an agent to widen what is in clear. A mode does not order which
+ * fields are public, so the clear lists are intersected, not taken from the more private rule. The gateway and the
+ * issuer both call this, so the fact arguments kept in clear and the view agree.
  */
 export function effectiveRule(capture: CaptureConfig | undefined, tool: string, unknownTool = false): CaptureRule | undefined {
   const named = ruleFor(capture, tool);
   if (!unknownTool) return named;
   const star = ownOf(capture, "*");
-  if (!star || !ownOf(capture, tool)) return named ?? star;
-  return PRIVACY[ruleMode(star)] >= PRIVACY[ruleMode(named)] ? star : named;
+  const own_ = ownOf(capture, tool);
+  if (!star || !own_) return named ?? star;
+  const both: CaptureRule = {};
+  for (const side of ["args", "result", "facts"] as const) {
+    const a = sideRule(own_, side);
+    const b = sideRule(star, side);
+    const mode = PRIVACY[a.mode] >= PRIVACY[b.mode] ? a.mode : b.mode;
+    if (mode === "clear") both[side] = { mode };
+    else both[side] = { mode, clear: a.clear === null ? (b.clear ?? []) : b.clear === null ? a.clear : a.clear.filter((f) => b.clear!.includes(f)) };
+  }
+  return both;
 }
-/** An upstream's attestation envelope as `signResult` writes it: the three claims and nothing else. Any other payload is upstream-authored data. */
-function isPlainAttestation(envelope: unknown): boolean {
-  if (!isObject(envelope) || typeof envelope.payload !== "string") return false;
+/**
+ * An upstream's attestation envelope exactly as `signResult` writes it for this call: the three envelope fields, the
+ * upstream payload type, one signature entry of a key id and a signature, and a payload that is the canonical bytes of
+ * this receipt's id, this tool, and the digest of this result, nothing else. Any other field, claim, or encoding is
+ * upstream-authored data that may repeat the withheld arguments. The key id and the signature are bytes the upstream
+ * chose and the gateway, holding no upstream key, checks for shape only; they carry no more than the clear result the
+ * rule publishes from the same upstream.
+ */
+function isPlainAttestation(envelope: unknown, receiptId: unknown, tool: unknown, result: unknown): boolean {
+  if (!isObject(envelope) || !exactKeys(envelope, ["payload", "payloadType", "signatures"])) return false;
+  if (envelope.payloadType !== UPSTREAM_TYPE || typeof envelope.payload !== "string" || !isObject(result)) return false;
+  const sigs = envelope.signatures;
+  if (!Array.isArray(sigs) || sigs.length !== 1) return false;
+  const sig = sigs[0] as unknown;
+  if (!isObject(sig) || !exactKeys(sig, ["keyid", "sig"]) || typeof sig.keyid !== "string" || !/^[0-9a-f]{64}$/.test(sig.keyid)) return false;
+  if (typeof sig.sig !== "string" || !canonicalBase64(sig.sig, 64)) return false;
+  if (!canonicalBase64(envelope.payload)) return false;
   try {
-    const p = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8")) as unknown;
-    if (!isObject(p)) return false;
-    const keys = Object.keys(p).sort();
-    return keys.join(",") === "contentDigest,receiptId,tool" && keys.every((k) => typeof p[k] === "string");
+    const bytes = Buffer.from(envelope.payload, "base64");
+    const p = JSON.parse(bytes.toString("utf8")) as unknown;
+    // compared as bytes: decoding to text would turn an invalid byte into U+FFFD and let it through
+    if (!isObject(p) || !exactKeys(p, ["contentDigest", "receiptId", "tool"]) || !bytes.equals(Buffer.from(canonicalize(p), "utf8"))) return false;
+    return p.receiptId === receiptId && p.tool === tool && p.contentDigest === contentDigest(result as { content: unknown; isError?: boolean });
   } catch {
     return false;
   }
+}
+/** exactly these own keys: a joined list would let one key named "a,b" stand for two, and an inherited one would not count */
+const exactKeys = (o: Record<string, unknown>, keys: string[]) => Object.keys(o).length === keys.length && keys.every((k) => Object.hasOwn(o, k));
+/** base64 that decodes and encodes back to itself, so no character rides along unread; of `length` bytes when given */
+function canonicalBase64(s: string, length?: number): boolean {
+  const b = Buffer.from(s, "base64");
+  return b.toString("base64") === s && (length === undefined || b.length === length);
 }
 
 /** The one mode a rule withholds in: encrypted when any side is, else digest; clear when no side is private. */
@@ -407,10 +448,11 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
           // the body against it) and the bind is a string the upstream chose. Only the provider's name stays. The
           // verifier checks the delivery once the body, the signature, and the bind are back.
           for (const [uf, uv] of Object.entries(v)) {
-            // beside a result the rule leaves in clear, an envelope that is the plain attestation (receipt id, tool,
-            // content digest) stays, so the signature over that public result can be checked; one carrying any other
-            // claim is upstream-authored data and is withheld, and the verifier then says so rather than skipping the check
-            if (uf === "envelope" && !resultSide && isPlainAttestation(uv)) continue;
+            // beside a result the rule leaves in clear, an envelope that is exactly the plain attestation for this call
+            // (isPlainAttestation: every field, the signature entry, and the payload's bytes) stays, so the signature over
+            // that public result can be checked; any other field or claim is upstream-authored data and withholds it, and
+            // the verifier then says so rather than skipping the check. A masked tool name is never kept beside its envelope.
+            if (uf === "envelope" && !resultSide && !ctx.unknownTool && isPlainAttestation(uv, predicate.receiptId, predicate.tool.name, value.result)) continue;
             if (uf === "rawBody" || uf === "envelope" || uf === "signature" || uf === "bind") hide(["execution", "upstream", uf], uv, resultSide ? resultSide.key : k);
             else if (!CLEAR_IN.upstream.has(uf)) hide(["execution", "upstream", uf], uv, k);
           }

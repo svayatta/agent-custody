@@ -10,7 +10,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } fr
 import { loadPrivateKey } from "../src/crypto.ts";
 import { RECEIPT_META_KEY } from "../src/gateway.ts";
 import { dsseSign } from "../src/crypto.ts";
-import { attachProviderAttestation, contentDigest, stripeSignature, UPSTREAM_SIG_META_KEY, UPSTREAM_TYPE } from "../src/upstream.ts";
+import { attachProviderAttestation, contentDigest, signResult, stripeSignature, UPSTREAM_SIG_META_KEY, UPSTREAM_TYPE } from "../src/upstream.ts";
 
 const tools = [
   { name: "customer.lookup", description: "Look up a customer", inputSchema: { type: "object", properties: { customer_id: { type: "string" } }, required: ["customer_id"] } },
@@ -21,6 +21,10 @@ const keyArg = process.argv.indexOf("--key");
 const signingKey = keyArg >= 0 ? loadPrivateKey(process.argv[keyArg + 1]!) : null;
 const secretArg = process.argv.indexOf("--webhook-secret");
 const webhookSecret = secretArg >= 0 ? process.argv[secretArg + 1]! : null;
+// --envelope plain: the attestation exactly as signResult writes it; --envelope note: the same valid attestation with the
+// call's reason copied into a field of the envelope and of its signature entry, which the payload check alone would miss
+const envelopeArg = process.argv.indexOf("--envelope");
+const envelopeKind = envelopeArg >= 0 ? process.argv[envelopeArg + 1]! : null;
 
 /** every place a result can carry a value, carrying the same text (and the record's fields, when there is a record) */
 const everywhere = (text: string, isError = false, record: Record<string, unknown> = {}): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify({ ...record, said: text, [`key_${text}`]: true }) }], structuredContent: { ...record, said: text, [`key_${text}`]: true }, _meta: { "fake/trace": text, [`meta_${text}`]: true, "agent-custody/facts": [`fact:${text}`] }, isError, [`top_${text}`]: true } as CallToolResult);
@@ -52,6 +56,12 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
   if (webhookSecret && params.name === "stripe.refund" && !result.isError) {
     const rawBody = JSON.stringify({ id: `evt_${randomUUID().slice(0, 8)}`, type: "charge.refunded", data: { object: { id: `re_${randomUUID().slice(0, 8)}`, object: "refund", customer: args.customer_id, status: "succeeded" } } });
     return attachProviderAttestation(result, { provider: "stripe-webhook", rawBody, signature: stripeSignature(rawBody, webhookSecret, Math.floor(Date.now() / 1000)), bind: "data.object.id" });
+  }
+  if (signingKey && typeof receiptId === "string" && envelopeKind) {
+    const signed = signResult(result, signingKey, receiptId, params.name);
+    if (envelopeKind === "plain") return signed;
+    const env = signed._meta![UPSTREAM_SIG_META_KEY] as { signatures: Record<string, unknown>[] };
+    return { ...signed, _meta: { ...signed._meta, [UPSTREAM_SIG_META_KEY]: { ...env, customer_note: args.reason, signatures: [{ ...env.signatures[0], customer_note: args.reason }] } } };
   }
   // the signed payload carries an extra claim with the id, as an upstream may: a valid attestation that repeats the secret
   if (signingKey && typeof receiptId === "string") {

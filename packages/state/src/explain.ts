@@ -179,12 +179,13 @@ export function formatExplain(pack: ActionPack, verification: VerifyResult | nul
   if (p.policy) more(`policy ${p.policy.policyDigest.slice(0, 12)} decided ${p.policy.decision}${p.policy.reasons.length ? ` by ${p.policy.reasons.join(", ")}` : ""}${errors.length ? `; errors: ${errors.join("; ")}` : ""}`);
   const facts = Object.entries(p.facts);
   row("WHAT THE AGENT SAW", facts.length ? facts.map(([k, f]) => `${k} = ${JSON.stringify(f.value)} (fetched by the gateway via ${f.tool})`).join("; ") : "no facts fetched for this call");
-  const shown = Array.isArray(p.consumed?.factIds) ? p.consumed.factIds : [];
+  // from the pack, not the receipt: under a capture rule the receipt holds a commitment, and the pack holds what the key opened
+  const shown = pack.consumed.facts.length + pack.consumed.unknown.length;
   if (pack.consumedWithheld) more("the beliefs shown before this call are withheld under the capture rule; give the capture key to see them");
-  else if (!withLedger) more(shown.length ? `${shown.length} belief(s) shown before this call; open with a ledger to see them` : "no beliefs shown before this call");
-  else if (shown.length === 0) more("no beliefs shown before this call");
+  else if (!withLedger) more(shown ? `${shown} belief(s) shown before this call; open with a ledger to see them` : "no beliefs shown before this call");
+  else if (shown === 0) more("no beliefs shown before this call");
   else {
-    more(`${shown.length} belief(s) shown before this call:`);
+    more(`${shown} belief(s) shown before this call:`);
     for (const f of pack.consumed.facts) more(`  ${factLine(f)}`);
     for (const id of pack.consumed.unknown) more(`  ${id.slice(0, 8)} (not in this ledger)`);
   }

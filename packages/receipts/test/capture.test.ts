@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { aadFor, captureKeyFrom, checkCommitment, digestSalt, effectiveRule, getAt, isCommitment, pathKey, privateView, REST, restorePaths, reveal, ruleFor, setAt, withhold, type CaptureNote, type Path } from "../src/capture.ts";
 import { dsseSign, generateKeyPair } from "../src/crypto.ts";
-import { signResult, UPSTREAM_SIG_META_KEY, UPSTREAM_TYPE } from "../src/upstream.ts";
+import { contentDigest, signResult, UPSTREAM_SIG_META_KEY, UPSTREAM_TYPE } from "../src/upstream.ts";
 import { sha256Hex } from "../src/crypto.ts";
 import { pruneLog, SALTS_DIR } from "../src/retention.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
@@ -318,13 +318,22 @@ describe("the view of a statement under a rule", () => {
     expect(after.salts[pathKey(["consumed", "factIds"])]).toBe(auth.salts[pathKey(["consumed", "factIds"])]);
   });
 
-  it("the rule for a call is one function: a name no upstream offers gets the more private of its rule and the wildcard, the wildcard when they are as private", () => {
+  it("the rule for a call is one function: for a name no upstream offers, its rule and the wildcard together, the more private mode and only the fields both keep in clear", () => {
     const capture = { "legacy.export": { args: { mode: "digest" as const, clear: ["customer_id"] } }, "retired.clear": { args: { mode: "clear" as const } }, "*": { args: { mode: "digest" as const } } };
     expect(effectiveRule(capture, "legacy.export")).toBe(capture["legacy.export"]);
-    // unknown: as private as the wildcard, so the wildcard, whose clear list is narrower, wins
-    expect(effectiveRule(capture, "legacy.export", true)).toBe(capture["*"]);
-    expect(effectiveRule(capture, "retired.clear", true)).toBe(capture["*"]);
-    expect(effectiveRule({ ...capture, "*": { args: { mode: "clear" as const } } }, "legacy.export", true)).toBe(capture["legacy.export"]);
+    // unknown: the wildcard keeps no field in clear, so neither does the call, whichever name the agent chose
+    const sides = (r: unknown) => r as { args: { mode: string; clear?: string[] }; result: { mode: string; clear?: string[] }; facts: { mode: string; clear?: string[] } };
+    expect(sides(effectiveRule(capture, "legacy.export", true)).args).toEqual({ mode: "digest", clear: [] });
+    expect(sides(effectiveRule(capture, "retired.clear", true)).args).toEqual({ mode: "digest", clear: [] });
+    // a more private mode on the retired name does not carry its wider clear list: the mode does not order which fields are public
+    const enc = { "legacy.export": { args: { mode: "encrypted" as const, clear: ["customer_id"] } }, "*": { args: { mode: "digest" as const } } };
+    expect(sides(effectiveRule(enc, "legacy.export", true)).args).toEqual({ mode: "encrypted", clear: [] });
+    // the fields both keep stay, a side the wildcard leaves in clear takes the name's list, and an unset side follows each rule's mode
+    const both = { "legacy.export": { args: { mode: "digest" as const, clear: ["customer_id", "amount"] } }, "*": { args: { mode: "encrypted" as const, clear: ["amount", "currency"] }, result: { mode: "clear" as const } } };
+    const b = sides(effectiveRule(both, "legacy.export", true));
+    expect(b.args).toEqual({ mode: "encrypted", clear: ["amount"] });
+    expect(b.result).toEqual({ mode: "digest", clear: [] });
+    expect(sides(effectiveRule({ ...capture, "*": { args: { mode: "clear" as const } } }, "legacy.export", true)).args).toEqual({ mode: "digest", clear: ["customer_id"] });
     expect(effectiveRule({ a: { args: { mode: "digest" as const } } }, "other", true)).toBeUndefined();
     expect(effectiveRule(capture, "constructor", true)).toBe(capture["*"]);
   });
@@ -341,6 +350,45 @@ describe("the view of a statement under a rule", () => {
     const hidden = privateView(base(chatty), { args: { mode: "digest" }, result: { mode: "clear" } }).predicate;
     expect(withheldPaths(hidden)).toContain("execution.upstream.envelope");
     expect(JSON.stringify(hidden)).not.toContain(chatty.payload);
+    // every other field of a plain attestation is upstream-authored too: an extra envelope field, an extra field in the
+    // signature entry, a second entry, bytes riding along in the base64, a payload bound to another call, a key id that is
+    // not one: each withholds the whole envelope, and the secret it carries is nowhere in the view
+    const p = plain as { payloadType: string; payload: string; signatures: { keyid: string; sig: string }[] };
+    const other = (claims: Record<string, unknown>) => dsseSign(UPSTREAM_TYPE, { receiptId: "r-1", tool: "stripe.refund", contentDigest: contentDigest(result), ...claims }, upstream);
+    const variants: [string, unknown][] = [
+      ["envelope field", { ...p, customer_note: "SECRET_NOTE" }],
+      ["signature field", { ...p, signatures: [{ ...p.signatures[0], customer_note: "SECRET_NOTE" }] }],
+      ["second signature", { ...p, signatures: [...p.signatures, { keyid: "SECRET_NOTE", sig: p.signatures[0]!.sig }] }],
+      ["key id", { ...p, signatures: [{ ...p.signatures[0], keyid: "SECRET_NOTE" }] }],
+      ["payload type", { ...p, payloadType: "SECRET_NOTE" }],
+      ["base64 tail", { ...p, payload: `${p.payload}SECRET_NOTE` }],
+      ["signature length", { ...p, signatures: [{ ...p.signatures[0], sig: Buffer.from(`SECRET_NOTE${"x".repeat(54)}`).toString("base64") }] }],
+      ["key standing for two", Object.assign(Object.create({ payloadType: p.payloadType, signatures: p.signatures }) as object, { payload: p.payload, "payloadType,signatures": "SECRET_NOTE" })],
+      ["signature key standing for two", { ...p, signatures: [Object.assign(Object.create({ sig: p.signatures[0]!.sig }) as object, { keyid: p.signatures[0]!.keyid, "keyid,sig": "SECRET_NOTE" })] }],
+      ["signature tail", { ...p, signatures: [{ ...p.signatures[0], sig: `${p.signatures[0]!.sig}SECRET_NOTE` }] }],
+      ["payload not canonical", { ...p, payload: Buffer.from(JSON.stringify({ tool: "stripe.refund", receiptId: "r-1", contentDigest: contentDigest(result) }) + " ".repeat(3) + "\n").toString("base64") }],
+      ["another receipt", other({ receiptId: "SECRET_NOTE" })],
+      ["another tool", other({ tool: "SECRET_NOTE" })],
+      ["another content", other({ contentDigest: sha256Hex("SECRET_NOTE") })],
+    ];
+    for (const [what, envelope] of variants) {
+      const v = privateView(base(envelope), { args: { mode: "digest" }, result: { mode: "clear" } }).predicate;
+      expect(withheldPaths(v), what).toContain("execution.upstream.envelope");
+      expect(JSON.stringify(v), what).not.toContain("SECRET_NOTE");
+      expect(JSON.stringify(v), what).not.toContain(sha256Hex("SECRET_NOTE"));
+    }
+    // the payload is compared as bytes: an invalid byte where the tool name has U+FFFD decodes to the same text, and is refused
+    const odd = "stripe.refund\uFFFD";
+    const oddEnv = signResult(result, upstream, "r-1", odd)._meta[UPSTREAM_SIG_META_KEY] as { payload: string };
+    const oddBase = (envelope: unknown): ReceiptPredicate => ({ ...base(envelope), tool: { name: odd, provenance: "observed" } });
+    const rule = { args: { mode: "digest" as const }, result: { mode: "clear" as const } };
+    expect(withheldPaths(privateView(oddBase(oddEnv), rule).predicate)).not.toContain("execution.upstream.envelope");
+    const raw = Buffer.from(oddEnv.payload, "base64");
+    const at = raw.indexOf(Buffer.from("\uFFFD", "utf8"));
+    const swapped = Buffer.concat([raw.subarray(0, at), Buffer.from([0xff]), raw.subarray(at + 3)]);
+    expect(withheldPaths(privateView(oddBase({ ...oddEnv, payload: swapped.toString("base64") }), rule).predicate)).toContain("execution.upstream.envelope");
+    // an unknown tool name is masked in the receipt, so an envelope naming it is never kept
+    expect(withheldPaths(privateView(base(plain), { args: { mode: "digest" }, result: { mode: "clear" } }, undefined, { unknownTool: true }).predicate)).toContain("execution.upstream.envelope");
     // with the result private, the envelope goes with it either way: its content digest is an unsalted hash of the withheld content
     expect(withheldPaths(privateView(base(plain), { result: { mode: "digest" } }).predicate)).toContain("execution.upstream.envelope");
   });
@@ -720,7 +768,7 @@ describe("private evidence through the gateway", () => {
     }
   });
 
-  it("a call to a tool no upstream offers keeps the rule its real name selects, or the wildcard if that is more private, and the receipt shows the name as (unknown tool), in either mode", async () => {
+  it("a call to a tool no upstream offers takes the rule its real name selects together with the wildcard, and the receipt shows the name as (unknown tool), in either mode", async () => {
     for (const mode of ["digest", "encrypted"] as const) {
       const fxu = buildFixture(mkdtempSync(join(tmpdir(), `capture-unknown-${mode}-`)));
       const cfg = JSON.parse(readFileSync(fxu.configFile, "utf8"));
@@ -746,20 +794,29 @@ describe("private evidence through the gateway", () => {
         expect(lp.tool.name).toBe("(unknown tool)");
         expect(leakText(bundleOf2(fxu, legacy))).not.toContain("PRIVATE_LEGACY");
         // and the fact arguments copied from the call follow the rule the issuer applies, not the name's wider clear list
-        const fxw = buildFixture(mkdtempSync(join(tmpdir(), `capture-unknown-wide-${mode}-`)));
-        const wcfg = JSON.parse(readFileSync(fxw.configFile, "utf8"));
-        wcfg.capture = { "legacy.export": { args: { mode: "digest", clear: ["customer_id"] } }, "*": { args: { mode: "encrypted" } } };
-        wcfg.captureKeyEnv = "TEST_CAPTURE_KEY";
-        wcfg.facts = [{ name: "customer", tool: "customer.lookup", args: { customer_id: "$args.customer_id" }, forTools: ["stripe.refund", "legacy.export"] }];
-        writeFileSync(fxw.configFile, JSON.stringify(wcfg));
-        const gww = await createGateway(loadConfig(fxw.configFile));
-        try {
-          const wide = await gww.handleCall({ name: "legacy.export", arguments: { customer_id: "cust_123", amount: 1 } });
-          const wp = decode(bundleOf2(fxw, wide)).predicate;
-          expect(Object.keys(wp.request.args)).toEqual([REST]);
-          expect(leakText(bundleOf2(fxw, wide))).not.toContain("cust_123");
-        } finally {
-          await gww.close();
+        // whichever rule is the more private, the retired name's wider clear list does not survive: neither in the request nor in the fact arguments
+        for (const rules of [
+          { "legacy.export": { args: { mode: "digest", clear: ["customer_id"] } }, "*": { args: { mode: "encrypted" } } },
+          { "legacy.export": { args: { mode: "encrypted", clear: ["customer_id"] } }, "*": { args: { mode: "digest" } } },
+        ]) {
+          const fxw = buildFixture(mkdtempSync(join(tmpdir(), `capture-unknown-wide-${mode}-`)));
+          const wcfg = JSON.parse(readFileSync(fxw.configFile, "utf8"));
+          wcfg.capture = rules;
+          wcfg.captureKeyEnv = "TEST_CAPTURE_KEY";
+          wcfg.facts = [{ name: "customer", tool: "customer.lookup", args: { customer_id: "$args.customer_id" }, forTools: ["stripe.refund", "legacy.export"] }];
+          writeFileSync(fxw.configFile, JSON.stringify(wcfg));
+          const gww = await createGateway(loadConfig(fxw.configFile));
+          try {
+            const wide = await gww.handleCall({ name: "legacy.export", arguments: { customer_id: "cust_123", amount: 1 } });
+            const wb = bundleOf2(fxw, wide);
+            const wp = decode(wb).predicate;
+            expect(Object.keys(wp.request.args)).toEqual([REST]);
+            expect(leakText(wb)).not.toContain("cust_123");
+            const v = verifyBundle(wb, { issuerKeys: [loadPublicKey(fxw.gatewayPub)], principalKeys: [loadPublicKey(fxw.principalPub)], logFile: fxw.logFile });
+            expect(v.ok, formatReport(v)).toBe(true);
+          } finally {
+            await gww.close();
+          }
         }
         // an offered tool keeps its name under the same kind of rule
         const known = await gwu.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500 } });

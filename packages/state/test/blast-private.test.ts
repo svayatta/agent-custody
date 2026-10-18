@@ -80,6 +80,11 @@ describe("blast radius under a capture rule", () => {
       if (mode === "encrypted") {
         expect(packWithKey.consumedWithheld).toBe(false);
         expect(packWithKey.consumed.facts.map((f) => f.factId)).toEqual([priv.factId]);
+        // the explanation prints what the key opened, not the receipt's commitment read as "nothing shown"
+        const opened = formatExplain(packWithKey, null, true);
+        expect(opened).toMatch(/1 belief\(s\) shown before this call:/);
+        expect(opened).toContain("plan");
+        expect(opened).not.toMatch(/no beliefs shown/);
       } else expect(packWithKey.consumedWithheld).toBe(true);
       // a fact valid from tomorrow is readable today and may be consumed today: the bound is when the ledger learned it, not when it is true
       const tomorrow = new Date(Date.now() + 86_400_000).toISOString();

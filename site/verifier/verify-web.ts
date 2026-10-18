@@ -287,8 +287,12 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   if (executedOrFailed) {
     const r = region(["execution", "result"]);
     if (r.problem) add("execution result digest", false, r.problem);
-    else if (r.paths.length) add("execution result digest", true, committedNote(r.paths));
-    else {
+    else if (r.paths.length) {
+      add("execution result digest", true, committedNote(r.paths));
+      // the upstream checks read the content, isError, and structuredContent, never _meta, which carries what the
+      // upstream wrote and is withheld beside a result the rule leaves in clear: with only _meta withheld they still run
+      if (r.paths.every((w) => JSON.stringify(w) === JSON.stringify(["execution", "result", "_meta"]))) resultInClear = true;
+    } else {
       add("execution result digest", (await digestOf(p.execution.result)) === p.execution.resultDigest);
       resultInClear = true;
     }

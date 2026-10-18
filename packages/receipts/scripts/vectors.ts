@@ -115,6 +115,21 @@ const privateCall = await capGw.handleCall({ name: "stripe.refund", arguments: {
 await capGw.close();
 const privateBundle = bundleFile(capFx.receiptsDir, String(privateCall._meta?.[RECEIPT_META_KEY]));
 const CAP = { issuerKeys: ["capture-gateway"], principalKeys: ["capture-principal"], logKeys: [] as string[] };
+// the arguments private and the result in clear: the result's _meta is withheld, the plain attestation stays
+const clrFx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-capture-clear-result-")));
+key("clear-result-gateway", clrFx.gatewayPub);
+key("clear-result-principal", clrFx.principalPub);
+key("clear-result-upstream", clrFx.upstreamPub);
+{
+  const cfg = JSON.parse(readFileSync(clrFx.configFile, "utf8"));
+  cfg.capture = { "stripe.refund": { args: { mode: "digest", clear: ["amount"] }, result: { mode: "clear" } } };
+  writeFileSync(clrFx.configFile, JSON.stringify(cfg));
+}
+const clrGw = await createGateway(loadConfig(clrFx.configFile));
+const clrCall = await clrGw.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500, reason: "customer called from +44 20 7946 0000" } });
+await clrGw.close();
+addCase({ name: "gateway-private-clear-result-upstream-attested", description: "A refund whose arguments are withheld (digest) and whose result the rule leaves in clear. The result's _meta is withheld, as it always is under a private rule, and the upstream's plain attestation stays in clear beside the result. With the upstream key given, `upstream signature (upstream key)` runs and passes in both verifiers: the signature covers the content and isError, never _meta. The expected outcome alone cannot tell a pass from a skip; the wrong-key case beside it shows the check runs.", bundle: bundleFile(clrFx.receiptsDir, String(clrCall._meta?.[RECEIPT_META_KEY])), issuerKeys: ["clear-result-gateway"], principalKeys: ["clear-result-principal"], logKeys: [], upstreamKeys: ["clear-result-upstream"], log: logLines(clrFx.logFile) });
+addCase({ name: "gateway-private-clear-result-upstream-wrong-key", description: "The same receipt with the principal's key offered as the upstream key. The check runs rather than being skipped for the withheld _meta, so `upstream signature (upstream key)` fails in both verifiers; everything else passes.", bundle: bundleFile(clrFx.receiptsDir, String(clrCall._meta?.[RECEIPT_META_KEY])), issuerKeys: ["clear-result-gateway"], principalKeys: ["clear-result-principal"], logKeys: [], upstreamKeys: ["clear-result-principal"], log: logLines(clrFx.logFile) });
 addCase({ name: "gateway-executed-private", description: "A refund whose capture rule withholds the note (encrypted), the provider's answer (digest), and the customer record (encrypted): the receipt carries commitments, the digests are over the whole call, and without the key or a disclosure the verifier passes them as committed, not recomputed, and does not check the upstream's signature.", bundle: privateBundle, ...CAP, upstreamKeys: ["capture-upstream"], log: logLines(capFx.logFile) });
 // commitment-shaped data without a capture note is ordinary data: the digest covers it and a verifier must not take it for a withheld field
 const shapedFx = buildSdkFixture(mkdtempSync(join(tmpdir(), "vectors-shaped-")));

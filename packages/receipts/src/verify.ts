@@ -177,8 +177,12 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     const r = region(["execution", "result"]);
     const ex = full.execution as { result: unknown; resultDigest: string };
     if (r.problem) add("execution result digest", false, r.problem);
-    else if (r.missing.length) add("execution result digest", true, committedNote(r.missing));
-    else {
+    else if (r.missing.length) {
+      add("execution result digest", true, committedNote(r.missing));
+      // the upstream checks read the content, isError, and structuredContent, never _meta, which carries what the
+      // upstream wrote and is withheld beside a result the rule leaves in clear: with only _meta withheld they still run
+      if (r.missing.every((w) => pathKey(w) === pathKey(["execution", "result", "_meta"]))) result = ex.result as { content: unknown; isError?: boolean };
+    } else {
       add("execution result digest", digestOf(ex.result, digestSaltFor(back, note, ["execution", "result"])) === ex.resultDigest, r.how ? `recomputed from ${r.how} values` : undefined);
       result = ex.result as { content: unknown; isError?: boolean };
     }
@@ -212,7 +216,7 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
       const env = restoredEvidence?.envelope as Envelope | undefined;
       const wellFormed = !!env && typeof env === "object" && typeof env.payload === "string" && Array.isArray(env.signatures);
       if (!result) add("upstream signature not checked", true, "the result is withheld; disclose it or give the capture key to check the upstream's signature against it");
-      // the issuer withholds the envelope beside a result it leaves in clear only when the envelope carries claims beyond the attestation; a verifier given the upstream's key is then told, not waved past
+      // the issuer withholds the envelope beside a result it leaves in clear only when the envelope is anything but the plain attestation for this call (a field, a claim, or an encoding the upstream added); a verifier given the upstream's key is then told, not waved past
       else if (withheldStill(["execution", "upstream", "envelope"])) add("upstream signature (upstream key)", false, "the result is in clear but the upstream's signature is withheld; disclose it or give the capture key to check it");
       else if (!wellFormed) add("upstream signature (upstream key)", false, "the receipt carries no upstream envelope to check, and the capture note does not say it is withheld");
       else {

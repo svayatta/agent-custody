@@ -142,6 +142,66 @@ describe("the canary", () => {
     }
   });
 
+  it("beside a result the rule leaves in clear, an upstream envelope that copies a withheld argument into any field of its own is withheld, in either mode; the plain one stays and verifies", async () => {
+    const captureKey = randomBytes(32);
+    const before = process.env.TEST_CAPTURE_KEY;
+    process.env.TEST_CAPTURE_KEY = captureKey.toString("hex");
+    try {
+    for (const mode of ["digest", "encrypted"] as const) {
+      for (const envelope of ["note", "plain"] as const) {
+        const fx = buildFixture(mkdtempSync(join(tmpdir(), `canary-envelope-${mode}-${envelope}-`)));
+        const cfg = JSON.parse(readFileSync(fx.configFile, "utf8"));
+        cfg.upstream.args[2] = resolve(import.meta.dirname, "..", "scripts", "fake-canary.ts");
+        cfg.upstream.args.push("--envelope", envelope);
+        cfg.capture = { "*": { args: { mode }, result: { mode: "clear" } } };
+        cfg.captureKeyEnv = "TEST_CAPTURE_KEY";
+        writeFileSync(fx.configFile, JSON.stringify(cfg));
+        const gw = await createGateway(loadConfig(fx.configFile));
+        try {
+          // the result names the customer and the amount, never the reason: only the envelope could carry it
+          const r = await gw.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500, reason: CANARY } });
+          expect(r.isError, `${mode}/${envelope}`).toBeFalsy();
+          const bundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${String(r._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
+          const p = decode(bundle).predicate;
+          const withheld = (p.capture?.withheld ?? []).map((w) => w.join("."));
+          expect(bundleText(bundle), `${mode}/${envelope}: the receipt carries the canary`).not.toContain(CANARY);
+          expect(onDisk(fx.receiptsDir, fx.logFile), `${mode}/${envelope}: a file on disk carries the canary`).not.toContain(CANARY);
+          const keys = { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], logFile: fx.logFile };
+          const upstream = { ...keys, upstreamKeys: [loadPublicKey(fx.upstreamPub)] };
+          const check = (v: ReturnType<typeof verifyBundle>) => v.checks.find((c) => c.name.startsWith("upstream signature"));
+          if (envelope === "plain") {
+            expect(withheld).not.toContain("execution.upstream.envelope");
+            const v = verifyBundle(bundle, upstream);
+            expect(v.ok, formatReport(v)).toBe(true);
+            // run, not skipped: "upstream signature not checked" would pass too
+            expect(check(v)?.name).toBe("upstream signature (upstream key)");
+            expect(check(v)?.ok).toBe(true);
+          } else {
+            expect(withheld).toContain("execution.upstream.envelope");
+            expect(verifyBundle(bundle, keys).ok).toBe(true);
+            // a verifier holding the upstream's key is told the envelope is withheld, not waved past
+            const v = verifyBundle(bundle, upstream);
+            expect(v.ok, formatReport(v)).toBe(false);
+            expect(check(v)?.detail).toMatch(/withheld/);
+            // with the capture key the envelope comes back, and the upstream's signature over the clear result verifies
+            if (mode === "encrypted") {
+              const vk = verifyBundle(bundle, { ...upstream, captureKey });
+              expect(vk.ok, formatReport(vk)).toBe(true);
+              expect(check(vk)?.name).toBe("upstream signature (upstream key)");
+              expect(check(vk)?.ok).toBe(true);
+            }
+          }
+        } finally {
+          await gw.close();
+        }
+      }
+    }
+    } finally {
+      if (before === undefined) delete process.env.TEST_CAPTURE_KEY;
+      else process.env.TEST_CAPTURE_KEY = before;
+    }
+  });
+
   it("the control: the same calls with no rule carry the canary in the statement, the files, the log, and the exports", async () => {
     const fx = buildFixture(mkdtempSync(join(tmpdir(), "canary-control-")));
     const cfg = JSON.parse(readFileSync(fx.configFile, "utf8"));
