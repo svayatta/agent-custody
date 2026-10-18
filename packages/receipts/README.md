@@ -10,7 +10,8 @@ Two producers, one receipt format, one verifier.
 Anyone holding the public keys can verify a receipt offline. The agent is not trusted. The layer around it is, and the receipt says exactly how far that trust extends, starting with who issued it. What the receipt file carries of a call is a choice per tool: a field can be withheld as a commitment or encrypted under your key, and the verifier recomputes the digests when it is shown the values.
 
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
-- [Tutorials](docs/tutorials.md): twenty-eight runnable examples, one per aspect of the code, all executed by the test suite
+- [Tutorials](docs/tutorials.md): twenty-nine runnable examples, one per aspect of the code, all executed by the test suite
+- [Financial operations](docs/financial-operations.md): durable operation ids, provider idempotency keys, atomic daily budget reservations, and reconciliation receipts for uncertain outcomes
 - [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop, and the gateway as an A2A agent between agents that delegate to each other, and private evidence: what the receipt file carries of each call
 - [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin and Google ADK callbacks through the Python package, and wrapping tool functions in anything else
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples, and replaying history against a proposed policy with `policy simulate`
@@ -181,7 +182,7 @@ Every field carries a provenance label. This is the design decision that matters
 bun install                              # from the repository root, once for the workspace
 cd packages/receipts
 node scripts/demo.ts                     # gateway: keys, grant, policy, four tool calls, verification, a tampering attempt; then the SDK wrapping the same tool
-node examples/01-keys-and-signing.ts     # first of twenty-eight step-by-step examples, see docs/tutorials.md
+node examples/01-keys-and-signing.ts     # first of twenty-nine step-by-step examples, see docs/tutorials.md
 bun run test                             # this package; `bun run test` at the root runs every package
 ```
 
@@ -247,6 +248,7 @@ src/delegation.ts  signed delegation grants
 src/receipt.ts     receipt and authorization statement types and provenance labels
 src/issue.ts       sign, log, and write a receipt, or commit an authorization first; shared by both producers
 src/gateway.ts     the MCP proxy: a host (key, policy, upstreams, log) and a session per grant; scope check, facts, policy, forward, receipt
+src/operations.ts  SQLite operation claims and daily budget reservations, retained across retries and process crashes
 src/gateway-http.ts the gateway over Streamable HTTP: one process, a session per connection, each under the grant it presents
 src/sdk/index.ts   the interceptor: policy decision, record, wrap(tool fn)
 src/sdk/claude.ts  Claude Code command hook and Claude Agent SDK in-process hooks
@@ -265,7 +267,7 @@ src/retention.ts   pruning the log: leaves become their hashes, bundles are remo
 src/index.ts       the package's public surface; adapters are exported on ./sdk/<framework> subpaths
 tsconfig.build.json  emits dist/ (JavaScript plus declarations) for consumers; the repo itself runs the .ts directly
 scripts/           fake Stripe upstream (signs its results with --key), a second fake upstream, fixture builders for gateway and SDK, the replay builder (`replay.ts`: example 27 and state example 07 as a folder of receipts and public keys anyone can verify with the published packages), demo
-examples/          twenty-eight runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
+examples/          twenty-nine runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
 test/              unit tests per module, end-to-end gateway test, SDK and hook tests,
                    adapter tests against the real packages, and a test that runs every policy in docs/policies.md
 docs/              tutorials, usage (gateway), sdk, policies, verification
@@ -277,6 +279,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Done**
 
+- Financial operations: stable caller-retained UUIDs, provider idempotency keys, atomic budget reservations across processes, explicit financial outcomes beside API execution, and provider-bound reconciliation receipts; fault tests kill the gateway after acceptance and verify that a restart never repeats the refund.
 - Policy simulation: `policy simulate` verifies local receipts and replays their recorded arguments, facts, and grant against a proposed Cedar policy. Every changed decision is listed by tool and reason with its receipt id, and the report pins the proposed policy digest. A call with no receipt but a surviving authorization file, and a receipt with withheld inputs, make the report incomplete unless `--capture-key-env` or `--disclose` opens them. [Guide](docs/policies.md#simulating-a-policy-against-recorded-history), tutorial 28.
 - Gateway: MCP proxy, signed delegation, gateway-fetched facts, Cedar policy, denial receipts, Merkle log, offline verifier.
 - Receipt schema carries the issuer kind, so a verifier reads gateway versus SDK before anything else.
@@ -306,7 +309,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 - The signer, keys, and checkpoints: the key in its own process (`signer`, `--signer-url`), the key document at `/.well-known/agent-custody-log.json` fetched and pinned by `verify --log-url` and `audit --log-url`, and signed checkpoints per log published to a directory and a table for a verifier who was not watching. Phase 3 of [issue #6](https://github.com/svayatta/agent-custody/issues/6).
 - The log over Postgres: `log --db-env`, leaves as hashes in one table keyed by tenant, one writer per tenant by advisory lock, tenants and hashed tokens in tables managed by `log-admin`, rate limits and a body cap, retries in the sink, and `import` for an existing file log. Phase 2 of [issue #6](https://github.com/svayatta/agent-custody/issues/6).
 - A log for someone else: `hashOnly` sends leaf hashes so the log never holds a receipt; the reference server runs several tenant logs at `/t/<tenant>/` with their own tokens and ids; tree heads name their log and the verifier checks it with `--log-id`. Phase 1 of the hosted log, [issue #6](https://github.com/svayatta/agent-custody/issues/6).
-- OpenTelemetry export: with `otel` in either config, every receipt is also one span at the collector the team already runs, trace id equal to the receipt id, attributes for tool, agent, principal, status, decision, and log position; after the receipt, best effort, never on the evidence path.
+- OpenTelemetry export: with `otel` in either config, every receipt is also one span at the collector the team already runs, trace id equal to the receipt id, attributes for tool, agent, principal, status, decision, and log position; after the receipt, best effort, never on the evidence path. A reconciliation receipt is marked and carries no policy decision, so a dashboard never counts it as a second allowed call.
 - Delegation chains for sub-agents: a grant that names the agent's key lets it delegate a narrower grant, with the parent embedded, up to three deep; the verifier and the gateway walk the chain to the principal, refusing any link that escalates scope, widens the window, changes the principal, or is signed by the wrong key; the receipt names the sub-agent and the principal and carries the chain. Pinned by the `gateway-chain-*` vectors and mirrored in the browser verifier.
 - One gateway for many agents: `gateway --http` serves the gateway over Streamable HTTP, one session per connection under the grant that connection presents, sessions sharing the upstreams and the policy and nothing else; a platform team runs one gateway in front of the tools instead of one process per agent.
 - Splunk export: with `splunk` in either config, every receipt is also one event at the HTTP Event Collector, with the receipt id, tool, agent, principal, status, decision, and log position as searchable fields and the token from the environment; the same best-effort rule.

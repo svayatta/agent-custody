@@ -4,7 +4,7 @@ import { digestSaltFor, getAt, isCommitment, pathKey, pathText, restorePaths, un
 import { delegationHasParent, delegationValidAt, describeChain, verifyDelegation } from "./delegation.ts";
 import { leafHash, MerkleLog, verifyConsistency, verifyInclusion } from "./log.ts";
 import { checkProvider, checkUpstream, contentDigest, isProviderAttestation, type ProviderSecrets } from "./upstream.ts";
-import { AUTHORIZATION_PREDICATE_TYPE, RECEIPT_PREDICATE_TYPE, RECEIPT_TYPE, TREEHEAD_TYPE, type AuthorizationStatement, type ReceiptBundle, type ReceiptStatement, type TreeHead } from "./receipt.ts";
+import { AUTHORIZATION_PREDICATE_TYPE, RECEIPT_PREDICATE_TYPE, RECEIPT_TYPE, TREEHEAD_TYPE, type AuthorizationBundle, type AuthorizationPredicate, type AuthorizationStatement, type ReceiptBundle, type ReceiptStatement, type TreeHead } from "./receipt.ts";
 
 export interface Check {
   name: string;
@@ -45,9 +45,72 @@ export interface VerifyResult {
 const short = (s: string) => s.slice(0, 12);
 
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const hex64 = (v: unknown) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+function operationProblem(o: unknown): string | null {
+  if (!isObject(o) || (o.id !== undefined && (typeof o.id !== "string" || !UUID.test(o.id))) || typeof o.originalReceiptId !== "string" || !UUID.test(o.originalReceiptId)) return "operation ids are not UUIDs";
+  if (!hex64(o.idempotencyKey) || !hex64(o.lookupDigest)) return "operation idempotencyKey or lookupDigest is not a sha256";
+  if (!["submitted", "pending", "confirmed", "failed", "unknown"].includes(String(o.status)) || o.provenance !== "observed") return "operation status or provenance is invalid";
+  if (!isObject(o.budget) || typeof o.budget.id !== "string" || !o.budget.id.length || o.budget.id.length > 128 || typeof o.budget.currency !== "string" || !/^[A-Z]{3}$/.test(o.budget.currency) || typeof o.budget.period !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(o.budget.period)) return "operation budget is invalid";
+  return null;
+}
+/** Provider records are JSON in the first text result, just as the gateway's ordinary fact extraction reads them. */
+function providerValue(result: unknown, path: string): unknown {
+  let record: unknown;
+  if (isObject(result) && Array.isArray(result.content)) {
+    const text = result.content.find((c) => isObject(c) && c.type === "text");
+    if (isObject(text) && typeof text.text === "string") {
+      try { record = JSON.parse(text.text); } catch { return undefined; }
+    }
+  }
+  return path.split(".").reduce<unknown>((v, k) => isObject(v) && Object.hasOwn(v, k) ? v[k] : undefined, record);
+}
+
+/** Verify a pre-forward authorization on its own when a crash prevented an outcome receipt being written. */
+function verifyOriginalAuthorization(bundle: AuthorizationBundle, opts: VerifyOptions): { ok: boolean; predicate: AuthorizationPredicate | null; checks: Check[] } {
+  const checks: Check[] = [];
+  const add = (name: string, ok: boolean, detail?: string) => checks.push({ name, ok, ...(detail === undefined ? {} : { detail }) });
+  const sig = dsseVerify(bundle.envelope, opts.issuerKeys);
+  const st = sig.ok ? sig.payload as AuthorizationStatement : null;
+  const typed = !!st && bundle.envelope.payloadType === RECEIPT_TYPE && st.predicateType === AUTHORIZATION_PREDICATE_TYPE;
+  add("authorization signature (issuer key)", sig.ok && typed);
+  if (!sig.ok || !st || !typed) return { ok: false, predicate: null, checks };
+  const p = st.predicate;
+  // Authorizations have no session, model, or execution; validate the parts they share with ordinary receipts.
+  const problem = structuralProblem({ ...p, session: { id: null, toolUseId: null, provenance: "claimed" }, model: { id: null, provenance: "claimed" }, execution: { status: "withheld", provenance: "observed" } });
+  add("structural parts in clear", !problem, problem ?? undefined);
+  if (problem) return { ok: false, predicate: null, checks };
+  add("authorization issued by the gateway", p.issuer.kind === "gateway" && p.issuer.keyid === sig.keyid);
+  add("authorization operation is submitted", p.operation?.status === "submitted");
+  add("authorization permits the original call", p.policy?.decision === "allow" ? Array.isArray(p.policy.errors) && p.policy.errors.length === 0 : p.policy?.decision === "deny" && p.policy.enforced === false);
+  const del = p.delegation && verifyDelegation(p.delegation.envelope, opts.principalKeys);
+  add("delegation signature (principal key)", !!del?.ok);
+  if (del?.ok) {
+    const d = del.delegation;
+    add("delegation binds principal and agent", d.principal === p.principal.id && d.agent === p.agent.id && p.principal.provenance === "attested" && p.principal.keyid === del.keyid);
+    add("delegation valid at receipt time", delegationValidAt(d, p.timestamp));
+    add("executed tool within delegated scope", d.scopes.includes(p.tool.name));
+  }
+  const back = restorePaths(p, p.capture, undefined, opts.captureKey);
+  add("captured commitments are well formed", back.problems.length === 0, back.problems[0]?.error);
+  const missingArgs = back.missing.some((w) => under(w, ["request", "args"]));
+  add("request args digest", st.subject[0]?.digest.sha256 === p.request.argsDigest && (missingArgs || digestOf(back.predicate.request.args, digestSaltFor(back, p.capture, ["request", "args"])) === p.request.argsDigest));
+  const th = dsseVerify(bundle.treeHead, [...(opts.logKeys ?? []), ...opts.issuerKeys]);
+  add("tree head signature", th.ok && bundle.treeHead.payloadType === TREEHEAD_TYPE);
+  if (th.ok) {
+    const head = th.payload as TreeHead;
+    if (opts.logId !== undefined) add("tree head names the expected log", head.log === opts.logId);
+    add("log inclusion proof", head.treeSize === bundle.inclusion.treeSize && verifyInclusion(leafHash(canonicalize(bundle.envelope)), bundle.inclusion, head.rootHash));
+    if (opts.logFile) {
+      try { add("log file root matches tree head", MerkleLog.rootFromFile(opts.logFile, head.treeSize) === head.rootHash); }
+      catch { add("log file root matches tree head", false); }
+    }
+  }
+  return { ok: checks.every((c) => c.ok), predicate: p, checks };
+}
 /** The parts of a statement a capture note may never name: what a verifier reads to run its checks. A note naming one, or a commitment sitting there, is not a private receipt but a broken one. */
 const STRUCTURAL_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "authorization", "capture"]);
-const STRUCTURAL_IN: Record<string, Set<string>> = { request: new Set(["argsDigest", "provenance"]), execution: new Set(["status", "provenance"]), policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]), consumed: new Set(["provenance"]), session: new Set(["provenance"]), model: new Set(["provenance"]) };
+const STRUCTURAL_IN: Record<string, Set<string>> = { request: new Set(["argsDigest", "provenance"]), execution: new Set(["status", "provenance"]), policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]), consumed: new Set(["provenance"]), session: new Set(["provenance"]), model: new Set(["provenance"]), operation: new Set(["idempotencyKey", "lookupDigest", "status", "budget", "originalReceiptId", "provenance"]), reconciliation: new Set(["original", "lookup"]) };
 /**
  * Why a statement cannot be verified at all, or null: the capture note is malformed, names a structural part, or a
  * structural part is not what every check assumes it to be. Checked once, before anything reads the statement, so that
@@ -77,6 +140,18 @@ export function structuralProblem(p: unknown): string | null {
   if (p.consumed !== undefined && !isObject(p.consumed)) return "consumed is not an object";
   if (p.delegation !== undefined && (!isObject(p.delegation) || !isObject(p.delegation.envelope))) return "delegation is not a signed envelope";
   if (p.authorization !== undefined && (!isObject(p.authorization) || !isObject(p.authorization.envelope))) return "authorization is not a bundle";
+  if (p.operation !== undefined) {
+    const problem = operationProblem(p.operation);
+    if (problem) return problem;
+  }
+  if (p.reconciliation !== undefined) {
+    const r = p.reconciliation;
+    if (!isObject(r) || !isObject(r.original) || !isObject(r.original.envelope) || !isObject(r.original.treeHead) || !isObject(r.original.inclusion) || !isObject(r.lookup)) return "reconciliation is not a lookup and an original bundle";
+    const l = r.lookup;
+    const statuses = (v: unknown) => Array.isArray(v) && v.length > 0 && v.every((s) => typeof s === "string" && s.length > 0 && s.length <= 128);
+    const path = (v: unknown) => typeof v === "string" && v.length > 0 && v.length <= 512 && v.split(".").every((s) => s.length > 0);
+    if (typeof l.tool !== "string" || !l.tool.length || !isObject(l.args) || !path(l.statusPath) || !path(l.identityPath) || !statuses(l.confirmed) || !statuses(l.failed) || (l.confirmed as string[]).some((s) => (l.failed as string[]).includes(s))) return "reconciliation lookup is malformed or its terminal statuses overlap";
+  }
   if (isObject(p.execution.upstream) && typeof p.execution.upstream.provider !== "undefined" && typeof p.execution.upstream.provider !== "string") return "execution.upstream.provider is not a string";
   return null;
 }
@@ -103,6 +178,17 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
 
   add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
   add("issuer keyid matches signer", p.issuer.keyid === sig.keyid);
+  if (p.operation) {
+    add("operation observed by gateway", p.issuer.kind === "gateway" && p.operation.provenance === "observed");
+    if (!p.reconciliation) {
+      // A retry of an existing operation has a receipt of its own. It is withheld (never forwarded again) and names the original.
+      const retry = p.operation.originalReceiptId !== p.receiptId;
+      add("operation names this original receipt", !retry || p.execution.status === "withheld");
+      const refused = p.execution.status === "withheld" || p.execution.status === "denied";
+      add("operation awaits provider reconciliation", retry || ["submitted", "pending", "unknown"].includes(p.operation.status) || refused && p.operation.status === "failed");
+      add("operation carries committed authorization", refused || !!p.authorization);
+    }
+  }
 
   if (p.issuer.kind === "gateway") {
     add("gateway receipt carries a delegation", p.delegation !== undefined);
@@ -124,7 +210,7 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
       const executed = p.execution.status === "executed" || p.execution.status === "failed";
       // a call the gateway refused after the grant ran out is still a true record; only an executed call has to sit inside the window
       const valid = delegationValidAt(d, p.timestamp);
-      add("delegation valid at receipt time", valid || !executed, valid ? `${d.issuedAt} .. ${d.expiresAt}` : `${d.issuedAt} .. ${d.expiresAt}; the call was ${p.execution.status}, so the grant need not have been in force`);
+      add("delegation valid at receipt time", valid || !executed || !!p.reconciliation, valid ? `${d.issuedAt} .. ${d.expiresAt}` : p.reconciliation ? "operator reconciliation; the original authorization's grant window is checked separately" : `${d.issuedAt} .. ${d.expiresAt}; the call was ${p.execution.status}, so the grant need not have been in force`);
       add("executed tool within delegated scope", !executed || inScope, inScope ? p.tool.name : `${p.tool.name} not in [${d.scopes.join(", ")}]`);
     }
   } else {
@@ -234,6 +320,51 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     add("no policy errors on an allow", !(p.policy.decision === "allow" && errors));
   }
 
+  if (p.reconciliation) {
+    const r = p.reconciliation;
+    // Refuse nesting before the recursive verifier is called; the original must be the first operation attempt.
+    const osig = dsseVerify(r.original.envelope, opts.issuerKeys);
+    const ost = osig.ok ? osig.payload as ReceiptStatement | AuthorizationStatement : null;
+    const original = ost?.predicate;
+    const eligible = isObject(original) && !("reconciliation" in original);
+    let originalOk = false;
+    if (eligible && ost) {
+      try {
+        const nested = ost.predicateType === RECEIPT_PREDICATE_TYPE
+          ? verifyBundle(r.original, { ...opts, disclosed: undefined })
+          : verifyOriginalAuthorization(r.original, opts);
+        originalOk = nested.ok;
+        for (const c of nested.checks) add(`reconciliation original ${c.name}`, c.ok, c.detail);
+      } catch {
+        add("reconciliation original bundle is well formed", false);
+      }
+    }
+    add("reconciliation original evidence verifies", eligible && originalOk);
+    const o = original?.operation;
+    const op = p.operation;
+    const linked = !!o && !!op && !operationProblem(o) && ["submitted", "pending", "unknown"].includes(o.status) && o.originalReceiptId === original!.receiptId && op.originalReceiptId === original!.receiptId && p.receiptId !== original!.receiptId && (op.id === undefined || o.id === undefined || op.id === o.id) && op.idempotencyKey === o.idempotencyKey && op.lookupDigest === o.lookupDigest && canonicalize(op.budget) === canonicalize(o.budget) && canonicalize(p.principal) === canonicalize(original!.principal) && canonicalize(p.agent) === canonicalize(original!.agent) && canonicalize(p.tool) === canonicalize(original!.tool) && canonicalize(p.delegation) === canonicalize(original!.delegation) && p.issuer.keyid === original!.issuer.keyid && Date.parse(p.timestamp) >= Date.parse(original!.timestamp);
+    add("reconciliation links the original operation", linked);
+    add("reconciliation lookup matches authorization", !!o && digestOf(r.lookup) === o.lookupDigest);
+    const lookupArgs = region(["request", "args"]);
+    add("reconciliation lookup args match request", !lookupArgs.problem && (lookupArgs.missing.length > 0 || canonicalize(full.request.args) === canonicalize(r.lookup.args)), lookupArgs.missing.length > 0 ? "request arguments committed under the capture rule" : undefined);
+    const before = r.original.inclusion.leafIndex < bundle.inclusion.leafIndex && r.original.inclusion.treeSize <= bundle.inclusion.treeSize;
+    const oth = dsseVerify(r.original.treeHead, [...(opts.logKeys ?? []), ...opts.issuerKeys]);
+    const cth = dsseVerify(bundle.treeHead, [...(opts.logKeys ?? []), ...opts.issuerKeys]);
+    add("reconciliation logged after original", before && oth.ok && cth.ok && isObject(oth.payload) && isObject(cth.payload) && oth.payload.log === cth.payload.log);
+    const terminal = op?.status === "confirmed" || op?.status === "failed";
+    add("reconciliation records a terminal provider outcome", terminal && p.execution.status === "executed" && p.execution.provenance === "observed");
+    const rr = region(["execution", "result"]);
+    if (rr.problem) add("reconciliation provider status", false, rr.problem);
+    else if (rr.missing.some((w) => pathKey(w) !== pathKey(["execution", "result", "_meta"]))) add("reconciliation provider status", true, "provider result withheld; disclose it or give the capture key to recompute the gateway-observed status");
+    else {
+      const ex = full.execution as { result?: unknown };
+      const status = providerValue(ex.result, r.lookup.statusPath);
+      const mapped = typeof status === "string" ? r.lookup.confirmed.includes(status) ? "confirmed" : r.lookup.failed.includes(status) ? "failed" : null : null;
+      const identity = providerValue(ex.result, r.lookup.identityPath);
+      add("reconciliation provider status", terminal && mapped === op?.status && identity === op?.idempotencyKey && !(isObject(ex.result) && ex.result.isError === true), "provider read observed by the gateway and bound to its idempotency key; no independent provider signature is implied");
+    }
+  }
+
   const logKeys = opts.logKeys ?? [];
   if (p.authorization) {
     // The gateway says it committed this call to the log before forwarding it. Check that the committed statement is
@@ -245,8 +376,13 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     add("authorization signature (issuer key)", asig.ok && typed && asig.keyid === sig.keyid, asig.ok ? (typed ? `keyid ${short(asig.keyid)}` : "not an authorization statement") : asig.error);
     if (ast && typed) {
       const ap = ast.predicate;
-      const same = ap.receiptId === p.receiptId && ap.tool.name === p.tool.name && ap.request.argsDigest === p.request.argsDigest && ap.agent.id === p.agent.id && ap.principal.id === p.principal.id && ap.policy?.decision === "allow";
+      const same = ap.receiptId === p.receiptId && ap.tool.name === p.tool.name && ap.request.argsDigest === p.request.argsDigest && ap.agent.id === p.agent.id && ap.principal.id === p.principal.id && (ap.policy?.decision === "allow" || ap.policy?.decision === "deny" && ap.policy.enforced === false);
       add("authorization names this call", same, same ? `${ap.tool.name} for receipt ${short(ap.receiptId)}` : "committed for a different receipt, tool, arguments, agent, or decision");
+      if (p.operation || ap.operation) {
+        const o = p.operation;
+        const aop = ap.operation;
+        add("authorization names this operation", !!o && !!aop && !operationProblem(aop) && aop.status === "submitted" && (aop.id === undefined || o.id === undefined || aop.id === o.id) && aop.idempotencyKey === o.idempotencyKey && aop.lookupDigest === o.lookupDigest && aop.originalReceiptId === o.originalReceiptId && canonicalize(aop.budget) === canonicalize(o.budget));
+      }
       const ath = dsseVerify(a.treeHead, [...logKeys, ...opts.issuerKeys]);
       add("authorization tree head signature", ath.ok && a.treeHead.payloadType === TREEHEAD_TYPE, ath.ok ? `keyid ${short(ath.keyid)}` : ath.error);
       if (ath.ok) {

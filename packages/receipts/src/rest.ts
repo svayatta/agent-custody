@@ -5,6 +5,7 @@
 // receipt per call. This is how an agent's direct HTTP calls come under custody: they become tool calls.
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { RestToolConfig, RestUpstreamConfig } from "./config.ts";
+import { OPERATION_META_KEY } from "./operations.ts";
 
 /** The part of an MCP client the gateway uses, so a REST connector can stand where an MCP upstream stands. */
 export interface UpstreamClient {
@@ -61,7 +62,17 @@ export function restUpstream(name: string, cfg: RestUpstreamConfig, opts: RestOp
       const tool = tools.get(params.name);
       if (!tool) throw new Error(`upstream ${name} has no tool "${params.name}"`);
       const { url, method, body } = buildRequest(cfg.baseUrl, tool, params.arguments ?? {});
-      const res = await f(url, { method, headers: { accept: "application/json", ...(body !== null ? { "content-type": "application/json" } : {}), ...headers }, ...(body !== null ? { body } : {}), signal: AbortSignal.timeout(cfg.timeoutMs) });
+      const requestHeaders = new Headers({ accept: "application/json", ...(body !== null ? { "content-type": "application/json" } : {}), ...headers });
+      if (tool.idempotencyHeader) {
+        const operation = params._meta?.[OPERATION_META_KEY];
+        if (!operation || typeof operation !== "object" || !Object.hasOwn(operation, "id") || !Object.hasOwn(operation, "idempotencyKey")) throw new Error(`tool ${tool.name}: durable operation metadata is required`);
+        const { id, idempotencyKey } = operation as { id?: unknown; idempotencyKey?: unknown };
+        if (typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id) || typeof idempotencyKey !== "string" || !/^[0-9a-f]{64}$/.test(idempotencyKey)) throw new Error(`tool ${tool.name}: malformed durable operation metadata`);
+        // Set after static/environment headers, case-insensitively, so a configured header cannot replace
+        // the durable key. The metadata itself never enters the provider's body or query arguments.
+        requestHeaders.set(tool.idempotencyHeader, idempotencyKey);
+      }
+      const res = await f(url, { method, headers: requestHeaders, ...(body !== null ? { body } : {}), signal: AbortSignal.timeout(cfg.timeoutMs) });
       const text = await res.text();
       // The result is what the API returned, as text. JSON stays JSON so policy facts and consumers can read it.
       return { content: [{ type: "text", text: text.length ? text : JSON.stringify({ status: res.status }) }], ...(res.ok ? {} : { isError: true }) };
