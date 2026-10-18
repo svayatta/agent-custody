@@ -36,28 +36,42 @@ export interface ReceiptRow {
   verified: boolean | null;
   transactionIds: string[];
   customerIds: string[];
+  /** The file name without `.json`. Links use it, because a tampered receipt can name another id inside. */
+  file: string;
+  /** Set when the record is not what its file name says it is. The row is then never verified. */
+  problem?: string;
 }
+
+const RECEIPT_ID = /^[0-9a-f-]{36}$/;
 
 const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
-/** Every receipt in the directory, newest first, with its verdict when keys were given. Damaged files are skipped. */
-export function listReceipts(o: ReviewOptions, query: ReceiptSearch = o.search ?? {}): ReceiptRow[] {
+/**
+ * Every receipt in the directory, newest first, with its verdict when keys were given. A record that does not match
+ * its file name is listed as NOT VERIFIED, never dropped. A file that cannot be decoded is counted in `unreadable`.
+ */
+export function scanReceipts(o: ReviewOptions, query: ReceiptSearch = o.search ?? {}): { rows: ReceiptRow[]; unreadable: number } {
   validateReceiptSearch(query);
   const rows: ReceiptRow[] = [];
+  let unreadable = 0;
   for (const f of readdirSync(o.receiptsDir)) {
     if (!f.endsWith(".json") || f.endsWith(".authorization.json")) continue;
     try {
       const bundle = JSON.parse(readFileSync(join(o.receiptsDir, f), "utf8")) as ReceiptBundle;
       const p = decodeStatement(bundle).predicate;
-      if (!/^[0-9a-f-]{36}$/.test(p.receiptId) || f !== `${p.receiptId}.json` || !matchesReceiptSearch(p, query)) continue;
-      const verified = verifyOf(bundle, o)?.ok ?? null;
-      rows.push({ receiptId: p.receiptId, timestamp: p.timestamp, tool: p.tool.name, status: p.execution.status, agent: p.agent.id, principal: p.principal.id, issuer: p.issuer.kind, verified, ...receiptSearchTerms(p) });
+      if (!matchesReceiptSearch(p, query)) continue;
+      const file = f.slice(0, -".json".length);
+      const problem = file !== p.receiptId ? "file name does not match receipt id" : !RECEIPT_ID.test(file) ? "receipt id is malformed" : undefined;
+      const verified = problem ? false : verifyOf(bundle, o)?.ok ?? null;
+      rows.push({ receiptId: String(p.receiptId), timestamp: String(p.timestamp), tool: p.tool.name, status: p.execution.status, agent: p.agent.id, principal: p.principal.id, issuer: p.issuer.kind, verified, ...receiptSearchTerms(p), file, ...(problem ? { problem } : {}) });
     } catch {
-      // not a bundle; the index is of receipts
+      unreadable++;
     }
   }
-  return rows.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  return { rows: rows.sort((a, b) => b.timestamp.localeCompare(a.timestamp)), unreadable };
 }
+
+export const listReceipts = (o: ReviewOptions, query: ReceiptSearch = o.search ?? {}): ReceiptRow[] => scanReceipts(o, query).rows;
 
 const STYLE = `
   :root { color-scheme: light dark; --ink: #1b2430; --ink2: #5b6b7a; --line: #d7dfe5; --bg: #fafbfc; --panel: #ffffff; --accent: #0f6e63; --bad: #b3261e; --mono: ui-monospace, Menlo, monospace; }
@@ -132,13 +146,15 @@ ${script ? `<script>${script}</script>` : ""}
 `;
 
 /** The index: one row per receipt, newest first. */
-export function renderIndex(rows: ReceiptRow[], o: ReviewOptions, link: (id: string) => string, staticPage = false): string {
+export function renderIndex(rows: ReceiptRow[], o: ReviewOptions, link: (id: string) => string, staticPage = false, unreadable = 0): string {
   const withKeys = !!o.keys;
-  const verdict = (r: ReceiptRow) => (r.verified === null ? '<span class="muted">not checked</span>' : r.verified ? '<span class="ok">verified</span>' : '<span class="bad">NOT VERIFIED</span>');
+  const verdict = (r: ReceiptRow) => (r.verified === null ? '<span class="muted">not checked</span>' : r.verified ? '<span class="ok">verified</span>' : `<span class="bad">NOT VERIFIED</span>${r.problem ? ` <span class="muted">(${esc(r.problem)})</span>` : ""}`);
+  // A tampered record can name any id inside. Only a file name that is a well formed id is a safe link target.
+  const receiptLink = (r: ReceiptRow) => (RECEIPT_ID.test(r.file) ? `<a class="mono" href="${esc(link(r.file))}">${esc(r.file.slice(0, 8))}</a>` : `<span class="mono">${esc(r.file.slice(0, 8))}</span>`);
   const body = `
 <h1>${esc(o.title ?? "Receipts")}</h1>
 <p class="sub"><span id="receipt-count">${rows.length} receipt(s)</span> in ${esc(o.receiptsDir)}${withKeys ? ", each checked against the keys given" : ", not checked: start the review with the gateway's and principal's public keys to verify"}${o.ledger ? "; beliefs from the ledger" : "; no ledger, so what depended on a call is not known here"}.</p>
-<form id="receipt-search" method="get">
+${unreadable ? `<p class="bad" role="alert">${unreadable} file(s) could not be read and are not in this list.</p>\n` : ""}<form id="receipt-search" method="get">
 ${([['transaction', 'Transaction ID', 're_… / pi_… / charge ID'], ['customer', 'Customer ID', 'cust_…'], ['agent', 'Agent', 'support-agent'], ['from', 'From (inclusive)', '2026-10-14T00:00:00Z'], ['to', 'To (inclusive)', '2026-10-15T00:00:00Z']] as const).map(([name, label, placeholder]) => `<label>${label}<input name="${name}" value="${esc(o.search?.[name] ?? "")}" placeholder="${placeholder}"${name === 'from' || name === 'to' ? ' pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}T.+(Z|[+-][0-9]{2}:[0-9]{2})"' : ''}></label>`).join("\n")}
 <button type="submit">Search receipts</button>${staticPage ? '<button type="reset">Clear filters</button>' : '<a href="/?transaction=&amp;customer=&amp;agent=&amp;from=&amp;to=">Clear filters</a>'}
 </form>
@@ -146,7 +162,7 @@ ${([['transaction', 'Transaction ID', 're_… / pi_… / charge ID'], ['customer
 <p id="search-error" role="alert" class="bad"></p>
 <p id="no-results"${rows.length ? ' hidden' : ''}>No receipts match these filters.</p>
 <div class="wrap"><table><thead><tr><th>when</th><th>tool</th><th>outcome</th><th>transaction</th><th>customer</th><th>agent</th><th>principal</th><th>producer</th><th>verification</th><th>receipt</th></tr></thead><tbody>
-${rows.map((r) => `<tr data-transactions="${esc(JSON.stringify(r.transactionIds))}" data-customers="${esc(JSON.stringify(r.customerIds))}" data-agent="${esc(r.agent)}" data-timestamp="${esc(r.timestamp)}"><td>${esc(r.timestamp.replace("T", " ").slice(0, 19))}</td><td><code>${esc(r.tool)}</code></td><td>${esc(r.status)}</td><td class="mono">${esc(r.transactionIds.join(', '))}</td><td class="mono">${esc(r.customerIds.join(', '))}</td><td>${esc(r.agent)}</td><td>${esc(r.principal ?? "")}</td><td>${esc(r.issuer)}</td><td>${verdict(r)}</td><td><a class="mono" href="${esc(link(r.receiptId))}">${esc(r.receiptId.slice(0, 8))}</a></td></tr>`).join("\n")}
+${rows.map((r) => `<tr data-transactions="${esc(JSON.stringify(r.transactionIds))}" data-customers="${esc(JSON.stringify(r.customerIds))}" data-agent="${esc(r.agent)}" data-timestamp="${esc(r.timestamp)}"><td>${esc(r.timestamp.replace("T", " ").slice(0, 19))}</td><td><code>${esc(r.tool)}</code></td><td>${esc(r.status)}</td><td class="mono">${esc(r.transactionIds.join(', '))}</td><td class="mono">${esc(r.customerIds.join(', '))}</td><td>${esc(r.agent)}</td><td>${esc(r.principal ?? "")}</td><td>${esc(r.issuer)}</td><td>${verdict(r)}</td><td>${receiptLink(r)}</td></tr>`).join("\n")}
 </tbody></table></div>
 <p class="muted">A gateway receipt was enforced outside the agent's process; an SDK receipt is the agent's own report. The verification column is the offline check any auditor can repeat with the same public keys.</p>`;
   return page(o.title ?? "Receipts", body, staticPage ? SEARCH_SCRIPT : "");
@@ -167,11 +183,15 @@ function explainHtml(text: string): string {
 /** One receipt's page: the ten answers, the verification report, and the receipt itself. */
 export function renderReceipt(pack: ActionPack, verification: VerifyResult | null, o: ReviewOptions, backLink: string, rawLink: string): string {
   const p = decodeStatement(pack.receipt).predicate;
-  const report = verification ? verification.checks.map((c) => `${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? `  (${c.detail})` : ""}`).join("\n") + `\n\nRESULT: ${verification.ok ? "VERIFIED" : "NOT VERIFIED"}` : "Not checked: start the review with --issuer-key and --principal-key to verify every receipt here.";
+  // pack.receiptId is the file name. A record that names another id inside was changed after it was issued.
+  const mismatch = pack.receiptId !== p.receiptId;
+  const failed = mismatch || (!!verification && !verification.ok);
+  const lines = [...(mismatch ? ["FAIL  file name matches receipt id  (file name does not match receipt id)"] : []), ...(verification ? verification.checks.map((c) => `${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? `  (${c.detail})` : ""}`) : [])];
+  const report = verification || mismatch ? `${lines.join("\n")}\n\nRESULT: ${failed ? "NOT VERIFIED" : "VERIFIED"}` : "Not checked: start the review with --issuer-key and --principal-key to verify every receipt here.";
   const body = `
 <p><a href="${esc(backLink)}">All receipts</a></p>
 <h1>${esc(p.tool.name)} <span class="muted">${esc(p.execution.status)}</span></h1>
-<p class="sub">${esc(p.timestamp.replace("T", " ").slice(0, 19))} · receipt <span class="mono">${esc(p.receiptId)}</span> · ${verification ? (verification.ok ? '<span class="ok">verified</span>' : '<span class="bad">NOT VERIFIED</span>') : '<span class="muted">not checked</span>'}</p>
+<p class="sub">${esc(p.timestamp.replace("T", " ").slice(0, 19))} · receipt <span class="mono">${esc(p.receiptId)}</span> · ${failed ? '<span class="bad">NOT VERIFIED</span>' : verification ? '<span class="ok">verified</span>' : '<span class="muted">not checked</span>'}</p>
 <h2>What this action is</h2>
 ${explainHtml(formatExplain(pack, verification, !!o.ledger))}
 <h2>Verification</h2>
@@ -181,7 +201,7 @@ ${explainHtml(formatExplain(pack, verification, !!o.ledger))}
 <h2>Hand this case to another reviewer</h2>
 <p><a download href="${esc(rawLink.replace(/\.json$/, '.case.html'))}">Download offline case file</a> · <a download href="${esc(rawLink.replace(/\.json$/, '.case.json'))}">Case data (JSON)</a></p>
 <p>The case file contains the receipts, signed authorizations, public keys, log heads and verification report. Open it in a browser offline to repeat the cryptographic checks. Compare its public key fingerprints with a trusted source.</p>`;
-  return page(`${p.tool.name} · ${p.receiptId.slice(0, 8)}`, body);
+  return page(`${p.tool.name} · ${String(p.receiptId).slice(0, 8)}`, body);
 }
 
 function verifyOf(bundle: ReceiptBundle, o: ReviewOptions): VerifyResult | null {
@@ -206,7 +226,8 @@ export function reviewHandler(o: ReviewOptions): (req: IncomingMessage, res: Ser
           else delete search[name];
         }
         try { validateReceiptSearch(search); } catch (e) { return send(400, "text/plain", e instanceof Error ? e.message : String(e)); }
-        return send(200, "text/html; charset=utf-8", renderIndex(listReceipts(o, search), { ...o, search }, (id) => `/r/${id}`));
+        const { rows, unreadable } = scanReceipts(o, search);
+        return send(200, "text/html; charset=utf-8", renderIndex(rows, { ...o, search }, (id) => `/r/${id}`, false, unreadable));
       }
       const m = /^\/r\/([0-9a-f-]{36})(\.case\.(?:html|json)|\.json)?$/.exec(url.pathname);
       if (!m) return send(404, "text/plain", "not found");
@@ -245,15 +266,16 @@ export function serveReview(o: ReviewOptions, opts: { port: number; host?: strin
 /** Writes the same pages as static files: index.html, and r/<id>.html with r/<id>.json beside it. For a case file or a shared drive. */
 export async function writeReview(o: ReviewOptions, outDir: string): Promise<{ receipts: number }> {
   mkdirSync(join(outDir, "r"), { recursive: true });
-  const rows = listReceipts(o);
-  writeFileSync(join(outDir, "index.html"), renderIndex(rows, o, (id) => `r/${id}.html`, true));
-  for (const r of rows) {
-    const file = await buildCaseFile(o, r.receiptId);
+  const { rows, unreadable } = scanReceipts(o);
+  writeFileSync(join(outDir, "index.html"), renderIndex(rows, o, (id) => `r/${id}.html`, true, unreadable));
+  // A file name that is not a well formed id has no page. Its row is in the index, flagged.
+  for (const r of rows.filter((row) => RECEIPT_ID.test(row.file))) {
+    const file = await buildCaseFile(o, r.file);
     const pack = file.pack;
-    writeFileSync(join(outDir, "r", `${r.receiptId}.html`), renderReceipt(pack, verifyOf(pack.receipt, o), o, "../index.html", `${r.receiptId}.json`));
-    writeFileSync(join(outDir, "r", `${r.receiptId}.json`), JSON.stringify(pack.receipt, null, 2));
-    writeFileSync(join(outDir, "r", `${r.receiptId}.case.json`), JSON.stringify(file, null, 2));
-    writeFileSync(join(outDir, "r", `${r.receiptId}.case.html`), renderCaseFile(file));
+    writeFileSync(join(outDir, "r", `${r.file}.html`), renderReceipt(pack, verifyOf(pack.receipt, o), o, "../index.html", `${r.file}.json`));
+    writeFileSync(join(outDir, "r", `${r.file}.json`), JSON.stringify(pack.receipt, null, 2));
+    writeFileSync(join(outDir, "r", `${r.file}.case.json`), JSON.stringify(file, null, 2));
+    writeFileSync(join(outDir, "r", `${r.file}.case.html`), renderCaseFile(file));
   }
   return { receipts: rows.length };
 }

@@ -18,7 +18,7 @@ import { loadScenarios, signReport, verifyReport } from "./evals-file.ts";
 import { buildPack, formatPack, signPack, verifyPack } from "./pack.ts";
 import { buildActionPack, formatExplain, signActionPack, verifyActionPack } from "./explain.ts";
 import { serveReview, writeReview } from "./review.ts";
-import { buildCaseFile, renderCaseFile, verifyCaseFile } from "./case-file.ts";
+import { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile } from "./case-file.ts";
 import { validateReceiptSearch } from "./search.ts";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -86,7 +86,7 @@ const USAGE = `agent-custody-memory <command>
   review ... --out <dir>                           static pages with search and downloadable offline case files
   review ... --case <receiptId> --out <case.html|case.json>
                                                    one portable case, with public keys and fresh offline verification in the HTML
-  review --verify-case <case.json> [--issuer-key <pub>] [--principal-key <pub>] [--log-key <pub>] [--upstream-key <pub>] [--log-id <id>] [--json]
+  review --verify-case <case.json|case.html> [--issuer-key <pub>] [--principal-key <pub>] [--log-key <pub>] [--upstream-key <pub>] [--log-id <id>] [--json]
                                                    repeat every receipt check offline; supplied keys replace the bundled trust set
   export --ledger <ledger.sqlite|postgres://…> --out <ledger.jsonl>  the auditable JSONL of any ledger, one event per line; also the feed for a warehouse
   blast --ledger <ledger.jsonl> --receipts <dir> --fact <factId> [--json]
@@ -239,7 +239,7 @@ async function main(argv: string[]): Promise<number> {
       const hasKeys = [values["issuer-key"], values["principal-key"], values["log-key"], values["upstream-key"]].some((k) => k?.length) || !!values["log-id"];
       const keys = hasKeys ? { issuerKeys: (values["issuer-key"] ?? []).map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), ...(values["log-key"]?.length ? { logKeys: values["log-key"].map(loadPublicKey) } : {}), ...(values["upstream-key"]?.length ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}), ...(values["log-id"] ? { logId: values["log-id"] } : {}) } : undefined;
       if (values["verify-case"]) {
-        const result = verifyCaseFile(JSON.parse(readFileSync(values["verify-case"], "utf8")), keys);
+        const result = verifyCaseFile(parseCaseFile(readFileSync(values["verify-case"], "utf8")), keys);
         if (values.json) console.log(JSON.stringify(result, null, 2));
         else {
           for (const c of result.checks) console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? `  (${c.detail})` : ""}`);
@@ -249,7 +249,7 @@ async function main(argv: string[]): Promise<number> {
         }
         return result.ok ? 0 : 1;
       }
-      if (!values.receipts) throw new Error("review needs --receipts, or --verify-case <case.json>");
+      if (!values.receipts) throw new Error("review needs --receipts, or --verify-case <case.json|case.html>");
       if (values.case && (!values.out || !/\.(?:html|json)$/.test(values.out))) throw new Error("review --case needs --out <case.html|case.json>");
       const search = { ...(values.transaction ? { transaction: values.transaction } : {}), ...(values.customer ? { customer: values.customer } : {}), ...(values.agent ? { agent: values.agent } : {}), ...(values.from ? { from: values.from } : {}), ...(values.to ? { to: values.to } : {}) };
       validateReceiptSearch(search);

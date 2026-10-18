@@ -131,4 +131,39 @@ describe("receipt search", () => {
     p.capture = { mode: "digest", withheld: [["request", "args", "customer"]] };
     expect(receiptSearchTerms(p)).toEqual({ transactionIds: ["tx_public"], customerIds: [] });
   });
+
+  it("still hides a withheld path below a nested array, object, or JSON text", () => {
+    const p = predicate({ a: { b: [{ transaction_id: "tx_hidden" }, { transaction_id: "tx_shown" }] }, c: JSON.stringify({ d: { customer_id: "customer-hidden" } }) });
+    p.capture = { mode: "digest", withheld: [["request", "args", "a", "b", "0"], ["request", "args", "c", "d"]] };
+    expect(receiptSearchTerms(p)).toEqual({ transactionIds: ["tx_shown"], customerIds: [] });
+  });
+});
+
+describe("search cost on hostile input", () => {
+  const nest = (depth: number, inner: unknown) => {
+    let value = inner;
+    for (let i = 0; i < depth; i++) value = { next: value };
+    return value;
+  };
+
+  it("indexes a deeply nested string argument in under a second", () => {
+    const memo = "[".repeat(2000) + "]".repeat(2000);
+    const p = predicate({ transaction_id: "tx_public", memo });
+    p.capture = { mode: "digest", withheld: [["request", "args", "secret", "deep", "er"]] };
+    const started = performance.now();
+    const terms = receiptSearchTerms(p);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(terms).toEqual({ transactionIds: ["tx_public"], customerIds: [] });
+  });
+
+  it("stops at a fixed depth in nested objects and in JSON text, and keeps the ids above it", () => {
+    const shallow = nest(10, { customer_id: "customer-shallow" });
+    const deep = nest(300,{ customer_id: "customer-deep" });
+    const text = JSON.stringify(nest(100, { customer_id: "customer-text" }));
+    const long = `[${" ".repeat(70_000)}{"customer_id":"customer-long"}]`;
+    const started = performance.now();
+    const terms = receiptSearchTerms(predicate({ shallow, deep, text, long }));
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(terms.customerIds).toEqual(["customer-shallow"]);
+  });
 });

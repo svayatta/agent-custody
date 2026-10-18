@@ -6,7 +6,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createDelegation, createGateway, generateKeyPair, loadPublicKey, RECEIPT_META_KEY, writeKeyPair, loadConfig } from "@agent-custody/receipts";
+import { createDelegation, createGateway, generateKeyPair, loadPublicKey, publicKeyFromPem, RECEIPT_META_KEY, writeKeyPair, loadConfig, type ReceiptBundle } from "@agent-custody/receipts";
+import { decodeStatement } from "../src/explain.ts";
 import { Ledger } from "../src/ledger.ts";
 import { listReceipts, serveReview, writeReview } from "../src/review.ts";
 
@@ -30,7 +31,7 @@ describe("the review page", () => {
     const denied = await gw.handleCall({ name: "memory.write", arguments: { subject: "acct:42", predicate: "note", value: "x", space: "user:me" } });
     expect(denied.isError).toBe(true);
     await gw.close();
-    // a file that is not a receipt is skipped, not fatal
+    // a file that is not a receipt does not stop the index, and the index says that it could not read it
     writeFileSync(join(dir, "receipts", "notes.json"), "{}");
 
     const keys = { issuerKeys: [loadPublicKey(join(dir, "keys", "gateway.pub"))], principalKeys: [loadPublicKey(join(dir, "keys", "principal.pub"))] };
@@ -47,6 +48,7 @@ describe("the review page", () => {
       const index = await (await fetch(running.url)).text();
       expect(index).toContain("Support agents, September");
       expect(index).toContain("3 receipt(s)");
+      expect(index).toContain("1 file(s) could not be read");
       expect(index).toContain(`href="/r/${writeId}"`);
       expect((index.match(/>verified</g) ?? []).length).toBe(3);
       const pageRes = await fetch(new URL(`r/${writeId}`, running.url));
@@ -95,5 +97,74 @@ describe("the review page", () => {
     });
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toMatch(/wrote 3 receipt page\(s\)/);
+  });
+});
+
+describe("a record that was changed after it was issued", () => {
+  const vectors = JSON.parse(readFileSync(join(import.meta.dirname, "../../receipts/vectors/receipts.json"), "utf8"));
+  const vector = vectors.cases.find((c: { name: string }) => c.name === "gateway-precommit-executed");
+  const key = (name: string) => publicKeyFromPem(vectors.keys[name].publicKeyPem);
+  const keys = { issuerKeys: vector.issuerKeys.map(key), principalKeys: vector.principalKeys.map(key) };
+
+  it("stays in the index and the export as NOT VERIFIED, and the header counts the files it cannot read", async () => {
+    const bundle = structuredClone(vector.bundle) as ReceiptBundle;
+    const statement = decodeStatement(bundle);
+    const id = statement.predicate.receiptId;
+    const dir = mkdtempSync(join(tmpdir(), "review-tamper-"));
+    const o = { receiptsDir: dir, keys };
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify(bundle));
+    expect(listReceipts(o).map((r) => [r.receiptId, r.verified])).toEqual([[id, true]]);
+
+    // Edit the id inside the signed payload. The file keeps its name.
+    statement.predicate.receiptId = "00000000";
+    bundle.envelope.payload = Buffer.from(JSON.stringify(statement)).toString("base64");
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify(bundle));
+    writeFileSync(join(dir, "notes.json"), "{}");
+    writeFileSync(join(dir, "broken.json"), "not json");
+    // A copy under a name that is not an id has a row, and no link.
+    writeFileSync(join(dir, "copy of receipt.json"), JSON.stringify(bundle));
+
+    for (const withKeys of [o, { receiptsDir: dir }]) {
+      const rows = listReceipts(withKeys);
+      expect(rows).toHaveLength(2);
+      expect(rows.map((r) => r.file).sort()).toEqual([id, "copy of receipt"]);
+      for (const r of rows) {
+        expect(r.verified).toBe(false);
+        expect(r.problem).toBe("file name does not match receipt id");
+      }
+    }
+
+    const running = await serveReview(o, { port: 0 });
+    try {
+      const index = await (await fetch(running.url)).text();
+      expect(index).toContain("2 receipt(s)");
+      expect(index).toContain("2 file(s) could not be read");
+      expect(index).toContain(`<p id="no-results" hidden>`);
+      expect((index.match(/NOT VERIFIED/g) ?? []).length).toBe(2);
+      expect(index).toContain("file name does not match receipt id");
+      expect(index).toContain(`href="/r/${id}"`);
+      expect(index).not.toContain("copy%20of");
+      const page = await (await fetch(new URL(`r/${id}`, running.url))).text();
+      expect(page).toContain("RESULT: NOT VERIFIED");
+      expect(page).toContain("FAIL  file name matches receipt id");
+    } finally {
+      await running.close();
+    }
+    // The page also fails without keys, because the name check needs none.
+    const bare = await serveReview({ receiptsDir: dir }, { port: 0 });
+    try {
+      expect(await (await fetch(new URL(`r/${id}`, bare.url))).text()).toContain("RESULT: NOT VERIFIED");
+    } finally {
+      await bare.close();
+    }
+
+    const out = join(dir, "site");
+    expect(await writeReview(o, out)).toEqual({ receipts: 2 });
+    const index = readFileSync(join(out, "index.html"), "utf8");
+    expect(index).toContain("2 file(s) could not be read");
+    expect(index).toContain("NOT VERIFIED");
+    expect(readFileSync(join(out, "r", `${id}.html`), "utf8")).toContain("RESULT: NOT VERIFIED");
+    expect(JSON.parse(readFileSync(join(out, "r", `${id}.case.json`), "utf8")).verification.ok).toBe(false);
+    expect(readdirSync(join(out, "r")).filter((f) => f.endsWith(".html") && !f.endsWith(".case.html"))).toEqual([`${id}.html`]);
   });
 });

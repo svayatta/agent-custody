@@ -119,7 +119,19 @@ describe("the review console", () => {
       expect(made.status, made.stderr).toBe(0);
       const artifact = readFileSync(destination, "utf8");
       if (extension === "json") expect(verifyCaseFile(JSON.parse(artifact), keys).ok).toBe(true);
-      else expect(artifact).toContain("Fresh browser verification");
+      else {
+        expect(artifact).toContain("Fresh browser verification");
+        // The page cannot check itself. The command line reads the HTML file and applies the same checks as for the JSON.
+        const verifyArgs = ["review", "--verify-case", destination, "--issuer-key", join(dir, "keys/gateway.pub"), "--principal-key", join(dir, "keys/principal.pub")];
+        const fromHtml = spawnSync(process.execPath, [cli, ...verifyArgs], { encoding: "utf8", timeout: 60_000 });
+        expect(fromHtml.status, fromHtml.stdout + fromHtml.stderr).toBe(0);
+        expect(fromHtml.stdout).toContain("RESULT: VERIFIED");
+        const forged = join(dir, "forged.case.html");
+        writeFileSync(forged, artifact.replaceAll("support-lead", "cfo_alice"));
+        const forgedRun = spawnSync(process.execPath, [cli, ...verifyArgs.map((arg) => (arg === destination ? forged : arg))], { encoding: "utf8", timeout: 60_000 });
+        expect(forgedRun.status, forgedRun.stdout + forgedRun.stderr).toBe(1);
+        expect(forgedRun.stdout).toContain("FAIL  ten answers match the signed receipt");
+      }
     }
     const selected = spawnSync(process.execPath, [cli, "review", "--receipts", o.receiptsDir, "--transaction", refundId!, "--out", join(dir, "filtered-cli")], { encoding: "utf8", timeout: 60_000 });
     expect(selected.status, selected.stderr).toBe(0);

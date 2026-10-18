@@ -96,9 +96,19 @@ export async function buildCaseFile(options: CaseFileOptions, receiptId: string)
     version: "0.1", generatedAt: new Date().toISOString(), receiptId, withLedger: !!options.ledger, pack, keys,
     explanation: "", verification: { ok: false, complete: false, trust: "none", checks: [], receipts: {} },
   };
+  // The answers carry the receipt's verdict, and the verification checks the answers. Verify once to get the verdict.
+  file.explanation = formatExplain(pack, verifyCaseFile(file).receipts[receiptId] ?? null, file.withLedger);
   file.verification = verifyCaseFile(file);
-  file.explanation = formatExplain(pack, file.verification.receipts[receiptId] ?? null, file.withLedger);
   return file;
+}
+
+/** Reads a case file from its JSON text, or from the `case-data` script of a rendered `.case.html`. It does not validate: `verifyCaseFile` does. */
+export function parseCaseFile(text: string): CaseFile {
+  if (!/^\s*</.test(text)) return JSON.parse(text);
+  // The renderer escapes every "<" in the data, so the first closing tag ends the data. A browser reads the first element with this id too.
+  const data = /<script id="case-data" type="application\/json">([\s\S]*?)<\/script>/.exec(text)?.[1];
+  if (data === undefined) throw new Error("this HTML file has no case-data script");
+  return JSON.parse(data);
 }
 
 /** Checks signed receipts and their embedded authorizations/proofs afresh. The exporter report is never trusted. */
@@ -134,6 +144,17 @@ export function verifyCaseFile(file: CaseFile, trustedKeys?: CaseFileOptions["ke
       add(`receipt ${id} verifies`, result.ok, result.checks.filter((c) => !c.ok).map((c) => c.name).join(", "));
       add(`receipt ${id} matches its id`, result.statement?.predicate.receiptId === id);
     }
+    // The saved answers are text from the exporter. Most of them come from signed data, so rebuild them from the receipt.
+    // The exporter wrote the verdict line with the bundled keys, so rebuild it with the same keys.
+    let own: VerifyResult | undefined = receipts[file.receiptId];
+    if (trustedKeys) {
+      try { own = verifyBundle(file.pack.receipt, bundled); }
+      catch { own = undefined; }
+    }
+    let answers: string | null = null;
+    try { answers = formatExplain(file.pack, own ?? null, file.withLedger); }
+    catch { /* a receipt that cannot be decoded has no answers to compare */ }
+    add("ten answers match the signed receipt", answers !== null && answers === file.explanation, answers === null ? "the receipt cannot be read" : answers === file.explanation ? undefined : "the saved answers differ from the answers that the signed receipt gives");
     const missing = citedIds(file.pack).filter((id) => id !== file.receiptId && !Object.hasOwn(file.pack.receipts, id));
     add("all cited receipts included", !file.pack.missingReceipts.length && !missing.length, [...new Set([...file.pack.missingReceipts, ...missing])].join(", "));
     add("written beliefs cite this receipt", file.pack.written.every((f) => f.source.receiptId === file.receiptId));
@@ -175,7 +196,7 @@ export function renderCaseFile(file: CaseFile): string {
   const hash = createHash("sha256").update(script).digest("base64");
   const text = (value: unknown) => escapeHtml(typeof value === "string" ? value : JSON.stringify(value, null, 2));
   const keyText = problem ? "Malformed public key set" : Object.entries(file.keys).filter(([role]) => role !== "logId").map(([role, keys]) => `${role}:\n${(keys as CaseFileKey[]).map((key) => `SHA-256 ${key.keyid}\n${key.pem}`).join("\n") || "(none)"}`).join("\n\n");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-${hash}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>Custody case ${text(file?.receiptId ?? "invalid")}</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:1040px;margin:2rem auto;padding:0 1rem;color:#202020;background:#faf9f6}h1,h2{line-height:1.2}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#fff;border:1px solid #ccc;border-radius:6px;padding:1rem}button{font:inherit;padding:.5rem 1rem;cursor:pointer}summary{cursor:pointer}#fresh-report{border-left:4px solid #a66c00}small{color:#555}</style></head><body><h1>Custody case file</h1><p>Receipt <code>${text(file?.receiptId ?? "invalid")}</code>. Saved ${text(file?.generatedAt ?? "unknown")}.</p><p>This file contains signed receipts, embedded signed authorizations, log heads and inclusion proofs, and public keys. It works offline when opened locally.</p><p><strong>Trust:</strong> bundled keys demonstrate internal consistency. Confirm each SHA-256 fingerprint with the issuer, principal, log operator, or upstream through an independent channel before trusting their identity. A signed receipt records a claim about execution; it does not by itself prove that an external side effect occurred.</p><p>Withheld values remain commitments; their hidden contents are not recomputed here. The ten answers and belief/ledger data are an exporter snapshot, not independently attested facts. The exporter report below is historical; the browser recomputes signatures, authorizations, digests and inclusion proofs.</p><h2>Fresh browser verification</h2><button id="verify" type="button">Verify again offline</button><pre id="fresh-report" role="status" aria-live="polite">NOT CHECKED: waiting for WebCrypto verification. If this stays unchanged, this browser could not run the verifier.</pre><noscript><p>NOT CHECKED: JavaScript is disabled. Use the independent command-line verifier.</p></noscript><h2>Ten answers (exporter snapshot)</h2><pre>${text(problem ?? file.explanation)}</pre><h2>Export-time verification (recomputed when rendering)</h2><pre>${text(report)}</pre><h2>Public keys and fingerprints</h2><pre>${text(keyText)}</pre><details><summary>All receipts, authorizations, proofs and ledger snapshot (JSON)</summary><pre>${text(file)}</pre></details><script id="case-data" type="application/json">${data}</script><script>${script}</script></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-${hash}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>Custody case ${text(file?.receiptId ?? "invalid")}</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:1040px;margin:2rem auto;padding:0 1rem;color:#202020;background:#faf9f6}h1,h2{line-height:1.2}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#fff;border:1px solid #ccc;border-radius:6px;padding:1rem}button{font:inherit;padding:.5rem 1rem;cursor:pointer}summary{cursor:pointer}#fresh-report{border-left:4px solid #a66c00}small{color:#555}</style></head><body><h1>Custody case file</h1><p>Receipt <code>${text(file?.receiptId ?? "invalid")}</code>. Saved ${text(file?.generatedAt ?? "unknown")}.</p><p>This file contains signed receipts, embedded signed authorizations, log heads and inclusion proofs, and public keys. It works offline when opened locally.</p><p><strong>Trust:</strong> bundled keys demonstrate internal consistency. Confirm each SHA-256 fingerprint with the issuer, principal, log operator, or upstream through an independent channel before trusting their identity. A signed receipt records a claim about execution; it does not by itself prove that an external side effect occurred.</p><p>Withheld values remain commitments; their hidden contents are not recomputed here. The ten answers and belief/ledger data are an exporter snapshot, not independently attested facts. The exporter report below is historical; the browser recomputes signatures, authorizations, digests and inclusion proofs.</p><h2>Fresh browser verification</h2><p><strong>This page does not check itself independently.</strong> Its result comes from the script in this same file, and whoever edits the file can edit the script and the answers too. This page does not compare the ten answers with the receipts. To check this file, run <code>agent-custody-memory review --verify-case &lt;this file&gt; --issuer-key &lt;issuer.pub&gt; --principal-key &lt;principal.pub&gt;</code>. The command reads this .html file and rebuilds the ten answers from the signed receipt.</p><button id="verify" type="button">Verify again offline</button><pre id="fresh-report" role="status" aria-live="polite">NOT CHECKED: waiting for WebCrypto verification. If this stays unchanged, this browser could not run the verifier.</pre><noscript><p>NOT CHECKED: JavaScript is disabled. Use the independent command-line verifier: <code>agent-custody-memory review --verify-case &lt;this file&gt; --issuer-key &lt;issuer.pub&gt; --principal-key &lt;principal.pub&gt;</code>.</p></noscript><h2>Ten answers (saved text, NOT CHECKED in this page)</h2><pre>${text(problem ?? file.explanation)}</pre><h2>Export-time verification (recomputed when rendering)</h2><pre>${text(report)}</pre><h2>Public keys and fingerprints</h2><pre>${text(keyText)}</pre><details><summary>All receipts, authorizations, proofs and ledger snapshot (JSON)</summary><pre>${text(file)}</pre></details><script id="case-data" type="application/json">${data}</script><script>${script}</script></body></html>`;
 }
 
 const BROWSER_CASE_SCRIPT = `
@@ -219,6 +240,7 @@ async function verifyCaseOffline() {
     lines.push("", good ? "RESULT: VERIFIED AGAINST BUNDLED KEYS (confirm fingerprints independently)" : "RESULT: NOT VERIFIED");
     if (incomplete) lines.push("INCOMPLETE: missing evidence, withheld consumed ids, or no ledger. Dependency and reversal answers remain limited.");
     lines.push("This checks signed evidence, not external side effects or the exporter's ledger snapshot.");
+    lines.push("NOT CHECKED here: the ten answers. They are the exporter's saved text. This result is not independent, because the script is in the same file as the data. Run: agent-custody-memory review --verify-case <this file> --issuer-key <issuer.pub> --principal-key <principal.pub>");
   } catch (error) { lines.push("RESULT: NOT VERIFIED / NOT CHECKED: " + String(error)); }
   output.textContent = lines.join("\\n");
 }

@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { createIssuer, generateKeyPair, publicKeyFromPem, type ReceiptBundle } from "@agent-custody/receipts";
-import { buildCaseFile, renderCaseFile, verifyCaseFile, type CaseFile } from "../src/case-file.ts";
-import { decodeStatement } from "../src/explain.ts";
+import { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile, type CaseFile } from "../src/case-file.ts";
+import { decodeStatement, formatExplain } from "../src/explain.ts";
 import { Ledger } from "../src/ledger.ts";
 
 const vectors = JSON.parse(readFileSync(join(import.meta.dirname, "../../receipts/vectors/receipts.json"), "utf8"));
@@ -102,6 +102,8 @@ describe("offline case files", () => {
       statement.predicate.authorization = auth;
       file.keys.issuerKeys = [{ keyid: issuerKey.keyid, pem: issuerKey.publicKey.export({ type: "spki", format: "pem" }).toString() }];
       file.pack.receipt = await issuer.issue(statement.predicate);
+      // The saved answers belong to the old receipt. Rebuild them for the new one.
+      file.explanation = formatExplain(file.pack, verifyCaseFile(file).receipts[file.receiptId] ?? null, file.withLedger);
       expect(verifyCaseFile(file).ok).toBe(true);
       if (part === "authorization") auth.envelope.signatures[0]!.sig = "AAAA";
       if (part === "authorization proof") auth.inclusion.leafIndex = 999;
@@ -117,6 +119,42 @@ describe("offline case files", () => {
     else bundle.treeHead.signatures[0]!.sig = "AAAA";
     expect(verifyCaseFile(file).ok).toBe(false);
     expect((await runBrowser(renderCaseFile(file))).report).toContain("RESULT: NOT VERIFIED");
+  });
+
+  it("fails when a saved answer is edited, in JSON and in HTML, and names the check", async () => {
+    const { file, keys } = await fixture();
+    const answers = (result: ReturnType<typeof verifyCaseFile>) => result.checks.find((c) => c.name === "ten answers match the signed receipt")!;
+    expect(answers(verifyCaseFile(file)).ok).toBe(true);
+    expect(answers(verifyCaseFile(file, keys)).ok).toBe(true);
+    // Each edit keeps the receipts and the keys intact. Only the exporter's text changes.
+    const edits: [RegExp, string][] = [[/^(WHO AUTHORIZED IT\s+).*$/m, "$1cfo_alice (manual sign-off)"], [/^(WHAT IT DID\s+\S+ ).*$/m, "$1{\"amount\":500} -> executed"], [/^(WHY\s+).*$/m, "$1the policy permitted it after human review"]];
+    for (const [pattern, replacement] of edits) {
+      const forged = structuredClone(file);
+      forged.explanation = forged.explanation.replace(pattern, replacement);
+      expect(forged.explanation).not.toBe(file.explanation);
+      for (const result of [verifyCaseFile(forged), verifyCaseFile(forged, keys), verifyCaseFile(parseCaseFile(renderCaseFile(forged)))]) {
+        expect(result.ok).toBe(false);
+        expect(answers(result).ok).toBe(false);
+        expect(result.receipts[file.receiptId]!.ok).toBe(true);
+      }
+    }
+  });
+
+  it("reads a rendered HTML case through the same checks, and tells a reader that the page does not check itself", async () => {
+    const { file, keys } = await fixture();
+    const html = renderCaseFile(file);
+    expect(parseCaseFile(html)).toEqual(file);
+    expect(parseCaseFile(JSON.stringify(file))).toEqual(file);
+    expect(verifyCaseFile(parseCaseFile(html), keys).ok).toBe(true);
+    expect(() => parseCaseFile("<!doctype html><p>nothing here</p>")).toThrow("no case-data script");
+    expect(html).toContain("This page does not check itself independently");
+    expect(html).toContain("--verify-case &lt;this file&gt;");
+    expect((await runBrowser(html)).report).toContain("NOT CHECKED here: the ten answers");
+    // A forged page that edits its data and its script together still fails the command.
+    const forged = structuredClone(file);
+    forged.explanation = forged.explanation.replace(/^(WHO AUTHORIZED IT\s+).*$/m, "$1cfo_alice");
+    expect(forged.explanation).not.toBe(file.explanation);
+    expect(verifyCaseFile(parseCaseFile(renderCaseFile(forged)), keys).ok).toBe(false);
   });
 
   it("checks every included receipt's signature and id, and marks absent cited evidence incomplete", async () => {

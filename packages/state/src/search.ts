@@ -43,30 +43,64 @@ const CUSTOMER_ID = /^cus(?:t)?_.+/;
 const kindOf = (field: string): Kind | undefined => TRANSACTION_FIELDS.has(field) ? "transaction" : CUSTOMER_FIELDS.has(field) ? "customer" : undefined;
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
+// The input is the agent's own text, so the work per receipt has fixed bounds. A walk stops below MAX_DEPTH levels, and
+// a string is parsed as JSON only up to MAX_JSON_TEXT characters. A node deeper than that, or in longer text, is not
+// searched.
+const MAX_DEPTH = 64;
+const MAX_JSON_TEXT = 65_536;
+interface Trie { end: boolean; kids: Map<string, Trie> }
+const HIDDEN = Symbol("hidden");
+
+/** The withheld paths as a trie, so that a walk tracks "hidden" one step at a time. */
+function withheldTrie(withheld: unknown): Trie {
+  const root: Trie = { end: false, kids: new Map() };
+  if (!Array.isArray(withheld)) return root;
+  for (const path of withheld) {
+    // An empty path, or a path with a step that is not a string, never named a field.
+    if (!Array.isArray(path) || !path.length || !path.every((step) => typeof step === "string")) continue;
+    let at = root;
+    for (const step of path as string[]) {
+      let next = at.kids.get(step);
+      if (!next) at.kids.set(step, (next = { end: false, kids: new Map() }));
+      at = next;
+    }
+    at.end = true;
+  }
+  return root;
+}
+/** The trie node below the keys, `undefined` when no withheld path goes there, or HIDDEN when a withheld path ends on the way. */
+const into = (at: Trie | undefined, ...keys: string[]): Trie | undefined | typeof HIDDEN => {
+  for (const key of keys) {
+    at = at?.kids.get(key);
+    if (at?.end) return HIDDEN;
+  }
+  return at;
+};
+
 /**
  * Named identifiers in public arguments, results, and fact lookups. Complete JSON objects/arrays in MCP text are
  * inspected too; prose, digests, signatures, metadata outside those values, and encoded envelopes are not searched.
- * Generic result `id` fields count only when they have a known payment or customer id prefix.
+ * Generic result `id` fields count only when they have a known payment or customer id prefix. Values nested deeper
+ * than 64 levels, and JSON text longer than 64 KiB, are not searched, so that one hostile argument cannot stall a reader.
  */
 export function receiptSearchTerms(predicate: Predicate): { transactionIds: string[]; customerIds: string[] } {
   const transaction = new Set<string>();
   const customer = new Set<string>();
   const terms = { transaction, customer };
-  const withheld = new Set((predicate.capture?.withheld ?? []).map((path) => JSON.stringify(path)));
-  const hidden = (path: string[]) => path.some((_, i) => withheld.has(JSON.stringify(path.slice(0, i + 1))));
+  const trie = withheldTrie(predicate.capture?.withheld);
 
-  const add = (value: unknown, kind: Kind, path: string[]) => {
-    if (hidden(path)) return;
+  const add = (value: unknown, kind: Kind, at: Trie | undefined) => {
     if (typeof value === "string" && value.length) terms[kind].add(value);
-    else if (object(value) && Object.hasOwn(value, "id") && !hidden([...path, "id"]) && typeof value.id === "string" && value.id.length) terms[kind].add(value.id);
+    else if (object(value) && Object.hasOwn(value, "id") && into(at, "id") !== HIDDEN && typeof value.id === "string" && value.id.length) terms[kind].add(value.id);
   };
-  const walk = (value: unknown, path: string[], result: boolean): void => {
-    if (hidden(path)) return;
+  // `at` is the trie node of the value's path. It is never a withheld node. It is undefined when no withheld path runs below.
+  const walk = (value: unknown, at: Trie | undefined, result: boolean, depth: number): void => {
+    if (depth > MAX_DEPTH) return;
     if (typeof value === "string") {
       // JSON.parse only accepts the entire text. A sentence that happens to mention an id is not an identifier.
-      if (/^\s*[\[{]/.test(value)) {
+      if (value.length <= MAX_JSON_TEXT && /^\s*[\[{]/.test(value)) {
         try {
-          walk(JSON.parse(value), path, result);
+          walk(JSON.parse(value), at, result, depth + 1);
         } catch {
           // Ordinary tool text is not JSON.
         }
@@ -74,34 +108,42 @@ export function receiptSearchTerms(predicate: Predicate): { transactionIds: stri
       return;
     }
     if (Array.isArray(value)) {
-      value.forEach((item, i) => walk(item, [...path, String(i)], result));
+      value.forEach((item, i) => {
+        const next = into(at, String(i));
+        if (next !== HIDDEN) walk(item, next, result, depth + 1);
+      });
       return;
     }
     if (!object(value)) return;
     for (const [field, item] of Object.entries(value)) {
-      const next = [...path, field];
-      if (hidden(next)) continue;
+      const next = into(at, field);
+      if (next === HIDDEN) continue;
       const kind = kindOf(field);
       if (kind) add(item, kind, next);
       else if (result && field === "id" && typeof item === "string") {
         if (TRANSACTION_ID.test(item)) transaction.add(item);
         if (CUSTOMER_ID.test(item)) customer.add(item);
       }
-      walk(item, next, result);
+      walk(item, next, result, depth + 1);
     }
   };
+  const start = (value: unknown, result: boolean, ...path: string[]) => {
+    const at = into(trie, ...path);
+    if (at !== HIDDEN) walk(value, at, result, 0);
+  };
 
-  walk(predicate.request.args, ["request", "args"], false);
+  start(predicate.request.args, false, "request", "args");
   if (predicate.execution.status === "executed" || predicate.execution.status === "failed") {
-    walk(predicate.execution.result, ["execution", "result"], true);
+    start(predicate.execution.result, true, "execution", "result");
   }
   for (const [name, fact] of Object.entries(predicate.facts)) {
-    const path = ["facts", name];
-    if (hidden(path)) continue;
-    walk(fact.args, [...path, "args"], false);
+    if (into(trie, "facts", name) === HIDDEN) continue;
+    start(fact.args, false, "facts", name, "args");
+    const valueAt = into(trie, "facts", name, "value");
+    if (valueAt === HIDDEN) continue;
     const kind = kindOf(name);
-    if (kind) add(fact.value, kind, [...path, "value"]);
-    walk(fact.value, [...path, "value"], true);
+    if (kind) add(fact.value, kind, valueAt);
+    walk(fact.value, valueAt, true, 0);
   }
   return { transactionIds: [...transaction].sort(), customerIds: [...customer].sort() };
 }
