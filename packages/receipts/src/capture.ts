@@ -282,7 +282,9 @@ export function setAt<T>(root: T, path: Path, value: unknown): T {
 // ---- the choke point ----
 
 /** The structural top-level parts of a statement: ids, keys, times, the grant, the names. Never withheld. */
-const CLEAR_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "authorization", "capture"]);
+// Approval signatures and their exact action binding are structural evidence, like the delegation. They remain in
+// clear even under a private rule; an approval may itself disclose action fields and an unsalted argument digest.
+const CLEAR_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "approval", "authorization", "capture"]);
 /** Inside the parts that carry values: what stays in clear beside them. */
 const CLEAR_IN = {
   request: new Set(["argsDigest", "provenance"]),

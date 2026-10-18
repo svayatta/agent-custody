@@ -58,7 +58,7 @@ const USAGE = `agent-custody <command>
   prune   --log <log.jsonl> --before <ISO instant> [--receipts <dir>]
           retention on the receipt log: replaces older leaves with their hashes, so proofs still verify and the content is gone
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
-  verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--json]
+  verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--json]
   log     ... --db-env NAME                     the same server over Postgres: tenants and tokens from the database, one writer per tenant,
                                                  root paths serve the tenant "default" (created with --log-id). Needs the pg package.
   log     ... (--key <log.key> [--retired-key <pub>]... | --signer-url <url> [--signer-token-env NAME]) [--checkpoint-dir <dir>] [--checkpoint-every <seconds>] [--checkpoint-heartbeat <seconds>]
@@ -461,6 +461,7 @@ async function main(argv: string[]): Promise<number> {
           "issuer-key": { type: "string", multiple: true },
           "gateway-key": { type: "string", multiple: true },
           "principal-key": { type: "string", multiple: true },
+          "approval-key": { type: "string", multiple: true },
           "log-key": { type: "string", multiple: true },
           "log-url": { type: "string" },
           "log-id": { type: "string" },
@@ -484,6 +485,7 @@ async function main(argv: string[]): Promise<number> {
       const result = verifyBundle(bundle, {
         issuerKeys: issuerKeyFiles.map(loadPublicKey),
         principalKeys: (values["principal-key"] ?? []).map(loadPublicKey),
+        ...(values["approval-key"] ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}),
         ...(logKeys.length ? { logKeys } : {}),
         ...(values["log-id"] ? { logId: values["log-id"] } : {}),
         ...(values["upstream-key"] ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}),

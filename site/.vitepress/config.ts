@@ -114,6 +114,7 @@ export default withMermaid(
           { text: "Overview", link: "/receipts/" },
           { text: "Tutorials", link: "/receipts/tutorials" },
           { text: "The gateway", link: "/receipts/usage" },
+          { text: "Payload-bound approvals", link: "/receipts/approvals" },
           { text: "The interceptor SDK and other languages", link: "/receipts/sdk" },
           { text: "Writing policies", link: "/receipts/policies" },
           { text: "Verifying a receipt", link: "/receipts/verification" },

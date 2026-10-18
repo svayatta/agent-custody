@@ -117,6 +117,36 @@ Exported from `@agent-custody/receipts` beside the gateway. They belong to the g
 
 Types: `AgentCard`, `ResolvedCard`, `A2aServerOptions`, `RunningA2aServer`.
 
+## Human approvals
+
+Exported from `@agent-custody/receipts` for signing and verifying exact actions at the [gateway](./gateway#human-approvals). The SDK issuer does not enforce these gateway rules.
+
+```ts
+interface ApprovalBinding {
+  principal: string;
+  agent: string;
+  tool: string;
+  args: Record<string, unknown>;
+  fields?: { amount?: string; currency?: string; beneficiary?: string };
+}
+type ApprovalVerifyResult =
+  | { ok: true; approval: Approval; approverKeyids: string[] }
+  | { ok: false; error: string };
+```
+
+| export | signature | behaviour |
+| --- | --- | --- |
+| `createApproval` | `(key: KeyPair, input: ApprovalBinding & { approvalId?: string; issuedAt?: string; expiresAt: string }): Envelope` | signs a v0.1 approval; defaults to a UUID id and current issuance time; requires expiry after issuance. The digest covers every JSON argument. Present action fields are copied by the configured top-level names; defaults are `amount`, `currency`, `beneficiary`. Amount is a safe integer in minor units; the other two are nonempty strings |
+| `verifyApproval` | `(envelope: unknown, trusted: PublicKeyRef[], binding: ApprovalBinding, { at?: string, minApprovers?: 1 \| 2 }?): ApprovalVerifyResult` | checks the envelope/schema, distinct trusted signatures, complete binding and half-open validity window `[issuedAt, expiresAt)`; current time and one approver by default. Returns a failure for untrusted input; does not consume |
+| `verifyApprovalStatement` | `(envelope: unknown, trusted: PublicKeyRef[], minApprovers: 1 \| 2 = 1): ApprovalVerifyResult` | checks only the schema and distinct trusted signatures. Does not establish action binding or time validity; use `verifyApproval` at an enforcement boundary |
+| `consumeApproval` | `(usedDir: string, approvalId: string, receiptId: string, at: string): void` | exclusively creates a persistent consumption marker before a side effect; throws on replay or storage failure; does not undo a marker after later failures |
+| `ApprovalSchema` | Zod schema | strict payload schema for `Approval`, with `version: "0.1"`, UUID `approvalId`, principal, agent, tool, `argsDigest`, optional action fields, `issuedAt`, `expiresAt` |
+| `APPROVAL_TYPE`, `APPROVAL_META_KEY` | `"application/vnd.agent-custody.approval+json"`, `"agent-custody/approval"` | signed payload type and caller `_meta` key |
+
+Types: `Approval`, `ApprovalBinding`, `ApprovalRecord`, `ApprovalVerifyResult`. `ApprovalRecord` is the gateway's observed check, embedded in receipts and pre-commit authorizations; it carries the envelope when its statement has a trusted signature and valid schema, threshold, optional field mapping, times, status, optional reason and signer keyids.
+
+For two approvers, `dsseCountersign(createApproval(firstKey, action), secondKey)` adds a signature to the same payload. Distinct trusted keyids count once each; distinct human identities are an operational assumption. Keep private keys with the people reviewing the complete action. [Tutorial 28](/receipts/tutorials) runs the gateway, refusals, two signatures, consumption and offline verification.
+
 ## Private evidence
 
 Exported from `@agent-custody/receipts`. `createIssuer(key, receiptsDir, log, { capture: { rules, key } })` applies the rule to every statement it signs (`issue(predicate, ctx?)`, `authorize(predicate, ctx?)`), which is how the gateway and `createSdkIssuer` get it, and the verifier uses `restorePaths` to put the values back; the behaviour is on the [gateway](./gateway#private-evidence) and [verify](./verify#reveal) pages.
@@ -153,4 +183,4 @@ Every option and check is on the [verify](./verify) page.
 
 ## Keys
 
-`generateKeyPair(): KeyPair`, `writeKeyPair(kp, dir, name)` → `{ keyFile, pubFile }`, `loadPrivateKey(path)`, `loadPublicKey(path): PublicKeyRef` (`{ publicKey, keyid }`), `publicKeyFromPem(pem)`, `publicKeyToPem(publicKey)`. Keys are Ed25519; a keyid is the SHA-256 of the SPKI DER. `dsseSign(payloadType, payload, keyPair): Envelope` and `dsseVerify(envelope, trustedKeys)` are the primitives every signed artefact uses.
+`generateKeyPair(): KeyPair`, `writeKeyPair(kp, dir, name)` → `{ keyFile, pubFile }`, `loadPrivateKey(path)`, `loadPublicKey(path): PublicKeyRef` (`{ publicKey, keyid }`), `publicKeyFromPem(pem)`, `publicKeyToPem(publicKey)`. Keys are Ed25519; a keyid is the SHA-256 of the SPKI DER. `dsseSign(payloadType, payload, keyPair): Envelope`, `dsseCountersign(envelope, keyPair): Envelope`, and `dsseVerify(envelope, trustedKeys)` are the primitives every signed artefact uses.

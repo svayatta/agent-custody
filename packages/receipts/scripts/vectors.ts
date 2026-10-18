@@ -2,11 +2,12 @@
 // The vectors are a snapshot: keys, receipts, logs, and expected verdicts produced by this implementation, so that a
 // verifier written elsewhere can prove it agrees. Regenerate only when the format changes, never to make a test pass.
 import { withhold } from "../src/capture.ts";
+import { APPROVAL_META_KEY, APPROVAL_TYPE, createApproval } from "../src/approval.ts";
 import { createDelegation, delegateFrom, DELEGATION_TYPE } from "../src/delegation.ts";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalize, digestOf, dsseSign, generateKeyPair, loadPrivateKey, loadPublicKey, sha256Hex, type Envelope, type KeyPair, publicKeyToPem } from "../src/crypto.ts";
+import { canonicalize, digestOf, dsseCountersign, dsseSign, generateKeyPair, loadPrivateKey, loadPublicKey, sha256Hex, type Envelope, type KeyPair, publicKeyToPem, writeKeyPair as writeApprovalKeyPair } from "../src/crypto.ts";
 import { createGateway, RECEIPT_META_KEY, createGatewayHost } from "../src/gateway.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { consistencyProof, inclusionProof, leafHash, rootOf } from "../src/log.ts";
@@ -29,6 +30,7 @@ interface Case {
   principalKeys: string[];
   logKeys: string[];
   upstreamKeys?: string[];
+  approvalKeys?: string[];
   /** shared secrets for provider-native deliveries; test values, published on purpose */
   providerSecrets?: { stripe?: string; github?: string };
   /** the log id the verifier is told to expect on the tree head */
@@ -62,6 +64,7 @@ function addCase(c: Omit<Case, "expected">, opts?: Partial<VerifyOptions>) {
     principalKeys: c.principalKeys.map((k) => keyFrom(k)),
     logKeys: c.logKeys.map((k) => keyFrom(k)),
     ...(c.upstreamKeys ? { upstreamKeys: c.upstreamKeys.map((k) => keyFrom(k)) } : {}),
+    ...(c.approvalKeys ? { approvalKeys: c.approvalKeys.map((k) => keyFrom(k)) } : {}),
     ...(c.providerSecrets ? { providerSecrets: c.providerSecrets } : {}),
     ...(c.logId ? { logId: c.logId } : {}),
     ...(logFile ? { logFile } : {}),
@@ -88,6 +91,67 @@ const glog = logLines(gfx.logFile);
 const G = { issuerKeys: ["gateway"], principalKeys: ["principal"], logKeys: [] as string[] };
 
 addCase({ name: "gateway-executed", description: "An in-policy refund through the gateway: delegation attested, facts observed, executed. Every check passes with the log.", bundle: executed, ...G, log: glog });
+
+// ---- human approvals: exact payload, distinct signers, single use, and expiry ----
+const afx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-approvals-")));
+const human = generateKeyPair(), secondHuman = generateKeyPair();
+const humanFiles = writeApprovalKeyPair(human, join(afx.dir, "keys"), "human");
+const secondFiles = writeApprovalKeyPair(secondHuman, join(afx.dir, "keys"), "second-human");
+key("approval-gateway", afx.gatewayPub);
+key("approval-principal", afx.principalPub);
+key("human", humanFiles.pubFile);
+key("second-human", secondFiles.pubFile);
+const acfg = loadConfig(afx.configFile);
+acfg.approvals = { trustedKeys: [humanFiles.pubFile, secondFiles.pubFile], usedDir: join(afx.dir, "used-approvals"), tools: [{ tool: "stripe.refund", minApprovers: 2 }] };
+acfg.precommit = ["stripe.refund"];
+const agw = await createGateway(acfg);
+const aargs = { customer_id: "cust_123", amount: 2500, currency: "GBP", beneficiary: "acct_42" };
+const abinding = { principal: "user_456", agent: "support-agent", tool: "stripe.refund", args: aargs };
+const ae = dsseCountersign(createApproval(human, { ...abinding, expiresAt: new Date(Date.now() + 3600_000).toISOString() }), secondHuman);
+const approved = await agw.handleCall({ name: "stripe.refund", arguments: aargs, _meta: { [APPROVAL_META_KEY]: ae } });
+const reused = await agw.handleCall({ name: "stripe.refund", arguments: aargs, _meta: { [APPROVAL_META_KEY]: ae } });
+const changed = await agw.handleCall({ name: "stripe.refund", arguments: { ...aargs, amount: 2501 }, _meta: { [APPROVAL_META_KEY]: ae } });
+const expiredApproval = dsseCountersign(createApproval(human, { ...abinding, issuedAt: new Date(Date.now() - 120_000).toISOString(), expiresAt: new Date(Date.now() - 60_000).toISOString() }), secondHuman);
+const aexpired = await agw.handleCall({ name: "stripe.refund", arguments: aargs, _meta: { [APPROVAL_META_KEY]: expiredApproval } });
+await agw.close();
+const approvedBundle = bundleFile(afx.receiptsDir, String(approved._meta?.[RECEIPT_META_KEY]));
+const approvalIssuer = loadPrivateKey(join(afx.dir, "keys", "gateway.key"));
+const alog = logLines(afx.logFile);
+const A = { issuerKeys: ["approval-gateway"], principalKeys: ["approval-principal"], logKeys: [] as string[], approvalKeys: ["human", "second-human"] };
+addCase({ name: "gateway-approved-two-humans", description: "Two distinct trusted humans signed the exact refund payload; the gateway precommitted the approval, atomically consumed it, and forwarded once.", bundle: approvedBundle, ...A, log: alog });
+addCase({ name: "gateway-approval-used", description: "The same approval was presented again. The gateway withheld the call; the refusal is an authentic receipt.", bundle: bundleFile(afx.receiptsDir, String(reused._meta?.[RECEIPT_META_KEY])), ...A, log: alog });
+addCase({ name: "gateway-approval-payload-changed", description: "One penny changed after approval. The gateway denied the action with the binding failure in the receipt.", bundle: bundleFile(afx.receiptsDir, String(changed._meta?.[RECEIPT_META_KEY])), ...A, log: alog });
+addCase({ name: "gateway-approval-expired", description: "An expired approval was refused; the denied receipt still verifies.", bundle: bundleFile(afx.receiptsDir, String(aexpired._meta?.[RECEIPT_META_KEY])), ...A, log: alog });
+addCase({ name: "gateway-approved-without-human-trust", description: "The approved receipt with no human keys trusted. Neither the gateway nor delegation keys substitute for human approval keys.", bundle: approvedBundle, ...A, approvalKeys: [], log: alog });
+addCase({ name: "gateway-approved-only-one-human-trusted", description: "A two-person action with only one of the human keys trusted fails approval verification.", bundle: approvedBundle, ...A, approvalKeys: ["human"], log: alog });
+for (const field of ["amount", "currency", "beneficiary", "extra"] as const) {
+  addCase({ name: `resigned-approved-${field}-changed`, description: `The gateway re-signed a changed ${field} and recomputed the request digest. The humans' unchanged signatures still bind the original full payload, so the approval check fails.`, bundle: resigned(approvedBundle, approvalIssuer, (st) => {
+    st.predicate.request.args[field] = field === "amount" ? 2501 : "changed";
+    st.predicate.request.argsDigest = digestOf(st.predicate.request.args);
+    st.subject[0]!.digest.sha256 = st.predicate.request.argsDigest;
+  }), ...A, log: alog });
+}
+addCase({ name: "resigned-approval-consumed-after-expiry", description: "A consumed time after the signed expiry fails even though the receipt's initial timestamp was within the approval window.", bundle: resigned(approvedBundle, approvalIssuer, (st) => { st.predicate.approval!.consumedAt = new Date(Date.now() + 7200_000).toISOString(); }), ...A, log: alog });
+addCase({ name: "resigned-approval-checked-before-issuance", description: "The final consumption time is valid but the recorded check precedes the human's signature window; approval time validation must check both.", bundle: resigned(approvedBundle, approvalIssuer, (st) => { st.predicate.approval!.checkedAt = new Date(Date.now() - 7200_000).toISOString(); }), ...A, log: alog });
+addCase({ name: "resigned-approval-not-consumed", description: "An executed call with its consumption record removed is inconsistent with single-use approval enforcement.", bundle: resigned(approvedBundle, approvalIssuer, (st) => { delete st.predicate.approval!.consumedAt; }), ...A, log: alog });
+addCase({ name: "resigned-approval-denied-but-forwarded", description: "An executed call whose approval status is denied fails approval/execution consistency.", bundle: resigned(approvedBundle, approvalIssuer, (st) => { st.predicate.approval!.status = "denied"; }), ...A, log: alog });
+for (const part of ["execution", "approval"] as const) addCase({ name: `resigned-${part}-array-status`, description: "An array whose string conversion resembles a status is not a status; reject it before the equality-based execution and approval checks.", bundle: resigned(approvedBundle, approvalIssuer, (st) => { (st.predicate[part] as unknown as { status: unknown }).status = [part === "execution" ? "executed" : "approved"]; }), ...A, log: alog });
+addCase({ name: "resigned-approval-withheld", description: "An approval hidden behind a capture commitment cannot bypass the approval checks: approval is structural evidence.", bundle: resigned(approvedBundle, approvalIssuer, (st) => { (st.predicate as unknown as { approval: unknown }).approval = withhold(st.predicate.approval).commitment; st.predicate.capture = { mode: "digest", withheld: [["approval"]] }; }), ...A, log: alog });
+for (const field of ["status", "checkedAt", "approverKeyids"] as const) addCase({ name: `resigned-precommit-approval-${field}`, description: "The precommit approval record is changed and re-signed while the final receipt keeps a valid approval. The initial authorization must itself record a valid approval.", bundle: resigned(approvedBundle, approvalIssuer, (st) => {
+  const authorization = st.predicate.authorization!;
+  const original = JSON.parse(Buffer.from(authorization.envelope.payload, "base64").toString()) as { predicate: { approval: NonNullable<ReceiptStatement["predicate"]["approval"]> } };
+  if (field === "status") original.predicate.approval.status = "denied";
+  if (field === "checkedAt") original.predicate.approval.checkedAt = new Date(Date.now() - 7200_000).toISOString();
+  if (field === "approverKeyids") original.predicate.approval.approverKeyids = [human.keyid, human.keyid];
+  authorization.envelope = dsseSign(RECEIPT_TYPE, original, approvalIssuer);
+}), ...A, log: alog });
+for (const malformed of ["fractional-amount", "unknown-field", "bad-date"] as const) addCase({ name: `resigned-human-approval-${malformed}`, description: "Both human keys signed a malformed approval payload. A trusted signature does not exempt it from schema checks.", bundle: resigned(approvedBundle, approvalIssuer, (st) => {
+  const value = JSON.parse(Buffer.from(st.predicate.approval!.envelope!.payload, "base64").toString());
+  if (malformed === "fractional-amount") value.amount = 25.01;
+  if (malformed === "unknown-field") value.unrecognized = "not part of the approval format";
+  if (malformed === "bad-date") value.issuedAt = "2026-02-30T12:00:00Z";
+  st.predicate.approval!.envelope = dsseCountersign(dsseSign(APPROVAL_TYPE, value, human), secondHuman);
+}), ...A, log: alog });
 
 // ---- arguments with special keys: an own property named __proto__ is in the digest, as it was in the call ----
 const protoFx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-proto-")));

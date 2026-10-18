@@ -1,5 +1,6 @@
 // Independent verification of a receipt bundle. Needs only public keys, and optionally a copy of the log.
 import { canonicalize, digestOf, dsseVerifiers, dsseVerify, type Envelope, type PublicKeyRef } from "./crypto.ts";
+import { verifyApproval, verifyApprovalStatement } from "./approval.ts";
 import { digestSaltFor, getAt, isCommitment, pathKey, pathText, restorePaths, under, type How } from "./capture.ts";
 import { delegationHasParent, delegationValidAt, describeChain, verifyDelegation } from "./delegation.ts";
 import { leafHash, MerkleLog, verifyConsistency, verifyInclusion } from "./log.ts";
@@ -16,6 +17,8 @@ export interface VerifyOptions {
   /** keys trusted to have issued receipts: gateway keys, SDK application keys */
   issuerKeys: PublicKeyRef[];
   principalKeys: PublicKeyRef[];
+  /** Human approval keys, trusted independently of receipt issuers and delegation principals. Required for an approved action. */
+  approvalKeys?: PublicKeyRef[];
   /** keys of logs run by someone other than the issuer; tree heads are checked against these and the issuer keys */
   logKeys?: PublicKeyRef[];
   /** keys of upstreams that sign their results; with one given, an execution carrying an upstream signature is checked and becomes attested */
@@ -46,7 +49,7 @@ const short = (s: string) => s.slice(0, 12);
 
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 /** The parts of a statement a capture note may never name: what a verifier reads to run its checks. A note naming one, or a commitment sitting there, is not a private receipt but a broken one. */
-const STRUCTURAL_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "authorization", "capture"]);
+const STRUCTURAL_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "approval", "authorization", "capture"]);
 const STRUCTURAL_IN: Record<string, Set<string>> = { request: new Set(["argsDigest", "provenance"]), execution: new Set(["status", "provenance"]), policy: new Set(["decision", "reasons", "policyDigest", "enforced", "provenance"]), consumed: new Set(["provenance"]), session: new Set(["provenance"]), model: new Set(["provenance"]) };
 /**
  * Why a statement cannot be verified at all, or null: the capture note is malformed, names a structural part, or a
@@ -71,12 +74,18 @@ export function structuralProblem(p: unknown): string | null {
   if (!isObject(p.issuer) || !isObject(p.principal) || !isObject(p.agent) || !isObject(p.session) || !isObject(p.model)) return "issuer, principal, agent, session, or model is not an object";
   if (!isObject(p.tool) || typeof p.tool.name !== "string") return "tool.name is not a string";
   if (!isObject(p.request) || typeof p.request.argsDigest !== "string" || !isObject(p.request.args)) return "request.args or request.argsDigest is not what it should be";
-  if (!isObject(p.execution) || !["executed", "failed", "denied", "error", "withheld"].includes(String(p.execution.status))) return "execution.status is not a status";
+  if (!isObject(p.execution) || typeof p.execution.status !== "string" || !["executed", "failed", "denied", "error", "withheld"].includes(p.execution.status)) return "execution.status is not a status";
   if (p.policy !== null && (!isObject(p.policy) || (p.policy.decision !== "allow" && p.policy.decision !== "deny") || !Array.isArray(p.policy.reasons))) return "policy is neither null nor a decision";
   if (!isObject(p.facts) || Object.values(p.facts).some((f) => !isObject(f) || typeof f.tool !== "string")) return "facts is not a map of facts";
   if (p.consumed !== undefined && !isObject(p.consumed)) return "consumed is not an object";
   if (p.delegation !== undefined && (!isObject(p.delegation) || !isObject(p.delegation.envelope))) return "delegation is not a signed envelope";
   if (p.authorization !== undefined && (!isObject(p.authorization) || !isObject(p.authorization.envelope))) return "authorization is not a bundle";
+  if (p.approval !== undefined) {
+    const a = p.approval;
+    if (!isObject(a) || typeof a.status !== "string" || !["approved", "denied"].includes(a.status) || (a.requiredApprovers !== 1 && a.requiredApprovers !== 2) || typeof a.checkedAt !== "string" || !Number.isFinite(Date.parse(a.checkedAt)) || !Array.isArray(a.approverKeyids) || !a.approverKeyids.every((k) => typeof k === "string") || a.provenance !== "observed") return "approval is not an approval record";
+    if (a.consumedAt !== undefined && (typeof a.consumedAt !== "string" || !Number.isFinite(Date.parse(a.consumedAt)))) return "approval consumption time is not a timestamp";
+    if (a.fields !== undefined && (!isObject(a.fields) || Object.entries(a.fields).some(([k, v]) => !["amount", "currency", "beneficiary"].includes(k) || typeof v !== "string" || !v.length))) return "approval field mapping is malformed";
+  }
   if (isObject(p.execution.upstream) && typeof p.execution.upstream.provider !== "undefined" && typeof p.execution.upstream.provider !== "string") return "execution.upstream.provider is not a string";
   return null;
 }
@@ -162,6 +171,29 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   if (args.problem) add("request args digest", false, args.problem);
   else if (args.missing.length) add("request args digest", subjectOk, committedNote(args.missing));
   else add("request args digest", digestOf(full.request.args, digestSaltFor(back, note, ["request", "args"])) === p.request.argsDigest && subjectOk, args.how ? `recomputed from ${args.how} values` : undefined);
+  if (p.approval) {
+    const a = p.approval;
+    // An upstream error can follow a side effect too; every attempted forward must have consumed a valid approval.
+    const forwarded = ["executed", "failed", "error"].includes(p.execution.status);
+    const consumed = a.consumedAt !== undefined && Date.parse(a.consumedAt) >= Date.parse(a.checkedAt) && Date.parse(a.checkedAt) >= Date.parse(p.timestamp);
+    add("approval consistent with execution", !forwarded || (a.status === "approved" && consumed), a.status === "denied" ? `approval refused: ${a.reason ?? "not approved"}` : "single use is enforced by the gateway's persistent store; one receipt cannot prove absence of reuse elsewhere");
+    // A refusal is still an authentic record when its approval was missing, expired, forged, or already used.
+    if (a.status === "approved") {
+      const signed = verifyApprovalStatement(a.envelope, opts.approvalKeys ?? [], a.requiredApprovers);
+      const reported = signed.ok && new Set(a.approverKeyids).size >= a.requiredApprovers && a.approverKeyids.every((id) => signed.approverKeyids.includes(id));
+      add("approval signatures (human keys)", signed.ok && reported, signed.ok ? `${signed.approverKeyids.length} distinct trusted signature(s)` : signed.error);
+      if (signed.ok) {
+        const at = a.consumedAt ?? a.checkedAt;
+        const valid = [a.checkedAt, at].every((time) => Date.parse(time) >= Date.parse(signed.approval.issuedAt) && Date.parse(time) < Date.parse(signed.approval.expiresAt));
+        add("approval valid at forward time", valid, `${signed.approval.issuedAt} .. ${signed.approval.expiresAt}; checked at ${at}`);
+        if (args.problem || args.missing.length) add("approval payload binding", false, args.problem ?? "arguments are withheld: disclose them or give the capture key to check the approval's full payload binding");
+        else {
+          const binding = verifyApproval(a.envelope, opts.approvalKeys ?? [], { principal: p.principal.id ?? "", agent: p.agent.id, tool: p.tool.name, args: full.request.args, ...(a.fields ? { fields: a.fields } : {}) }, { at, minApprovers: a.requiredApprovers });
+          add("approval payload binding", binding.ok, binding.ok ? "principal, agent, tool, full arguments, amount, currency, and beneficiary match" : binding.error);
+        }
+      }
+    }
+  }
   // a captured fact: its commitments are checked against a disclosure or the key; the policy decided on the real value
   for (const name of Object.keys(p.facts)) {
     for (const part of ["value", "args"] as const) {
@@ -247,6 +279,17 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
       const ap = ast.predicate;
       const same = ap.receiptId === p.receiptId && ap.tool.name === p.tool.name && ap.request.argsDigest === p.request.argsDigest && ap.agent.id === p.agent.id && ap.principal.id === p.principal.id && ap.policy?.decision === "allow";
       add("authorization names this call", same, same ? `${ap.tool.name} for receipt ${short(ap.receiptId)}` : "committed for a different receipt, tool, arguments, agent, or decision");
+      if (ap.approval || p.approval) {
+        const stable = (approval: typeof p.approval) => approval ? { envelope: approval.envelope, requiredApprovers: approval.requiredApprovers, fields: approval.fields } : null;
+        add("authorization carries this approval", canonicalize(stable(ap.approval)) === canonicalize(stable(p.approval)), "approval envelope, signer requirement, and argument mapping must match the precommit");
+        const ac = ap.approval;
+        const signed = ac ? verifyApprovalStatement(ac.envelope, opts.approvalKeys ?? [], ac.requiredApprovers) : null;
+        const valid = !!ac && ac.status === "approved" && ac.provenance === "observed" && typeof ac.checkedAt === "string" && !!signed?.ok &&
+          Date.parse(ac.checkedAt) >= Date.parse(signed.approval.issuedAt) && Date.parse(ac.checkedAt) < Date.parse(signed.approval.expiresAt) &&
+          Date.parse(ac.checkedAt) >= Date.parse(p.timestamp) && Date.parse(ac.checkedAt) <= Date.parse(p.approval?.checkedAt ?? "") &&
+          Array.isArray(ac.approverKeyids) && new Set(ac.approverKeyids).size >= ac.requiredApprovers && ac.approverKeyids.every((id) => signed.approverKeyids.includes(id));
+        add("authorization approval was valid", valid, "the precommit must record an approved statement with trusted signer observations and a check inside its validity window");
+      }
       const ath = dsseVerify(a.treeHead, [...logKeys, ...opts.issuerKeys]);
       add("authorization tree head signature", ath.ok && a.treeHead.payloadType === TREEHEAD_TYPE, ath.ok ? `keyid ${short(ath.keyid)}` : ath.error);
       if (ath.ok) {
@@ -355,6 +398,7 @@ export function formatReport(r: VerifyResult): string {
     const committed = r.checks.filter((c) => c.name.startsWith("authorization ")).every((c) => c.ok);
     row("authorization", "observed", committed ? `committed to the log as leaf ${p.authorization.inclusion.leafIndex}, before the call was forwarded` : "carried, but its checks FAILED");
   } else if (p.execution.status === "withheld") row("authorization", "observed", "the log would not commit it; the call was not forwarded");
+  if (p.approval) row("approval", p.approval.provenance, `${p.approval.status}; ${p.approval.requiredApprovers} approver(s) required${p.approval.consumedAt ? `; consumed ${p.approval.consumedAt}` : ""}${p.approval.reason ? `; ${p.approval.reason}` : ""}`);
   const upstreamCheck = r.checks.find((c) => c.name === "upstream signature (upstream key)" || c.name === "upstream signature (provider secret)");
   const hasUpstream = (p.execution.status === "executed" || p.execution.status === "failed") && !!p.execution.upstream;
   const byProvider = hasUpstream && isProviderAttestation((p.execution as { upstream?: unknown }).upstream);

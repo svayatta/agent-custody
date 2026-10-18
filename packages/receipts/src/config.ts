@@ -76,6 +76,18 @@ const FactSchema = z.object({
   optional: z.boolean().default(false),
 });
 
+/** Signed human approvals are independent of Cedar: an approving artifact binds the whole call and is used once. */
+const ApprovalsSchema = z.object({
+  trustedKeys: z.array(z.string().min(1)).min(1),
+  usedDir: z.string().min(1),
+  tools: z.array(z.object({
+    tool: z.string().min(1),
+    minApprovers: z.union([z.literal(1), z.literal(2)]).default(1),
+    /** Argument names carrying these values; omitted names default to amount, currency, and beneficiary. */
+    fields: z.object({ amount: z.string().min(1).optional(), currency: z.string().min(1).optional(), beneficiary: z.string().min(1).optional() }).optional(),
+  })).min(1).refine((tools) => new Set(tools.map((t) => t.tool)).size === tools.length, { message: "approval tool names must be unique" }),
+});
+
 export const GatewayConfigSchema = z.object({
   identity: z.object({ keyFile: z.string() }),
   /** the upstream: an MCP server to spawn over stdio, an MCP URL to reach over Streamable HTTP with an optional bearer token from the environment, or a REST API described as tools */
@@ -92,6 +104,8 @@ export const GatewayConfigSchema = z.object({
    * authorization to the log and refuses the call if the log will not take it. Evidence then precedes the side effect.
    */
   precommit: z.array(z.string().min(1)).default([]),
+  /** Tools that require a signed, unexpired, single-use approval, in every mode; "*" covers all agent calls. */
+  approvals: ApprovalsSchema.optional(),
   /** a JSON file listing digests of revoked grant envelopes (`agent-custody revoke` appends to it); re-read whenever it changes, checked on every call */
   revokedGrants: z.string().min(1).optional(),
   /** private evidence: what the receipt file carries of each tool's arguments, result, and facts */
@@ -99,7 +113,7 @@ export const GatewayConfigSchema = z.object({
   /** the environment variable holding the 32-byte key (hex or base64) that encrypts withheld fields in mode encrypted; read at startup, never in the file */
   captureKeyEnv: z.string().min(1).optional(),
   /**
-   * "enforce" (the default when absent) denies what the policy denies. "observe" forwards every call the grant allows and records the
+   * "enforce" (the default when absent) denies what the policy denies. "observe" forwards every call the grant and required human approval allow and records the
    * decision the policy would have made, with `enforced: false` on the receipt: the way to run a new policy against
    * real traffic before turning it on. A log that refuses a consequential call's authorization does not withhold the
    * call in observe mode; it is printed.
@@ -132,6 +146,7 @@ export function loadConfig(path: string): GatewayConfig {
     ...(cfg.logFile ? { logFile: r(cfg.logFile) } : {}),
     ...(cfg.log?.keys ? { log: { ...cfg.log, keys: cfg.log.keys.map(r) } } : {}),
     ...(cfg.revokedGrants ? { revokedGrants: r(cfg.revokedGrants) } : {}),
+    ...(cfg.approvals ? { approvals: { ...cfg.approvals, trustedKeys: cfg.approvals.trustedKeys.map(r), usedDir: r(cfg.approvals.usedDir) } } : {}),
   };
 }
 

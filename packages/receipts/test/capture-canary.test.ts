@@ -8,8 +8,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { APPROVAL_META_KEY, APPROVAL_TYPE, createApproval } from "../src/approval.ts";
+import { pathKey } from "../src/capture.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
-import { loadPrivateKey, loadPublicKey } from "../src/crypto.ts";
+import { dsseCountersign, dsseSign, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair, type Envelope } from "../src/crypto.ts";
 import { createGateway, RECEIPT_META_KEY, type Gateway } from "../src/gateway.ts";
 import { fileLog, type LogSink } from "../src/log-sink.ts";
 import { spanFor } from "../src/otel.ts";
@@ -88,6 +90,96 @@ async function everyGatewayPath(gw: Gateway, gwWithheld: Gateway): Promise<{ nam
 const TOOLS: Record<string, string> = { "out of scope": "stripe.payout" };
 
 describe("the canary", () => {
+  it("human approvals keep private arguments and untrusted envelope data out of statements, precommit files, logs, and exporters", async () => {
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "canary-approvals-")));
+    const first = generateKeyPair();
+    const second = generateKeyPair();
+    const firstFiles = writeKeyPair(first, join(fx.dir, "keys"), "approver");
+    const secondFiles = writeKeyPair(second, join(fx.dir, "keys"), "second-approver");
+    const cfg = JSON.parse(readFileSync(fx.configFile, "utf8"));
+    cfg.upstream.args[2] = resolve(import.meta.dirname, "..", "scripts", "fake-canary.ts");
+    // This upstream copies reason into its returned signature metadata, proving the full private argument reached it.
+    cfg.upstream.args.push("--envelope", "note");
+    cfg.precommit = ["stripe.refund"];
+    cfg.capture = { "*": { args: { mode: "digest" }, result: { mode: "digest" }, facts: { mode: "digest" } } };
+    cfg.approvals = {
+      trustedKeys: [firstFiles.pubFile, secondFiles.pubFile],
+      usedDir: "approvals-used",
+      tools: [{ tool: "stripe.refund", minApprovers: 2 }],
+    };
+    writeFileSync(fx.configFile, JSON.stringify(cfg));
+    const exports = keepExports();
+    const gw = await createGateway(loadConfig(fx.configFile), { exporter: exports.exporter });
+    // Approval action fields are deliberately public. The canary is only in an extra argument and malicious metadata.
+    const args = { customer_id: "cust_123", amount: 2500, currency: "GBP", beneficiary: "cust_123", reason: CANARY };
+    const approve = () => dsseCountersign(createApproval(first, {
+      principal: "user_456", agent: "support-agent", tool: "stripe.refund", args,
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    }), second);
+    const original = approve();
+    const invalidPayload = JSON.parse(Buffer.from(original.payload, "base64").toString());
+    invalidPayload[CANARY] = CANARY;
+    const malformed = dsseCountersign(dsseSign(APPROVAL_TYPE, invalidPayload, first), second);
+    const injectedSignature = Buffer.from(CANARY.padEnd(64, "x")).toString("base64");
+    const untrusted = approve();
+    const forgedDuplicate = approve();
+    const cases: { name: string; envelope: Envelope; retained?: Envelope }[] = [
+      { name: "trusted approval", envelope: original, retained: original },
+      { name: "signed invalid schema", envelope: malformed },
+      { name: "untrusted signature keyid", envelope: { ...untrusted, signatures: [...untrusted.signatures, { keyid: CANARY, sig: injectedSignature }] }, retained: untrusted },
+      { name: "forged duplicate trusted keyid", envelope: { ...forgedDuplicate, signatures: [...forgedDuplicate.signatures, { keyid: first.keyid, sig: injectedSignature }] }, retained: forgedDuplicate },
+    ];
+    // Controls: these inputs really carry the secret, including inside an encoded signature outside the signed payload.
+    expect(decodeAll(JSON.stringify(malformed))).toContain(CANARY);
+    expect(Buffer.from(injectedSignature, "base64").toString()).toContain(CANARY);
+    const keys = {
+      issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)],
+      approvalKeys: [loadPublicKey(firstFiles.pubFile), loadPublicKey(secondFiles.pubFile)], logFile: fx.logFile,
+    };
+    try {
+      for (const { name, envelope, retained } of cases) {
+        const result = await gw.handleCall({ name: "stripe.refund", arguments: args, _meta: { [APPROVAL_META_KEY]: envelope } });
+        const id = String(result._meta![RECEIPT_META_KEY]);
+        const bundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${id}.json`), "utf8")) as ReceiptBundle;
+        const p = decode(bundle).predicate;
+        const v = verifyBundle(bundle, keys);
+        for (const needle of [CANARY, injectedSignature]) expect(bundleText(bundle), `${name}: a decoded receipt carries private approval data`).not.toContain(needle);
+        if (retained) {
+          expect(p.execution.status, name).toBe("executed");
+          expect(result.isError, name).toBeFalsy();
+          expect((result._meta!["agent-custody/upstream-signature"] as { customer_note: string }).customer_note, name).toBe(args.reason);
+          expect(p.approval!.envelope!.signatures, name).toEqual(retained.signatures);
+          const authorization = decode(p.authorization as ReceiptBundle).predicate;
+          expect(authorization.approval!.envelope!.signatures, name).toEqual(retained.signatures);
+          expect(readdirSync(fx.receiptsDir)).toContain(`${id}.authorization.json`);
+          // Signatures still verify, but a private request cannot establish the independent unsalted approval digest.
+          expect(v.ok, name).toBe(false);
+          expect(v.checks.filter((check) => !check.ok), name).toEqual([
+            expect.objectContaining({ name: "approval payload binding", detail: expect.stringMatching(/withheld.*disclose/i) }),
+          ]);
+          const { salts } = JSON.parse(readFileSync(join(fx.receiptsDir, "salts", `${id}.json`), "utf8")) as { salts: Record<string, string> };
+          const disclosed = { receiptId: id, request: { args: { $rest: { $custody: "disclosed", salt: salts[pathKey(["request", "args", "$rest"])], value: args } } } };
+          const revealed = verifyBundle(bundle, { ...keys, disclosed });
+          expect(revealed.ok, `${name}: ${formatReport(revealed)}`).toBe(true);
+        } else {
+          expect(p.execution.status).toBe("denied");
+          expect(p.approval).not.toHaveProperty("envelope");
+          expect(p.approval!.reason).toBe("approval rejected: malformed or untrusted statement");
+          expect(v.ok, formatReport(v)).toBe(true);
+        }
+      }
+      const disk = onDisk(fx.receiptsDir, fx.logFile);
+      const exported = decodeAll(exports.seen.join("\n"));
+      for (const needle of [CANARY, injectedSignature]) {
+        expect(disk, "a receipt, authorization, salts file, or log carries private approval data").not.toContain(needle);
+        expect(exported, "an exporter carries private approval data").not.toContain(needle);
+      }
+      expect(exports.seen).toHaveLength(cases.length * 3);
+    } finally {
+      await gw.close();
+    }
+  });
+
   it("under one private rule, a secret in the arguments reaches nothing in clear on any path through the gateway: statement, authorization, files, log, exporters", async () => {
     const fx = buildFixture(mkdtempSync(join(tmpdir(), "canary-gateway-")));
     const cfg = JSON.parse(readFileSync(fx.configFile, "utf8"));

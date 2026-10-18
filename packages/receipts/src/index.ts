@@ -36,6 +36,7 @@ export type { RestOptions, UpstreamClient } from "./rest.ts";
 export * from "./config.ts";
 export * from "./crypto.ts";
 export * from "./delegation.ts";
+export * from "./approval.ts";
 export * from "./gateway.ts";
 export * from "./issue.ts";
 export * from "./log.ts";
