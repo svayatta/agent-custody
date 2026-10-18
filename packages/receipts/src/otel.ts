@@ -48,9 +48,9 @@ export function spanFor(p: ReceiptPredicate, bundle: ReceiptBundle, serviceName:
     ...int("agent_custody.log.leaf_index", bundle.inclusion.leafIndex),
     ...int("agent_custody.log.tree_size", bundle.inclusion.treeSize),
     ...(auth ? int("agent_custody.authorization.leaf_index", auth.inclusion.leafIndex) : []),
-    ...int("agent_custody.consumed.count", p.consumed?.factIds.length ?? 0),
-    ...str("agent_custody.model", p.model.id),
-    ...str("agent_custody.session", p.session.id),
+    ...int("agent_custody.consumed.count", Array.isArray(p.consumed?.factIds) ? p.consumed.factIds.length : 0),
+    ...str("agent_custody.model", typeof p.model.id === "string" ? p.model.id : undefined),
+    ...str("agent_custody.session", typeof p.session.id === "string" ? p.session.id : undefined),
   ];
   return {
     resourceSpans: [
@@ -68,7 +68,8 @@ export function spanFor(p: ReceiptPredicate, bundle: ReceiptBundle, serviceName:
                 startTimeUnixNano: start.toString(),
                 endTimeUnixNano: (end > start ? end : start).toString(),
                 attributes,
-                status: status === "executed" || status === "denied" || status === "withheld" ? { code: 1 } : { code: 2, message: status === "failed" ? "the upstream reported failure" : (p.execution as { error?: string }).error ?? status },
+                // Status.message is a string in OTLP; under a capture rule the error is a commitment, and the span says so
+                status: status === "executed" || status === "denied" || status === "withheld" ? { code: 1 } : { code: 2, message: status === "failed" ? "the upstream reported failure" : typeof (p.execution as { error?: unknown }).error === "string" ? ((p.execution as { error: string }).error) : (p.execution as { error?: unknown }).error ? "the upstream reported an error (withheld under the capture rule)" : status },
               },
             ],
           },

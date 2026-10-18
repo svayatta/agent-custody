@@ -58,10 +58,10 @@ function receiptResult(bundle: ReceiptBundle): unknown {
   }
 }
 
-export async function buildPack(ledger: Ledger, receiptsDir: string, factId: string): Promise<CustodyPack> {
+export async function buildPack(ledger: Ledger, receiptsDir: string, factId: string, opts: { captureKey?: Buffer } = {}): Promise<CustodyPack> {
   const bundles = loadBundles(receiptsDir);
   const history = await ledger.history(factId);
-  const blast = await blastRadius(ledger, loadReceipts(receiptsDir), factId);
+  const blast = await blastRadius(ledger, loadReceipts(receiptsDir, opts), factId);
   const wanted = new Set<string>();
   for (const e of history) {
     const src = e.kind === "assert" ? e.fact.source.receiptId : e.source.receiptId;
@@ -163,6 +163,6 @@ export function formatPack(p: CustodyPack): string {
   lines.push(`receipts in pack: ${Object.keys(p.receipts).length}${p.missingReceipts.length ? `, missing ${p.missingReceipts.length}` : ""}`);
   if (p.holds.length) lines.push(`holds: ${p.holds.map((e) => (e.kind === "hold" || e.kind === "release" ? `${e.kind} by ${e.actor} (${e.reason})` : e.kind)).join("; ")}`);
   if (p.forget) lines.push(`forgotten at ${p.forget.event.txTime} by ${(p.forget.event as { actor: string }).actor}; receipt ${p.forget.receiptId?.slice(0, 8) ?? "none"}; stores: ${p.forget.verification ? Object.entries(p.forget.verification).map(([k, v]) => `${k}=${v}`).join(", ") : "none"}`);
-  lines.push(`blast radius: ${p.blast.receipts.length} later call(s), ${p.blast.derivedFacts.length} derived belief(s), ${p.blast.stillBelieved.length} still believed`);
+  lines.push(`blast radius: ${p.blast.receipts.length} later call(s), ${p.blast.derivedFacts.length} derived belief(s), ${p.blast.stillBelieved.length} still believed${p.blast.withheld?.length ? `; INCOMPLETE: ${p.blast.withheld.length} later call(s) withhold what the agent had been shown under a capture rule and may depend on it` : ""}`);
   return lines.join("\n");
 }

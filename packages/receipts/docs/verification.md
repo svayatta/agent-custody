@@ -23,6 +23,8 @@ node src/cli.ts verify receipts/<id>.json \
 
 Exit code 0 when every check passes, 1 otherwise. Add `--json` for machine-readable output. `--issuer-key` and `--principal-key` can be repeated to accept rotated keys; signatures are matched by keyid. `--gateway-key` is an alias for `--issuer-key`. `--principal-key` may be omitted for SDK receipts, which carry no delegation.
 
+When a receipt was issued under a capture rule ([private evidence](usage.md#private-evidence)), some of its arguments, result, or facts are commitments rather than values. `--capture-key-env NAME` names the environment variable holding the customer's capture key: the verifier decrypts every encrypted field, checks it against its commitment, and recomputes the digests from the real values. `--disclose disclosure.json` does the same from a file holding the withheld values, `{ "receiptId", "args"?, "result"? }`, as `agent-custody reveal` writes it or as the party that holds them hands it over. Without either, the withheld parts pass as committed and the report says so.
+
 A real report, produced by `node scripts/demo.ts`:
 
 ```
@@ -76,8 +78,10 @@ execution       observed    executed
 | delegation valid at receipt time | the receipt's timestamp is inside the grant's window; a call the gateway refused after the grant ran out passes with a note, since only an executed call must sit inside the window | expired or not-yet-valid authority behind an executed call |
 | executed tool within delegated scope | if the tool ran, the grant covered it. Denied calls pass this check by construction | a gateway that forwarded out of scope |
 | principal is claimed, not attested | SDK receipts only: there is no delegation, so the principal is a config string and is labelled as such | an SDK receipt pretending to an attested principal |
-| request args digest | the args in the predicate hash to the digest in the subject | edited arguments |
-| execution result digest | executed and failed receipts only: the result in the predicate hashes to `execution.resultDigest` | an edited result, or an issuer that signed a digest of a different result |
+| request args digest | the args in the predicate hash to the digest in the subject. Recomputed when the arguments are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when fields are withheld and neither is given, it passes as committed, the detail saying "committed, not recomputed" and how many fields are withheld | edited arguments, or a disclosure that contradicts a commitment |
+| execution result digest | executed and failed calls: the result in the predicate hashes to `execution.resultDigest`, under the same rules as the arguments; a provider delivery withheld with the result is restored first, since the digest covered it | an edited result, or a disclosure or key that does not match the commitment, or a capture note naming a field that is not a commitment |
+| fact `<name>` value, fact `<name>` args | only for a captured fact: its commitments hold against the disclosed or decrypted value, or pass as committed when neither is given | a disclosure that lies about a fact the policy decided on |
+| upstream signature not checked | only when the result is withheld and an upstream key or provider secret was given: the signature cannot be checked against a result the verifier cannot see, so the line passes with a note in place of the signature check; disclose the result or give the key to run it | nothing; it is a note |
 | policy decision consistent with execution | allow went with executed or failed; an enforced deny went with denied; a deny carrying `enforced: false` (observe mode) went with anything but denied, and the detail says "observe mode, not enforced". Skipped when no policy was evaluated | an issuer that executed after a deny |
 | no policy errors on an allow | an allow was not produced while Cedar reported errors | broken fail-closed behaviour |
 | authorization signature (issuer key) | pre-commit receipts only: the embedded authorization statement was signed by the same issuer key as the receipt | an authorization from another gateway, or none the issuer signed |
@@ -91,7 +95,7 @@ execution       observed    executed
 | log inclusion proof | this exact envelope is a leaf of the tree with that root | receipt never logged, or logged then changed |
 | log file root matches tree head | recomputing the root from your copy of the log at that size gives the same value | your log copy and the issuer's history diverge: deletion, reordering, or edit |
 
-Gateway receipts run seventeen checks, eighteen with a log file, and five more when the tool was committed before it ran (`precommit` in the gateway config). SDK receipts run fewer, because there is no delegation to check, and the report says so on the `principal is claimed` line. A receipt issued to a sub-agent under a delegation chain runs one more, `delegation chain to the principal`. A denied, errored, or withheld receipt has no result, so it does not run `execution result digest`.
+Gateway receipts run seventeen checks, eighteen with a log file, one more (`execution result digest`) when the call was executed or failed, and five more when the tool was committed before it ran (`precommit` in the gateway config). SDK receipts run fewer, because there is no delegation to check, and the report says so on the `principal is claimed` line. A receipt issued to a sub-agent under a delegation chain runs one more, `delegation chain to the principal`.
 
 ## What a verified receipt lets you conclude
 
@@ -106,6 +110,7 @@ A gateway receipt does **not** support:
 - that Stripe really executed the refund. The upstream result is `observed`, not signed by Stripe. That is the first roadmap item.
 - that the side effect exists because the receipt does, unless the receipt carries an authorization. Without one, the call was forwarded first and logged second. With one, the five `authorization` checks establish that the gateway had committed the call to the log before it went out, and a `withheld` execution establishes that it never went out.
 - that the arguments were correct. They are `claimed`: they are what the agent asked for, which is what a receipt should record.
+- that a receipt issued under a capture rule shows everything the call carried. The `capture` note says which fields are withheld; the verifier establishes that every value shown, disclosed, or decrypted is the one the signed digest was made over, and nothing about the ones it was not shown.
 - that the model named in `model` produced the call. No hosted provider signs model identity.
 - that the gateway operator is honest. The operator holds the gateway key. Against a dishonest operator you need a log copy taken out of their control, or a signer they do not control. See the threat model table in the README.
 
@@ -135,7 +140,7 @@ result.statement?.predicate        // the decoded receipt, only when the signatu
 console.log(formatReport(result));
 ```
 
-`verifyBundle` is pure and synchronous. It reads the log file only when `logFile` is given.
+`verifyBundle` is pure and synchronous. It reads the log file only when `logFile` is given. `disclosed: { args?, result? }` hands it the withheld values of a receipt issued under a capture rule and `captureKey: Buffer` the customer's key (`captureKeyFrom(text)` parses the hex or base64 form); the digests are then recomputed instead of passing as committed.
 
 ## Verifying without this codebase
 

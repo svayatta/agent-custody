@@ -75,14 +75,14 @@ describe("the gateway over HTTP", () => {
       const deniedReceipt = statementOf(receipt(String(denied._meta?.[RECEIPT_META_KEY]))).predicate;
       expect(deniedReceipt.agent.id).toBe("read-agent");
       expect(deniedReceipt.execution.status).toBe("denied");
-      expect(deniedReceipt.policy?.errors.join(" ")).toMatch(/not in the delegation scopes/);
+      expect((deniedReceipt.policy?.errors as string[]).join(" ")).toMatch(/not in the delegation scopes/);
 
       // what the refunder was shown is on the refunder's next receipt, and on nobody else's
       const lookup = (await refunder.client.callTool({ name: "customer.lookup", arguments: { customer_id: "cust_123" } })) as CallToolResult;
       const readerLookup = (await reader.client.callTool({ name: "customer.lookup", arguments: { customer_id: "cust_123" } })) as CallToolResult;
       const refunderNext = statementOf(receipt(String(lookup._meta?.[RECEIPT_META_KEY]))).predicate;
       const readerNext = statementOf(receipt(String(readerLookup._meta?.[RECEIPT_META_KEY]))).predicate;
-      expect(refunderNext.consumed?.factIds.length).toBeGreaterThanOrEqual(0);
+    expect((refunderNext.consumed?.factIds as string[]).length).toBeGreaterThanOrEqual(0);
       expect(readerNext.consumed?.factIds).toEqual([]);
       expect(readerNext.agent.id).toBe("read-agent");
     } finally {
