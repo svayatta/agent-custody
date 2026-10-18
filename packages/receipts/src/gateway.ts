@@ -410,7 +410,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         const settled = operation.reconciliation as { bundle?: ReceiptBundle; predicate?: ReceiptPredicate } | undefined;
         const result = settled?.bundle && settled.predicate && "result" in settled.predicate.execution ? settled.predicate.execution.result as CallToolResult : operation.result as CallToolResult | undefined;
         const receipt = settled?.bundle ? settled.predicate!.receiptId : operation.originalReceiptId;
-        cached = { ...(result ?? { isError: true, content: [{ type: "text" as const, text: `Operation outcome is ${head.operation!.status}; reconcile with the provider before taking further action` }] }), _meta: { ...result?._meta, [RECEIPT_META_KEY]: receipt, ...(operation.original && !existsSync(`${cfg.receiptsDir}/${operation.originalReceiptId}.json`) ? { "agent-custody/authorization": operation.original } : {}) } };
+        cached = { ...(result ?? { isError: true, content: [{ type: "text" as const, text: head.operation!.status === "failed" ? "Operation failed and the call was not sent; use a new operation id to try again" : `Operation outcome is ${head.operation!.status}; reconcile with the provider before taking further action` }] }), _meta: { ...result?._meta, [RECEIPT_META_KEY]: receipt, ...(operation.original && !existsSync(`${cfg.receiptsDir}/${operation.originalReceiptId}.json`) ? { "agent-custody/authorization": operation.original } : {}) } };
         execution = { status: "withheld", reason: `existing operation: not forwarded again; the stored outcome is ${head.operation!.status}`, provenance: "observed" };
       }
 
@@ -420,10 +420,18 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         // observe mode nothing is withheld, and the missing authorization is printed instead.
         try {
           authorization = await issuer.authorize({ ...head, policy: { ...policy, provenance: "observed" } }, captureCtx);
-          if (operation) operation = operations!.update(operation.id, { original: authorization, unsent: undefined });
         } catch (e) {
           if (cfg.mode === "observe" && !financial) console.error(`agent-custody gateway (observe mode): the log did not commit the authorization for ${tool}, receipt ${receiptId}; the call was forwarded without it: ${String(e instanceof Error ? e.message : e)}`);
           else execution = { status: "withheld", reason: `the log did not commit the authorization, so the call was not forwarded: ${String(e instanceof Error ? e.message : e)}`, provenance: "observed" };
+        }
+        if (authorization && operation) {
+          try {
+            operation = operations!.saveAuthorization(operation.id, authorization);
+          } catch (e) {
+            // Recovery closed this operation as "not forwarded" while the log held the authorization. Its closing receipt
+            // has this receipt id, so no second receipt is issued. The call is not forwarded.
+            return { isError: true, content: [{ type: "text", text: `Not executed: ${String(e instanceof Error ? e.message : e)} (receipt ${receiptId})` }], _meta: { [RECEIPT_META_KEY]: receiptId, [OPERATION_META_KEY]: operationEvidence(operations!.get(operation.id) ?? operation) } };
+          }
         }
       }
 
@@ -532,7 +540,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
             operation: operationEvidence(op, "failed"),
             execution: { status: "withheld", reason: "the gateway stopped before it forwarded the call; the call was not forwarded", provenance: "observed" },
           };
-          intent = operations.claimReconciliation(op.id, { predicate }) as { predicate: ReceiptPredicate; bundle?: ReceiptBundle };
+          intent = operations.claimReconciliation(op.id, { predicate }, true) as { predicate: ReceiptPredicate; bundle?: ReceiptBundle };
         }
       }
       if (!intent) {

@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { GatewayConfigSchema, loadConfig } from "../src/config.ts";
-import { OperationStore, ownerAlive, processStamp, type OperationReservation } from "../src/operations.ts";
+import { OperationStore, ownerAlive, processStamp, psStamp, type OperationReservation } from "../src/operations.ts";
 import { buildFixture } from "../scripts/fixture.ts";
 
 const database = () => join(mkdtempSync(join(tmpdir(), "custody-operations-")), "operations.sqlite");
@@ -160,6 +160,39 @@ describe("operation owner liveness", () => {
   it("waits when the start times cannot be compared", () => {
     expect(ownerAlive({ ownerPid: process.pid })).toBe(true);
     expect(ownerAlive({ ownerPid: process.pid, ownerStart: `${own!.startsWith("proc:") ? "ps" : "proc"}:other source` })).toBe(true);
+  });
+
+  it("gives the same ps stamp under any TZ, although ps prints local time", () => {
+    const before = process.env.TZ;
+    const ps = (zone: string) => execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { LC_ALL: "C", TZ: zone } }).trim();
+    try {
+      // control: the raw ps text depends on TZ. Without ps there is nothing to test.
+      let raw: string[];
+      try { raw = [ps("Asia/Kolkata"), ps("UTC")]; } catch { return; }
+      if (!raw[0] || !raw[1]) return;
+      expect(raw[0]).not.toBe(raw[1]);
+      const stamps = ["Asia/Kolkata", "UTC", "America/Los_Angeles"].map((zone) => { process.env.TZ = zone; return psStamp(process.pid); });
+      expect(stamps[0]).toMatch(/^ps:./);
+      expect(new Set(stamps).size).toBe(1);
+    } finally { if (before === undefined) delete process.env.TZ; else process.env.TZ = before; }
+  });
+
+  it("saves an authorization only while the operation is open, and closes an unsent call only while none is saved", () => {
+    const store = new OperationStore(database());
+    try {
+      const closed = input({ amount: 40 });
+      store.reserve(closed);
+      // recovery claims the call as never forwarded; the creator may no longer save an authorization or forward
+      store.claimReconciliation(closed.id, { predicate: "unsent" }, true);
+      expect(() => store.saveAuthorization(closed.id, { signed: "authorization" })).toThrow(/closed/);
+      expect(store.get(closed.id)?.original).toBeUndefined();
+      const saved = input({ amount: 40 });
+      store.reserve(saved);
+      store.saveAuthorization(saved.id, { signed: "authorization" });
+      expect(store.get(saved.id)).toMatchObject({ original: { signed: "authorization" } });
+      expect(() => store.claimReconciliation(saved.id, { predicate: "unsent" }, true)).toThrow(/meanwhile/);
+      expect(store.get(saved.id)?.reconciliation).toBeUndefined();
+    } finally { store.close(); }
   });
 
   it("stamps the creator of a new operation", () => {

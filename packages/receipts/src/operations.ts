@@ -21,8 +21,16 @@ export function processStamp(pid: number): string | undefined {
     const field = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
     if (field) return `proc:${field}`;
   } catch { /* no /proc: try ps */ }
+  return psStamp(pid);
+}
+
+/**
+ * The start time from `ps`, for a system without /proc. `ps` prints it in local time, so the time zone is pinned to
+ * UTC: a creator and an operator that run under different TZ values must still get the same text.
+ */
+export function psStamp(pid: number): string | undefined {
   try {
-    const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const started = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, env: { LC_ALL: "C", TZ: "UTC" }, stdio: ["ignore", "pipe", "ignore"] }).trim();
     if (started) return `ps:${started}`;
   } catch { /* unreadable */ }
   return undefined;
@@ -209,13 +217,34 @@ export class OperationStore {
     });
   }
 
-  /** Persist one terminal reconciliation intent before its asynchronous log append; later reconcilers use it. */
-  claimReconciliation(id: string, candidate: unknown): unknown {
+  /**
+   * Save the signed authorization of a submitted operation, and let the gateway forward. This is a compare-and-set:
+   * it refuses once recovery has closed the operation or claimed a reconciliation, whatever a liveness check said,
+   * so a call that recovery closed as "not forwarded" is never forwarded afterwards.
+   */
+  saveAuthorization(id: string, original: unknown): OperationRecord {
+    return this.transaction(() => {
+      const operation = this.get(id);
+      if (!operation) throw new Error("operation not found");
+      if (operation.status !== "submitted" || operation.reconciliation !== undefined) throw new Error(`operation was closed (${operation.status}) before its call was forwarded`);
+      const updated: OperationRecord = { ...operation, original, updatedAt: new Date().toISOString() };
+      delete updated.unsent;
+      this.db.prepare("UPDATE operations SET json = ? WHERE id = ?").run(JSON.stringify(updated), id);
+      return updated;
+    });
+  }
+
+  /**
+   * Persist one terminal reconciliation intent before its asynchronous log append; later reconcilers use it.
+   * With `unsent`, the claim says that the call was never forwarded, and it holds only while no authorization is saved.
+   */
+  claimReconciliation(id: string, candidate: unknown, unsent = false): unknown {
     if (candidate === undefined || candidate === null) throw new Error("reconciliation intent is required");
     return this.transaction(() => {
       const operation = this.get(id);
       if (!operation) throw new Error("operation not found");
       if (operation.reconciliation !== undefined) return operation.reconciliation;
+      if (unsent && (operation.original !== undefined || operation.status !== "submitted")) throw new Error("the operation saved its authorization meanwhile; it may have been forwarded");
       const updated = { ...operation, reconciliation: candidate, updatedAt: new Date().toISOString() };
       this.db.prepare("UPDATE operations SET json = ? WHERE id = ?").run(JSON.stringify(updated), id);
       return candidate;

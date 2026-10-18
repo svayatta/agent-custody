@@ -13,7 +13,7 @@ import { createGatewayHost, RECEIPT_META_KEY, RETRY_RECEIPT_META_KEY } from "../
 import { spanFor } from "../src/otel.ts";
 import { hecEvent } from "../src/splunk.ts";
 import { fileLog, type LogSink } from "../src/log-sink.ts";
-import { OPERATION_META_KEY, OperationStore } from "../src/operations.ts";
+import { OPERATION_META_KEY, OperationStore, processStamp } from "../src/operations.ts";
 import type { ReceiptBundle, ReceiptPredicate } from "../src/receipt.ts";
 import { formatReport, verifyBundle } from "../src/verify.ts";
 import { decode } from "./helpers.ts";
@@ -359,11 +359,47 @@ describe("financial operations through the gateway", () => {
       expect(p).toMatchObject({ receiptId: record.originalReceiptId, execution: { status: "withheld" }, operation: { status: "failed" } });
       expect(p.reconciliation).toBeUndefined();
       expect(await host.reconcile(id)).toEqual(closed);
+      // a retry is told that the call was not sent, not to reconcile again
+      const retry = await host.open(grant(fx)).handleCall(params);
+      expect(JSON.stringify(retry.content)).toMatch(/not sent.*new operation id/);
       expect(readRecord(fx, id)).toMatchObject({ status: "failed" });
       expect(readRecord(fx, id).unsent).toBeUndefined();
       expect((await host.open(grant(fx)).handleCall(call())).isError).toBeFalsy();
       expect(fx.api.posts).toBe(1);
     } finally { await host.close(); await fx.close(); }
+  });
+
+  it("never forwards a call that recovery closed as not sent, even when the liveness answer was wrong", async () => {
+    const fx = await fixture();
+    const inner = fileLog(fx.logFile, loadPrivateKey(join(fx.dir, "keys/gateway.key")));
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const isHeld = new Promise<void>((resolve) => { held = resolve; });
+    let first = true;
+    // the first append is the authorization: a slow log holds it while the operator runs reconcile
+    const log: LogSink = { ...inner, async append(leaf) {
+      if (first) { first = false; held(); await gate; }
+      return inner.append(leaf);
+    } };
+    const host = await createGatewayHost(loadConfig(fx.configFile), { log });
+    try {
+      const params = call();
+      const id = params._meta[OPERATION_META_KEY];
+      const pending = host.open(grant(fx)).handleCall(params);
+      await isHeld;
+      // a wrong answer: the live creator (this process) looks like another process that took its PID
+      patchRecord(fx, id, { ownerStart: `${processStamp(process.pid)!.split(":")[0]}:another start` });
+      const closed = await host.reconcile(id);
+      expect(decode(closed).predicate).toMatchObject({ execution: { status: "withheld" }, operation: { status: "failed" } });
+      release();
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toMatch(/closed/);
+      expect(fx.api.posts).toBe(0);
+      expect((await host.open(grant(fx)).handleCall(call())).isError).toBeFalsy();
+      expect(fx.api.posts).toBe(1);
+    } finally { release(); await host.close(); await fx.close(); }
   });
 
   it("does not take a later process with the creator's PID for the creator", async () => {
