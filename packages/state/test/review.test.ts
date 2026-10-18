@@ -213,7 +213,7 @@ describe("a record that was changed after it was issued", () => {
     const id = statement.predicate.receiptId;
     // A list larger than 64 KiB held as text, as an MCP result can be. The id sits at the end.
     const text = JSON.stringify({ data: [...Array.from({ length: 4000 }, (_, i) => ({ note: `padding ${i}` })), { refund_id: "re_far_away" }] });
-    statement.predicate.execution.result = { content: [{ type: "text", text }] };
+    Object.assign(statement.predicate.execution, { result: { content: [{ type: "text", text }] } });
     bundle.envelope.payload = Buffer.from(JSON.stringify(statement)).toString("base64");
     writeFileSync(join(dir, `${id}.json`), JSON.stringify(bundle));
     const o = { receiptsDir: dir };
