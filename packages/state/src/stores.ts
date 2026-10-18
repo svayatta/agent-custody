@@ -9,13 +9,13 @@ export interface StoreEntry {
   externalId: string;
   factId: string;
   text: string;
-  /** when the store received the entry, from its custody metadata; repair removes only entries older than its cutoff. Absent on entries that a version before 0.6.21 wrote. */
+  /** when the store received the entry, from its custody metadata; repair removes only entries older than its cutoff. Absent on entries that version 0.7.0 or earlier wrote. */
   storedAt?: string;
 }
 
 /**
  * The storedAt field of an entry: the first of the given times that parses, as an ISO string. The custody storedAt comes
- * first. The store's own creation time follows, for entries that a version before 0.6.21 wrote.
+ * first. The store's own creation time follows, for entries that version 0.7.0 or earlier wrote.
  */
 const stored = (...times: unknown[]): { storedAt?: string } => {
   for (const t of times) {

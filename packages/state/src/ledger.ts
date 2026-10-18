@@ -4,7 +4,6 @@
 import { randomUUID } from "node:crypto";
 import { createHash, createHmac } from "node:crypto";
 import { openStore, type EventStore } from "./storage.ts";
-import type { RemovalOutcome } from "./stores.ts";
 
 /** Where a write came from. A receipt id means the write went through a receipts producer and can be verified there. */
 export interface Source {
@@ -108,8 +107,9 @@ export interface HoldEvent {
 }
 
 /**
- * A repair records the removal of a store entry that the ledger has no fact for: the stores were written, then the
- * ledger append failed. The factId is the id in the entry's custody metadata, which no assert carries.
+ * A repair records the claim on a store entry that the ledger has no fact for: the stores were written, then the
+ * ledger append failed. The memory server appends it before it removes the entry. The factId is the id in the
+ * entry's custody metadata, which no assert carries. After a repair event, the ledger refuses an assert of that id.
  */
 export interface RepairEvent {
   eventId: string;
@@ -122,8 +122,6 @@ export interface RepairEvent {
   /** the store the entry was in, and the store's id for it */
   store: string;
   externalId: string;
-  /** what the store answered: the same outcomes a retraction or forget reports */
-  outcome: RemovalOutcome;
 }
 
 export type LedgerEvent = AssertEvent | RetractEvent | ConfirmEvent | ForgetEvent | HoldEvent | RepairEvent;
@@ -202,6 +200,7 @@ export class Ledger {
   private readonly store: EventStore;
   private readonly now: () => Date;
   private readonly forgetKey: Buffer | null;
+  private readonly locks = new Map<string, Promise<void>>();
 
   /**
    * `location` is a path (JSONL by default, SQLite when it ends in .sqlite or .db) or a postgres:// URL; or pass a
@@ -250,8 +249,14 @@ export class Ledger {
     }
   }
 
-  async assert(input: AssertInput): Promise<AssertEvent> {
+  assert(input: AssertInput): Promise<AssertEvent> {
+    return input.factId === undefined ? this.appendAssert(input) : this.exclusive(input.factId, () => this.appendAssert(input));
+  }
+
+  private async appendAssert(input: AssertInput): Promise<AssertEvent> {
     await this.validateAssert(input);
+    // A repair removed the stores' entries of this id, so an assert now would give the ledger a fact that no store holds.
+    if (input.factId !== undefined && (await this.store.eventsFor(input.factId)).some((e) => e.kind === "repair")) throw new Error(`fact ${input.factId} was repaired: the stores no longer hold it, so the ledger refuses to record it`);
     const txTime = this.now().toISOString();
     const validFrom = input.validFrom ?? txTime;
     const event: AssertEvent = {
@@ -328,12 +333,35 @@ export class Ledger {
     return event;
   }
 
-  /** Records the removal of a store entry with no fact in the ledger. Refuses a fact id that the ledger knows. */
-  async repair(input: RepairInput): Promise<RepairEvent> {
-    if (await this.factById(input.factId)) throw new Error(`fact ${input.factId} is in the ledger; repair removes only entries the ledger has no fact for`);
-    const event: RepairEvent = { eventId: randomUUID(), kind: "repair", txTime: this.now().toISOString(), factId: input.factId, actor: input.actor, reason: input.reason, source: input.source ?? { receiptId: null }, store: input.store, externalId: input.externalId, outcome: input.outcome };
-    await this.store.append(event);
-    return event;
+  /**
+   * Records the claim on a store entry with no fact in the ledger. Refuses a fact id that the ledger knows. The first
+   * record of a fact id wins: an assert of an id with a repair event is refused, and so is a repair of an id with an
+   * assert. A repair of an entry that has a repair event returns that event, so a retry adds none.
+   */
+  repair(input: RepairInput): Promise<RepairEvent> {
+    return this.exclusive(input.factId, async () => {
+      if (await this.factById(input.factId)) throw new Error(`fact ${input.factId} is in the ledger; repair removes only entries the ledger has no fact for`);
+      const prior = (await this.store.eventsFor(input.factId)).find((e): e is RepairEvent => e.kind === "repair" && e.store === input.store && e.externalId === input.externalId);
+      if (prior) return prior;
+      const event: RepairEvent = { eventId: randomUUID(), kind: "repair", txTime: this.now().toISOString(), factId: input.factId, actor: input.actor, reason: input.reason, source: input.source ?? { receiptId: null }, store: input.store, externalId: input.externalId };
+      await this.store.append(event);
+      return event;
+    });
+  }
+
+  /**
+   * Runs one step at a time per fact id in this process, so the check of an assert and of a repair cannot interleave.
+   * Two processes that share a store need a unique constraint on the fact id for the same guarantee.
+   */
+  private async exclusive<T>(factId: string, step: () => Promise<T>): Promise<T> {
+    const run = (this.locks.get(factId) ?? Promise.resolve()).then(step);
+    const tail = run.then(() => {}, () => {});
+    this.locks.set(factId, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.locks.get(factId) === tail) this.locks.delete(factId);
+    }
   }
 
   /** The facts the ledger learned of before an instant, in one space or all, that have not been forgotten: what a retention sweep decides about. */

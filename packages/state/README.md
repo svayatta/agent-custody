@@ -198,7 +198,7 @@ A store that refuses the write fails the write, and nothing is recorded anywhere
 
 The order has one cost. If the ledger append fails after the stores took the write, a store keeps an entry that the ledger has no fact for. That entry is an orphan: recall can serve it, and no event explains it. The repair sweep removes orphans.
 
-A write that is in progress looks like an orphan too: its entries are in the stores and not yet in the ledger. Two rules keep the sweep away from it. Each entry records `storedAt`, the time of its store write. The sweep removes only entries stored before a cutoff, which is ten minutes ago (the exported `REPAIR_MIN_AGE_MS`). And a write whose stores take more than five minutes, half of `REPAIR_MIN_AGE_MS`, is refused before its ledger append. So the entries of a write in progress are never older than the cutoff. This holds across server processes that share the stores.
+A write that is in progress looks like an orphan too: its entries are in the stores and not yet in the ledger. Two rules keep the sweep away from it. Each entry records `storedAt`, the time of its store write. The sweep removes only entries stored before a cutoff, which is ten minutes ago (the exported `REPAIR_MIN_AGE_MS`). And a write whose stores take more than five minutes, half of `REPAIR_MIN_AGE_MS`, is refused before its ledger append. So the entries of a write in progress are never older than the cutoff. This holds across server processes that share the stores. If a ledger append stalls for longer than that, the repair event decides: whichever record of the fact id reaches the ledger first wins, and the other fails with an error. In one server process, the ledger makes the check and the append of the two records one step. For servers in different processes, the window is the time between the check and the commit of one append. A unique constraint on the fact id in the shared ledger store closes it.
 
 `memory.repair { reason, before? }` runs the sweep. The CLI runs it through a gateway, so the sweep has a receipt and runs as the principal in the gateway's grant:
 
@@ -208,7 +208,7 @@ agent-custody-memory repair --via repair-gateway.json --reason "ledger outage on
 
 The cutoff is the earlier of `before` and ten minutes ago. `before` can move the cutoff earlier only, never later.
 
-For each store that has `list`, the sweep reads every entry with custody metadata. It removes an entry once only, if a listing holds it twice. It skips an entry whose fact id the ledger knows. It skips an entry that was not stored before the cutoff. It removes each other entry, asks the store's search whether the entry is gone (the same retries and outcomes as a forget), and appends a `repair` event. The event has the fact id from the entry's metadata, the actor, the reason, the receipt id, the store, the store's id for the entry, and the outcome: `verified`, `stillIndexed`, `unverified`, or `failed`. `memory.history` of the orphan's fact id shows that event. The ledger refuses a repair for a fact id that it knows.
+For each store that has `list`, the sweep reads every entry with custody metadata. It removes an entry once only, if a listing holds it twice. It skips an entry whose fact id the ledger knows. It skips an entry that was not stored before the cutoff. For each other entry, the sweep first appends a `repair` event, as a retraction does with its ledger event. The event has the fact id from the entry's metadata, the actor, the reason, the receipt id, the store, and the store's id for the entry. Then the sweep removes the entry and asks the store's search whether the entry is gone (the same retries and outcomes as a forget). The outcome is in the result and in the receipt of the call: `verified`, `stillIndexed`, `unverified`, or `failed`. `memory.history` of the orphan's fact id shows the event. The first record of a fact id wins. The ledger refuses a repair for a fact id that it knows, and it refuses an assert for a fact id that has a repair event, so a late write fails with an error and the ledger never believes a fact that no store holds. A repair of an entry that already has a repair event adds no second event: a retry after a failed removal uses the first event. One sweep runs at a time in a server process. If a store fails a delete and then says the entry is gone, the sweep counts the entry as removed.
 
 The result is `{ before, repaired, unlisted, stillHeld, unrecorded }`:
 
@@ -216,7 +216,7 @@ The result is `{ before, repaired, unlisted, stillHeld, unrecorded }`:
 - `repaired` is `[{ store, externalId, factId, outcome, eventId }]`.
 - `unlisted` is the names of the stores that have no `list`.
 - `stillHeld` is the errors of removals that failed. It also holds `<store>: cannot list: <error>` for a store whose listing failed. The sweep goes on with the other stores.
-- `unrecorded` is `[{ store, externalId, factId, outcome, error }]`: the removals whose repair event the ledger did not take. The receipt of the call is the record of those.
+- `unrecorded` is `[{ store, externalId, factId, error }]`: the entries that the sweep did not remove, because the ledger did not take the repair event. The next sweep tries them again.
 
 The result is an error when `stillHeld` or `unrecorded` is not empty. Run the sweep again after you fix the store or the ledger.
 

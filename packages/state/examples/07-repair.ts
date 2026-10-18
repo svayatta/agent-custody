@@ -1,8 +1,8 @@
 // Aspect: stores that match the ledger. Source: src/server.ts (memory.repair), src/stores.ts (Store.list)
 // Run:    node examples/07-repair.ts        (after `bun run build` at the repository root)
 // A write reaches the stores before the ledger. When the ledger append fails, a store keeps an entry that the ledger
-// has no fact for. memory.repair finds that entry, removes it once it is older than its cutoff (ten minutes), verifies
-// the removal, and records a repair event.
+// has no fact for. memory.repair finds that entry. Once it is older than its cutoff (ten minutes), repair records a
+// repair event, removes the entry, and verifies the removal.
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,14 +68,14 @@ step(4, "a good write follows; its entry has a fact in the ledger, so the repair
 const good = value(await client.callTool({ name: "memory.write", arguments: { subject: "acct:42", predicate: "tier", value: "gold", space: "team:support", actor: "support-agent" } }));
 console.log(`   store entries=${held.size}  ledger facts=${(await ledger.facts()).length}`);
 
-step(5, "memory.repair removes the orphan, verifies the removal, and records a repair event under the orphan's fact id; the good write's entry stays");
+step(5, "memory.repair records a repair event under the orphan's fact id, removes the orphan, and verifies the removal; the good write's entry stays");
 const repair = value(await client.callTool({ name: "memory.repair", arguments: { reason: "ledger append failed" } }));
 const orphan = repair.repaired[0];
 console.log(`   cutoff=${repair.before}  repaired=${JSON.stringify(repair.repaired.map((r: any) => ({ store: r.store, outcome: r.outcome })))}  unlisted=${repair.unlisted.length}  store entries=${held.size}`);
 
 step(6, "memory.history of the orphan's fact id shows the repair event");
 const history = value(await client.callTool({ name: "memory.history", arguments: { factId: orphan.factId } }));
-console.log(`   ${history.events.map((e: any) => `${e.kind}/${e.outcome}`).join(", ")}`);
+console.log(`   ${history.events.map((e: any) => e.kind).join(", ")}`);
 
 await client.close();
 const stillThere = (await ledger.get(good.fact.factId)) !== undefined && held.has(good.fact.factId);

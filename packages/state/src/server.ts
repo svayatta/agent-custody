@@ -91,7 +91,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "memory.repair",
-    description: "Find and remove store entries that the ledger has no fact for. A write reaches the stores before the ledger, so a failed ledger append leaves such an entry. For each store that can list its entries: every entry with custody metadata, stored more than ten minutes ago, whose fact id the ledger does not know is removed, the removal is verified, and a repair event is recorded under that fact id. A write still in progress is never that old. `before` can only move the cutoff earlier. Returns { before, repaired, unlisted, stillHeld, unrecorded }: the cutoff, what was removed with the store's answer, the stores that cannot list, the removals and listings that failed, and the removals whose repair event the ledger did not take.",
+    description: "Find and remove store entries that the ledger has no fact for. A write reaches the stores before the ledger, so a failed ledger append leaves such an entry. For each store that can list its entries: every entry with custody metadata, stored more than ten minutes ago, whose fact id the ledger does not know is removed, a repair event is recorded under that fact id first, and then the removal is made and verified. A write that is still in progress then fails at its ledger append. A repair of an entry that has a repair event adds no second event. `before` can only move the cutoff earlier. Returns { before, repaired, unlisted, stillHeld, unrecorded }: the cutoff, what was removed with the store's answer, the stores that cannot list, the removals and listings that failed, and the entries that stay because the ledger did not take the repair event.",
     inputSchema: { type: "object", properties: { reason: str, before: isoStr }, required: ["reason"] },
   },
   {
@@ -214,6 +214,56 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
     const { removedFrom, stillHeld, verification } = await removeFromStores(fact);
     return { factId: ev.factId, valueDigest: ev.valueDigest, digestKind: ev.digestKind, txTime: ev.txTime, actor: ev.actor, reason: ev.reason, source: ev.source, erasedFromLedger: true, removedFrom, stillHeld, verification };
   }
+  /** The tail of the sweeps queued in this process. */
+  let repairTurn: Promise<void> = Promise.resolve();
+
+  async function repairSweep(a: z.infer<typeof Repair>, who: { actor: string; receiptId: string | null }): Promise<CallToolResult> {
+    // `before` can only move the cutoff earlier: a later one would reach the entries of a write in progress.
+    const cutoff = Math.min(a.before ? Date.parse(a.before) : Infinity, Date.now() - REPAIR_MIN_AGE_MS);
+    const repaired: { store: string; externalId: string; factId: string; outcome: RemovalOutcome; eventId: string }[] = [];
+    const unrecorded: { store: string; externalId: string; factId: string; error: string }[] = [];
+    const unlisted: string[] = [];
+    const stillHeld: string[] = [];
+    for (const store of opts.stores ?? []) {
+      if (!store.list) {
+        unlisted.push(store.name);
+        continue;
+      }
+      let entries: StoreEntry[];
+      try {
+        entries = await store.list();
+      } catch (e) {
+        stillHeld.push(`${store.name}: cannot list: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+      const seen = new Set<string>();
+      for (const entry of entries) {
+        if (seen.has(entry.externalId)) continue;
+        seen.add(entry.externalId);
+        // A young entry may be a write in progress. So is one whose time is missing or does not parse.
+        if (!(Date.parse(entry.storedAt ?? "") < cutoff)) continue;
+        if (await ledger.get(entry.factId)) continue;
+        // The ledger records the repair first, as a retraction does. A write that is still in progress then fails at
+        // its own append, and a write that has appended makes this refuse. Either way the first record wins.
+        let ev;
+        try {
+          ev = await ledger.repair({ factId: entry.factId, store: store.name, externalId: entry.externalId, actor: who.actor, reason: a.reason, source: { receiptId: who.receiptId } });
+        } catch (e) {
+          // The ledger now knows the fact: the write won, and its entry stays. Otherwise nothing was removed.
+          if (!(await ledger.get(entry.factId))) unrecorded.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, error: e instanceof Error ? e.message : String(e) });
+          continue;
+        }
+        let { outcome, error } = await removeEntry(store, entry);
+        // Another server may have removed the entry already, and the store may then fail the delete. Gone is gone.
+        if (error && (await store.verifyDeleted?.(entry).catch(() => false))) ({ outcome, error } = { outcome: "verified", error: undefined });
+        if (error) stillHeld.push(error);
+        repaired.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, outcome, eventId: ev.eventId });
+      }
+    }
+    const out = { before: new Date(cutoff).toISOString(), repaired, unlisted, stillHeld, unrecorded };
+    if (stillHeld.length > 0 || unrecorded.length > 0) return { isError: true, content: [{ type: "text", text: `repair incomplete: ${[...stillHeld, ...unrecorded.map((u) => `${u.store} ${u.externalId}: not removed, because the ledger did not record the repair: ${u.error}`)].join("; ")}` }, { type: "text", text: JSON.stringify(out) }] };
+    return json(out);
+  }
   async function handle(name: string, args: Record<string, unknown>, meta: Record<string, unknown>, receiptId: string | null): Promise<CallToolResult> {
     const gatewayAgent = typeof meta[AGENT_META_KEY] === "string" ? (meta[AGENT_META_KEY] as string) : null;
     if (opts.requireGateway && !receiptId) return fail("memory server accepts calls only through the receipts gateway; no receipt id on this call");
@@ -315,45 +365,10 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
         }
         case "memory.repair": {
           const a = Repair.parse(args);
-          // `before` can only move the cutoff earlier: a later one would reach the entries of a write in progress.
-          const cutoff = Math.min(a.before ? Date.parse(a.before) : Infinity, Date.now() - REPAIR_MIN_AGE_MS);
-          const repaired: { store: string; externalId: string; factId: string; outcome: RemovalOutcome; eventId: string }[] = [];
-          const unrecorded: { store: string; externalId: string; factId: string; outcome: RemovalOutcome; error: string }[] = [];
-          const unlisted: string[] = [];
-          const stillHeld: string[] = [];
-          for (const store of opts.stores ?? []) {
-            if (!store.list) {
-              unlisted.push(store.name);
-              continue;
-            }
-            let entries: StoreEntry[];
-            try {
-              entries = await store.list();
-            } catch (e) {
-              stillHeld.push(`${store.name}: cannot list: ${e instanceof Error ? e.message : String(e)}`);
-              continue;
-            }
-            const seen = new Set<string>();
-            for (const entry of entries) {
-              if (seen.has(entry.externalId)) continue;
-              seen.add(entry.externalId);
-              // A young entry may be a write in progress. So is one whose time is missing or does not parse.
-              if (!(Date.parse(entry.storedAt ?? "") < cutoff)) continue;
-              if (await ledger.get(entry.factId)) continue;
-              const { outcome, error } = await removeEntry(store, entry);
-              if (error) stillHeld.push(error);
-              try {
-                const ev = await ledger.repair({ factId: entry.factId, store: store.name, externalId: entry.externalId, outcome, actor: who.actor, reason: a.reason, source: { receiptId } });
-                repaired.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, outcome, eventId: ev.eventId });
-              } catch (e) {
-                // The entry is gone, or not, and the ledger has no event for it: the receipt of this call is then the record.
-                unrecorded.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, outcome, error: e instanceof Error ? e.message : String(e) });
-              }
-            }
-          }
-          const out = { before: new Date(cutoff).toISOString(), repaired, unlisted, stillHeld, unrecorded };
-          if (stillHeld.length > 0 || unrecorded.length > 0) return { isError: true, content: [{ type: "text", text: `repair incomplete: ${[...stillHeld, ...unrecorded.map((u) => `${u.store} ${u.externalId}: removed (${u.outcome}) but not recorded: ${u.error}`)].join("; ")}` }, { type: "text", text: JSON.stringify(out) }] };
-          return json(out);
+          // One sweep at a time in this process: a second sweep then lists after the first has removed its entries.
+          const turn = repairTurn.then(() => repairSweep(a, who));
+          repairTurn = turn.then(() => {}, () => {});
+          return await turn;
         }
         case "memory.get": {
           const a = Get.parse(args);
