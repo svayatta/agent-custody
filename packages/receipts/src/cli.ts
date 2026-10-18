@@ -4,7 +4,7 @@ import { captureKeyFrom, getAt, pathText, restorePaths, setAt } from "./capture.
 import { saltsFileFor } from "./retention.ts";
 import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
-import { closeSync, constants as fsConstants, existsSync, fchmodSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fchmodSync, openSync, readFileSync, readdirSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { loadConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
 import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
@@ -26,11 +26,12 @@ import type { AdminOptions } from "./log-admin.ts";
 import { createRequire } from "node:module";
 import { pruneLog } from "./retention.ts";
 import { serveSidecar } from "./sidecar.ts";
-import { TREEHEAD_TYPE, type ReceiptBundle, type TreeHead, type ReceiptStatement } from "./receipt.ts";
+import { TREEHEAD_TYPE, type AuthorizationBundle, type ReceiptBundle, type TreeHead, type ReceiptStatement } from "./receipt.ts";
 import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
 import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
 import { auditExtends, formatReport, verifyBundle } from "./verify.ts";
+import { formatSimulation, simulatePolicy, verifyOrphanAuthorization, type SimulationSkip } from "./simulate.ts";
 
 /** A shared secret from an environment variable; never from the command line, where it would land in shell history. */
 function secretFrom(envName: string): string {
@@ -59,6 +60,9 @@ const USAGE = `agent-custody <command>
           retention on the receipt log: replaces older leaves with their hashes, so proofs still verify and the content is gone
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
   verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--json]
+  policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
+                                                   replay verified local receipts against a proposed policy using their recorded inputs;
+                                                   --out saves the full JSON report. Exits 1 when any call could not be evaluated.
   log     ... --db-env NAME                     the same server over Postgres: tenants and tokens from the database, one writer per tenant,
                                                  root paths serve the tenant "default" (created with --log-id). Needs the pg package.
   log     ... (--key <log.key> [--retired-key <pub>]... | --signer-url <url> [--signer-token-env NAME]) [--checkpoint-dir <dir>] [--checkpoint-every <seconds>] [--checkpoint-heartbeat <seconds>]
@@ -494,6 +498,93 @@ async function main(argv: string[]): Promise<number> {
       });
       console.log(values.json ? JSON.stringify(result, null, 2) : formatReport(result));
       return result.ok ? 0 : 1;
+    }
+    case "policy": {
+      const [subcommand, ...args] = rest;
+      if (subcommand !== "simulate") throw new Error("policy needs the simulate subcommand: policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>");
+      const { values } = parseArgs({
+        args,
+        options: {
+          policy: { type: "string" },
+          receipts: { type: "string" },
+          "issuer-key": { type: "string", multiple: true },
+          "principal-key": { type: "string", multiple: true },
+          "log-key": { type: "string", multiple: true },
+          "capture-key-env": { type: "string" },
+          disclose: { type: "string", multiple: true },
+          json: { type: "boolean", default: false },
+          out: { type: "string" },
+        },
+      });
+      if (!values.policy || !values.receipts || !values["issuer-key"]?.length) throw new Error("policy simulate needs --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>");
+      const policy = readFileSync(values.policy, "utf8");
+      const keys = {
+        issuerKeys: values["issuer-key"].map(loadPublicKey),
+        principalKeys: (values["principal-key"] ?? []).map(loadPublicKey),
+        logKeys: (values["log-key"] ?? []).map(loadPublicKey),
+      };
+      const names = readdirSync(values.receipts, { withFileTypes: true })
+        .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".json"))
+        .map((entry) => entry.name);
+      const AUTHORIZATION = ".authorization.json";
+      const files = names.filter((name) => !name.endsWith(AUTHORIZATION)).sort();
+      const have = new Set(files);
+      const fail = (file: string, error: unknown): never => { throw new Error(`policy simulate: ${file}: ${error instanceof Error ? error.message : String(error)}`); };
+      // A gateway that dies after it forwards a precommit call leaves <id>.authorization.json and no <id>.json. That
+      // call went upstream, so it counts as skipped and the report is incomplete.
+      const unreplayable: SimulationSkip[] = names.filter((name) => name.endsWith(AUTHORIZATION) && !have.has(`${name.slice(0, -AUTHORIZATION.length)}.json`)).sort().map((name) => {
+        const file = join(values.receipts!, name);
+        try {
+          const p = verifyOrphanAuthorization(JSON.parse(readFileSync(file, "utf8")) as AuthorizationBundle, keys.issuerKeys, keys.logKeys);
+          if (`${p.receiptId}${AUTHORIZATION}` !== name) throw new Error("the file name does not match the receipt id in the authorization");
+          return { receiptId: p.receiptId, tool: p.tool.name, reason: "only the authorization survives; the receipt is missing, so the outcome and the call cannot be replayed" };
+        } catch (error) {
+          return fail(file, error);
+        }
+      });
+      if (!files.length && !unreplayable.length) throw new Error(`policy simulate: no receipt bundles found in ${values.receipts}`);
+      const captureKey = values["capture-key-env"] ? captureKeyFrom(secretFrom(values["capture-key-env"])) : undefined;
+      const disclosures = new Map<string, unknown>();
+      for (const file of values.disclose ?? []) {
+        try {
+          const disclosure = JSON.parse(readFileSync(file, "utf8")) as { receiptId?: unknown };
+          if (typeof disclosure?.receiptId !== "string") throw new Error("the disclosure names no receiptId");
+          disclosures.set(disclosure.receiptId, disclosure);
+        } catch (error) {
+          fail(file, error);
+        }
+      }
+      // One bundle at a time: the replay needs the predicate of the receipt it is on, not the results of the others.
+      function* verified() {
+        for (const name of files) {
+          const file = join(values.receipts!, name);
+          try {
+            const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
+            const result = verifyBundle(bundle, keys);
+            if (!result.ok || !result.statement) {
+              const failures = result.checks.filter((check) => !check.ok).map((check) => `${check.name}${check.detail ? ` (${check.detail})` : ""}`);
+              throw new Error(`receipt verification failed: ${failures.join("; ")}`);
+            }
+            yield result.statement.predicate;
+          } catch (error) {
+            fail(file, error);
+          }
+        }
+      }
+      const report = simulatePolicy(policy, verified(), { unreplayable, ...(captureKey ? { captureKey } : {}), disclosures });
+      const json = JSON.stringify(report, null, 2);
+      if (values.out) {
+        // Reports name calls and decisions: keep them owner-only, including when replacing an existing file.
+        const fd = openSync(values.out, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW, 0o600);
+        try {
+          fchmodSync(fd, 0o600);
+          writeSync(fd, json);
+        } finally {
+          closeSync(fd);
+        }
+      }
+      console.log(values.json ? json : formatSimulation(report));
+      return report.complete ? 0 : 1;
     }
     case "reveal": {
       // The values a receipt withheld, under the customer's key, as a disclosure file: hand it to a reviewer with the
