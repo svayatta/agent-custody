@@ -23,7 +23,7 @@ await ledger.retract({ factId: a.fact.factId, actor: "user:admin", reason: "pois
 await ledger.asOf({ validAt: "2026-09-01T00:00:00Z", txAt: "2026-09-01T00:00:00Z" });
 ```
 
-Six runnable examples, all executed by the test suite. [06-actions-on-beliefs.ts](examples/06-actions-on-beliefs.ts) puts memory and a payments API behind one gateway and finds the refund in a belief's blast radius. [05-blast-radius.ts](examples/05-blast-radius.ts) walks from a retracted belief to everything that relied on it. [04-evals.ts](examples/04-evals.ts) scores the ledger and a naive store on the same memory incidents. [03-memory-behind-the-gateway.ts](examples/03-memory-behind-the-gateway.ts) runs the memory server as the gateway's upstream. [01-ledger.ts](examples/01-ledger.ts) walks through a wrong write and its undo. [02-receipt-to-belief.ts](examples/02-receipt-to-belief.ts) runs the whole loop with the receipts package: a tool call gets a signed receipt, the receipt is verified, the belief taken from it is recorded citing the receipt, and later retracted. Run them with `node examples/<file>` from this directory, after `bun run build` at the repository root.
+Runnable examples, all executed by the test suite. [08-review-console.ts](examples/08-review-console.ts) makes a refund through the gateway, finds it by transaction and customer, and exports an offline case file that verifies independently. [06-actions-on-beliefs.ts](examples/06-actions-on-beliefs.ts) puts memory and a payments API behind one gateway and finds the refund in a belief's blast radius. [05-blast-radius.ts](examples/05-blast-radius.ts) walks from a retracted belief to everything that relied on it. [04-evals.ts](examples/04-evals.ts) scores the ledger and a naive store on the same memory incidents. [03-memory-behind-the-gateway.ts](examples/03-memory-behind-the-gateway.ts) runs the memory server as the gateway's upstream. [01-ledger.ts](examples/01-ledger.ts) walks through a wrong write and its undo. [02-receipt-to-belief.ts](examples/02-receipt-to-belief.ts) runs the whole loop with the receipts package: a tool call gets a signed receipt, the receipt is verified, the belief taken from it is recorded citing the receipt, and later retracted. Run them with `node examples/<file>` from this directory, after `bun run build` at the repository root.
 
 ## The memory server
 
@@ -144,7 +144,19 @@ WHAT NEEDS REVERSAL          2 belief(s) still believed, and 3 later call(s) to 
 
 The first eight lines come from the receipt alone and work without a ledger; the last two are answered from the ledger, and without one they say `unknown without a ledger` rather than pretending nothing depended on the call. `--out action.json --sign keys/pack.key` writes the same answers as one signed action pack with the receipt and every downstream receipt inside it, and `explain --verify action.json --key keys/pack.pub --issuer-key ... --principal-key ...` checks the pack's signature and digest, the receipt, every downstream receipt, and that the written beliefs cite this receipt. Touch one receipt inside and the pack fails. The custody pack below is the same artefact seen from a fact instead of an action.
 
-**The review page.** `agent-custody-memory review --receipts receipts --ledger ledger.sqlite --issuer-key keys/gateway.pub --principal-key keys/principal.pub` serves the same answers as pages on loopback: an index of every receipt with when, tool, outcome, agent, principal, producer, and its verdict, and one page per receipt with the ten answers, the verification report, and the receipt itself to download. `--out <dir>` writes the same as static files for a case file or a shared drive. It runs where the receipts are, because nobody else holds them; it has no login of its own, so expose it only behind one you already have.
+**The review console.** `agent-custody-memory review --receipts receipts --ledger ledger.sqlite --issuer-key keys/gateway.pub --principal-key keys/principal.pub` serves the same answers as pages on loopback: an index with transaction and customer ids, when, tool, outcome, agent, principal, producer, and its verdict. Search by transaction, customer, agent, or an inclusive time range; each receipt opens the ten answers, the verification report, the issued bundle, and a portable case download. It runs where the receipts are, because nobody else holds them; it has no login of its own, so expose it only behind one you already have.
+
+```bash
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --transaction re_123 --customer cust_123 --agent support-agent --from 2026-10-01T00:00:00Z --to 2026-10-31T23:59:59Z
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --out review-site/
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --case <receiptId> --out refund.case.html
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --case <receiptId> --out refund.case.json
+agent-custody-memory review --verify-case refund.case.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub --json
+```
+
+Filters combine with AND, match exact case-sensitive ids, and search only public arguments, results, and gateway facts. Times must be ISO 8601 date-times with `Z` or a UTC offset. An identifier withheld by a capture rule cannot be searched. `--out <dir>` writes an index, receipt pages and bundles, and each receipt's `.case.html` and `.case.json`; its browser search covers only the receipts included in that export. Add `--log-key`, `--log-id`, and `--upstream-key` when those signatures need independent keys.
+
+A portable HTML case contains the signed receipts, embedded signed authorizations, inclusion proofs, signed log heads, public keys and their fingerprints, the ten answers, and any ledger snapshot. Open it locally: its embedded WebCrypto verifier runs fresh checks without external requests. `review --verify-case` checks the JSON independently and exits 1 on failed verification. Without key flags it uses the bundled keys; supplied public keys replace the entire bundled trust set. Confirm bundled fingerprints through a trusted source. The explanation and ledger snapshot are unsigned exporter assertions; verification establishes the recorded gateway decision and detects receipt tampering, not that an external payment occurred. Without a ledger, belief dependencies remain `unknown without a ledger`. Capture keys, private keys, salts, and restored withheld values are never added to a case file.
 
 ## Write-through to the stores you already use
 
@@ -223,7 +235,10 @@ src/storage.ts  the store interface and its three stores: JSONL (default, audita
 src/server.ts   the ledger as MCP tools; source and actor taken from the gateway's _meta
 src/http.ts     the memory server over Streamable HTTP with bearer auth, for a shared ledger
 src/explain.ts  one action explained: the ten answers from a receipt and the ledger, and the signed action pack
-src/review.ts   the review page: the explain output as pages, served on loopback or written as files
+src/review.ts   the searchable review console: explain pages and portable case downloads, served on loopback or written as files
+src/search.ts   exact transaction, customer, agent and time filters over the public receipt view
+src/case-file.ts  portable HTML/JSON evidence with public keys, fresh offline verification and the ten answers
+src/verify-web.ts  the browser verifier embedded in portable HTML case files
 src/pack.ts     the custody pack: build, sign, verify, format
 src/cli.ts      agent-custody-memory serve (stdio or --http, with --retention and --forget-key-env), sweep (ledger-only or --via a gateway), eval, explain, review, pack, export, blast
 src/blast.ts    blast radius: from receipts' consumed facts and the ledger's source receipts, forward
@@ -245,7 +260,7 @@ tsconfig.build.json  emits dist/ for consumers; the repo itself runs the .ts dir
 - The memory server: the ledger as MCP tools behind the receipts gateway, with the source receipt id and the attested actor supplied by the gateway, policy over spaces, and a denial receipt for every refused write.
 - Forget digests are keyed under a server-held secret, or absent on request, so an erased value cannot be guessed back from the file.
 - Retention windows per space in the server, sweeps that default to them, and a `sweep --via` trigger that runs retention through a gateway as a named principal, on any timer.
-- The review page: the explain output as pages for the reviewer who will not open a terminal, an index of every receipt with its verdict and one page per receipt, served on loopback or written as static files.
+- The review console: search public receipt fields by transaction, customer, agent or time, inspect the ten answers and verification report, and export a portable HTML/JSON case with fresh offline verification; served on loopback or written as static files.
 - Explain one action: from a receipt id, who, who authorized it, what was allowed, what the agent saw, what it did, why, the evidence, whether it verifies, what depended on it, and what needs reversal; the same as a signed action pack that carries every downstream receipt.
 - The custody pack: a fact's history with receipts, holds, blast radius, and forget certificate as one signed artefact, verified as a whole.
 - Removal verification: after a retraction, forget, or sweep the server asks each store's search whether the value still surfaces and records verified, stillIndexed, unverified, or failed per store, in the receipt.

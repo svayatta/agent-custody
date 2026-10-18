@@ -11,7 +11,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
 - [Tutorials](docs/tutorials.md): twenty-seven runnable examples, one per aspect of the code, all executed by the test suite
-- [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop, and the gateway as an A2A agent between agents that delegate to each other, and private evidence: what the receipt file carries of each call
+- [Usage guide](docs/usage.md): gateway setup, wiring into agent hosts, A2A delegation, private evidence, and searching receipts and exporting offline cases with the state package's review console
 - [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin and Google ADK callbacks through the Python package, and wrapping tool functions in anything else
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
@@ -313,6 +313,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 - The grant on every call (issue #97): expiry and revocation are checked on every call and again before the forward, in every mode, on the MCP, HTTP, and A2A fronts; `agent-custody revoke` revokes a grant and every grant delegated from it. The remote log's answer is verified against pinned keys before a pre-committed call goes upstream (issue #99). The portal verifies an address only from the account's own session before a provider sign-in can link to it (issue #103). The verifier recomputes the execution result digest (issue #104). The Stripe webhook ignores a repeated or out-of-order event (issue #105).
 - Agent-to-agent delegation under custody: the A2A upstream and the gateway's A2A front; receipts per delegation with the delegate's card as a fact. A Google ADK `RemoteA2aAgent`, or any A2A client, is pointed at the gateway and a refused delegation comes back as a rejected task the delegate never saw. The delegate does not yet countersign its answer; the receipt attests what the gateway sent and observed, not what the delegate did with it.
 - Private evidence: per-tool capture rules, applied by the issuer to the whole statement so nothing outside a fixed structural list is in clear under a private rule; withheld values as salted commitments whose salts never enter the receipt, encrypted under the customer's key, revealed and recomputed by the verifier; nothing in the receipt confirms a guess of a withheld value.
+- The [state review console](../state/README.md#explain-one-action): search receipts by transaction, customer, agent or time, read the ten answers, and hand over a portable HTML/JSON case whose signatures, authorizations and inclusion proofs can be verified offline.
 
 **Next, in the order it pays off**
 

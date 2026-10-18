@@ -17,6 +17,10 @@ export { PACK_TYPE, buildPack, formatPack, signPack, verifyPack } from "./pack.t
 export { ACTION_PACK_TYPE, buildActionPack, decodeStatement, formatExplain, signActionPack, verifyActionPack } from "./explain.ts";
 export { listReceipts, renderIndex, renderReceipt, reviewHandler, serveReview, writeReview } from "./review.ts";
 export type { ReceiptRow, ReviewOptions, RunningReview } from "./review.ts";
+export { matchesReceiptSearch, receiptSearchTerms, validateReceiptSearch } from "./search.ts";
+export type { ReceiptSearch } from "./search.ts";
+export { buildCaseFile, renderCaseFile, verifyCaseFile } from "./case-file.ts";
+export type { CaseFile, CaseFileKey, CaseFileKeys, CaseFileOptions, CaseFileVerification } from "./case-file.ts";
 export type { ActionPack, ActionPackCheck, ActionPackVerification, ReceiptKeys } from "./explain.ts";
 export type { CustodyPack, PackCheck, PackVerification } from "./pack.ts";
 export type { MemoryHttpOptions, RunningMemoryServer } from "./http.ts";

@@ -80,7 +80,7 @@ describe("the review page", () => {
     const out = join(dir, "site");
     expect(await writeReview(o, out)).toEqual({ receipts: 3 });
     expect(existsSync(join(out, "index.html"))).toBe(true);
-    expect(readdirSync(join(out, "r")).filter((f) => f.endsWith(".html"))).toHaveLength(3);
+    expect(readdirSync(join(out, "r")).filter((f) => f.endsWith(".html") && !f.endsWith(".case.html"))).toHaveLength(3);
     expect(readFileSync(join(out, "index.html"), "utf8")).toContain(`href="r/${writeId}.html"`);
     expect(readFileSync(join(out, "r", `${writeId}.html`), "utf8")).toContain("<dt>WHAT IT DID</dt>");
     await ledger.close();

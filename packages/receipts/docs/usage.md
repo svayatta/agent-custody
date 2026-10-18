@@ -141,6 +141,22 @@ node src/cli.ts gateway --config ./gateway.json
 
 You will not normally run this by hand. The agent host spawns it, as below.
 
+## Review a transaction and export its case
+
+The state package's `agent-custody-memory review` opens the receipts as a local review console, with one receipt's ten answers and verification report behind each index row:
+
+```bash
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --transaction re_123 --customer cust_123 --agent support-agent --from 2026-10-01T00:00:00Z --to 2026-10-31T23:59:59Z
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --out review-site/
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --case <receiptId> --out refund.case.html
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --case <receiptId> --out refund.case.json
+agent-custody-memory review --verify-case refund.case.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub --json
+```
+
+`--transaction`, `--customer`, and `--agent` match exact case-sensitive ids; all filters combine with AND. `--from` and `--to` are inclusive ISO date-times with `Z` or a UTC offset. Search covers public arguments, results, and gateway facts; a withheld identifier is unavailable. `--ledger <path>` adds belief dependencies, `--log-key <pub>` and `--log-id <id>` check the log, and `--upstream-key <pub>` checks signed upstream results. `--host` defaults to `127.0.0.1`, `--port` to `8791`; `--title <text>` labels the console. It has no authentication of its own. A directory export includes the index, receipt pages and bundles, and portable HTML/JSON cases; its browser search covers the exported set.
+
+The standalone `.case.html` repeats cryptographic checks with embedded WebCrypto code, offline and without external requests. Its JSON companion can be checked independently with `--verify-case`, which exits 1 on failure; public key flags may be repeated and replace the entire bundled trust set. Confirm bundled key fingerprints with a trusted source. Cases include signed receipts, authorizations, log heads and proofs, public keys, and the ten answers; explanation and ledger snapshots are unsigned exporter assertions. Verification proves the recorded gateway decision and detects receipt tampering, not an external payment side effect. Without a ledger the belief questions remain unknown. Private keys, capture keys, disclosures, and issuer salts files are not exported, and withheld values stay unavailable. [The state guide](../../state/README.md#explain-one-action) and [runnable example](../../state/examples/08-review-console.ts) cover the full flow.
+
 ## Private evidence
 
 A receipt carries the call as it happened: the arguments, the result, and the facts the policy decided on. Some of that a reviewer has no business seeing: the note on a refund with the caller's phone number, the customer record the policy read, the provider's full answer. `capture` in the config says, per tool, what the receipt file carries of each part:
