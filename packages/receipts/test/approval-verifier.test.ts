@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { APPROVAL_TYPE, createApproval, type ApprovalRecord } from "../src/approval.ts";
-import { privateView } from "../src/capture.ts";
+import { privateView, withhold } from "../src/capture.ts";
 import { digestOf, dsseCountersign, dsseSign, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "../src/crypto.ts";
 import { createIssuer } from "../src/issue.ts";
 import { buildStatement, RECEIPT_TYPE, type ReceiptBundle, type ReceiptPredicate } from "../src/receipt.ts";
@@ -204,6 +204,38 @@ describe("independent approval verification", () => {
     const p = structuredClone(base);
     p.approval!.envelope = dsseCountersign(createApproval(human, { ...binding, issuedAt: at, expiresAt: new Date(Date.parse(at) + 3600_000).toISOString() }), secondHuman);
     expect(failing(await privateIssuer.issue(p))).toEqual([]);
+  });
+
+  it("keeps an approved envelope in clear beside arguments in clear, and fails one that is withheld there", async () => {
+    // args whole in clear, result private: the binding must still run
+    const rules = { "stripe.refund": { args: { mode: "clear" as const }, result: { mode: "digest" as const } } };
+    const clearArgsIssuer = createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules } });
+    const honest = await clearArgsIssuer.issue(structuredClone(base));
+    const visible = JSON.parse(Buffer.from(honest.envelope.payload, "base64").toString()).predicate as ReceiptPredicate;
+    expect(visible.approval!.envelope).toEqual(approval);
+    expect(visible.capture!.withheld.some((w) => w[0] === "approval")).toBe(false);
+    expect(verifyBundle(honest, opts).checks.find((c) => c.name === "approval payload binding")?.ok).toBe(true);
+    // a crafted issuer withholds the envelope to skip the binding check
+    const crafted = structuredClone(visible);
+    crafted.approval!.envelope = withhold(approval).commitment as never;
+    crafted.capture!.withheld.push(["approval", "envelope"]);
+    const skipped = await issuer.issue(crafted);
+    expect(failing(skipped)).toContain("approval signatures (human keys)");
+    // the same receipt with the arguments withheld too is the private receipt, which passes as committed
+    const privateIssuer = createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules: { "stripe.refund": { args: { mode: "digest" as const } } } } });
+    expect(failing(await privateIssuer.issue(structuredClone(base)))).toEqual([]);
+  });
+
+  it("does not require human keys for the precommit of a call that was withheld after the approval was consumed", async () => {
+    const p = structuredClone(base);
+    const { execution, session, model, ...head } = p;
+    p.authorization = await issuer.authorize(head);
+    p.execution = { status: "withheld", reason: "the delegation grant was revoked before the call was forwarded", provenance: "observed" };
+    expect(failing(await issuer.issue(p), { ...opts, approvalKeys: [] })).toEqual([]);
+    // the same record on a forwarded call needs the keys
+    const forwardedPrecommit = structuredClone(base);
+    forwardedPrecommit.authorization = p.authorization;
+    expect(failing(await issuer.issue(forwardedPrecommit), { ...opts, approvalKeys: [] })).toContain("authorization approval was valid");
   });
 
   it.each(["checkedAt", "consumedAt"] as const)("rejects an approval time without an offset: %s", async (field) => {

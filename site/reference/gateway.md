@@ -64,7 +64,7 @@ The first check runs before facts and Cedar; failures issue denial receipts even
 
 `usedDir` must persist across restarts and be shared by every gateway accepting these approvals, on a filesystem with consistent exclusive creation. A consumed id stays burned after crashes, log failures, or unknown upstream outcomes. Do not remove records while the approvals can remain valid. No automatic pruning or outcome reconciliation is supplied. An offline verifier checks approval signatures and action binding with separately trusted [`approvalKeys`](./verify#verify); it cannot establish global single use.
 
-Under a private capture rule the receipt withholds `approval.envelope` and `approval.reason` as commitments, because the envelope carries the action fields and an unsalted full-argument digest that would disclose private values or confirm guesses. The status, times, and signer key ids stay in clear. Verifying the signatures and the full binding needs the capture key or a disclosure. The [approval guide](/receipts/approvals) covers the complete workflow and privacy boundary.
+Under a private capture rule the receipt withholds `approval.envelope` and `approval.reason` as commitments, because the envelope carries the action fields and an unsalted full-argument digest that would disclose private values or confirm guesses. The status, times, and signer key ids stay in clear. Verifying the signatures and the full binding needs the capture key or a disclosure. When the rule keeps the arguments whole in clear, an approved envelope stays in clear. The [approval guide](/receipts/approvals) covers the complete workflow and privacy boundary.
 
 ### A REST API as an upstream
 

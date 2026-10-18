@@ -322,6 +322,9 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
     if (forwarded && a.status === "approved") {
       const sealed = region(["approval", "envelope"]);
       if (sealed.problem) add("approval signatures (human keys)", false, sealed.problem);
+      // The issuer withholds the envelope only when it withholds the arguments. With the arguments in clear, a withheld
+      // envelope would let an issuer skip the binding check, so it fails rather than passes as committed.
+      else if (sealed.paths.length && !args.paths.length) add("approval signatures (human keys)", false, "the approval envelope is withheld but the arguments are in clear; the binding cannot be checked");
       else if (sealed.paths.length) add("approval signatures (human keys)", true, committedNote(sealed.paths));
       else {
         const signed = await verifyApprovalStatement(a.envelope, opts.approvalKeys ?? [], a.requiredApprovers);
@@ -434,7 +437,8 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
         if (forwarded) {
           const ac = ap.approval;
           // Under a private rule the precommit carries a commitment to the envelope, which this verifier cannot open.
-          const sealed = isCommitment(ac?.envelope);
+          // an envelope withheld beside arguments in clear is not a private receipt: see "approval signatures (human keys)"
+          const sealed = isCommitment(ac?.envelope) && args.paths.length > 0;
           const signed = ac && !sealed && (ac.requiredApprovers === 1 || ac.requiredApprovers === 2) ? await verifyApprovalStatement(ac.envelope, opts.approvalKeys ?? [], ac.requiredApprovers) : null;
           const valid = !!ac && ac.status === "approved" && ac.provenance === "observed" && iso(ac.checkedAt) && (sealed || !!signed?.ok) &&
             (!signed?.ok || (Date.parse(ac.checkedAt) >= Date.parse(signed.approval.issuedAt) && Date.parse(ac.checkedAt) < Date.parse(signed.approval.expiresAt))) &&

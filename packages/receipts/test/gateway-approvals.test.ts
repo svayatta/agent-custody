@@ -194,6 +194,18 @@ describe("gateway signed approvals", () => {
     expect(verified.checks.filter((check) => !check.ok)).toEqual([]);
   });
 
+  it("keeps the approved envelope in clear when the rule keeps the arguments in clear, and verifies the binding", async () => {
+    const { fx, gw, predicate } = await fixture((c) => { c.capture = { "*": { args: { mode: "clear" }, result: { mode: "digest" } } }; });
+    const envelope = approve();
+    const result = await call(gw, envelope);
+    expect(result.isError).toBeFalsy();
+    expect(predicate(result).approval!.envelope).toEqual(envelope);
+    const bundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${String(result._meta?.[RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
+    const verified = verifyBundle(bundle, { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], approvalKeys: [loadPublicKey(join(fx.dir, "keys/approver.pub"))] });
+    expect(verified.checks.filter((check) => !check.ok)).toEqual([]);
+    expect(verified.checks.find((check) => check.name === "approval payload binding")?.detail).toMatch(/full arguments/);
+  });
+
   it("refuses an approval whose lifetime exceeds the default cap, and honors approvals.maxLifetimeSeconds", async () => {
     const { gw, predicate } = await fixture();
     const tooLong = approve(binding(), new Date(Date.now() + 3_700_000).toISOString());

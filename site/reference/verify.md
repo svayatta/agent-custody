@@ -47,7 +47,7 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 | executed tool within delegated scope | if the tool ran, the grant covered it |
 | principal is claimed, not attested | SDK receipts: the principal is a config string and labelled so |
 | disclosure names this receipt | only with `--disclose`: the file's `receiptId` is this receipt's |
-| approval signatures (human keys) | a forwarded call carrying an approval record has the required number of distinct signatures from separately trusted `approvalKeys`. A withheld envelope passes as committed until it is disclosed or decrypted |
+| approval signatures (human keys) | a forwarded call carrying an approval record has the required number of distinct signatures from separately trusted `approvalKeys`. A withheld envelope passes as committed until it is disclosed or decrypted, unless the arguments are in clear: then it fails |
 | approval payload binding | that approval names this principal, agent, tool, complete arguments, and mapped amount/currency/beneficiary. If any argument remains withheld, this passes as committed until the arguments are disclosed or decrypted, as `request args digest` does |
 | approval valid at forward time | the recorded check and consumption occurred inside the approval validity window |
 | approval consistent with execution | forwarded calls carrying approval evidence have an approved, consumed record with matching signer observations; denied or withheld calls can verify as authentic refusals despite an invalid approval |

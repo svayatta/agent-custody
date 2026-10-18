@@ -184,6 +184,9 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
       // The envelope is withheld under a private rule: it carries the action fields and a digest of the arguments.
       const sealed = region(["approval", "envelope"]);
       if (sealed.problem) add("approval signatures (human keys)", false, sealed.problem);
+      // The issuer withholds the envelope only when it withholds the arguments. With the arguments in clear, a withheld
+      // envelope would let an issuer skip the binding check, so it fails rather than passes as committed.
+      else if (sealed.missing.length && !args.paths.length) add("approval signatures (human keys)", false, "the approval envelope is withheld but the arguments are in clear; the binding cannot be checked");
       else if (sealed.missing.length) add("approval signatures (human keys)", true, committedNote(sealed.missing));
       else {
         const envelope = (full.approval as { envelope?: unknown }).envelope;
@@ -298,7 +301,8 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
           const ac = ap.approval;
           // Under a private rule the precommit carries the receipt's commitment to the envelope: it is checked once restored.
           const envelope = ac && isCommitment(ac.envelope) && carries ? (full.approval as { envelope?: unknown } | undefined)?.envelope : ac?.envelope;
-          const sealed = isCommitment(envelope);
+          // an envelope withheld beside arguments in clear is not a private receipt: see "approval signatures (human keys)"
+          const sealed = isCommitment(envelope) && args.paths.length > 0;
           const signed = ac && !sealed ? verifyApprovalStatement(envelope, opts.approvalKeys ?? [], ac.requiredApprovers) : null;
           const valid = !!ac && ac.status === "approved" && ac.provenance === "observed" && isApprovalTime(ac.checkedAt) && (sealed || !!signed?.ok) &&
             (!signed?.ok || (Date.parse(ac.checkedAt) >= Date.parse(signed.approval.issuedAt) && Date.parse(ac.checkedAt) < Date.parse(signed.approval.expiresAt))) &&

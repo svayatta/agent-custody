@@ -4,7 +4,8 @@
 import { withhold } from "../src/capture.ts";
 import { APPROVAL_META_KEY, APPROVAL_TYPE, createApproval } from "../src/approval.ts";
 import { createDelegation, delegateFrom, DELEGATION_TYPE } from "../src/delegation.ts";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import nodeFs, { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalize, digestOf, dsseCountersign, dsseSign, generateKeyPair, loadPrivateKey, loadPublicKey, sha256Hex, type Envelope, type KeyPair, publicKeyToPem, writeKeyPair as writeApprovalKeyPair } from "../src/crypto.ts";
@@ -176,6 +177,48 @@ for (const variant of ["clear", "private"] as const) {
   const vlog = logLines(vfx.logFile);
   addCase({ name: `gateway-approval-cedar-denied${variant === "private" ? "-private-args" : ""}`, description: `A valid single-human approval was presented and the Cedar policy then denied the call${variant === "private" ? ", with the arguments withheld (digest)" : ""}. The gateway records the approval as approved and the call as denied. The call was never forwarded, so the receipt verifies without any human key.`, bundle: bundleFile(vfx.receiptsDir, String(cedarDenied._meta?.[RECEIPT_META_KEY])), ...V, log: vlog });
   if (variant === "private") addCase({ name: "gateway-approved-private-args", description: "A forwarded call with an approval under a private args rule (digest). The receipt withholds the approval envelope, which carries the action fields and an unsalted digest of the arguments. The signature, window, and binding checks pass as committed; the status, the times, and the signer ids stay in clear.", bundle: bundleFile(vfx.receiptsDir, String(forwardedCall._meta?.[RECEIPT_META_KEY])), ...V, approvalKeys: ["human"], log: vlog });
+}
+// A grant revoked right after the approval was consumed: the call is withheld, the approval stays recorded as approved
+// with its consumption time, and the precommit exists. Verifies without human keys. The revocation is written from the
+// durable claim's fsync, as the gateway tests do, so that it lands between the claim and the forward.
+for (const variant of ["clear", "private"] as const) {
+  const rfx = buildFixture(mkdtempSync(join(tmpdir(), `vectors-approval-revoked-${variant}-`)));
+  key(`approval-revoked-${variant}-gateway`, rfx.gatewayPub);
+  key(`approval-revoked-${variant}-principal`, rfx.principalPub);
+  const rcfg = loadConfig(rfx.configFile);
+  rcfg.approvals = { trustedKeys: [humanFiles.pubFile], usedDir: join(rfx.dir, "used-approvals"), tools: [{ tool: "stripe.refund", minApprovers: 1 }] };
+  rcfg.precommit = ["stripe.refund"];
+  rcfg.revokedGrants = join(rfx.dir, "revoked.json");
+  if (variant === "private") rcfg.capture = { "*": { args: { mode: "digest" } } };
+  const revoking = await createGateway(rcfg);
+  const realFsync = nodeFs.fsyncSync;
+  nodeFs.fsyncSync = (fd: number) => { realFsync(fd); writeFileSync(rcfg.revokedGrants!, JSON.stringify([revoking.grantDigest])); };
+  syncBuiltinESMExports();
+  const revoked = await revoking.handleCall({ name: "stripe.refund", arguments: aargs, _meta: { [APPROVAL_META_KEY]: createApproval(human, { ...abinding, expiresAt: new Date(Date.now() + 3600_000).toISOString() }) } });
+  nodeFs.fsyncSync = realFsync;
+  syncBuiltinESMExports();
+  await revoking.close();
+  addCase({ name: `gateway-approval-revoked-after-consumption${variant === "private" ? "-private-args" : ""}`, description: `The grant was revoked after the gateway consumed a valid approval and before it forwarded the call${variant === "private" ? ", with the arguments withheld (digest)" : ""}. The call is withheld; the approval is recorded as approved and consumed, and a precommit exists. No call was forwarded, so the receipt verifies without any human key.`, bundle: bundleFile(rfx.receiptsDir, String(revoked._meta?.[RECEIPT_META_KEY])), issuerKeys: [`approval-revoked-${variant}-gateway`], principalKeys: [`approval-revoked-${variant}-principal`], logKeys: [], log: logLines(rfx.logFile) });
+}
+// The rule keeps the arguments whole in clear and the result private: an approved envelope stays in clear, so the
+// binding check runs. A crafted receipt that withholds it beside clear arguments fails instead of passing as committed.
+{
+  const cfx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-approval-args-clear-")));
+  key("approval-args-clear-gateway", cfx.gatewayPub);
+  key("approval-args-clear-principal", cfx.principalPub);
+  const ccfg = loadConfig(cfx.configFile);
+  ccfg.approvals = { trustedKeys: [humanFiles.pubFile], usedDir: join(cfx.dir, "used-approvals"), tools: [{ tool: "stripe.refund", minApprovers: 1 }] };
+  ccfg.capture = { "*": { args: { mode: "clear" }, result: { mode: "digest" } } };
+  const clearArgs = await createGateway(ccfg);
+  const clearCall = await clearArgs.handleCall({ name: "stripe.refund", arguments: aargs, _meta: { [APPROVAL_META_KEY]: createApproval(human, { ...abinding, expiresAt: new Date(Date.now() + 3600_000).toISOString() }) } });
+  await clearArgs.close();
+  const C = { issuerKeys: ["approval-args-clear-gateway"], principalKeys: ["approval-args-clear-principal"], logKeys: [] as string[], approvalKeys: ["human"], log: logLines(cfx.logFile) };
+  const clearBundle = bundleFile(cfx.receiptsDir, String(clearCall._meta?.[RECEIPT_META_KEY]));
+  addCase({ name: "gateway-approved-args-clear-result-private", description: "A forwarded call with an approval, under a rule that keeps the arguments whole in clear and the result private. The approved envelope stays in clear beside the clear arguments, so the signature, window, and binding checks all run and pass.", bundle: clearBundle, ...C });
+  addCase({ name: "resigned-approval-envelope-withheld-beside-clear-args", description: "The issuer re-signed the receipt with the approval envelope replaced by a commitment and the capture note naming it, while the arguments are in clear. A verifier must not pass the human signatures as committed: with the arguments public the binding could be checked, so the check fails.", bundle: resigned(clearBundle, loadPrivateKey(join(cfx.dir, "keys", "gateway.key")), (st) => {
+    (st.predicate.approval as unknown as { envelope: unknown }).envelope = withhold(st.predicate.approval!.envelope).commitment;
+    st.predicate.capture = { mode: "digest", withheld: [...(st.predicate.capture?.withheld ?? []), ["approval", "envelope"]] };
+  }), ...C });
 }
 addCase({ name: "resigned-approval-checked-at-no-offset", description: "The approval record's checkedAt and consumedAt carry no offset. Date.parse would read them as local time, so the window checks would depend on the verifier's time zone. Both verifiers refuse such a time as a structural fault.", bundle: resigned(approvedBundle, approvalIssuer, (st) => {
   st.predicate.approval!.checkedAt = st.predicate.approval!.checkedAt.replace("Z", "");

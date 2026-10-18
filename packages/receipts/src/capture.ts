@@ -471,6 +471,10 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
         const path = ["approval", f];
         // the authorization and the receipt carry the same envelope, so they carry the same commitment to it
         const earlier = prior ? getAt(prior.predicate, path) : undefined;
+        // Beside arguments that the rule keeps whole in clear, an approved envelope adds nothing: its payload equals the
+        // clear call, and the gateway checked that. It stays, so a verifier can run the binding check on it. A denied
+        // envelope may carry another call's fields, so it is withheld, unless the authorization already showed it.
+        if (f === "envelope" && !argsSide && (value.status === "approved" || (earlier !== undefined && !isCommitment(earlier)))) continue;
         if (f === "envelope" && isCommitment(earlier) && withheld.some((w) => pathKey(w) === pathKey(path))) out = setAt(out, path, earlier);
         else hide(path, v, f === "envelope" && argsSide ? argsSide.key : k);
       }

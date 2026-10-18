@@ -299,8 +299,10 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       let approvedWindow: { issuedAt: number; expiresAt: number } | undefined;
       const rule = approvalRule(tool);
       const approvalBinding = { principal: delegation.principal, agent: delegation.agent, tool, args, ...(rule?.fields ? { fields: rule.fields } : {}) };
-      // Authenticated approval statements are public evidence, like grants. Untrusted or malformed metadata must
-      // never be copied into that clear structural slot: it could carry arbitrary text from withheld arguments.
+      // Only an authenticated statement is embedded in the approval record. Untrusted or malformed metadata is never
+      // copied there: it could carry arbitrary text from withheld arguments. Under a private rule the issuer then
+      // withholds the embedded envelope as a commitment (see CLEAR_IN.approval in capture.ts), because even an
+      // authentic one carries the action fields and an unsalted digest of the arguments.
       const signedApproval = rule ? verifyApprovalStatement(approvalEnvelope, approvalKeys) : undefined;
       // Signatures lie outside the signed payload. Keep only entries that independently verify: an attacker can
       // append an untrusted signature, or a forged duplicate of a trusted key id, without invalidating the approval.
