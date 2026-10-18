@@ -31,18 +31,23 @@ const verifyHref = `/verify?sample=${sample}`;
 const command = `git clone ${repo} && cd agent-custody && bun install && bun run demo`;
 
 // The Copy button shows "Copied" for 1.5 seconds. The id says which of the two command boxes was used.
+// When the browser refuses the clipboard, the button says "Copy failed" and a note asks the visitor to select the text.
 const copied = ref("");
+const failed = ref("");
 let copyTimer: ReturnType<typeof setTimeout> | undefined;
 async function copy(id: string) {
+  let ok = true;
   try {
     await navigator.clipboard.writeText(command);
   } catch {
-    return;
+    ok = false;
   }
-  copied.value = id;
+  copied.value = ok ? id : "";
+  failed.value = ok ? "" : id;
   clearTimeout(copyTimer);
-  copyTimer = setTimeout(() => (copied.value = ""), 1500);
+  copyTimer = setTimeout(() => (copied.value = failed.value = ""), ok ? 1500 : 6000);
 }
+const label = (id: string) => (copied.value === id ? "Copied" : failed.value === id ? "Copy failed" : "Copy");
 onBeforeUnmount(() => clearTimeout(copyTimer));
 
 // The film. A chapter button seeks and plays. The timeupdate event marks the chapter that holds the playhead.
@@ -52,7 +57,7 @@ const chapters = [
   { t: 14, at: "0:14", title: "The gateway", line: "Between your agents and their tools, a signed receipt for every call." },
   { t: 24, at: "0:24", title: "How it works", line: "A signed grant, a policy check before the tool runs, a Merkle log." },
   { t: 40, at: "0:40", title: "The refund story", line: "£500 approved. Then a prompt injection asks for £5,000." },
-  { t: 72, at: "1:12", title: "The audit", line: "Months later, an auditor checks it with public keys alone." },
+  { t: 72, at: "1:12", title: "The audit", line: "Months later, an auditor checks it with public keys and a copy of the log." },
 ];
 const chapter = ref(0);
 function mark() {
@@ -123,9 +128,9 @@ const keywords = (code: string) => code.split(/(\bpermit\b|\bwhen\b)/).map((s) =
           <a href="#film">Overview</a><a href="#story">The demo</a><a href="#how">How it works</a><a href="#policies">Policies</a><a href="/use-cases">Use cases</a><a href="/pricing">Pricing</a><a href="/guide/getting-started">Docs</a>
         </nav>
         <div class="right">
-          <button class="icon-btn" type="button" :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'" @click="isDark = !isDark">
-            <svg v-if="isDark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>
-            <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" /></svg>
+          <button class="icon-btn" type="button" aria-label="Switch between light and dark mode" @click="isDark = !isDark">
+            <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>
+            <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" /></svg>
           </button>
           <a class="icon-btn" :href="repo" aria-label="agent-custody on GitHub">
             <svg viewBox="0 0 16 16" class="mark" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" /></svg>
@@ -145,8 +150,9 @@ const keywords = (code: string) => code.split(/(\bpermit\b|\bwhen\b)/).map((s) =
               <a class="btn primary" href="#run">Run the refund demo locally</a>
               <a class="btn" :href="verifyHref">Verify a receipt in your browser</a>
             </div>
-            <div class="cmd"><span class="prompt" aria-hidden="true">$</span><code>{{ command }}</code><button type="button" aria-live="polite" @click="copy('hero')">{{ copied === "hero" ? "Copied" : "Copy" }}</button></div>
-            <p class="note">Requires Node 22 and Bun. Runs four refund calls and verifies each receipt.</p>
+            <div class="cmd"><span class="prompt" aria-hidden="true">$</span><code>{{ command }}</code><button type="button" aria-live="polite" @click="copy('hero')">{{ label("hero") }}</button></div>
+          <p v-if="failed === 'hero'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
+            <p class="note">Requires Node 22 and Bun. Runs four calls through the gateway, three refunds and a payout, and verifies each receipt.</p>
             <a class="watch" href="#film"><span class="play" aria-hidden="true">▶</span>Watch the overview (1:32)</a>
           </div>
 
@@ -223,7 +229,7 @@ const keywords = (code: string) => code.split(/(\bpermit\b|\bwhen\b)/).map((s) =
       <section id="story" class="sec alt">
         <div class="wrap">
           <h2>The refund demo</h2>
-          <p class="sub"><code>bun run demo</code> runs a support agent against a test Stripe server. Each step writes a signed receipt to your disk.</p>
+          <p class="sub"><code>bun run demo</code> runs a support agent against a test Stripe server. Each call writes a signed receipt to your disk. Then the demo verifies the receipts and edits one.</p>
           <Demo />
         </div>
       </section>
@@ -306,7 +312,8 @@ const keywords = (code: string) => code.split(/(\bpermit\b|\bwhen\b)/).map((s) =
         <div class="wrap">
           <h2>Run the demo</h2>
           <p class="sub">Requires Node 22 and Bun. No account needed.</p>
-          <div class="cmd"><span class="prompt" aria-hidden="true">$</span><code>{{ command }}</code><button type="button" aria-live="polite" @click="copy('final')">{{ copied === "final" ? "Copied" : "Copy" }}</button></div>
+          <div class="cmd"><span class="prompt" aria-hidden="true">$</span><code>{{ command }}</code><button type="button" aria-live="polite" @click="copy('final')">{{ label("final") }}</button></div>
+          <p v-if="failed === 'final'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
           <div class="ctas">
             <a class="btn primary" href="/guide/getting-started">Put the gateway in front of your agent →</a>
             <a class="btn" :href="verifyHref">Verify a receipt in your browser</a>
@@ -370,6 +377,10 @@ a { color: inherit; }
 .icon-btn:hover { color: var(--ink); border-color: var(--line-2); }
 .icon-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .icon-btn svg.mark { fill: currentColor; stroke: none; }
+/* Both icons are in the markup, so the server and the client render the same tree. The html.dark class picks one. */
+.icon-btn svg.sun { display: none; }
+html.dark .icon-btn svg.sun { display: block; }
+html.dark .icon-btn svg.moon { display: none; }
 
 /* Buttons */
 .btn { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 18px; border-radius: 8px; font-weight: 500; font-size: 15px; text-decoration: none; white-space: nowrap; border: 1px solid var(--line-2); background: var(--bg); color: var(--ink); }
@@ -394,7 +405,7 @@ h2 { font-size: clamp(28px, 4vw, 36px); line-height: 1.15; letter-spacing: -.025
 .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
 .cmd { display: flex; align-items: center; gap: 12px; background: var(--term); color: var(--term-ink); border-radius: 10px; padding: 12px 12px 12px 16px; font: 13.5px var(--mono); max-width: 560px; }
 .cmd .prompt { color: #a8a29e; flex: none; }
-.cmd code { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cmd code { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
 .cmd button { flex: none; min-width: 64px; font: 12px var(--sans); background: #292524; color: var(--term-ink); border: 1px solid #44403c; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
 .cmd button:hover { background: #44403c; }
 .note { font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }

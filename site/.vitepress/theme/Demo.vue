@@ -1,7 +1,9 @@
 <script setup lang="ts">
 // The refund story. Six steps on the left, one terminal on the right. A step shows the output that
 // `bun run demo` printed for it. The lines come from one real run of packages/receipts/scripts/demo.ts.
-// Where a step leaves out lines, a line "… N more checks" says how many. No timers, no animation.
+// Where a step leaves out PASS lines, a line "… N more checks" (or "… N checks") says how many.
+// Steps 1 to 4 each join a call from section 1 of the demo with the auditor's output for its receipt from section 2.
+// Step 5 shows section 2 with the checks counted, not listed. No timers, no animation.
 // Each step is a button with aria-pressed. Exactly one step is pressed.
 import { computed, ref } from "vue";
 
@@ -25,6 +27,7 @@ const receiptOk = [
   "tool            observed    stripe.refund",
 ];
 const policyRows = "policy          observed    deny [] policy ba4e4461ffc4";
+const issuer = "ISSUER: gateway, enforced outside the agent's process; the agent could neither skip nor forge this receipt";
 const consumed = "consumed        observed    (no facts shown before this call)";
 
 const steps: Step[] = [
@@ -38,13 +41,16 @@ const steps: Step[] = [
       l("exec", '  EXECUTED {"refund_id":"re_b5db9a9e","customer_id":"cust_123","amount":50000,"status":"succeeded"}'),
       l("muted", "  receipt a8094805-e7d0-48da-bf05-9dcfdfe7a1dd"),
       gap,
+      l("plain", "--- a8094805-e7d0-48da-bf05-9dcfdfe7a1dd"),
       l("pass", "PASS  receipt signature (issuer key)  (keyid 13221dd037cb)"),
       l("pass", "PASS  delegation signature (principal key)  (signed by 0b715318f782)"),
       l("pass", "PASS  policy decision consistent with execution  (allow -> executed)"),
       l("pass", "PASS  log inclusion proof  (leaf 0 of 1, root 4901cb4cdc68)"),
-      l("muted", "… 14 more checks"),
+      l("muted", "… 15 more checks"),
       gap,
       l("ok", "RESULT: VERIFIED"),
+      gap,
+      l("plain", issuer),
       gap,
       ...table([
         ...receiptOk,
@@ -66,13 +72,16 @@ const steps: Step[] = [
       l("deny", "  DENIED   Denied by policy: no permit policy matched (receipt aa3e91c0-97ed-4f15-bfbf-ad73c524709d)"),
       l("muted", "  receipt aa3e91c0-97ed-4f15-bfbf-ad73c524709d"),
       gap,
+      l("plain", "--- aa3e91c0-97ed-4f15-bfbf-ad73c524709d"),
       l("pass", "PASS  receipt signature (issuer key)  (keyid 13221dd037cb)"),
       l("pass", "PASS  delegation signature (principal key)  (signed by 0b715318f782)"),
       l("pass", "PASS  policy decision consistent with execution  (deny -> denied)"),
       l("pass", "PASS  log inclusion proof  (leaf 1 of 2, root 322f3ee01785)"),
-      l("muted", "… 13 more checks"),
+      l("muted", "… 14 more checks"),
       gap,
       l("ok", "RESULT: VERIFIED"),
+      gap,
+      l("plain", issuer),
       gap,
       ...table([
         ...receiptOk,
@@ -94,13 +103,16 @@ const steps: Step[] = [
       l("deny", "  DENIED   Denied by policy: no permit policy matched (receipt 7996a636-53c4-47d3-9ae5-5b79e2605c7e)"),
       l("muted", "  receipt 7996a636-53c4-47d3-9ae5-5b79e2605c7e"),
       gap,
+      l("plain", "--- 7996a636-53c4-47d3-9ae5-5b79e2605c7e"),
       l("pass", "PASS  receipt signature (issuer key)  (keyid 13221dd037cb)"),
       l("pass", "PASS  delegation signature (principal key)  (signed by 0b715318f782)"),
       l("pass", "PASS  policy decision consistent with execution  (deny -> denied)"),
       l("pass", "PASS  log inclusion proof  (leaf 2 of 3, root 3388f2cb303e)"),
-      l("muted", "… 13 more checks"),
+      l("muted", "… 14 more checks"),
       gap,
       l("ok", "RESULT: VERIFIED"),
+      gap,
+      l("plain", issuer),
       gap,
       ...table([
         ...receiptOk,
@@ -122,14 +134,17 @@ const steps: Step[] = [
       l("deny", '  DENIED   Denied by policy: tool "stripe.payout" is not in the delegation scopes (receipt 96809a6f-64df-4a8a-b55f-79360966e029)'),
       l("muted", "  receipt 96809a6f-64df-4a8a-b55f-79360966e029"),
       gap,
+      l("plain", "--- 96809a6f-64df-4a8a-b55f-79360966e029"),
       l("pass", "PASS  receipt signature (issuer key)  (keyid 13221dd037cb)"),
       l("pass", "PASS  delegation signature (principal key)  (signed by 0b715318f782)"),
       l("pass", "PASS  executed tool within delegated scope  (stripe.payout not in [customer.lookup, stripe.refund])"),
       l("pass", "PASS  policy decision consistent with execution  (deny -> denied)"),
       l("pass", "PASS  log inclusion proof  (leaf 3 of 4, root 53d94b1804f7)"),
-      l("muted", "… 12 more checks"),
+      l("muted", "… 13 more checks"),
       gap,
       l("ok", "RESULT: VERIFIED"),
+      gap,
+      l("plain", issuer),
       gap,
       ...table([
         "principal       attested    user_456",
@@ -151,10 +166,26 @@ const steps: Step[] = [
     lines: [
       l("muted", "======== 2. auditor verifies every receipt with public keys and a copy of the log"),
       gap,
-      l("ok", "a8094805-e7d0-48da-bf05-9dcfdfe7a1dd  RESULT: VERIFIED"),
-      l("ok", "aa3e91c0-97ed-4f15-bfbf-ad73c524709d  RESULT: VERIFIED"),
-      l("ok", "7996a636-53c4-47d3-9ae5-5b79e2605c7e  RESULT: VERIFIED"),
-      l("ok", "96809a6f-64df-4a8a-b55f-79360966e029  RESULT: VERIFIED"),
+      l("plain", "--- a8094805-e7d0-48da-bf05-9dcfdfe7a1dd"),
+      l("muted", "… 19 checks"),
+      gap,
+      l("ok", "RESULT: VERIFIED"),
+      gap,
+      l("plain", "--- aa3e91c0-97ed-4f15-bfbf-ad73c524709d"),
+      l("muted", "… 18 checks"),
+      gap,
+      l("ok", "RESULT: VERIFIED"),
+      gap,
+      l("plain", "--- 7996a636-53c4-47d3-9ae5-5b79e2605c7e"),
+      l("muted", "… 18 checks"),
+      gap,
+      l("ok", "RESULT: VERIFIED"),
+      gap,
+      l("plain", "--- 96809a6f-64df-4a8a-b55f-79360966e029"),
+      l("muted", "… 18 checks"),
+      gap,
+      l("ok", "RESULT: VERIFIED"),
+      gap,
     ],
   },
   {

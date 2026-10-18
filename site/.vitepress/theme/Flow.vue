@@ -44,9 +44,9 @@
 .node text.sub { fill: var(--vp-c-text-2); font-size: 11px; font-weight: 400; }
 .node.gw rect { stroke: var(--vp-c-text-2); }
 .node.receipt rect { stroke: var(--vp-c-brand-1); stroke-width: 1.5; }
-.edge { fill: none; stroke: var(--vp-c-text-3); stroke-width: 1.2; }
+.edge { fill: none; stroke: var(--vp-c-text-2); stroke-width: 1.2; }
 .edge.dashed { stroke-dasharray: 4 4; }
-.ahp { fill: var(--vp-c-text-3); }
+.ahp { fill: var(--vp-c-text-2); }
 .lbl { fill: var(--vp-c-text-2); font-size: 11px; text-anchor: middle; }
 .lbl.start { text-anchor: start; }
 .flow figcaption { margin-top: .8rem; font-size: .9rem; color: var(--vp-c-text-2); line-height: 1.55; }
