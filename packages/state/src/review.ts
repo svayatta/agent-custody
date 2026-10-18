@@ -8,7 +8,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { verifyBundle, type ReceiptBundle, type VerifyOptions, type VerifyResult } from "@agent-custody/receipts";
+import { structuralProblem, verifyBundle, type ReceiptBundle, type VerifyOptions, type VerifyResult } from "@agent-custody/receipts";
 import { buildActionPack, decodeStatement, formatExplain, type ActionPack } from "./explain.ts";
 import type { Ledger } from "./ledger.ts";
 import { matchesReceiptSearch, receiptSearchTerms, validateReceiptSearch, type ReceiptSearch } from "./search.ts";
@@ -68,7 +68,7 @@ export function scanReceipts(o: ReviewOptions, query: ReceiptSearch = o.search ?
         if (!terms.truncated || !matchesReceiptSearch(p, others)) continue;
       }
       const file = f.slice(0, -".json".length);
-      const problem = file !== p.receiptId ? "file name does not match receipt id" : !RECEIPT_ID.test(file) ? "receipt id is malformed" : undefined;
+      const problem = structuralProblem(p) ?? (file !== p.receiptId ? "file name does not match receipt id" : !RECEIPT_ID.test(file) ? "receipt id is malformed" : undefined);
       const verified = problem ? false : verifyOf(bundle, o)?.ok ?? null;
       rows.push({ receiptId: String(p.receiptId), timestamp: String(p.timestamp), tool: p.tool.name, status: p.reconciliation ? "reconciled" : p.execution.status, agent: p.agent.id, principal: p.principal.id, issuer: p.issuer.kind, verified, ...terms, file, ...(problem ? { problem } : {}) });
     } catch {
@@ -211,9 +211,16 @@ ${explainHtml(formatExplain(pack, verification, !!o.ledger))}
   return page(`${p.tool.name} · ${String(p.receiptId).slice(0, 8)}`, body);
 }
 
-/** The page for a record that cannot be shown, for example when a part that every check reads is missing. */
-function renderDamaged(file: string, error: unknown, backLink: string, rawLink: string): string {
-  const reason = error instanceof Error ? error.message : String(error);
+/**
+ * Why the record in this file cannot be shown, or null. The verifier's own structural check decides it from the record, so
+ * an error from the ledger or the disk is never taken for a defect of the record.
+ */
+function recordProblem(receiptsDir: string, id: string): string | null {
+  return structuralProblem(decodeStatement(JSON.parse(readFileSync(join(receiptsDir, `${id}.json`), "utf8")) as ReceiptBundle).predicate);
+}
+
+/** The page for a record that cannot be shown: a part that every check reads is missing or has the wrong type. */
+function renderDamaged(file: string, reason: string, backLink: string, rawLink: string): string {
   return page(`Damaged record ${file.slice(0, 8)}`, `
 <p><a href="${esc(backLink)}">All receipts</a></p>
 <h1>A record that cannot be shown <span class="bad">NOT VERIFIED</span></h1>
@@ -254,15 +261,10 @@ export function reviewHandler(o: ReviewOptions): (req: IncomingMessage, res: Ser
         return send(200, m[2].endsWith('html') ? "text/html; charset=utf-8" : "application/json", m[2].endsWith('html') ? renderCaseFile(file) : JSON.stringify(file, null, 2), true);
       }
       if (m[2]) return send(200, "application/json", readFileSync(join(o.receiptsDir, `${m[1]}.json`), "utf8"));
-      try {
-        const pack = await buildActionPack(o.receiptsDir, m[1]!, o.ledger);
-        return send(200, "text/html; charset=utf-8", renderReceipt(pack, verifyOf(pack.receipt, o), o, "/", `/r/${m[1]}.json`));
-      } catch (e) {
-        // A part that is missing or has the wrong type makes a read throw a TypeError. That is a defect of the record.
-        // A ledger or I/O error is not, and it stays an error (404 for a missing file, else 500).
-        if (!(e instanceof TypeError)) throw e;
-        return send(200, "text/html; charset=utf-8", renderDamaged(m[1]!, e, "/", `/r/${m[1]}.json`));
-      }
+      const defect = recordProblem(o.receiptsDir, m[1]!);
+      if (defect) return send(200, "text/html; charset=utf-8", renderDamaged(m[1]!, defect, "/", `/r/${m[1]}.json`));
+      const pack = await buildActionPack(o.receiptsDir, m[1]!, o.ledger);
+      return send(200, "text/html; charset=utf-8", renderReceipt(pack, verifyOf(pack.receipt, o), o, "/", `/r/${m[1]}.json`));
     } catch (e) {
       return send((e as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 500, "text/plain", e instanceof Error ? e.message : String(e));
     }
@@ -295,20 +297,19 @@ export async function writeReview(o: ReviewOptions, outDir: string): Promise<{ r
   writeFileSync(join(outDir, "index.html"), renderIndex(rows, o, (id) => `r/${id}.html`, true, unreadable));
   // A file name that is not a well formed id has no page. Its row is in the index, flagged.
   for (const r of rows.filter((row) => RECEIPT_ID.test(row.file))) {
-    try {
-      const file = await buildCaseFile(o, r.file);
-      const pack = file.pack;
-      writeFileSync(join(outDir, "r", `${r.file}.html`), renderReceipt(pack, verifyOf(pack.receipt, o), o, "../index.html", `${r.file}.json`));
-      writeFileSync(join(outDir, "r", `${r.file}.json`), JSON.stringify(pack.receipt, null, 2));
-      writeFileSync(join(outDir, "r", `${r.file}.case.json`), JSON.stringify(file, null, 2));
-      writeFileSync(join(outDir, "r", `${r.file}.case.html`), renderCaseFile(file));
-    } catch (e) {
-      // A defect of the record (a TypeError) must not stop the export. Its page says NOT VERIFIED and why, and it has no case file.
-      // A ledger or I/O error is not a defect of the record, and it fails the export.
-      if (!(e instanceof TypeError)) throw e;
-      writeFileSync(join(outDir, "r", `${r.file}.html`), renderDamaged(r.file, e, "../index.html", `${r.file}.json`));
+    // A record with a structural defect must not stop the export. Its page says NOT VERIFIED and why, and it has no case file.
+    const defect = recordProblem(o.receiptsDir, r.file);
+    if (defect) {
+      writeFileSync(join(outDir, "r", `${r.file}.html`), renderDamaged(r.file, defect, "../index.html", `${r.file}.json`));
       writeFileSync(join(outDir, "r", `${r.file}.json`), readFileSync(join(o.receiptsDir, `${r.file}.json`), "utf8"));
+      continue;
     }
+    const file = await buildCaseFile(o, r.file);
+    const pack = file.pack;
+    writeFileSync(join(outDir, "r", `${r.file}.html`), renderReceipt(pack, verifyOf(pack.receipt, o), o, "../index.html", `${r.file}.json`));
+    writeFileSync(join(outDir, "r", `${r.file}.json`), JSON.stringify(pack.receipt, null, 2));
+    writeFileSync(join(outDir, "r", `${r.file}.case.json`), JSON.stringify(file, null, 2));
+    writeFileSync(join(outDir, "r", `${r.file}.case.html`), renderCaseFile(file));
   }
   return { receipts: rows.length };
 }

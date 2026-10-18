@@ -181,11 +181,18 @@ describe("a record that was changed after it was issued", () => {
     const good = save("gateway-precommit-executed", () => {});
     const noReasons = save("gateway-executed", (p) => { delete p.policy.reasons; });
     const wrongType = save("gateway-executed-proto-key", (p) => { p.timestamp = { not: "a time" }; });
+    // A timestamp that is a string but not a date breaks nothing that a page reads, so the record is not damaged.
+    const oddTime = save("gateway-private-clear-result-upstream-attested", (p) => { p.timestamp = "not a date"; });
     const o = { receiptsDir: dir, keys };
 
     const out = join(dir, "site");
-    expect(await writeReview(o, out)).toEqual({ receipts: 3 });
+    expect(await writeReview(o, out)).toEqual({ receipts: 4 });
     expect(readFileSync(join(out, "r", `${good}.html`), "utf8")).toContain("RESULT: VERIFIED");
+    const odd = readFileSync(join(out, "r", `${oddTime}.html`), "utf8");
+    expect(odd).toContain("RESULT: NOT VERIFIED");
+    expect(odd).not.toContain("the record has the parts of a receipt");
+    expect(existsSync(join(out, "r", `${oddTime}.case.json`))).toBe(true);
+    expect(existsSync(join(out, "r", `${noReasons}.case.json`))).toBe(false);
     for (const id of [noReasons, wrongType]) {
       const page = readFileSync(join(out, "r", `${id}.html`), "utf8");
       expect(page).toContain("RESULT: NOT VERIFIED");
@@ -206,22 +213,25 @@ describe("a record that was changed after it was issued", () => {
     }
   });
 
-  it("keeps a ledger outage an error: the export fails and the live page answers 500, never a NOT VERIFIED page", async () => {
+  it.each([
+    ["an outage", new Error("connect ECONNREFUSED 127.0.0.1:5432")],
+    ["a TypeError from the adapter", new TypeError("Cannot read properties of undefined (reading 'rows')")],
+  ])("keeps %s in the ledger an error: the export fails and the live page answers 500, never a NOT VERIFIED page", async (_name, failure) => {
     const dir = mkdtempSync(join(tmpdir(), "review-outage-"));
     const bundle = structuredClone(vector.bundle) as ReceiptBundle;
     const id = decodeStatement(bundle).predicate.receiptId;
     writeFileSync(join(dir, `${id}.json`), JSON.stringify(bundle));
-    const down = () => Promise.reject(new Error("connect ECONNREFUSED 127.0.0.1:5432"));
+    const down = () => Promise.reject(failure);
     const ledger = { get: down, facts: down, history: down } as unknown as Ledger;
     const o = { receiptsDir: dir, keys, ledger };
 
-    await expect(writeReview(o, join(dir, "site"))).rejects.toThrow("ECONNREFUSED");
+    await expect(writeReview(o, join(dir, "site"))).rejects.toThrow(failure.message);
     expect(existsSync(join(dir, "site", "r", `${id}.html`))).toBe(false);
     const running = await serveReview(o, { port: 0 });
     try {
       const res = await fetch(new URL(`r/${id}`, running.url));
       expect(res.status).toBe(500);
-      expect(await res.text()).toContain("ECONNREFUSED");
+      expect(await res.text()).toContain(failure.message);
     } finally {
       await running.close();
     }
