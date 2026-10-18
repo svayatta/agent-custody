@@ -34,7 +34,7 @@ A separate process between the agent and its tools. The agent connects to it as 
 | `policyFile` | path | the Cedar policy; its SHA-256 is in every receipt |
 | `facts` | array | lookups the gateway makes itself before deciding: `name` under `context.facts`, the upstream `tool` to call, `args` templates where `"$args.<key>"` copies the agent's argument, `forTools` the intercepted tools that trigger it, `optional` skips the lookup when the template's argument is absent |
 | `precommit` | array of tool names or `["*"]` | consequential tools: the authorization is logged before the call is forwarded, and the call is withheld if the log will not take it or answers with a head or proof that does not verify |
-| `approvals` | `{ trustedKeys: path[], usedDir: path, tools: [{ tool, minApprovers?: 1 \| 2, fields?: { amount?, currency?, beneficiary? } }] }`, *optional* | exact-action human approval rules; nonempty trust list and tools, unique tool names; paths resolve relative to this file. Defaults to one trusted signer. `"*"` covers all agent calls, an exact rule takes precedence. [Below](#human-approvals) |
+| `approvals` | `{ trustedKeys: path[], usedDir: path, maxLifetimeSeconds?: number, tools: [{ tool, minApprovers?: 1 \| 2, fields?: { amount?, currency?, beneficiary? } }] }`, *optional* | exact-action human approval rules; nonempty trust list and tools, unique tool names; paths resolve relative to this file. Defaults to one trusted signer and a lifetime cap of 3600 seconds (`maxLifetimeSeconds`, a positive integer: the gateway refuses an approval whose `expiresAt` minus `issuedAt` is longer). `"*"` covers all agent calls, an exact rule takes precedence. [Below](#human-approvals) |
 | `revokedGrants` | path, *optional* | a JSON array of grant digests (sha256 over the grant's signed payload), re-read whenever the file changes and checked on every call against every link of the grant's chain; `agent-custody revoke` appends to it. A file that cannot be read denies every call |
 | `capture` | map of tool name or `"*"` to `{ args?, result?, facts? }`, *optional* | private evidence: what the receipt file carries of each tool's arguments, result, and facts. Each side is `{ "mode": "clear" \| "digest" \| "encrypted", "clear"?: [fields] }`: `clear` records the value (the default); `digest` withholds every top-level field not listed in `clear` and leaves a salted sha256 commitment in its place; `encrypted` does the same and carries the value encrypted under the capture key. Digests and signatures are always over the whole call, and the policy decides on the real values. [Below](#private-evidence) |
 | `captureKeyEnv` | environment variable name, *optional* | the 32-byte key (64 hex characters or base64) that encrypts withheld fields in mode `encrypted`, read at startup and never from the file; a rule in mode `encrypted` without it fails at startup |
@@ -51,6 +51,7 @@ A separate process between the agent and its tools. The agent connects to it as 
 { "approvals": {
   "trustedKeys": ["keys/approver.pub", "keys/second-approver.pub"],
   "usedDir": "approvals-used",
+  "maxLifetimeSeconds": 900,
   "tools": [{ "tool": "stripe.refund", "minApprovers": 2, "fields": { "beneficiary": "customer_id" } }]
 } }
 ```
@@ -63,7 +64,7 @@ The first check runs before facts and Cedar; failures issue denial receipts even
 
 `usedDir` must persist across restarts and be shared by every gateway accepting these approvals, on a filesystem with consistent exclusive creation. A consumed id stays burned after crashes, log failures, or unknown upstream outcomes. Do not remove records while the approvals can remain valid. No automatic pruning or outcome reconciliation is supplied. An offline verifier checks approval signatures and action binding with separately trusted [`approvalKeys`](./verify#verify); it cannot establish global single use.
 
-The envelope stays clear under capture rules. Its action fields and unsalted full-argument digest can disclose private values or confirm guesses despite receipt encryption. A forwarded call with withheld arguments needs disclosure or the capture key to verify the full approval binding. The [approval guide](/receipts/approvals) covers the complete workflow and privacy boundary.
+Under a private capture rule the receipt withholds `approval.envelope` and `approval.reason` as commitments, because the envelope carries the action fields and an unsalted full-argument digest that would disclose private values or confirm guesses. The status, times, and signer key ids stay in clear. Verifying the signatures and the full binding needs the capture key or a disclosure. The [approval guide](/receipts/approvals) covers the complete workflow and privacy boundary.
 
 ### A REST API as an upstream
 

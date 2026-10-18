@@ -122,7 +122,7 @@ describe("independent approval verification", () => {
     expect(failing(await issuer.issue(p))).toContain("authorization approval was valid");
   });
 
-  it("keeps authenticated approvals clear but requires disclosed or decrypted private args for binding", async () => {
+  it("withholds the approval envelope under a private rule, and checks it again with the capture key", async () => {
     const key = Buffer.alloc(32, 7);
     const rules = { "stripe.refund": { args: { mode: "encrypted" as const, clear: ["amount", "currency", "recipient"] } } };
     const privateIssuer = createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules, key } });
@@ -131,10 +131,88 @@ describe("independent approval verification", () => {
     p.authorization = await privateIssuer.authorize(head);
     const privateBundle = await privateIssuer.issue(p);
     const visible = JSON.parse(Buffer.from(privateBundle.envelope.payload, "base64").toString()).predicate as ReceiptPredicate;
-    expect(visible.approval).toEqual(record);
-    expect(visible.capture!.withheld.some((w) => w[0] === "approval")).toBe(false);
-    expect(failing(privateBundle)).toEqual(["approval payload binding"]);
-    expect(verifyBundle(privateBundle, { ...opts, captureKey: key }).checks.filter((c) => !c.ok)).toEqual([]);
+    // The gateway's own observations stay in clear. The envelope, which the agent supplied, is one commitment.
+    const { envelope, ...observed } = record;
+    expect(visible.approval).toEqual({ ...observed, envelope: expect.objectContaining({ $custody: "encrypted" }) });
+    expect(visible.capture!.withheld).toContainEqual(["approval", "envelope"]);
+    expect(visible.capture!.withheld.some((w) => w[0] === "approval" && w.length === 1)).toBe(false);
+    const authorized = JSON.parse(Buffer.from((visible.authorization!.envelope).payload, "base64").toString()).predicate as ReceiptPredicate;
+    expect(authorized.approval!.envelope).toEqual(visible.approval!.envelope);
+    // Without the key, the checks pass as committed. With it, they run on the decrypted envelope and arguments.
+    expect(failing(privateBundle)).toEqual([]);
+    const keyed = verifyBundle(privateBundle, { ...opts, captureKey: key });
+    expect(keyed.checks.filter((c) => !c.ok)).toEqual([]);
+    expect(keyed.checks.find((c) => c.name === "approval payload binding")?.detail).toMatch(/principal, agent, tool, full arguments/);
+    expect(keyed.checks.find((c) => c.name === "authorization approval was valid")?.detail).toMatch(/must record an approved statement/);
+    // A decrypted envelope for other arguments still fails the binding.
+    const other = structuredClone(base);
+    other.request.args.recipient = "acct_43";
+    other.request.argsDigest = digestOf(other.request.args);
+    expect(verifyBundle(await privateIssuer.issue(other), { ...opts, captureKey: key }).checks.filter((c) => !c.ok).map((c) => c.name)).toContain("approval payload binding");
+  });
+
+  it("keeps the action fields and the unsalted argument digest out of a digest-mode receipt", async () => {
+    const privateIssuer = createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules: { "stripe.refund": { args: { mode: "digest" as const } } } } });
+    const p = structuredClone(base);
+    p.request.args.recipient = "IBAN-GB29-SECRET";
+    p.request.argsDigest = digestOf(p.request.args);
+    p.approval!.envelope = dsseCountersign(createApproval(human, { ...binding, args: p.request.args, issuedAt: at, expiresAt: new Date(Date.parse(at) + 3600_000).toISOString() }), secondHuman);
+    const text = Buffer.from((await privateIssuer.issue(p)).envelope.payload, "base64").toString();
+    // The envelope payload is base64 inside the statement: look at it decoded, as a reader of the receipt would.
+    const shown = (JSON.parse(text).predicate as ReceiptPredicate).approval!.envelope?.payload;
+    const decoded = shown ? Buffer.from(shown, "base64").toString() : "";
+    for (const view of [text, decoded]) {
+      expect(view).not.toContain("IBAN-GB29-SECRET");
+      expect(view).not.toContain(digestOf(p.request.args));
+    }
+    // The signed approval payload carries both. It is the reason to withhold the envelope.
+    expect(Buffer.from(p.approval!.envelope!.payload, "base64").toString()).toContain(digestOf(p.request.args));
+    expect(Buffer.from(p.approval!.envelope!.payload, "base64").toString()).toContain("IBAN-GB29-SECRET");
+  });
+
+  it("withholds the refusal reason of an approval under a private rule", async () => {
+    const privateIssuer = createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules: { "stripe.refund": { args: { mode: "digest" as const } } } } });
+    const p = structuredClone(base);
+    p.approval = { requiredApprovers: 2, checkedAt: at, status: "denied", reason: "approval amount does not match this call", approverKeyids: [], provenance: "observed" };
+    p.policy!.decision = "deny";
+    p.execution = { status: "denied", reason: "approval rejected", provenance: "observed" };
+    const privateBundle = await privateIssuer.issue(p);
+    const visible = JSON.parse(Buffer.from(privateBundle.envelope.payload, "base64").toString()).predicate as ReceiptPredicate;
+    expect(visible.approval!.reason).toEqual(expect.objectContaining({ $custody: "withheld" }));
+    expect(failing(privateBundle, { ...opts, approvalKeys: [] })).toEqual([]);
+  });
+
+  it.each([["in clear", undefined], ["under a private args rule", { "stripe.refund": { args: { mode: "digest" as const } } }]])("passes a refusal that holds a valid approval without approval keys, %s", async (_name, rules) => {
+    const refusingIssuer = rules ? createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules } }) : issuer;
+    for (const execution of [
+      { status: "denied" as const, reason: "policy denied the action", provenance: "observed" as const },
+      { status: "withheld" as const, reason: "the grant was revoked after the approval was consumed", provenance: "observed" as const },
+    ]) {
+      const p = structuredClone(base);
+      p.policy!.decision = execution.status === "denied" ? "deny" : "allow";
+      p.execution = execution;
+      expect(failing(await refusingIssuer.issue(p), { ...opts, approvalKeys: [] })).toEqual([]);
+    }
+    // The same record on a forwarded call needs the keys. Under a private rule the envelope is a commitment: nothing to check.
+    const forwardedFailing = failing(await refusingIssuer.issue(structuredClone(base)), { ...opts, approvalKeys: [] });
+    if (rules) expect(forwardedFailing).toEqual([]);
+    else expect(forwardedFailing).toContain("approval signatures (human keys)");
+  });
+
+  it("passes the approval binding as committed when the arguments are withheld, as the args digest does", async () => {
+    const privateIssuer = createIssuer(issuerKey, fx.receiptsDir, fx.logFile, { capture: { rules: { "stripe.refund": { args: { mode: "digest" as const } } } } });
+    const p = structuredClone(base);
+    p.approval!.envelope = dsseCountersign(createApproval(human, { ...binding, issuedAt: at, expiresAt: new Date(Date.parse(at) + 3600_000).toISOString() }), secondHuman);
+    expect(failing(await privateIssuer.issue(p))).toEqual([]);
+  });
+
+  it.each(["checkedAt", "consumedAt"] as const)("rejects an approval time without an offset: %s", async (field) => {
+    // Date.parse reads such a time as local time, so the window checks would depend on the verifier's time zone.
+    for (const time of [at.replace("Z", ""), at.replace("T", " "), at.slice(0, 16)]) {
+      const p = structuredClone(base);
+      p.approval![field] = time;
+      expect(failing(await issuer.issue(p))).toContain("structural parts in clear");
+    }
   });
 
   it("never allows capture to hide an approval's status or signatures", () => {

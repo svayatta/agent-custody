@@ -80,6 +80,8 @@ const FactSchema = z.object({
 const ApprovalsSchema = z.object({
   trustedKeys: z.array(z.string().min(1)).min(1),
   usedDir: z.string().min(1),
+  /** The longest lifetime (expiresAt minus issuedAt) that the gateway accepts. The signer chooses the expiry, and this caps it. Default: 3600. */
+  maxLifetimeSeconds: z.number().int().positive().optional(),
   tools: z.array(z.object({
     tool: z.string().min(1),
     minApprovers: z.union([z.literal(1), z.literal(2)]).default(1),

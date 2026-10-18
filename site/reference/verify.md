@@ -12,7 +12,7 @@ agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principa
 | --- | --- |
 | `--issuer-key` (repeatable) | keys trusted to issue receipts: gateway keys, SDK application keys. `--gateway-key` is an alias |
 | `--principal-key` (repeatable) | keys whose grants are accepted; may be omitted for SDK receipts |
-| `--approval-key` (repeatable) | human keys trusted to sign exact-action approvals; required to validate a forwarded call carrying approval evidence. Never falls back to issuer or principal keys |
+| `--approval-key` (repeatable) | human keys trusted to sign exact-action approvals; required to validate a forwarded call carrying approval evidence; a refusal needs none. Never falls back to issuer or principal keys |
 | `--log-key` / `--log-url` | the key of a log run by someone else, given as a file or fetched from the log's key document and pinned by keyid |
 | `--log-id` | every tree head must name this log |
 | `--upstream-key` | an upstream that signs its results; the execution then verifies as attested |
@@ -30,7 +30,7 @@ Exit 0 when every check passes, 1 otherwise. The text report is one line per che
 
 In code: `verifyBundle(bundle, { issuerKeys, principalKeys, approvalKeys?, logKeys?, upstreamKeys?, providerSecrets?, logFile?, logId?, disclosed?, captureKey? }): { ok, checks, statement }` and `formatReport(result): string`. Keys are `PublicKeyRef`s from `loadPublicKey(path)` or `publicKeyFromPem(pem)`; `fetchLogKeys(url)` returns `{ doc, keys }` from a key document.
 
-An approval record makes its checks mandatory for a forwarded call, even when `approvalKeys` is empty. A refusal receipt can verify without endorsing the invalid approval that caused the refusal. The browser verifier takes a separate human approval key input and cannot restore hidden arguments; use the Node verifier with `--disclose` or `--capture-key-env` for those. The signed envelope stays in clear under capture rules and contains action fields plus an unsalted argument digest, so it can reveal private values or confirm guesses. See [human approvals](/receipts/approvals). Offline verification cannot prove that the approval was never used elsewhere; single use relies on the gateway's persistent shared consumption store.
+An approval record makes its checks mandatory for a forwarded call, even when `approvalKeys` is empty. A refusal receipt, such as a Cedar denial after a valid approval, runs only `approval consistent with execution` and verifies without approval keys. The browser verifier takes a separate human approval key input and cannot restore hidden values; use the Node verifier with `--disclose` or `--capture-key-env` for those. Under a private capture rule the receipt withholds the signed envelope, which contains action fields plus an unsalted argument digest, so the approval checks pass as committed until it is restored. See [human approvals](/receipts/approvals). Offline verification cannot prove that the approval was never used elsewhere; single use relies on the gateway's persistent shared consumption store.
 
 ### The checks
 
@@ -47,8 +47,8 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 | executed tool within delegated scope | if the tool ran, the grant covered it |
 | principal is claimed, not attested | SDK receipts: the principal is a config string and labelled so |
 | disclosure names this receipt | only with `--disclose`: the file's `receiptId` is this receipt's |
-| approval signatures (human keys) | a forwarded call carrying an approval record has the required number of distinct signatures from separately trusted `approvalKeys` |
-| approval payload binding | that approval names this principal, agent, tool, complete arguments, and mapped amount/currency/beneficiary. If any argument remains withheld, this fails until disclosed or decrypted; a salted receipt digest alone cannot establish the unsalted approval binding |
+| approval signatures (human keys) | a forwarded call carrying an approval record has the required number of distinct signatures from separately trusted `approvalKeys`. A withheld envelope passes as committed until it is disclosed or decrypted |
+| approval payload binding | that approval names this principal, agent, tool, complete arguments, and mapped amount/currency/beneficiary. If any argument remains withheld, this passes as committed until the arguments are disclosed or decrypted, as `request args digest` does |
 | approval valid at forward time | the recorded check and consumption occurred inside the approval validity window |
 | approval consistent with execution | forwarded calls carrying approval evidence have an approved, consumed record with matching signer observations; denied or withheld calls can verify as authentic refusals despite an invalid approval |
 | request args digest | the arguments match their digest (salted from the field salts when any argument is withheld) and the statement's subject: recomputed when they are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when values are withheld and neither is given it passes as committed, the detail saying "committed, not recomputed" and how many values are withheld; a path the note names that holds no commitment, or a disclosure that contradicts a commitment, fails it with the path named |
@@ -61,7 +61,7 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 | policy decision consistent with execution | an enforced `deny` never sits beside `executed`; a `deny` with `enforced: false` (observe mode) may, and the detail says so |
 | authorization … (five checks) | pre-committed calls: the authorization verifies, names this call, was allowed, is included in the log, and precedes the receipt leaf |
 | authorization carries this approval | the precommit and receipt carry the same human approval envelope, threshold, and field mapping |
-| authorization approval was valid | the precommit itself recorded an approved statement, distinct trusted signer observations, and a check inside the signed approval window |
+| authorization approval was valid | for a forwarded call, the precommit itself recorded an approved statement, distinct trusted signer observations, and a check inside the signed approval window |
 | tree head signature, tree head names the expected log | the head was signed by an issuer or log key, and by the log the verifier expected |
 | log inclusion proof | the leaf is in the tree the head describes |
 | log file root matches | with `--log`, the copy's root at that size equals the head's |

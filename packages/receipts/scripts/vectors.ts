@@ -153,6 +153,35 @@ for (const malformed of ["fractional-amount", "unknown-field", "bad-date"] as co
   st.predicate.approval!.envelope = dsseCountersign(dsseSign(APPROVAL_TYPE, value, human), secondHuman);
 }), ...A, log: alog });
 
+// A refusal that carried a valid approval, and an approved call under a private args rule. The refusal needs no human
+// keys. Under the private rule the approval envelope is a commitment, so its checks pass as committed.
+for (const variant of ["clear", "private"] as const) {
+  const vfx = buildFixture(mkdtempSync(join(tmpdir(), `vectors-approval-${variant}-`)));
+  key(`approval-${variant}-gateway`, vfx.gatewayPub);
+  key(`approval-${variant}-principal`, vfx.principalPub);
+  const vcfg = loadConfig(vfx.configFile);
+  vcfg.approvals = { trustedKeys: [humanFiles.pubFile], usedDir: join(vfx.dir, "used-approvals"), tools: [{ tool: "stripe.refund", minApprovers: 1 }] };
+  vcfg.precommit = ["stripe.refund"];
+  if (variant === "private") vcfg.capture = { "*": { args: { mode: "digest" } } };
+  const approval = () => ({ [APPROVAL_META_KEY]: createApproval(human, { ...abinding, expiresAt: new Date(Date.now() + 3600_000).toISOString() }) });
+  const permitting = await createGateway(vcfg);
+  const forwardedCall = await permitting.handleCall({ name: "stripe.refund", arguments: aargs, _meta: approval() });
+  await permitting.close();
+  // the policy file is read at start: a second gateway on the same directory, with a policy that forbids the call
+  writeFileSync(join(vfx.dir, "policy.cedar"), "forbid(principal, action, resource);");
+  const refusing = await createGateway(vcfg);
+  const cedarDenied = await refusing.handleCall({ name: "stripe.refund", arguments: aargs, _meta: approval() });
+  await refusing.close();
+  const V = { issuerKeys: [`approval-${variant}-gateway`], principalKeys: [`approval-${variant}-principal`], logKeys: [] as string[] };
+  const vlog = logLines(vfx.logFile);
+  addCase({ name: `gateway-approval-cedar-denied${variant === "private" ? "-private-args" : ""}`, description: `A valid single-human approval was presented and the Cedar policy then denied the call${variant === "private" ? ", with the arguments withheld (digest)" : ""}. The gateway records the approval as approved and the call as denied. The call was never forwarded, so the receipt verifies without any human key.`, bundle: bundleFile(vfx.receiptsDir, String(cedarDenied._meta?.[RECEIPT_META_KEY])), ...V, log: vlog });
+  if (variant === "private") addCase({ name: "gateway-approved-private-args", description: "A forwarded call with an approval under a private args rule (digest). The receipt withholds the approval envelope, which carries the action fields and an unsalted digest of the arguments. The signature, window, and binding checks pass as committed; the status, the times, and the signer ids stay in clear.", bundle: bundleFile(vfx.receiptsDir, String(forwardedCall._meta?.[RECEIPT_META_KEY])), ...V, approvalKeys: ["human"], log: vlog });
+}
+addCase({ name: "resigned-approval-checked-at-no-offset", description: "The approval record's checkedAt and consumedAt carry no offset. Date.parse would read them as local time, so the window checks would depend on the verifier's time zone. Both verifiers refuse such a time as a structural fault.", bundle: resigned(approvedBundle, approvalIssuer, (st) => {
+  st.predicate.approval!.checkedAt = st.predicate.approval!.checkedAt.replace("Z", "");
+  st.predicate.approval!.consumedAt = st.predicate.approval!.consumedAt!.replace("Z", "");
+}), ...A, log: alog });
+
 // ---- arguments with special keys: an own property named __proto__ is in the digest, as it was in the call ----
 const protoFx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-proto-")));
 key("proto-gateway", protoFx.gatewayPub);

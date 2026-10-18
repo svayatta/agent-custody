@@ -7,9 +7,13 @@ import { digestOf, dsseSign, dsseVerifiers, sha256Hex, type Envelope, type KeyPa
 
 export const APPROVAL_TYPE = "application/vnd.agent-custody.approval+json";
 export const APPROVAL_META_KEY = "agent-custody/approval";
+/** The longest approval lifetime that the gateway accepts when `approvals.maxLifetimeSeconds` is not set. */
+export const DEFAULT_APPROVAL_LIFETIME_SECONDS = 3600;
 
 const Nonempty = z.string().min(1);
 const Timestamp = z.iso.datetime({ offset: true });
+/** An ISO time with an offset: the only form that the approval and the receipt's approval record accept. Both verifiers use this rule. */
+export const isApprovalTime = (value: unknown): value is string => Timestamp.safeParse(value).success;
 const ApprovalId = z.uuid();
 
 export const ApprovalSchema = z.strictObject({
@@ -142,7 +146,7 @@ export function verifyApprovalStatement(envelope: unknown, trusted: PublicKeyRef
 }
 
 /** Check trusted, distinct signatures, the whole action binding, and the half-open validity window. Never throws for untrusted input. */
-export function verifyApproval(envelope: unknown, trusted: PublicKeyRef[], binding: ApprovalBinding, options: { at?: string; minApprovers?: 1 | 2 } = {}): ApprovalVerifyResult {
+export function verifyApproval(envelope: unknown, trusted: PublicKeyRef[], binding: ApprovalBinding, options: { at?: string; minApprovers?: 1 | 2; maxLifetimeSeconds?: number } = {}): ApprovalVerifyResult {
   try {
     const signed = verifyApprovalStatement(envelope, trusted, options.minApprovers ?? 1);
     if (!signed.ok) return signed;
@@ -151,6 +155,10 @@ export function verifyApproval(envelope: unknown, trusted: PublicKeyRef[], bindi
     // Fields must match in both directions: a signed field missing from the call is a mismatch too.
     for (const field of ["principal", "agent", "tool", "argsDigest", "amount", "currency", "beneficiary"] as const) {
       if (approval[field] !== action[field]) return { ok: false, error: `approval ${field} does not match this call` };
+    }
+    // The signer chooses the expiry, so the caller can cap it. An unused approval then cannot stay usable for years.
+    if (options.maxLifetimeSeconds !== undefined && Date.parse(approval.expiresAt) - Date.parse(approval.issuedAt) > options.maxLifetimeSeconds * 1000) {
+      return { ok: false, error: `approval lifetime exceeds the maximum of ${options.maxLifetimeSeconds} seconds` };
     }
     const at = options.at ?? new Date().toISOString();
     if (!Timestamp.safeParse(at).success) return { ok: false, error: "invalid approval check time" };

@@ -282,9 +282,7 @@ export function setAt<T>(root: T, path: Path, value: unknown): T {
 // ---- the choke point ----
 
 /** The structural top-level parts of a statement: ids, keys, times, the grant, the names. Never withheld. */
-// Approval signatures and their exact action binding are structural evidence, like the delegation. They remain in
-// clear even under a private rule; an approval may itself disclose action fields and an unsalted argument digest.
-const CLEAR_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "approval", "authorization", "capture"]);
+const CLEAR_TOP = new Set(["receiptId", "timestamp", "issuer", "principal", "agent", "delegation", "tool", "authorization", "capture"]);
 /** Inside the parts that carry values: what stays in clear beside them. */
 const CLEAR_IN = {
   request: new Set(["argsDigest", "provenance"]),
@@ -293,6 +291,12 @@ const CLEAR_IN = {
   execution: new Set(["status", "resultDigest", "provenance"]),
   upstream: new Set(["provider"]),
   consumed: new Set(["provenance"]),
+  /**
+   * The gateway's own observations of its approval check: the status, the times, the signers' key ids, and the config's
+   * argument mapping. The envelope is not here: the agent supplied it, and it carries the action fields and an unsalted
+   * digest of the arguments. The reason is not here either: it can quote the statement.
+   */
+  approval: new Set(["status", "requiredApprovers", "checkedAt", "consumedAt", "approverKeyids", "fields", "provenance"]),
   /** the host's correlation ids are supplied by the agent's process or its call: values, withheld; the provenance stays */
   session: new Set(["provenance"]),
   model: new Set(["provenance"]),
@@ -461,6 +465,15 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
         } else if (!CLEAR_IN.execution.has(f)) hide(["execution", f], v, k);
       }
       if (own(value, "result")) out = setAt(out, ["execution", "resultDigest"], digest(value.result, ["execution", "result"]));
+    } else if (key_ === "approval" && isObject(value)) {
+      for (const [f, v] of Object.entries(value)) {
+        if (CLEAR_IN.approval.has(f)) continue;
+        const path = ["approval", f];
+        // the authorization and the receipt carry the same envelope, so they carry the same commitment to it
+        const earlier = prior ? getAt(prior.predicate, path) : undefined;
+        if (f === "envelope" && isCommitment(earlier) && withheld.some((w) => pathKey(w) === pathKey(path))) out = setAt(out, path, earlier);
+        else hide(path, v, f === "envelope" && argsSide ? argsSide.key : k);
+      }
     } else if ((key_ === "session" || key_ === "model") && isObject(value)) {
       // correlation ids the host or the agent supplied: a value when there is one; none is structural
       for (const [f, v] of Object.entries(value)) {

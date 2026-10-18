@@ -177,6 +177,16 @@ describe("approval validity", () => {
     expect(verifyApproval(env, [first], binding, { at: "not a date" }).ok).toBe(false);
   });
 
+  it("refuses a lifetime above the cap, and accepts one equal to it", () => {
+    const env = signed();
+    expect(verifyApproval(env, [first], binding, { at, maxLifetimeSeconds: 300 }).ok).toBe(true);
+    expect(verifyApproval(env, [first], binding, { at, maxLifetimeSeconds: 299 })).toEqual({ ok: false, error: "approval lifetime exceeds the maximum of 299 seconds" });
+    // A signer can pick any expiry. Without a cap the approval stays valid for as long as the signer chose.
+    const forever = createApproval(first, { ...binding, issuedAt, expiresAt: "2999-01-01T00:00:00Z" });
+    expect(verifyApproval(forever, [first], binding, { at }).ok).toBe(true);
+    expect(verifyApproval(forever, [first], binding, { at, maxLifetimeSeconds: 3600 }).ok).toBe(false);
+  });
+
   it("rejects an empty or reversed signed validity window", () => {
     for (const expiry of [issuedAt, "2026-10-18T09:59:00Z"]) {
       expect(() => createApproval(first, { ...binding, issuedAt, expiresAt: expiry })).toThrow(/expiry/);

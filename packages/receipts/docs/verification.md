@@ -24,7 +24,7 @@ node src/cli.ts verify receipts/<id>.json \
   --log log.jsonl
 ```
 
-`--approval-key` is needed for forwarded calls carrying human approvals, `--log-key` for a remote log, and `--upstream-key` when checking a signed upstream result. `--log` is optional.
+`--approval-key` is needed for forwarded calls carrying human approvals (not for a refusal), `--log-key` for a remote log, and `--upstream-key` when checking a signed upstream result. `--log` is optional.
 
 Exit code 0 when every check passes, 1 otherwise. Add `--json` for machine-readable output. `--issuer-key`, `--principal-key`, and `--approval-key` can be repeated to accept rotated keys; signatures are matched by keyid. `--gateway-key` is an alias for `--issuer-key`. `--principal-key` may be omitted for SDK receipts, which carry no delegation.
 
@@ -83,9 +83,9 @@ execution       observed    executed
 | delegation valid at receipt time | the receipt's timestamp is inside the grant's window; a call the gateway refused after the grant ran out passes with a note, since only an executed call must sit inside the window | expired or not-yet-valid authority behind an executed call |
 | executed tool within delegated scope | if the tool ran, the grant covered it. Denied calls pass this check by construction | a gateway that forwarded out of scope |
 | principal is claimed, not attested | SDK receipts only: there is no delegation, so the principal is a config string and is labelled as such | an SDK receipt pretending to an attested principal |
-| approval signatures (human keys) | for a forwarded call carrying an approval record, enough distinct human approval keys signed the embedded envelope; issuer and principal keys never substitute | missing approval keys, untrusted signer, or insufficient threshold |
-| approval payload binding | the signed approval names the same principal, agent, tool, complete arguments, and configured amount/currency/beneficiary | changed arguments, a spliced approval, or private arguments still withheld: disclose them or provide the capture key to check the full binding |
-| approval valid at forward time | the approval was valid at the recorded check and consumption times | expiry or a future issuance time behind a forwarded call |
+| approval signatures (human keys) | for a forwarded call carrying an approval record, enough distinct human approval keys signed the embedded envelope; issuer and principal keys never substitute. Under a private rule the envelope is a commitment: the check passes as committed until it is disclosed or decrypted | missing approval keys, untrusted signer, or insufficient threshold |
+| approval payload binding | the signed approval names the same principal, agent, tool, complete arguments, and configured amount/currency/beneficiary | changed arguments or a spliced approval. Arguments that are still withheld pass as committed, as `request args digest` does; disclose them or provide the capture key to check the full binding |
+| approval valid at forward time | the approval was valid at the recorded check and consumption times (forwarded calls only) | expiry or a future issuance time behind a forwarded call |
 | approval consistent with execution | forwarded calls with approval evidence have an approved, consumed record with matching signer observations; denied or withheld calls verify as evidence of refusal without endorsing the rejected approval | an execution without the recorded approval consumption, or inconsistent observed signer ids |
 | request args digest | the args in the predicate hash to the digest in the subject. Recomputed when the arguments are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when fields are withheld and neither is given, it passes as committed, the detail saying "committed, not recomputed" and how many fields are withheld | edited arguments, or a disclosure that contradicts a commitment |
 | execution result digest | executed and failed calls: the result in the predicate hashes to `execution.resultDigest`, under the same rules as the arguments; a provider delivery withheld with the result is restored first, since the digest covered it | an edited result, or a disclosure or key that does not match the commitment, or a capture note naming a field that is not a commitment |
@@ -96,7 +96,7 @@ execution       observed    executed
 | authorization signature (issuer key) | pre-commit receipts only: the embedded authorization statement was signed by the same issuer key as the receipt | an authorization from another gateway, or none the issuer signed |
 | authorization names this call | the committed authorization names this receipt id, tool, argument digest, agent, and principal, and recorded an allow | an authorization spliced in from a different call |
 | authorization carries this approval | when present, the human approval envelope, signature threshold, and field mapping match the final receipt | a different approval substituted after the precommit |
-| authorization approval was valid | the precommit recorded an approved statement, distinct trusted signer observations, and a check inside the signed window | an invalid initial approval hidden by a valid final receipt |
+| authorization approval was valid | for a forwarded call, the precommit recorded an approved statement, distinct trusted signer observations, and a check inside the signed window. Under a private rule only the status, the times, and the signer count are checked until the envelope is restored | an invalid initial approval hidden by a valid final receipt |
 | authorization tree head signature | the authorization's own tree head is signed by a trusted log or issuer key | a fabricated log position for the authorization |
 | authorization log inclusion proof | the authorization statement is a leaf of that tree | an authorization that was never logged |
 | authorization logged before execution | the authorization's leaf precedes the receipt's leaf, at a tree size no larger than the receipt's | evidence written after the side effect, dressed up as before |
@@ -106,7 +106,7 @@ execution       observed    executed
 | log inclusion proof | this exact envelope is a leaf of the tree with that root | receipt never logged, or logged then changed |
 | log file root matches tree head | recomputing the root from your copy of the log at that size gives the same value | your log copy and the issuer's history diverge: deletion, reordering, or edit |
 
-Approval-bearing forwarded calls add four approval checks; refused calls can verify even with the invalid approval that caused their refusal. Gateway receipts otherwise run seventeen checks, eighteen with a log file, one more (`execution result digest`) when the call was executed or failed, and five more when the tool was committed before it ran (`precommit` in the gateway config). SDK receipts run fewer, because there is no delegation to check, and the report says so on the `principal is claimed` line. A receipt issued to a sub-agent under a delegation chain runs one more, `delegation chain to the principal`.
+Approval-bearing forwarded calls add four approval checks. A refused call runs only `approval consistent with execution`, so it verifies without approval keys, with a valid approval or with the invalid approval that caused its refusal. Gateway receipts otherwise run seventeen checks, eighteen with a log file, one more (`execution result digest`) when the call was executed or failed, and five more when the tool was committed before it ran (`precommit` in the gateway config). SDK receipts run fewer, because there is no delegation to check, and the report says so on the `principal is claimed` line. A receipt issued to a sub-agent under a delegation chain runs one more, `delegation chain to the principal`.
 
 ## What a verified receipt lets you conclude
 
@@ -123,7 +123,7 @@ A gateway receipt does **not** support:
 - that the arguments were correct. They are `claimed`: they are what the agent asked for, which is what a receipt should record.
 - that a receipt issued under a capture rule shows everything the call carried. The `capture` note says which fields are withheld; the verifier establishes that every value shown, disclosed, or decrypted is the one the signed digest was made over, and nothing about the ones it was not shown.
 - that a human approval was not used by another gateway. The signature establishes the exact action and window; single use depends on the gateway's persistent consumption store shared across every process that accepts the approval.
-- that an approval-protected call hides its private arguments from a reviewer: its approval remains clear, with the action fields and an unsalted digest of all arguments. Full binding verification fails while any arguments remain withheld; disclose them or provide the capture key. See [approval privacy limits](approvals.md#privacy-limits).
+- that a human approval is valid, for a reviewer who holds neither the capture key nor a disclosure: under a private rule the receipt withholds the approval envelope, because it carries the action fields and an unsalted digest of all arguments. The approval checks then pass as committed. See [approval privacy limits](approvals.md#privacy-limits).
 - that the model named in `model` produced the call. No hosted provider signs model identity.
 - that the gateway operator is honest. The operator holds the gateway key. Against a dishonest operator you need a log copy taken out of their control, or a signer they do not control. See the threat model table in the README.
 

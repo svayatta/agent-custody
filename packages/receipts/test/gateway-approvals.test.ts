@@ -7,8 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { APPROVAL_META_KEY, APPROVAL_TYPE, createApproval, type ApprovalBinding } from "../src/approval.ts";
+import { checkCommitment, isCommitment, pathKey, type Commitment } from "../src/capture.ts";
 import { GatewayConfigSchema, loadConfig, type GatewayConfig } from "../src/config.ts";
-import { dsseCountersign, dsseSign, generateKeyPair, loadPrivateKey, writeKeyPair, type Envelope } from "../src/crypto.ts";
+import { dsseCountersign, dsseSign, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair, type Envelope } from "../src/crypto.ts";
+import { verifyBundle } from "../src/verify.ts";
 import { createGatewayHost, RECEIPT_META_KEY, type Gateway, type GatewayHost, type GatewayOptions } from "../src/gateway.ts";
 import { fileLog, type LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "../src/receipt.ts";
@@ -180,6 +182,32 @@ describe("gateway signed approvals", () => {
     expect(() => readdirSync(cfg.approvals!.usedDir)).toThrow();
   });
 
+  it.each([["in clear", undefined], ["under a private args rule", { "*": { args: { mode: "digest" as const } } }]])("a Cedar refusal that carried a valid approval verifies without approval keys, %s", async (_name, capture) => {
+    const { fx, gw, predicate } = await fixture((c, f) => {
+      writeFileSync(join(f.dir, "policy.cedar"), "forbid(principal, action, resource);");
+      if (capture) c.capture = capture;
+    });
+    const result = await call(gw, approve());
+    expect(predicate(result)).toMatchObject({ approval: { status: "approved" }, execution: { status: "denied" } });
+    const bundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${String(result._meta?.[RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
+    const verified = verifyBundle(bundle, { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)] });
+    expect(verified.checks.filter((check) => !check.ok)).toEqual([]);
+  });
+
+  it("refuses an approval whose lifetime exceeds the default cap, and honors approvals.maxLifetimeSeconds", async () => {
+    const { gw, predicate } = await fixture();
+    const tooLong = approve(binding(), new Date(Date.now() + 3_700_000).toISOString());
+    const refused = await call(gw, tooLong);
+    expect(refused.isError).toBe(true);
+    expect(predicate(refused)).toMatchObject({ execution: { status: "denied" }, approval: { status: "denied", reason: expect.stringMatching(/lifetime exceeds the maximum of 3600 seconds/) } });
+    expect(seen).toHaveLength(0);
+
+    const capped = await fixture((c) => { c.approvals!.maxLifetimeSeconds = 30; });
+    expect((await call(capped.gw, approve())).isError).toBe(true);
+    expect((await call(capped.gw, approve(binding(), new Date(Date.now() + 20_000).toISOString()))).isError).toBeFalsy();
+    for (const value of [0, -1, 1.5]) expect(GatewayConfigSchema.safeParse({ ...capped.cfg, approvals: { ...capped.cfg.approvals, maxLifetimeSeconds: value } }).success).toBe(false);
+  });
+
   it("keeps approval consumed when forwarding ends in a transport error", async () => {
     const { gw, predicate } = await fixture();
     const a = { ...args(), customer_id: "cust_transport_error" };
@@ -308,7 +336,7 @@ describe("gateway signed approvals", () => {
 
   it("does not copy malformed approval input or appended untrusted signatures into private evidence", async () => {
     const secret = "approval-signature-private-canary";
-    const { gw, predicate } = await fixture((c) => { c.precommit = ["stripe.refund"]; c.capture = { "*": { args: { mode: "digest" }, result: { mode: "digest" }, facts: { mode: "digest" } } }; });
+    const { fx, gw, predicate } = await fixture((c) => { c.precommit = ["stripe.refund"]; c.capture = { "*": { args: { mode: "digest" }, result: { mode: "digest" }, facts: { mode: "digest" } } }; });
     const a = { ...args(), private_note: secret };
     const original = approve(binding(a));
     const invalidPayload = JSON.parse(Buffer.from(original.payload, "base64").toString());
@@ -316,7 +344,8 @@ describe("gateway signed approvals", () => {
     const malformed = await call(gw, dsseSign(APPROVAL_TYPE, invalidPayload, key), a);
     const denied = predicate(malformed);
     expect(denied.approval).not.toHaveProperty("envelope");
-    expect(denied.approval!.reason).toBe("approval rejected: malformed or untrusted statement");
+    // The reason can quote the statement, so a private rule withholds it.
+    expect(isCommitment(denied.approval!.reason)).toBe(true);
     expect(JSON.stringify(denied)).not.toContain(secret);
 
     const padded = Buffer.from(secret.padEnd(64, "x")).toString("base64");
@@ -324,10 +353,13 @@ describe("gateway signed approvals", () => {
     const approved = await call(gw, appended, a);
     expect(approved.isError).toBeFalsy();
     const p = predicate(approved);
-    expect(p.approval!.envelope!.signatures).toEqual(original.signatures);
+    // The receipt commits to the envelope with only the verified signatures, and the precommit carries the same commitment.
+    const { salts } = JSON.parse(readFileSync(join(fx.receiptsDir, "salts", `${String(approved._meta?.[RECEIPT_META_KEY])}.json`), "utf8")) as { salts: Record<string, string> };
+    expect(isCommitment(p.approval!.envelope)).toBe(true);
+    expect(checkCommitment(p.approval!.envelope as unknown as Commitment, original, salts[pathKey(["approval", "envelope"])]!)).toBe(true);
     expect(JSON.stringify(p)).not.toContain(secret);
     const authorization = decode(p.authorization as ReceiptBundle).predicate;
-    expect(authorization.approval!.envelope!.signatures).toEqual(original.signatures);
+    expect(authorization.approval!.envelope).toEqual(p.approval!.envelope);
     expect(JSON.stringify(authorization)).not.toContain(secret);
   });
 });

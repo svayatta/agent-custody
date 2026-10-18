@@ -11,7 +11,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, typ
 import type { FactConfig, GatewayConfig, UpstreamConfig } from "./config.ts";
 import { digestOf, dsseVerifiers, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
 import { delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
-import { APPROVAL_META_KEY, consumeApproval, verifyApproval, verifyApprovalStatement } from "./approval.ts";
+import { APPROVAL_META_KEY, DEFAULT_APPROVAL_LIFETIME_SECONDS, consumeApproval, verifyApproval, verifyApprovalStatement } from "./approval.ts";
 import { createIssuer } from "./issue.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
@@ -308,7 +308,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       const envelope = rawEnvelope ? { ...rawEnvelope, signatures: rawEnvelope.signatures.filter((signature) => dsseVerifiers({ ...rawEnvelope, signatures: [signature] }, approvalKeys).length > 0) } : undefined;
       const checkApproval = (at: string) => {
         if (!rule) return undefined;
-        const checked = verifyApproval(approvalEnvelope, approvalKeys, approvalBinding, { at, minApprovers: rule.minApprovers });
+        const checked = verifyApproval(approvalEnvelope, approvalKeys, approvalBinding, { at, minApprovers: rule.minApprovers, maxLifetimeSeconds: cfg.approvals!.maxLifetimeSeconds ?? DEFAULT_APPROVAL_LIFETIME_SECONDS });
         approval = { ...(envelope ? { envelope } : {}), requiredApprovers: rule.minApprovers, ...(rule.fields ? { fields: rule.fields } : {}), checkedAt: at, status: checked.ok ? "approved" : "denied", approverKeyids: checked.ok ? checked.approverKeyids : [], ...(!checked.ok ? { reason: envelope ? checked.error : "approval rejected: malformed or untrusted statement" } : {}), provenance: "observed" };
         return checked;
       };
