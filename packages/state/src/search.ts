@@ -45,7 +45,7 @@ const object = (value: unknown): value is Record<string, unknown> => value !== n
 
 // The input is the agent's own text, so the work per receipt has fixed bounds. A walk stops below MAX_DEPTH levels, and
 // a string is parsed as JSON only up to MAX_JSON_TEXT characters. A node deeper than that, or in longer text, is not
-// searched.
+// searched, and the result says `truncated`, so that a reader never mistakes a skipped value for an absent one.
 const MAX_DEPTH = 64;
 const MAX_JSON_TEXT = 65_536;
 interface Trie { end: boolean; kids: Map<string, Trie> }
@@ -82,8 +82,10 @@ const into = (at: Trie | undefined, ...keys: string[]): Trie | undefined | typeo
  * inspected too; prose, digests, signatures, metadata outside those values, and encoded envelopes are not searched.
  * Generic result `id` fields count only when they have a known payment or customer id prefix. Values nested deeper
  * than 64 levels, and JSON text longer than 64 KiB, are not searched, so that one hostile argument cannot stall a reader.
+ * When a value is skipped for that reason, the result carries `truncated: true`. Otherwise it has no such field.
  */
-export function receiptSearchTerms(predicate: Predicate): { transactionIds: string[]; customerIds: string[] } {
+export function receiptSearchTerms(predicate: Predicate): { transactionIds: string[]; customerIds: string[]; truncated?: true } {
+  let truncated = false;
   const transaction = new Set<string>();
   const customer = new Set<string>();
   const terms = { transaction, customer };
@@ -95,10 +97,14 @@ export function receiptSearchTerms(predicate: Predicate): { transactionIds: stri
   };
   // `at` is the trie node of the value's path. It is never a withheld node. It is undefined when no withheld path runs below.
   const walk = (value: unknown, at: Trie | undefined, result: boolean, depth: number): void => {
-    if (depth > MAX_DEPTH) return;
+    if (depth > MAX_DEPTH) {
+      if (value !== null && typeof value === "object") truncated = true;
+      return;
+    }
     if (typeof value === "string") {
       // JSON.parse only accepts the entire text. A sentence that happens to mention an id is not an identifier.
-      if (value.length <= MAX_JSON_TEXT && /^\s*[\[{]/.test(value)) {
+      if (value.length > MAX_JSON_TEXT && /^\s*[\[{]/.test(value)) truncated = true;
+      else if (/^\s*[\[{]/.test(value)) {
         try {
           walk(JSON.parse(value), at, result, depth + 1);
         } catch {
@@ -145,7 +151,7 @@ export function receiptSearchTerms(predicate: Predicate): { transactionIds: stri
     if (kind) add(fact.value, kind, valueAt);
     walk(fact.value, valueAt, true, 0);
   }
-  return { transactionIds: [...transaction].sort(), customerIds: [...customer].sort() };
+  return { transactionIds: [...transaction].sort(), customerIds: [...customer].sort(), ...(truncated ? { truncated: true as const } : {}) };
 }
 
 /** Every supplied filter must match; identifiers and agent ids are exact and case sensitive. */

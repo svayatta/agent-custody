@@ -18,7 +18,7 @@ import { loadScenarios, signReport, verifyReport } from "./evals-file.ts";
 import { buildPack, formatPack, signPack, verifyPack } from "./pack.ts";
 import { buildActionPack, formatExplain, signActionPack, verifyActionPack } from "./explain.ts";
 import { serveReview, writeReview } from "./review.ts";
-import { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile } from "./case-file.ts";
+import { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile, verifyCaseHtml } from "./case-file.ts";
 import { validateReceiptSearch } from "./search.ts";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -239,10 +239,12 @@ async function main(argv: string[]): Promise<number> {
       const hasKeys = [values["issuer-key"], values["principal-key"], values["log-key"], values["upstream-key"]].some((k) => k?.length) || !!values["log-id"];
       const keys = hasKeys ? { issuerKeys: (values["issuer-key"] ?? []).map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), ...(values["log-key"]?.length ? { logKeys: values["log-key"].map(loadPublicKey) } : {}), ...(values["upstream-key"]?.length ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}), ...(values["log-id"] ? { logId: values["log-id"] } : {}) } : undefined;
       if (values["verify-case"]) {
-        const result = verifyCaseFile(parseCaseFile(readFileSync(values["verify-case"], "utf8")), keys);
+        const text = readFileSync(values["verify-case"], "utf8");
+        const result = /^\s*</.test(text) ? verifyCaseHtml(text, keys) : verifyCaseFile(parseCaseFile(text), keys);
         if (values.json) console.log(JSON.stringify(result, null, 2));
         else {
           for (const c of result.checks) console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? `  (${c.detail})` : ""}`);
+          if (result.answers !== undefined) console.log(`\nTHE TEN ANSWERS, rebuilt from the signed receipt and the file's ledger snapshot (trust these, not a saved copy):\n${result.answers}`);
           console.log(`\nRESULT: ${result.ok ? "VERIFIED" : "NOT VERIFIED"}`);
           if (!result.complete) console.log("INCOMPLETE: missing evidence, unknown or withheld beliefs, or no ledger; dependency and reversal answers remain limited.");
           console.log(keys ? "Checked against independently supplied public keys." : "Checked against bundled public keys; confirm their fingerprints with a trusted source.");

@@ -36,6 +36,8 @@ export interface ReceiptRow {
   verified: boolean | null;
   transactionIds: string[];
   customerIds: string[];
+  /** A value was too deep or too long to search. An id filter keeps this row in the list, because the id may be in that value. */
+  truncated?: true;
   /** The file name without `.json`. Links use it, because a tampered receipt can name another id inside. */
   file: string;
   /** Set when the record is not what its file name says it is. The row is then never verified. */
@@ -59,11 +61,16 @@ export function scanReceipts(o: ReviewOptions, query: ReceiptSearch = o.search ?
     try {
       const bundle = JSON.parse(readFileSync(join(o.receiptsDir, f), "utf8")) as ReceiptBundle;
       const p = decodeStatement(bundle).predicate;
-      if (!matchesReceiptSearch(p, query)) continue;
+      const terms = receiptSearchTerms(p);
+      if (!matchesReceiptSearch(p, query)) {
+        // A value that the search skipped may hold the id. Keep the row, marked, when only an id filter excludes it.
+        const { transaction: _transaction, customer: _customer, ...others } = query;
+        if (!terms.truncated || !matchesReceiptSearch(p, others)) continue;
+      }
       const file = f.slice(0, -".json".length);
       const problem = file !== p.receiptId ? "file name does not match receipt id" : !RECEIPT_ID.test(file) ? "receipt id is malformed" : undefined;
       const verified = problem ? false : verifyOf(bundle, o)?.ok ?? null;
-      rows.push({ receiptId: String(p.receiptId), timestamp: String(p.timestamp), tool: p.tool.name, status: p.execution.status, agent: p.agent.id, principal: p.principal.id, issuer: p.issuer.kind, verified, ...receiptSearchTerms(p), file, ...(problem ? { problem } : {}) });
+      rows.push({ receiptId: String(p.receiptId), timestamp: String(p.timestamp), tool: p.tool.name, status: p.execution.status, agent: p.agent.id, principal: p.principal.id, issuer: p.issuer.kind, verified, ...terms, file, ...(problem ? { problem } : {}) });
     } catch {
       unreadable++;
     }
@@ -118,8 +125,8 @@ form.addEventListener('submit', (event) => {
   let count = 0;
   for (const row of document.querySelectorAll('tbody tr')) {
     const data = row.dataset;
-    const matches = (!value('transaction') || JSON.parse(data.transactions).includes(value('transaction')))
-      && (!value('customer') || JSON.parse(data.customers).includes(value('customer')))
+    const matches = (!value('transaction') || data.partial || JSON.parse(data.transactions).includes(value('transaction')))
+      && (!value('customer') || data.partial || JSON.parse(data.customers).includes(value('customer')))
       && (!value('agent') || data.agent === value('agent'))
       && (!from || Date.parse(data.timestamp) >= Date.parse(from))
       && (!to || Date.parse(data.timestamp) <= Date.parse(to));
@@ -162,7 +169,7 @@ ${([['transaction', 'Transaction ID', 're_… / pi_… / charge ID'], ['customer
 <p id="search-error" role="alert" class="bad"></p>
 <p id="no-results"${rows.length ? ' hidden' : ''}>No receipts match these filters.</p>
 <div class="wrap"><table><thead><tr><th>when</th><th>tool</th><th>outcome</th><th>transaction</th><th>customer</th><th>agent</th><th>principal</th><th>producer</th><th>verification</th><th>receipt</th></tr></thead><tbody>
-${rows.map((r) => `<tr data-transactions="${esc(JSON.stringify(r.transactionIds))}" data-customers="${esc(JSON.stringify(r.customerIds))}" data-agent="${esc(r.agent)}" data-timestamp="${esc(r.timestamp)}"><td>${esc(r.timestamp.replace("T", " ").slice(0, 19))}</td><td><code>${esc(r.tool)}</code></td><td>${esc(r.status)}</td><td class="mono">${esc(r.transactionIds.join(', '))}</td><td class="mono">${esc(r.customerIds.join(', '))}</td><td>${esc(r.agent)}</td><td>${esc(r.principal ?? "")}</td><td>${esc(r.issuer)}</td><td>${verdict(r)}</td><td>${receiptLink(r)}</td></tr>`).join("\n")}
+${rows.map((r) => `<tr data-transactions="${esc(JSON.stringify(r.transactionIds))}" data-customers="${esc(JSON.stringify(r.customerIds))}" data-agent="${esc(r.agent)}" data-timestamp="${esc(r.timestamp)}"${r.truncated ? ' data-partial="1"' : ""}><td>${esc(r.timestamp.replace("T", " ").slice(0, 19))}</td><td><code>${esc(r.tool)}</code></td><td>${esc(r.status)}</td><td class="mono">${esc(r.transactionIds.join(', '))}${r.truncated ? ' <span class="muted">(partially indexed: a value was too large to search)</span>' : ""}</td><td class="mono">${esc(r.customerIds.join(', '))}</td><td>${esc(r.agent)}</td><td>${esc(r.principal ?? "")}</td><td>${esc(r.issuer)}</td><td>${verdict(r)}</td><td>${receiptLink(r)}</td></tr>`).join("\n")}
 </tbody></table></div>
 <p class="muted">A gateway receipt was enforced outside the agent's process; an SDK receipt is the agent's own report. The verification column is the offline check any auditor can repeat with the same public keys.</p>`;
   return page(o.title ?? "Receipts", body, staticPage ? SEARCH_SCRIPT : "");
@@ -204,6 +211,17 @@ ${explainHtml(formatExplain(pack, verification, !!o.ledger))}
   return page(`${p.tool.name} · ${String(p.receiptId).slice(0, 8)}`, body);
 }
 
+/** The page for a record that cannot be shown, for example when a part that every check reads is missing. */
+function renderDamaged(file: string, error: unknown, backLink: string, rawLink: string): string {
+  const reason = error instanceof Error ? error.message : String(error);
+  return page(`Damaged record ${file.slice(0, 8)}`, `
+<p><a href="${esc(backLink)}">All receipts</a></p>
+<h1>A record that cannot be shown <span class="bad">NOT VERIFIED</span></h1>
+<p class="sub">file <span class="mono">${esc(file)}</span></p>
+<pre>${esc(`FAIL  the record has the parts of a receipt  (${reason})\n\nRESULT: NOT VERIFIED`)}</pre>
+<p><a href="${esc(rawLink)}">The file as stored</a>. Check it with <code>agent-custody verify</code> and the public keys.</p>`);
+}
+
 function verifyOf(bundle: ReceiptBundle, o: ReviewOptions): VerifyResult | null {
   return o.keys ? verifyBundle(bundle, o.keys) : null;
 }
@@ -236,8 +254,14 @@ export function reviewHandler(o: ReviewOptions): (req: IncomingMessage, res: Ser
         return send(200, m[2].endsWith('html') ? "text/html; charset=utf-8" : "application/json", m[2].endsWith('html') ? renderCaseFile(file) : JSON.stringify(file, null, 2), true);
       }
       if (m[2]) return send(200, "application/json", readFileSync(join(o.receiptsDir, `${m[1]}.json`), "utf8"));
-      const pack = await buildActionPack(o.receiptsDir, m[1]!, o.ledger);
-      return send(200, "text/html; charset=utf-8", renderReceipt(pack, verifyOf(pack.receipt, o), o, "/", `/r/${m[1]}.json`));
+      try {
+        const pack = await buildActionPack(o.receiptsDir, m[1]!, o.ledger);
+        return send(200, "text/html; charset=utf-8", renderReceipt(pack, verifyOf(pack.receipt, o), o, "/", `/r/${m[1]}.json`));
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") throw e;
+        // A malformed record is shown as NOT VERIFIED with the reason, never as a server error.
+        return send(200, "text/html; charset=utf-8", renderDamaged(m[1]!, e, "/", `/r/${m[1]}.json`));
+      }
     } catch (e) {
       return send((e as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 500, "text/plain", e instanceof Error ? e.message : String(e));
     }
@@ -270,12 +294,18 @@ export async function writeReview(o: ReviewOptions, outDir: string): Promise<{ r
   writeFileSync(join(outDir, "index.html"), renderIndex(rows, o, (id) => `r/${id}.html`, true, unreadable));
   // A file name that is not a well formed id has no page. Its row is in the index, flagged.
   for (const r of rows.filter((row) => RECEIPT_ID.test(row.file))) {
-    const file = await buildCaseFile(o, r.file);
-    const pack = file.pack;
-    writeFileSync(join(outDir, "r", `${r.file}.html`), renderReceipt(pack, verifyOf(pack.receipt, o), o, "../index.html", `${r.file}.json`));
-    writeFileSync(join(outDir, "r", `${r.file}.json`), JSON.stringify(pack.receipt, null, 2));
-    writeFileSync(join(outDir, "r", `${r.file}.case.json`), JSON.stringify(file, null, 2));
-    writeFileSync(join(outDir, "r", `${r.file}.case.html`), renderCaseFile(file));
+    try {
+      const file = await buildCaseFile(o, r.file);
+      const pack = file.pack;
+      writeFileSync(join(outDir, "r", `${r.file}.html`), renderReceipt(pack, verifyOf(pack.receipt, o), o, "../index.html", `${r.file}.json`));
+      writeFileSync(join(outDir, "r", `${r.file}.json`), JSON.stringify(pack.receipt, null, 2));
+      writeFileSync(join(outDir, "r", `${r.file}.case.json`), JSON.stringify(file, null, 2));
+      writeFileSync(join(outDir, "r", `${r.file}.case.html`), renderCaseFile(file));
+    } catch (e) {
+      // One malformed record must not stop the export. Its page says NOT VERIFIED and why, and it has no case file.
+      writeFileSync(join(outDir, "r", `${r.file}.html`), renderDamaged(r.file, e, "../index.html", `${r.file}.json`));
+      writeFileSync(join(outDir, "r", `${r.file}.json`), readFileSync(join(o.receiptsDir, `${r.file}.json`), "utf8"));
+    }
   }
   return { receipts: rows.length };
 }

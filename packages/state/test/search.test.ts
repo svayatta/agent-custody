@@ -153,7 +153,7 @@ describe("search cost on hostile input", () => {
     const started = performance.now();
     const terms = receiptSearchTerms(p);
     expect(performance.now() - started).toBeLessThan(1000);
-    expect(terms).toEqual({ transactionIds: ["tx_public"], customerIds: [] });
+    expect(terms).toEqual({ transactionIds: ["tx_public"], customerIds: [], truncated: true });
   });
 
   it("stops at a fixed depth in nested objects and in JSON text, and keeps the ids above it", () => {
@@ -165,5 +165,13 @@ describe("search cost on hostile input", () => {
     const terms = receiptSearchTerms(predicate({ shallow, deep, text, long }));
     expect(performance.now() - started).toBeLessThan(1000);
     expect(terms.customerIds).toEqual(["customer-shallow"]);
+  });
+
+  it("marks a result as truncated when it skipped a deep value or a long JSON text, and only then", () => {
+    expect(receiptSearchTerms(predicate({ a: nest(10, { customer_id: "customer-1" }) }))).not.toHaveProperty("truncated");
+    expect(receiptSearchTerms(predicate({ note: "x".repeat(100_000) }))).not.toHaveProperty("truncated");
+    expect(receiptSearchTerms(predicate({ a: nest(300, {}) })).truncated).toBe(true);
+    expect(receiptSearchTerms(predicate({}, { content: [{ type: "text", text: `[${" ".repeat(70_000)}]` }] })).truncated).toBe(true);
+    expect(receiptSearchTerms(predicate({ memo: "[".repeat(200) + "]".repeat(200) })).truncated).toBe(true);
   });
 });

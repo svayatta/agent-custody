@@ -19,7 +19,7 @@ export { listReceipts, scanReceipts, renderIndex, renderReceipt, reviewHandler, 
 export type { ReceiptRow, ReviewOptions, RunningReview } from "./review.ts";
 export { matchesReceiptSearch, receiptSearchTerms, validateReceiptSearch } from "./search.ts";
 export type { ReceiptSearch } from "./search.ts";
-export { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile } from "./case-file.ts";
+export { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile, verifyCaseHtml } from "./case-file.ts";
 export type { CaseFile, CaseFileKey, CaseFileKeys, CaseFileOptions, CaseFileVerification } from "./case-file.ts";
 export type { ActionPack, ActionPackCheck, ActionPackVerification, ReceiptKeys } from "./explain.ts";
 export type { CustodyPack, PackCheck, PackVerification } from "./pack.ts";

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { createIssuer, generateKeyPair, publicKeyFromPem, type ReceiptBundle } from "@agent-custody/receipts";
-import { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile, type CaseFile } from "../src/case-file.ts";
+import { buildCaseFile, parseCaseFile, renderCaseFile, verifyCaseFile, verifyCaseHtml, type CaseFile } from "../src/case-file.ts";
 import { decodeStatement, formatExplain } from "../src/explain.ts";
 import { Ledger } from "../src/ledger.ts";
 
@@ -123,7 +123,7 @@ describe("offline case files", () => {
 
   it("fails when a saved answer is edited, in JSON and in HTML, and names the check", async () => {
     const { file, keys } = await fixture();
-    const answers = (result: ReturnType<typeof verifyCaseFile>) => result.checks.find((c) => c.name === "ten answers match the signed receipt")!;
+    const answers = (result: ReturnType<typeof verifyCaseFile>) => result.checks.find((c) => c.name.startsWith("ten answers match the signed receipt"))!;
     expect(answers(verifyCaseFile(file)).ok).toBe(true);
     expect(answers(verifyCaseFile(file, keys)).ok).toBe(true);
     // Each edit keeps the receipts and the keys intact. Only the exporter's text changes.
@@ -155,6 +155,44 @@ describe("offline case files", () => {
     forged.explanation = forged.explanation.replace(/^(WHO AUTHORIZED IT\s+).*$/m, "$1cfo_alice");
     expect(forged.explanation).not.toBe(file.explanation);
     expect(verifyCaseFile(parseCaseFile(renderCaseFile(forged)), keys).ok).toBe(false);
+  });
+
+  it("fails a page whose visible text or number of data copies differs from its data, and prints the rebuilt answers", async () => {
+    const { file, keys } = await fixture();
+    const html = renderCaseFile(file);
+    const genuine = verifyCaseHtml(html, keys);
+    expect(genuine.ok).toBe(true);
+    expect(genuine.checks[0]).toMatchObject({ name: "page is exactly what its case data renders", ok: true });
+    expect(genuine.answers).toBe(file.explanation);
+    // Only the visible answer changes. The data, the script, and the CSP hash stay as they were.
+    const visible = html.replace(/(WHO AUTHORIZED IT\s+)[^\n<]*/, "$1cfo_alice (manual sign-off)");
+    expect(visible).not.toBe(html);
+    const forged = verifyCaseHtml(visible, keys);
+    expect(forged.ok).toBe(false);
+    expect(forged.checks[0]!.ok).toBe(false);
+    expect(forged.answers).toBe(file.explanation);
+    // The genuine data hides in a comment, and a forged copy is the element that a browser uses.
+    const lie = structuredClone(file);
+    lie.explanation = lie.explanation.replace(/^(WHO AUTHORIZED IT\s+).*$/m, "$1cfo_alice (manual sign-off)");
+    const data = html.match(/<script id="case-data" type="application\/json">[\s\S]*?<\/script>/)![0];
+    const smuggled = renderCaseFile(lie).replace("<body>", `<body><!--${data}-->`);
+    expect(parseCaseFile(smuggled)).toEqual(file);
+    expect(verifyCaseHtml(smuggled, keys).ok).toBe(false);
+  });
+
+  it("names what the answers check covers: the unsigned ledger snapshot is not attested", async () => {
+    const { file, keys } = await fixture("gateway-precommit-executed", true);
+    const name = "ten answers match the signed receipt and the unsigned ledger snapshot";
+    // An exporter that invents a belief, and rebuilds the answers to match, passes. The check says what it does not cover.
+    file.pack.written.push({ factId: "f".repeat(36), subject: "refund", predicate: "refund_approved_by", value: "cfo_alice", space: "org", actor: "x", provenance: "attested", source: { receiptId: file.receiptId }, validFrom: "2026-01-01T00:00:00.000Z", validTo: null } as never);
+    file.pack.status["f".repeat(36)] = "believed";
+    file.explanation = formatExplain(file.pack, verifyCaseFile(file).receipts[file.receiptId] ?? null, file.withLedger);
+    const result = verifyCaseFile(file, keys);
+    const check = result.checks.find((c) => c.name === name)!;
+    expect(check.ok).toBe(true);
+    expect(check.detail).toContain("unsigned ledger snapshot");
+    expect(check.detail).toContain("not attested");
+    expect(result.answers).toContain("refund_approved_by");
   });
 
   it("checks every included receipt's signature and id, and marks absent cited evidence incomplete", async () => {

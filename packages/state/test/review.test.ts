@@ -167,4 +167,67 @@ describe("a record that was changed after it was issued", () => {
     expect(JSON.parse(readFileSync(join(out, "r", `${id}.case.json`), "utf8")).verification.ok).toBe(false);
     expect(readdirSync(join(out, "r")).filter((f) => f.endsWith(".html") && !f.endsWith(".case.html"))).toEqual([`${id}.html`]);
   });
+
+  it("does not abort the export or answer 500 for a record that lacks a part that the pages read", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "review-malformed-"));
+    const save = (name: string, change: (predicate: Record<string, any>) => void) => {
+      const bundle = structuredClone(vectors.cases.find((c: { name: string }) => c.name === name).bundle) as ReceiptBundle;
+      const statement = decodeStatement(bundle);
+      change(statement.predicate as unknown as Record<string, any>);
+      bundle.envelope.payload = Buffer.from(JSON.stringify(statement)).toString("base64");
+      writeFileSync(join(dir, `${statement.predicate.receiptId}.json`), JSON.stringify(bundle));
+      return statement.predicate.receiptId as string;
+    };
+    const good = save("gateway-precommit-executed", () => {});
+    const noReasons = save("gateway-executed", (p) => { delete p.policy.reasons; });
+    const wrongType = save("gateway-executed-proto-key", (p) => { p.timestamp = { not: "a time" }; });
+    const o = { receiptsDir: dir, keys };
+
+    const out = join(dir, "site");
+    expect(await writeReview(o, out)).toEqual({ receipts: 3 });
+    expect(readFileSync(join(out, "r", `${good}.html`), "utf8")).toContain("RESULT: VERIFIED");
+    for (const id of [noReasons, wrongType]) {
+      const page = readFileSync(join(out, "r", `${id}.html`), "utf8");
+      expect(page).toContain("RESULT: NOT VERIFIED");
+      expect(page).toContain("FAIL  the record has the parts of a receipt");
+      expect(readFileSync(join(out, "r", `${id}.json`), "utf8")).toContain("payload");
+    }
+
+    const running = await serveReview(o, { port: 0 });
+    try {
+      for (const id of [noReasons, wrongType]) {
+        const res = await fetch(new URL(`r/${id}`, running.url));
+        expect(res.status).toBe(200);
+        expect(await res.text()).toContain("RESULT: NOT VERIFIED");
+      }
+      expect((await fetch(new URL(`r/${good}`, running.url))).status).toBe(200);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("keeps a receipt with a value too large to search in the list, marked, when an id filter would drop it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "review-partial-"));
+    const bundle = structuredClone(vector.bundle) as ReceiptBundle;
+    const statement = decodeStatement(bundle);
+    const id = statement.predicate.receiptId;
+    // A list larger than 64 KiB held as text, as an MCP result can be. The id sits at the end.
+    const text = JSON.stringify({ data: [...Array.from({ length: 4000 }, (_, i) => ({ note: `padding ${i}` })), { refund_id: "re_far_away" }] });
+    statement.predicate.execution.result = { content: [{ type: "text", text }] };
+    bundle.envelope.payload = Buffer.from(JSON.stringify(statement)).toString("base64");
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify(bundle));
+    const o = { receiptsDir: dir };
+
+    const rows = listReceipts(o, { transaction: "re_far_away" });
+    expect(rows.map((r) => [r.file, r.truncated])).toEqual([[id, true]]);
+    expect(listReceipts(o, { transaction: "re_far_away", agent: "nobody" })).toEqual([]);
+    const running = await serveReview(o, { port: 0 });
+    try {
+      const index = await (await fetch(new URL("?transaction=re_far_away", running.url))).text();
+      expect(index).toContain("1 receipt(s)");
+      expect(index).toContain("partially indexed");
+    } finally {
+      await running.close();
+    }
+  });
 });
