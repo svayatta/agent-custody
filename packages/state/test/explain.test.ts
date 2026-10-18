@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { createDelegation, createGateway, generateKeyPair, loadPrivateKey, loadPublicKey, RECEIPT_META_KEY, verifyBundle, writeKeyPair, loadConfig } from "@agent-custody/receipts";
 import { Ledger } from "../src/ledger.ts";
 import { buildActionPack, formatExplain, signActionPack, verifyActionPack } from "../src/explain.ts";
+import { listReceipts } from "../src/review.ts";
 
 const value = (r: any) => JSON.parse(r.content[0].text);
 const cli = join(import.meta.dirname, "..", "src", "cli.ts");
@@ -91,5 +92,34 @@ describe("explain a receipt", () => {
     expect(receiptsOnly.status, receiptsOnly.stderr).toBe(0);
     expect(receiptsOnly.stdout).toMatch(/unknown without a ledger/);
     await ledger.close();
+  });
+
+  it("does not present a reconciliation receipt as a policy-allowed execution of the tool", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "explain-reconcile-"));
+    writeKeyPair(generateKeyPair(), join(dir, "keys"), "gateway");
+    const principalKp = generateKeyPair();
+    writeKeyPair(principalKp, join(dir, "keys"), "principal");
+    const now = Date.now();
+    writeFileSync(join(dir, "grant.json"), JSON.stringify(createDelegation(principalKp, { version: "0.1", principal: "user_456", agent: "support-agent", scopes: ["memory.read"], issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 3600_000).toISOString() })));
+    writeFileSync(join(dir, "policy.cedar"), `permit(principal, action, resource);\n`);
+    writeFileSync(join(dir, "gateway.json"), JSON.stringify({ identity: { keyFile: "keys/gateway.key" }, upstream: { command: process.execPath, args: [cli, "serve", "--ledger", join(dir, "ledger.jsonl")] }, grantFile: "grant.json", trustedPrincipalKeys: ["keys/principal.pub"], policyFile: "policy.cedar", receiptsDir: "receipts", logFile: "log.jsonl" }));
+    const gw = await createGateway(loadConfig(join(dir, "gateway.json")));
+    const read = await gw.handleCall({ name: "memory.read", arguments: { subject: "acct:42" } });
+    await gw.close();
+    const id = String(read._meta?.[RECEIPT_META_KEY]);
+    // Give the receipt the fields of a reconciliation. Its signature no longer holds, and the explanation does not check it here.
+    const file = join(dir, "receipts", `${id}.json`);
+    const bundle = JSON.parse(readFileSync(file, "utf8"));
+    const statement = JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString());
+    statement.predicate.reconciliation = { original: bundle, lookup: { tool: "refund.lookup", args: {}, statusPath: "status", identityPath: "idempotencyKey", confirmed: ["succeeded"], failed: ["failed"] } };
+    statement.predicate.operation = { status: "failed" };
+    statement.predicate.policy.reasons = ["reconciliation: the gateway read the provider record and evaluated no policy"];
+    bundle.envelope.payload = Buffer.from(JSON.stringify(statement)).toString("base64");
+    writeFileSync(file, JSON.stringify(bundle));
+    const text = formatExplain(await buildActionPack(join(dir, "receipts"), id), null, false);
+    expect(text).toMatch(/WHAT IT DID\s+reconciliation: the gateway read refund.lookup for memory.read; the operation is failed/);
+    expect(text).toMatch(/WHY\s+no policy was evaluated/);
+    expect(text).not.toMatch(/decided allow|the policy permitted it|-> executed/);
+    expect(listReceipts({ receiptsDir: join(dir, "receipts"), ledger: new Ledger(join(dir, "ledger.jsonl")) })[0]!.status).toBe("reconciled");
   });
 });

@@ -12,6 +12,7 @@ import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { buildRequest, restUpstream } from "../src/rest.ts";
 import { verifyBundle } from "../src/verify.ts";
 import { buildFixture, type Fixture } from "../scripts/fixture.ts";
+import { OPERATION_META_KEY } from "../src/operations.ts";
 
 const decode = (b: ReceiptBundle) => JSON.parse(Buffer.from(b.envelope.payload, "base64").toString()) as ReceiptStatement;
 
@@ -54,6 +55,39 @@ describe("buildRequest", () => {
     expect(q.url.search).toBe("?q=x");
     expect(JSON.parse(q.body!)).toEqual({ page: 2 });
     expect(() => buildRequest("https://api.example.com", tool, { limit: 5 })).toThrow(/needs argument "id"/);
+  });
+});
+
+describe("REST durable operation keys", () => {
+  const tool = { name: "payments.transfer", method: "POST" as const, path: "/transfers", body: "json" as const, inputSchema: {}, idempotencyHeader: "Idempotency-Key" };
+  const operation = { id: "39f5d833-a34d-4aae-897a-148f3cbcd648", idempotencyKey: "a".repeat(64) };
+
+  it("sets the durable key after case-insensitive static and environment headers, without putting metadata in the body", async () => {
+    const seen: RequestInit[] = [];
+    const client = restUpstream("payments", {
+      baseUrl: "https://payments.example", timeoutMs: 1000,
+      headers: { "IDEMPOTENCY-KEY": "static" }, headerEnv: { "Idempotency-Key": "OPERATION_HEADER" }, tools: [tool],
+    }, { env: { OPERATION_HEADER: "environment" }, fetch: (async (_url, init) => { seen.push(init!); return new Response('{"status":"pending"}'); }) as typeof fetch });
+    await client.callTool({ name: tool.name, arguments: { amount: 50, currency: "USD" }, _meta: { [OPERATION_META_KEY]: operation, unrelated: "metadata" } });
+    expect(new Headers(seen[0]!.headers).get("idempotency-key")).toBe(operation.idempotencyKey);
+    expect(JSON.parse(seen[0]!.body as string)).toEqual({ amount: 50, currency: "USD" });
+    expect(seen[0]!.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("refuses missing and malformed operation keys before making a request", async () => {
+    let calls = 0;
+    const client = restUpstream("payments", { baseUrl: "https://payments.example", timeoutMs: 1000, tools: [tool] }, { fetch: (async () => { calls++; return new Response("{}"); }) as typeof fetch });
+    for (const value of [undefined, {}, { ...operation, id: "not-a-uuid" }, { ...operation, idempotencyKey: "caller-controlled" }, { ...operation, idempotencyKey: "a".repeat(64) + "\r\nother: value" }]) {
+      await expect(client.callTool({ name: tool.name, _meta: { [OPERATION_META_KEY]: value } })).rejects.toThrow(/operation metadata/);
+    }
+    expect(calls).toBe(0);
+  });
+
+  it("adds no operation header to a tool without a configured idempotency header", async () => {
+    let headers: Headers | undefined;
+    const client = restUpstream("payments", { baseUrl: "https://payments.example", timeoutMs: 1000, tools: [{ ...tool, idempotencyHeader: undefined }] }, { fetch: (async (_url, init) => { headers = new Headers(init!.headers); return new Response("{}"); }) as typeof fetch });
+    await client.callTool({ name: tool.name, _meta: { [OPERATION_META_KEY]: operation } });
+    expect(headers?.has("idempotency-key")).toBe(false);
   });
 });
 
