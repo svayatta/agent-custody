@@ -8,6 +8,16 @@ import { join } from "node:path";
 import type { Envelope } from "./crypto.ts";
 import { leafHash } from "./log.ts";
 
+/** where the issuer keeps the salts behind a receipt's commitments, under the receipts directory; private, pruned with the receipt */
+export const SALTS_DIR = "salts";
+/** a receipt id as the issuer mints it; anything else never becomes part of a path */
+export const RECEIPT_ID = /^[A-Za-z0-9-]{1,64}$/;
+/** the salts file of a receipt, or a throw when the id (which may come from a bundle or a log line) is not one */
+export function saltsFileFor(receiptsDir: string, receiptId: string): string {
+  if (!RECEIPT_ID.test(receiptId)) throw new Error(`receipt id ${JSON.stringify(receiptId)} is not a valid id`);
+  return join(receiptsDir, SALTS_DIR, `${receiptId}.json`);
+}
+
 export interface PruneResult {
   pruned: { leafIndex: number; receiptId: string | null; timestamp: string | null }[];
   kept: number;
@@ -26,7 +36,8 @@ function receiptOf(leaf: string): { receiptId: string | null; timestamp: string 
 
 /**
  * Prunes every leaf whose receipt timestamp is before the cutoff. Leaves already pruned, and leaves that are not
- * receipts, are left as they are. Rewrites the log file in place and deletes the pruned receipts' bundle files.
+ * receipts, are left as they are. Rewrites the log file in place and deletes the pruned receipts' bundle files, and
+ * the salts the issuer kept for them.
  */
 export function pruneLog(logFile: string, before: string, receiptsDir?: string): PruneResult {
   const lines = readFileSync(logFile, "utf8").split("\n").filter((l) => l.trim());
@@ -42,12 +53,18 @@ export function pruneLog(logFile: string, before: string, receiptsDir?: string):
     if (timestamp !== null && timestamp < before) {
       out.push(JSON.stringify({ pruned: leafHash(parsed).toString("hex") }));
       result.pruned.push({ leafIndex: i, receiptId, timestamp });
-      if (receiptsDir && receiptId) {
+      // the id comes from a log line: it never becomes part of a path unless it is one the issuer could have minted
+      if (receiptsDir && receiptId && RECEIPT_ID.test(receiptId)) {
         const bundle = join(receiptsDir, `${receiptId}.json`);
         if (existsSync(bundle)) {
           unlinkSync(bundle);
           result.bundlesRemoved++;
         }
+        const salts = saltsFileFor(receiptsDir, receiptId);
+        if (existsSync(salts)) unlinkSync(salts);
+        // the authorization committed before the call carries the same call: it goes too
+        const authorization = join(receiptsDir, `${receiptId}.authorization.json`);
+        if (existsSync(authorization)) unlinkSync(authorization);
       }
     } else {
       out.push(line);
