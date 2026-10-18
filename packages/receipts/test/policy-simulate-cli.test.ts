@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildFixture, buildSdkFixture, SDK_POLICY, type SdkFixture } from "../scripts/fixture.ts";
+import { pathKey } from "../src/capture.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { dsseSign, generateKeyPair, loadPrivateKey, writeKeyPair } from "../src/crypto.ts";
 import { createGateway, RECEIPT_META_KEY } from "../src/gateway.ts";
@@ -38,10 +40,9 @@ beforeAll(async () => {
     const outcome = decision.decision === "allow" ? { status: "executed" as const, result: { refunded: amount } } : { status: "denied" as const, reason: "over limit" };
     ids.push(receiptIdOf(await sdk.record(event, outcome, decision)));
   }
-  // These are normal issuer side files, not receipt bundles, and must not enter the replay.
+  // The salts directory is a normal issuer side directory, not a receipt bundle, and must not enter the replay.
   mkdirSync(join(fx.receiptsDir, "salts"));
   writeFileSync(join(fx.receiptsDir, "salts", "private.json"), "not receipt JSON");
-  writeFileSync(join(fx.receiptsDir, "ignored.authorization.json"), "not receipt JSON");
 });
 
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -174,6 +175,83 @@ describe("policy simulate CLI on plain Node", () => {
     expect(report.skipped[0]?.receiptId).toBe(receiptIdOf(bundle));
     expect(report.skipped[0]?.reason).toMatch(/withheld/i);
     expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(report);
+  });
+
+  it("reports a call whose receipt is missing but whose authorization survives, instead of dropping it", async () => {
+    const gatewayFixture = buildFixture(join(dir, "orphan"));
+    const cfg = loadConfig(gatewayFixture.configFile);
+    cfg.precommit = ["stripe.refund"];
+    const gateway = await createGateway(cfg);
+    const made: string[] = [];
+    try {
+      for (const amount of [500, 40000]) {
+        const result = await gateway.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount } });
+        made.push(String(result._meta?.[RECEIPT_META_KEY]));
+      }
+    } finally {
+      await gateway.close();
+    }
+    // The gateway died after it forwarded the second call: the authorization is on disk and the receipt is not.
+    rmSync(join(gatewayFixture.receiptsDir, `${made[1]}.json`));
+    const tighter = join(dir, "orphan.cedar");
+    writeFileSync(tighter, `permit(principal, action == Action::"stripe.refund", resource) when { context.args.amount <= 1000 };`);
+    const args = ["policy", "simulate", "--policy", tighter, "--receipts", gatewayFixture.receiptsDir, "--issuer-key", gatewayFixture.gatewayPub, "--principal-key", gatewayFixture.principalPub, "--json"];
+    const result = run(...args);
+    expect(result.status, result.stderr).toBe(1);
+    const report = JSON.parse(result.stdout) as SimulationReport;
+    expect(report).toMatchObject({ total: 2, evaluated: 1, unchanged: 1, complete: false, skipped: [{ receiptId: made[1], tool: "stripe.refund", reason: expect.stringContaining("authorization") }] });
+    // An authorization that does not verify fails the command, as a receipt that does not verify does.
+    const file = join(gatewayFixture.receiptsDir, `${made[1]}.authorization.json`);
+    const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
+    bundle.inclusion.leafIndex += 1;
+    writeFileSync(file, JSON.stringify(bundle));
+    const forged = run(...args);
+    expect(forged.status).toBe(1);
+    expect(forged.stderr).toContain(file);
+    expect(forged.stdout).toBe("");
+  });
+
+  it("replays receipts under a capture rule with the capture key or a disclosure", async () => {
+    const privateFixture = buildSdkFixture(join(dir, "keyed"));
+    const cfg = JSON.parse(readFileSync(privateFixture.configFile, "utf8"));
+    cfg.capture = { "*": { args: { mode: "encrypted" } } };
+    cfg.captureKeyEnv = "SIMULATE_CAPTURE_KEY";
+    writeFileSync(privateFixture.configFile, JSON.stringify(cfg));
+    process.env.SIMULATE_CAPTURE_KEY = randomBytes(32).toString("hex");
+    const sdk = createSdkIssuer(loadSdkConfig(privateFixture.configFile));
+    const event = { tool: "stripe.refund", args: { amount: 100 } };
+    await sdk.record(event, { status: "executed", result: "ok" }, sdk.decide(event));
+    const keyed = (...more: string[]) => simulate("--receipts", privateFixture.receiptsDir, "--issuer-key", privateFixture.appPub, "--json", ...more);
+    expect(keyed().status).toBe(1);
+    const wrong = spawnSync(process.execPath, [cli, "policy", "simulate", "--policy", policyFile, "--receipts", privateFixture.receiptsDir, "--issuer-key", privateFixture.appPub, "--capture-key-env", "SIMULATE_CAPTURE_KEY_UNSET"], { encoding: "utf8" });
+    expect(wrong.status).toBe(1);
+    expect(wrong.stderr).toContain("SIMULATE_CAPTURE_KEY_UNSET");
+    const result = keyed("--capture-key-env", "SIMULATE_CAPTURE_KEY");
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ total: 1, evaluated: 1, unchanged: 1, complete: true });
+
+    const digestFixture = buildSdkFixture(join(dir, "disclosed"));
+    const digestCfg = loadSdkConfig(digestFixture.configFile);
+    digestCfg.capture = { "*": { args: { mode: "digest" }, result: { mode: "clear" }, facts: { mode: "clear" } } };
+    const digestSdk = createSdkIssuer(digestCfg);
+    const bundle = await digestSdk.record(event, { status: "executed", result: "ok" }, digestSdk.decide(event));
+    const statement = decode(bundle);
+    const id = statement.predicate.receiptId;
+    // The holder fills in the value beside the salt it kept, as reveal --include-salts describes.
+    const salts = (JSON.parse(readFileSync(join(digestFixture.receiptsDir, "salts", `${id}.json`), "utf8")) as { salts: Record<string, string> }).salts;
+    const path = statement.predicate.capture!.withheld[0]!;
+    const disclosureFile = join(dir, "disclosure.json");
+    writeFileSync(disclosureFile, JSON.stringify({ receiptId: id, request: { args: { $rest: { $custody: "disclosed", salt: salts[pathKey(path)], value: event.args } } } }));
+    const base = ["--receipts", digestFixture.receiptsDir, "--issuer-key", digestFixture.appPub, "--json"];
+    expect(simulate(...base).status).toBe(1);
+    const disclosed = simulate(...base, "--disclose", disclosureFile);
+    expect(disclosed.status, disclosed.stderr).toBe(0);
+    expect(JSON.parse(disclosed.stdout)).toMatchObject({ total: 1, evaluated: 1, complete: true });
+    // A disclosure that does not match the commitment fails; it never replays a made-up value.
+    writeFileSync(disclosureFile, JSON.stringify({ receiptId: id, request: { args: { $rest: { $custody: "disclosed", salt: salts[pathKey(path)], value: { amount: 999999 } } } } }));
+    const lying = simulate(...base, "--disclose", disclosureFile);
+    expect(lying.status).toBe(1);
+    expect(JSON.parse(lying.stdout)).toMatchObject({ evaluated: 0, complete: false, skipped: [{ reason: expect.stringContaining("does not match") }] });
   });
 
   it("rejects malformed proposed Cedar instead of reporting a successful replay", () => {

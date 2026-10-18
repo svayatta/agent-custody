@@ -277,7 +277,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Done**
 
-- Policy simulation: `policy simulate` verifies local receipts and replays their recorded arguments, facts, and grant against a proposed Cedar policy. Every changed decision is listed by tool and reason with its receipt id, and the report pins the proposed policy digest. [Guide](docs/policies.md#simulating-a-policy-against-recorded-history), tutorial 28.
+- Policy simulation: `policy simulate` verifies local receipts and replays their recorded arguments, facts, and grant against a proposed Cedar policy. Every changed decision is listed by tool and reason with its receipt id, and the report pins the proposed policy digest. A call with no receipt but a surviving authorization file, and a receipt with withheld inputs, make the report incomplete unless `--capture-key-env` or `--disclose` opens them. [Guide](docs/policies.md#simulating-a-policy-against-recorded-history), tutorial 28.
 - Gateway: MCP proxy, signed delegation, gateway-fetched facts, Cedar policy, denial receipts, Merkle log, offline verifier.
 - Receipt schema carries the issuer kind, so a verifier reads gateway versus SDK before anything else.
 - SDK core: policy decision, record, and a generic `wrap(tool, fn)` for any framework whose tools are functions.

@@ -2,9 +2,11 @@
 import { randomUUID } from "node:crypto";
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import { isCommitment, pathText, restorePaths, under } from "./capture.ts";
+import { canonicalize, dsseVerify, type PublicKeyRef } from "./crypto.ts";
 import { decodeDelegation, DELEGATION_TYPE, delegationValidAt } from "./delegation.ts";
+import { leafHash, verifyInclusion } from "./log.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
-import type { ReceiptPredicate } from "./receipt.ts";
+import { AUTHORIZATION_PREDICATE_TYPE, RECEIPT_TYPE, TREEHEAD_TYPE, type AuthorizationBundle, type AuthorizationStatement, type ReceiptPredicate, type TreeHead } from "./receipt.ts";
 import { structuralProblem } from "./verify.ts";
 
 export interface SimulationChange {
@@ -43,6 +45,15 @@ export interface SimulationReport {
   groups: SimulationGroup[];
 }
 
+export interface SimulationOptions {
+  /** The customer's capture key. It decrypts the withheld values that were encrypted under it. */
+  captureKey?: Buffer;
+  /** Disclosure files by receipt id, as `agent-custody reveal` writes them. A disclosure applies only to its own receipt. */
+  disclosures?: ReadonlyMap<string, unknown>;
+  /** Calls that have no receipt to replay. Each counts in `total` and is reported as skipped. */
+  unreplayable?: SimulationSkip[];
+}
+
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
 const order = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 
@@ -66,29 +77,49 @@ function gateProblem(p: ReceiptPredicate): string | null {
 }
 
 /**
+ * Check an authorization bundle that has no receipt, as the verifier does for an embedded one: the issuer signed it, it
+ * is an authorization statement, and its leaf is in the log under a signed tree head. Throws when a check fails.
+ * Returns the statement's predicate.
+ */
+export function verifyOrphanAuthorization(bundle: AuthorizationBundle, issuerKeys: PublicKeyRef[], logKeys: PublicKeyRef[]): AuthorizationStatement["predicate"] {
+  const signed = dsseVerify(bundle.envelope, issuerKeys);
+  if (!signed.ok) throw new Error(`authorization signature (issuer key) (${signed.error})`);
+  const statement = signed.payload as AuthorizationStatement;
+  if (bundle.envelope.payloadType !== RECEIPT_TYPE || statement.predicateType !== AUTHORIZATION_PREDICATE_TYPE) throw new Error("authorization payload type");
+  const head = dsseVerify(bundle.treeHead, [...logKeys, ...issuerKeys]);
+  if (!head.ok || bundle.treeHead.payloadType !== TREEHEAD_TYPE) throw new Error(`authorization tree head signature${head.ok ? "" : ` (${head.error})`}`);
+  const tree = head.payload as TreeHead;
+  if (tree.treeSize !== bundle.inclusion.treeSize || !verifyInclusion(leafHash(canonicalize(bundle.envelope)), bundle.inclusion, tree.rootHash)) throw new Error("authorization log inclusion proof");
+  return statement.predicate;
+}
+
+/**
  * Compare a proposed Cedar policy with recorded policy decisions, using each receipt's original arguments, fact
  * values, agent, and (for gateways) grant context. Observe-mode decisions are the baseline even when the call ran.
  * Receipts are not signature-verified here; verify their bundles separately when their authenticity matters.
  * Missing inputs and non-Cedar gate failures are reported as skipped, never guessed or fetched again.
+ * The receipts are read once, one at a time, so a caller can verify and parse a large history lazily.
  */
-export function simulatePolicy(policyText: string, receipts: ReceiptPredicate[]): SimulationReport {
+export function simulatePolicy(policyText: string, receipts: Iterable<ReceiptPredicate>, options: SimulationOptions = {}): SimulationReport {
   const parsed = cedar.checkParsePolicySet({ staticPolicies: policyText });
   if (parsed.type === "failure") throw new Error(`invalid Cedar policy: ${parsed.errors.map((e) => e.message).join("; ")}`);
+  const unreplayable = options.unreplayable ?? [];
   const report: SimulationReport = {
     runId: randomUUID(),
     timestamp: new Date().toISOString(),
     policyDigest: policyDigest(policyText),
     previousPolicyDigests: [],
-    total: receipts.length,
+    total: unreplayable.length,
     evaluated: 0,
     unchanged: 0,
     complete: true,
     changes: [],
-    skipped: [],
+    skipped: [...unreplayable],
     groups: [],
   };
   const digests = new Set<string>();
   for (const original of receipts) {
+    report.total++;
     const receiptId = typeof original?.receiptId === "string" ? original.receiptId : "(unknown receipt)";
     const tool = typeof original?.tool?.name === "string" ? original.tool.name : "(unknown tool)";
     const skip = (reason: string) => { report.skipped.push({ receiptId, tool, reason }); };
@@ -106,7 +137,7 @@ export function simulatePolicy(policyText: string, receipts: ReceiptPredicate[])
       || !Number.isFinite(Date.parse(original.timestamp)) || !["sdk", "gateway"].includes(original.issuer.kind)) {
       skip("malformed receipt: receipt id, tool, agent, timestamp, or issuer is invalid"); continue;
     }
-    const restored = restorePaths(original, original.capture);
+    const restored = restorePaths(original, original.capture, options.disclosures?.get(receiptId), options.captureKey);
     if (restored.problems.length) {
       skip(`malformed capture: ${restored.problems.map((p) => p.error).join("; ")}`); continue;
     }

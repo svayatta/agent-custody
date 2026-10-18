@@ -2,7 +2,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { privateView, withhold } from "../src/capture.ts";
+import { randomBytes } from "node:crypto";
+import { pathKey, privateView, setAt, withhold } from "../src/capture.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { digestOf } from "../src/crypto.ts";
 import { createGateway, RECEIPT_META_KEY } from "../src/gateway.ts";
@@ -180,5 +181,35 @@ describe("offline policy simulation", () => {
     expect(report.skipped[0]!.reason).toContain("record-only");
     expect(report.skipped[3]!.reason).toContain("no commitment");
     expect(simulatePolicy(ALLOW, [])).toMatchObject({ complete: true, total: 0, evaluated: 0, previousPolicyDigests: [], changes: [], groups: [] });
+  });
+
+  it("reads a one-shot iterable once and counts the calls that have no receipt", async () => {
+    const sdk = issuer();
+    const first = await record(sdk, 10);
+    const second = await record(sdk, 150);
+    const seen: string[] = [];
+    function* lazy() { for (const p of [first, second]) { seen.push(p.receiptId); yield p; } }
+    const orphan = { receiptId: "orphan-1", tool: "refund", reason: "only the authorization survives" };
+    const report = simulatePolicy(ALLOW, lazy(), { unreplayable: [orphan] });
+    expect(seen).toEqual([first.receiptId, second.receiptId]);
+    expect(report).toMatchObject({ total: 3, evaluated: 2, complete: false, skipped: [orphan] });
+    expect(formatSimulation(report)).toContain("SKIPPED orphan-1 (refund)");
+  });
+
+  it("replays withheld inputs with the capture key or a matching disclosure, and no other", async () => {
+    const receipt = await record(issuer(ALLOW), 10);
+    const key = randomBytes(32);
+    const encrypted = privateView(receipt, { args: { mode: "encrypted" }, result: { mode: "clear" }, facts: { mode: "clear" } }, key).predicate;
+    expect(simulatePolicy(DENY, [encrypted])).toMatchObject({ evaluated: 0, complete: false, skipped: [{ reason: expect.stringContaining("withheld") }] });
+    expect(simulatePolicy(DENY, [encrypted], { captureKey: key })).toMatchObject({ evaluated: 1, complete: true, changes: [{ previous: { decision: "allow" }, proposed: { decision: "deny" } }] });
+    expect(simulatePolicy(DENY, [encrypted], { captureKey: randomBytes(32) })).toMatchObject({ evaluated: 0, complete: false, skipped: [{ reason: expect.stringContaining("malformed capture") }] });
+    const view = privateView(receipt, { args: { mode: "digest" }, result: { mode: "clear" }, facts: { mode: "clear" } });
+    // With no clear list, the whole arguments object is withheld at one path: request.args.$rest.
+    expect(view.predicate.capture!.withheld).toEqual([["request", "args", "$rest"]]);
+    const path = view.predicate.capture!.withheld[0]!;
+    const disclosure = setAt({ receiptId: receipt.receiptId }, path, { $custody: "disclosed", salt: view.salts[pathKey(path)], value: receipt.request.args });
+    expect(simulatePolicy(DENY, [view.predicate])).toMatchObject({ evaluated: 0, complete: false });
+    expect(simulatePolicy(DENY, [view.predicate], { disclosures: new Map([[receipt.receiptId, disclosure]]) })).toMatchObject({ evaluated: 1, complete: true, changes: [{ proposed: { decision: "deny" } }] });
+    expect(simulatePolicy(DENY, [view.predicate], { disclosures: new Map([["another-receipt", disclosure]]) })).toMatchObject({ evaluated: 0, complete: false });
   });
 });
