@@ -26,6 +26,9 @@ export function hecEvent(p: ReceiptPredicate, bundle: ReceiptBundle, cfg: Splunk
   const exec = p.execution as { status: string; reason?: unknown; error?: unknown };
   // under a capture rule a message is a commitment; the event says so rather than carrying it
   const text = (v: unknown) => (typeof v === "string" ? v : v && typeof v === "object" ? "(withheld under the capture rule)" : undefined);
+  // A reconciliation receipt records a provider read. No policy ran and the payment tool did not run again, so the
+  // event carries no decision and its status is "reconciled", never "executed" with "allow".
+  const reconciliation = p.reconciliation !== undefined;
   return {
     time: Date.parse(p.timestamp) / 1000,
     source: cfg.source ?? "agent-custody",
@@ -41,11 +44,15 @@ export function hecEvent(p: ReceiptPredicate, bundle: ReceiptBundle, cfg: Splunk
       agent: p.agent.id,
       agent_provenance: p.agent.provenance,
       principal: p.principal.id,
-      status: exec.status,
+      status: reconciliation ? "reconciled" : exec.status,
       reason: text(exec.reason) ?? text(exec.error) ?? null,
-      policy_decision: p.policy?.decision ?? null,
-      policy_digest: p.policy?.policyDigest ?? null,
-      policy_reasons: p.policy?.reasons ?? [],
+      policy_decision: reconciliation ? null : p.policy?.decision ?? null,
+      policy_digest: reconciliation ? null : p.policy?.policyDigest ?? null,
+      policy_reasons: reconciliation ? [] : p.policy?.reasons ?? [],
+      reconciliation,
+      reconciliation_lookup_tool: reconciliation ? p.reconciliation!.lookup?.tool ?? null : null,
+      operation_status: p.operation?.status ?? null,
+      operation_original_receipt_id: p.operation?.originalReceiptId ?? null,
       args_digest: p.request.argsDigest,
       log_leaf_index: bundle.inclusion.leafIndex,
       log_tree_size: bundle.inclusion.treeSize,

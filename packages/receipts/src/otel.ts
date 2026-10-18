@@ -31,20 +31,27 @@ export function spanFor(p: ReceiptPredicate, bundle: ReceiptBundle, serviceName:
   const traceId = hex.length === 32 ? hex : hex.padEnd(32, "0").slice(0, 32);
   const start = BigInt(Date.parse(p.timestamp)) * 1_000_000n;
   const end = BigInt(Date.now()) * 1_000_000n;
-  const status = p.execution.status;
+  // A reconciliation receipt records a provider read that the gateway made. The gateway evaluated no policy, and it did
+  // not execute the payment tool again. The span says so: a dashboard must not count it as a second allowed call.
+  const reconciliation = p.reconciliation !== undefined;
+  const status = reconciliation ? "reconciled" : p.execution.status;
+  const operationFailed = reconciliation && p.operation?.status === "failed";
   const auth = p.authorization as AuthorizationBundle | undefined;
   const attributes: Attr[] = [
     ...str("agent_custody.receipt_id", p.receiptId),
     ...str("agent_custody.issuer.kind", p.issuer.kind),
     ...str("agent_custody.issuer.keyid", p.issuer.keyid),
     ...str("agent_custody.tool", p.tool.name),
+    ...(reconciliation ? [{ key: "agent_custody.reconciliation", value: { boolValue: true } }, ...str("agent_custody.reconciliation.lookup_tool", p.reconciliation!.lookup?.tool)] : []),
+    ...str("agent_custody.operation.status", p.operation?.status),
+    ...str("agent_custody.operation.original_receipt_id", p.operation?.originalReceiptId),
     ...str("agent_custody.upstream", p.tool.upstream),
     ...str("agent_custody.agent", p.agent.id),
     ...str("agent_custody.agent.provenance", p.agent.provenance),
     ...str("agent_custody.principal", p.principal.id),
     ...str("agent_custody.execution.status", status),
-    ...str("agent_custody.policy.decision", p.policy?.decision),
-    ...str("agent_custody.policy.digest", p.policy?.policyDigest),
+    ...(reconciliation ? [] : str("agent_custody.policy.decision", p.policy?.decision)),
+    ...(reconciliation ? [] : str("agent_custody.policy.digest", p.policy?.policyDigest)),
     ...int("agent_custody.log.leaf_index", bundle.inclusion.leafIndex),
     ...int("agent_custody.log.tree_size", bundle.inclusion.treeSize),
     ...(auth ? int("agent_custody.authorization.leaf_index", auth.inclusion.leafIndex) : []),
@@ -63,13 +70,13 @@ export function spanFor(p: ReceiptPredicate, bundle: ReceiptBundle, serviceName:
               {
                 traceId,
                 spanId: traceId.slice(0, 16),
-                name: `${p.tool.name}`,
+                name: reconciliation ? `${p.tool.name} reconciliation` : `${p.tool.name}`,
                 kind: 3, // CLIENT: the agent calling out
                 startTimeUnixNano: start.toString(),
                 endTimeUnixNano: (end > start ? end : start).toString(),
                 attributes,
                 // Status.message is a string in OTLP; under a capture rule the error is a commitment, and the span says so
-                status: status === "executed" || status === "denied" || status === "withheld" ? { code: 1 } : { code: 2, message: status === "failed" ? "the upstream reported failure" : typeof (p.execution as { error?: unknown }).error === "string" ? ((p.execution as { error: string }).error) : (p.execution as { error?: unknown }).error ? "the upstream reported an error (withheld under the capture rule)" : status },
+                status: operationFailed ? { code: 2, message: "the provider reports that the operation failed" } : status === "executed" || status === "reconciled" || status === "denied" || status === "withheld" ? { code: 1 } : { code: 2, message: status === "failed" ? "the upstream reported failure" : typeof (p.execution as { error?: unknown }).error === "string" ? ((p.execution as { error: string }).error) : (p.execution as { error?: unknown }).error ? "the upstream reported an error (withheld under the capture rule)" : status },
               },
             ],
           },
