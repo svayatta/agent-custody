@@ -413,7 +413,9 @@ async function main(argv: string[]): Promise<number> {
           throw new Error("sso set needs the OIDC flags or --saml-entry-point with --saml-cert");
         }
         const domains = values.domains.split(",");
-        await new PortalStore(openPostgres(values["db-env"])).setSso({ tenant: args[0], protocol: "issuer" in config ? "oidc" : "saml", config, domains, defaultRole: values["default-role"] as Role, enforced: values.enforce });
+        const protocol = "issuer" in config ? "oidc" : "saml";
+        await new PortalStore(openPostgres(values["db-env"])).setSso({ tenant: args[0], protocol, config, domains, defaultRole: values["default-role"] as Role, enforced: values.enforce });
+        await tenancy.record(actor, "sso.set", args[0], { protocol, ...("issuer" in config ? { issuer: config.issuer } : { entryPoint: config.entryPoint }), domains, defaultRole: values["default-role"], enforced: values.enforce });
         console.log(`single sign-on set for ${args[0]}: ${domains.join(", ")}${values.enforce ? " (enforced)" : ""}`);
       } else if (what === "sso" && verb === "show" && args[0]) {
         const s = await new PortalStore(openPostgres(values["db-env"])).ssoOf(args[0]);
@@ -421,9 +423,16 @@ async function main(argv: string[]): Promise<number> {
         const c = s.config as Partial<OidcConfig & SamlConfig>;
         console.log([`protocol      ${s.protocol}`, ...(c.issuer ? [`issuer        ${c.issuer}`, `client id     ${c.clientId}`, "client secret  set"] : [`entry point   ${c.entryPoint}`, `idp issuer    ${c.idpIssuer ?? "(not pinned)"}`, "idp cert      set"]), `domains       ${s.domains.join(", ")}`, `default role  ${s.defaultRole}`, `enforced      ${s.enforced}`].join("\n"));
       } else if (what === "sso" && verb === "remove" && args[0]) {
-        console.log(`${(await new PortalStore(openPostgres(values["db-env"])).removeSso(args[0])) ? "removed" : "there was no"} single sign-on for ${args[0]}`);
+        const removed = await new PortalStore(openPostgres(values["db-env"])).removeSso(args[0]);
+        if (removed) await tenancy.record(actor, "sso.remove", args[0], {});
+        console.log(`${removed ? "removed" : "there was no"} single sign-on for ${args[0]}`);
       } else if (what === "user" && verb === "mfa-reset" && args[0]) {
-        if (!(await new PortalStore(openPostgres(values["db-env"])).resetMfa(args[0].trim().toLowerCase()))) throw new Error(`no portal account with the address ${args[0]}`);
+        const portal = new PortalStore(openPostgres(values["db-env"]));
+        const email = args[0].trim().toLowerCase();
+        const member = await portal.userByEmail(email);
+        if (!member) throw new Error(`no portal account with the address ${args[0]}`);
+        await portal.resetMfa(email);
+        await tenancy.record(actor, "user.mfa-reset", await portal.tenantOf(member.id), { email });
         console.log(`MFA reset for ${args[0]}`);
       } else if (what === "audit") {
         for (const e of await tenancy.audit({ ...(values.tenant !== "default" ? { tenant: values.tenant } : {}), limit: 100 })) console.log(`${e.at}  ${e.actor.padEnd(40)} ${e.action.padEnd(14)} ${(e.tenantId ?? "").padEnd(20)} ${Object.entries(e.detail).map(([k, v]) => `${k}=${v}`).join(" ")}`);

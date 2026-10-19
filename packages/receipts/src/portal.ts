@@ -169,6 +169,8 @@ export class PortalStore {
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS mfa_enabled_at TIMESTAMPTZ`);
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS mfa_last_step BIGINT`);
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}invites (tenant_id TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL, invited_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, email))`);
+        // who an admin removed from a tenant: single sign-on does not let them back in on its own
+        await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}removed (tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (tenant_id, user_id))`);
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}sso (tenant_id TEXT PRIMARY KEY, protocol TEXT NOT NULL, config TEXT NOT NULL, domains TEXT[] NOT NULL, default_role TEXT NOT NULL, enforced BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
       })();
     }
@@ -296,7 +298,9 @@ export class PortalStore {
   }
   async removeMember(tenantId: string, userId: string): Promise<boolean> {
     await this.init();
-    return (await this.client.query(`DELETE FROM ${this.p}members WHERE user_id = $1 AND tenant_id = $2 AND (role <> 'owner' OR EXISTS (SELECT 1 FROM ${this.p}members o WHERE o.tenant_id = $2 AND o.role = 'owner' AND o.user_id <> $1)) RETURNING user_id`, [userId, tenantId])).rows.length > 0;
+    const gone = (await this.client.query(`DELETE FROM ${this.p}members WHERE user_id = $1 AND tenant_id = $2 AND (role <> 'owner' OR EXISTS (SELECT 1 FROM ${this.p}members o WHERE o.tenant_id = $2 AND o.role = 'owner' AND o.user_id <> $1)) RETURNING user_id`, [userId, tenantId])).rows.length > 0;
+    if (gone) await this.client.query(`INSERT INTO ${this.p}removed (tenant_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [tenantId, userId]);
+    return gone;
   }
   async invite(tenantId: string, email: string, role: Role, by: string): Promise<void> {
     await this.init();
@@ -374,8 +378,12 @@ export class PortalStore {
   }
   /**
    * The account behind an identity that the tenant's IdP vouched for: the linked one; else the account with that
-   * email, linked from now on, if it verified its address (UnverifiedAccountError otherwise); else a new verified
-   * account with a random password. The tenant's role is kept; an account with no tenant joins with the default role.
+   * email, linked from now on, if it verified its address; else a new verified account with a random password.
+   * The IdP proves the address, so an account that never verified it loses the address: the account goes, with its
+   * password, its sessions, and its links. A tenant that it owned stays for the operator. The one exception is an
+   * unverified member of this same tenant, who verifies by password first (UnverifiedAccountError). An account with
+   * no tenant joins with the default role. A member that an admin removed joins again only through a new invite,
+   * with the invited role.
    */
   async findOrCreateSsoUser(s: SsoSetting, id: SsoIdentity): Promise<PortalUser> {
     await this.init();
@@ -387,19 +395,25 @@ export class PortalStore {
     const known = !!user;
     user ??= await this.userByEmail(id.email);
     if (user && !known && !user.emailVerifiedAt) {
-      // the IdP proves the address: a bare unproven account is replaced, so its password and sessions die
-      if (await this.tenantOf(user.id) || (await this.identities(user.id)).length) throw new UnverifiedAccountError(id.email);
+      if ((await this.tenantOf(user.id)) === s.tenant) throw new UnverifiedAccountError(id.email);
+      for (const t of ["members", "identities"]) await this.client.query(`DELETE FROM ${this.p}${t} WHERE user_id = $1`, [user.id]);
       await this.client.query(`DELETE FROM ${this.p}users WHERE id = $1`, [user.id]);
       user = null;
     }
     const home = user ? await this.tenantOf(user.id) : null;
     if (home && home !== s.tenant) throw new SsoRefusedError(`the account ${id.email} belongs to another tenant`);
+    let role = s.defaultRole;
+    if (user && !home && (await this.client.query(`SELECT 1 FROM ${this.p}removed WHERE tenant_id = $1 AND user_id = $2`, [s.tenant, user.id])).rows.length) {
+      const invited = await this.takeInvite(s.tenant, id.email);
+      if (!invited) throw new SsoRefusedError(`${id.email} was removed from ${s.tenant}; an admin must invite the address again`);
+      role = invited;
+    }
     if (!user) {
       user = await this.createUser(id.email, randomBytes(32).toString("hex"));
       await this.markEmailVerified(user.id);
     }
     if (!known) await this.linkIdentity(provider, id.subject, id.email, user.id);
-    if (!home) await this.addMember(user.id, s.tenant, s.defaultRole);
+    if (!home) await this.addMember(user.id, s.tenant, role);
     return user;
   }
   /** the user's tenant; one per account today */

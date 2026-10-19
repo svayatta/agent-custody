@@ -9,11 +9,12 @@ const b64 = (v: unknown) => Buffer.from(typeof v === "string" ? v : JSON.stringi
 const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const rsaOther = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const ec = generateKeyPairSync("ec", { namedCurve: "P-256" });
+const ec384 = generateKeyPairSync("ec", { namedCurve: "secp384r1" });
 const jwk = (k: KeyObject, kid: string) => ({ ...k.export({ format: "jwk" }), kid, use: "sig" });
 
 let n = 0;
 // a new issuer per test, because the module caches per issuer
-function idp(opts: { discoveryIssuer?: string; keys?: unknown[] } = {}) {
+function idp(opts: { discoveryIssuer?: string; keys?: unknown[]; endpoints?: Record<string, string> } = {}) {
   const issuer = `https://idp${++n}.example.com`;
   const cfg: OidcConfig = { issuer, clientId: "client-1", clientSecret: "s3cret" };
   const calls: { url: string; body?: URLSearchParams }[] = [];
@@ -23,7 +24,7 @@ function idp(opts: { discoveryIssuer?: string; keys?: unknown[] } = {}) {
     calls.push({ url, ...(init?.body ? { body: init.body as URLSearchParams } : {}) });
     expect(init?.signal).toBeInstanceOf(AbortSignal);
     const json = (v: unknown) => new Response(JSON.stringify(v), { headers: { "content-type": "application/json" } });
-    if (url.endsWith("/.well-known/openid-configuration")) return json({ issuer: opts.discoveryIssuer ?? issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, jwks_uri: `${issuer}/jwks` });
+    if (url.endsWith("/.well-known/openid-configuration")) return json({ issuer: opts.discoveryIssuer ?? issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, jwks_uri: `${issuer}/jwks`, ...opts.endpoints });
     if (url.endsWith("/jwks")) return json({ keys });
     if (url.endsWith("/token")) return json({ id_token: idToken });
     return new Response("nope", { status: 404 });
@@ -94,11 +95,32 @@ describe("OIDC", () => {
     ["an expired token", /expired/, (c: OidcConfig) => jws(rsHeader, { ...goodClaims(c), exp: now - 3600 }, "RS256", rsa.privateKey)],
     ["the wrong nonce", /nonce/, (c: OidcConfig) => jws(rsHeader, { ...goodClaims(c), nonce: "replayed" }, "RS256", rsa.privateKey)],
     ["email_verified false", /not verified/, (c: OidcConfig) => jws(rsHeader, { ...goodClaims(c), email_verified: false }, "RS256", rsa.privateKey)],
+    ["an id_token issued an hour ahead", /future/, (c: OidcConfig) => jws(rsHeader, { ...goodClaims(c), iat: now + 3600, exp: now + 7200 }, "RS256", rsa.privateKey)],
     ["no email", /email/, (c: OidcConfig) => jws(rsHeader, { ...goodClaims(c), email: undefined }, "RS256", rsa.privateKey)],
   ])("refuses %s", async (_name, error, make) => {
     const p = idp();
     p.setToken(make(p.cfg));
     await expect(oidcExchange(p.cfg, { code: "c", redirectUri: "r", codeVerifier: "v", nonce: "n-1", fetch: p.fetch })).rejects.toThrow(error);
+  });
+
+  it("refuses a key that is marked for encryption, even when its kid matches", async () => {
+    const p = idp({ keys: [{ ...jwk(rsa.publicKey, "rs1"), use: "enc" }] });
+    p.setToken(jws(rsHeader, goodClaims(p.cfg), "RS256", rsa.privateKey));
+    await expect(oidcExchange(p.cfg, { code: "c", redirectUri: "r", codeVerifier: "v", nonce: "n-1", fetch: p.fetch })).rejects.toThrow(/no key/);
+  });
+
+  it("refuses an ES256 id_token whose key is not on the P-256 curve", async () => {
+    const p = idp({ keys: [jwk(ec384.publicKey, "ec1")] });
+    p.setToken(jws({ alg: "ES256", kid: "ec1" }, goodClaims(p.cfg), "ES256", ec384.privateKey));
+    await expect(oidcExchange(p.cfg, { code: "c", redirectUri: "r", codeVerifier: "v", nonce: "n-1", fetch: p.fetch })).rejects.toThrow(/signature/);
+  });
+
+  it.each(["authorization_endpoint", "token_endpoint", "jwks_uri"])("refuses a discovery document whose %s is not https, so the client secret never goes out in clear", async (name) => {
+    const plain = idp({ endpoints: { [name]: "http://idp.example.com/endpoint" } });
+    await expect(oidcAuthorizeUrl(plain.cfg, { redirectUri: "r", state: "s", nonce: "n", codeChallenge: "c", fetch: plain.fetch })).rejects.toThrow(/must be an https URL/);
+    plain.setToken(jws(rsHeader, goodClaims(plain.cfg), "RS256", rsa.privateKey));
+    await expect(oidcExchange(plain.cfg, { code: "c", redirectUri: "r", codeVerifier: "v", nonce: "n-1", fetch: plain.fetch })).rejects.toThrow(/must be an https URL/);
+    expect(plain.calls.some((c) => c.body)).toBe(false);
   });
 
   it("refuses an issuer that is not https, and a discovery document for another issuer", async () => {
@@ -117,18 +139,25 @@ const CONFIG = { entryPoint: "https://idp.example.com/sso", idpCert: idpPublicPe
 const REQUEST_ID = "_req123";
 const iso = (ms: number) => new Date(Date.now() + ms).toISOString();
 
-interface Opts { audience?: string; inResponseTo?: string; responseInResponseTo?: string; nameId?: string; nameFormat?: string; email?: string; notOnOrAfter?: string; issuer?: string; key?: KeyObject; sign?: boolean }
+interface Opts { recipient?: string; scNotOnOrAfter?: string; scMethod?: string; conditionsNotOnOrAfter?: string | null; audience?: string; inResponseTo?: string; responseInResponseTo?: string; nameId?: string; nameFormat?: string; email?: string; notOnOrAfter?: string; issuer?: string; key?: KeyObject; sign?: boolean }
 function assertion(o: Opts): string {
-  const sc = `<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml:SubjectConfirmationData InResponseTo="${o.inResponseTo ?? REQUEST_ID}" Recipient="${SP.acsUrl}" NotOnOrAfter="${iso(300_000)}"/></saml:SubjectConfirmation>`;
+  const sc = `<saml:SubjectConfirmation Method="${o.scMethod ?? "urn:oasis:names:tc:SAML:2.0:cm:bearer"}"><saml:SubjectConfirmationData InResponseTo="${o.inResponseTo ?? REQUEST_ID}" Recipient="${o.recipient ?? SP.acsUrl}" NotOnOrAfter="${o.scNotOnOrAfter ?? iso(300_000)}"/></saml:SubjectConfirmation>`;
   const attrs = o.email ? `<saml:AttributeStatement><saml:Attribute Name="email"><saml:AttributeValue>${o.email}</saml:AttributeValue></saml:Attribute></saml:AttributeStatement>` : "";
   return `<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_assertion1" Version="2.0" IssueInstant="${iso(0)}"><saml:Issuer>${o.issuer ?? CONFIG.idpIssuer}</saml:Issuer>`
     + `<saml:Subject><saml:NameID Format="${o.nameFormat ?? "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"}">${o.nameId ?? "Alice@Acme.com"}</saml:NameID>${sc}</saml:Subject>`
-    + `<saml:Conditions NotBefore="${iso(-60_000)}" NotOnOrAfter="${o.notOnOrAfter ?? iso(300_000)}"><saml:AudienceRestriction><saml:Audience>${o.audience ?? SP.spEntityId}</saml:Audience></saml:AudienceRestriction></saml:Conditions>${attrs}</saml:Assertion>`;
+    + `<saml:Conditions${o.conditionsNotOnOrAfter === null ? "" : ` NotBefore="${iso(-60_000)}" NotOnOrAfter="${o.conditionsNotOnOrAfter ?? o.notOnOrAfter ?? iso(300_000)}"`}><saml:AudienceRestriction><saml:Audience>${o.audience ?? SP.spEntityId}</saml:Audience></saml:AudienceRestriction></saml:Conditions>${attrs}</saml:Assertion>`;
 }
 function signAssertion(xml: string, key: KeyObject): string {
   const s = new SignedXml({ privateKey: key.export({ format: "pem", type: "pkcs8" }) as string, signatureAlgorithm: "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256", canonicalizationAlgorithm: "http://www.w3.org/2001/10/xml-exc-c14n#" });
   s.addReference({ xpath: "//*[local-name(.)='Assertion']", transforms: ["http://www.w3.org/2000/09/xmldsig#enveloped-signature", "http://www.w3.org/2001/10/xml-exc-c14n#"], digestAlgorithm: "http://www.w3.org/2001/04/xmlenc#sha256" });
   s.computeSignature(xml, { location: { reference: "//*[local-name(.)='Issuer']", action: "after" } });
+  return s.getSignedXml();
+}
+// a valid signature over the Response, around an assertion that nobody signed
+function signResponse(xml: string, key: KeyObject): string {
+  const s = new SignedXml({ privateKey: key.export({ format: "pem", type: "pkcs8" }) as string, signatureAlgorithm: "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256", canonicalizationAlgorithm: "http://www.w3.org/2001/10/xml-exc-c14n#" });
+  s.addReference({ xpath: "/*", transforms: ["http://www.w3.org/2000/09/xmldsig#enveloped-signature", "http://www.w3.org/2001/10/xml-exc-c14n#"], digestAlgorithm: "http://www.w3.org/2001/04/xmlenc#sha256" });
+  s.computeSignature(xml, { location: { reference: "//*[local-name(.)='Status']", action: "before" } });
   return s.getSignedXml();
 }
 const wrap = (inner: string, inResponseTo = REQUEST_ID) => `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_resp1" Version="2.0" IssueInstant="${iso(0)}" InResponseTo="${inResponseTo}"><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>${inner}</samlp:Response>`;
@@ -166,6 +195,11 @@ describe("SAML", () => {
     ["the wrong IdP issuer", /issuer/, () => signed({ issuer: "https://evil.example.com/meta" })],
     ["a NameID changed after signing", /signature/i, () => good.replace("Alice@Acme.com", "admin@acme.com")],
     ["an assertion for another request", /answer to this sign-in/, () => signed({ inResponseTo: "_other" })],
+    ["a wrong Recipient", /answer to this sign-in/, () => signed({ recipient: "https://evil.example.com/acs" })],
+    ["an expired SubjectConfirmationData", /answer to this sign-in/, () => signed({ scNotOnOrAfter: iso(-3_600_000) })],
+    ["a holder-of-key confirmation only", /answer to this sign-in/, () => signed({ scMethod: "urn:oasis:names:tc:SAML:2.0:cm:holder-of-key" })],
+    ["Conditions with no validity period", /validity period/, () => signed({ conditionsNotOnOrAfter: null })],
+    ["a signed Response around an unsigned assertion", /signature/i, () => signResponse(signed({ sign: false }), idpKeys.privateKey)],
     ["a forged Response InResponseTo", /answer to this sign-in/, () => signed({ inResponseTo: "_other", responseInResponseTo: REQUEST_ID })],
     ["a forged assertion beside a signed one in Extensions", /signature/i, () => {
       const s = signAssertion(assertion({}), idpKeys.privateKey);

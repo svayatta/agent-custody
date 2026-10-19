@@ -71,7 +71,7 @@ Every member of a tenant has one role. A role includes the roles above it in thi
 | `admin` | also mint and revoke API keys, invite, cancel invites, change a member's role, and remove a member, but never touch an owner and never grant `owner` |
 | `owner` | everything, billing included |
 
-A write route that is not in this table needs `admin`. The last owner of a tenant cannot be removed or demoted. An invite lasts seven days. An account belongs to one tenant. The members page of the portal shows the same operations.
+A write route that is not in this table needs `admin`. The last owner of a tenant cannot be removed or demoted. An invite lasts seven days. An account belongs to one tenant. A removed member loses access at once, also in a tenant with single sign-on. The members page of the portal shows the same operations.
 
 ### Two-step sign-in
 
@@ -89,7 +89,7 @@ An enterprise tenant can sign in through its own identity provider (IdP). Only t
 | `GET /auth/sso/<tenant>/saml` | the service provider metadata to give to the IdP |
 | `POST /auth/sso/<tenant>/saml/acs` | SAML: reads only the signed assertion, whose bearer `SubjectConfirmationData` must answer the request id in the cookie, then signs the user in |
 
-A sign-in creates the account or links it, and joins it to the tenant with the tenant's default role. The email domain must be one of the tenant's. An unverified password account with the same address and no tenant or provider is replaced, so its password and sessions stop working; any other unverified account with that address is refused. The portal skips its own MFA, because the IdP owns it. SAML needs the optional package `@node-saml/node-saml` beside the CLI.
+A sign-in creates the account or links it, and joins it to the tenant with the tenant's default role. The email domain must be one of the tenant's. The IdP proves the address, so a password account that never verified it loses the address: the sign-in deletes that account with its password, sessions, memberships, and linked providers, and a tenant that it created stays for the operator. Registering an address first, with or without a tenant, or linking a provider to it, never blocks the person at the IdP. The one exception is an unverified member of the same tenant, who signs in with the password and verifies the address first. A member that an admin removed from the tenant does not rejoin through the IdP on its own: an admin must invite the address again, and the person then joins with the invited role. The portal skips its own MFA, because the IdP owns it. SAML needs the optional package `@node-saml/node-saml` beside the CLI.
 
 With `--enforce`, members of the tenant cannot sign in with a password, GitHub, or Google. The sessions that members had before end. Invites are refused, because members join through the IdP.
 
@@ -130,4 +130,4 @@ agent-custody log-admin --db-env DATABASE_URL sso show acme
 agent-custody log-admin --db-env DATABASE_URL sso remove acme
 ```
 
-`sso set` reads the client secret from the named environment variable at that moment and stores it in the portal's table. `--default-role` is the role of a new member (`readonly` if unset, never `owner`). `sso set` replaces the whole setting, so give every flag each time. `--enforce` turns on the rules in [Single sign-on](#single-sign-on). The redirect URI to register at the IdP is `https://<PORTAL_HOST>/auth/sso/<tenant>/callback`. `user mfa-reset <email>` turns MFA off for one portal account; it prints an error when the address has no account.
+`sso set` reads the client secret from the named environment variable at that moment and stores it in the portal's table. `--default-role` is the role of a new member (`readonly` if unset, never `owner`). `sso set` replaces the whole setting, so give every flag each time. `--enforce` turns on the rules in [Single sign-on](#single-sign-on). The redirect URI to register at the IdP is `https://<PORTAL_HOST>/auth/sso/<tenant>/callback`. `user mfa-reset <email>` turns MFA off for one portal account; it prints an error when the address has no account. `sso set`, `sso remove`, and `user mfa-reset` write an entry in the audit trail (`sso.set`, `sso.remove`, `user.mfa-reset`) with the actor `cli:<user>@<host>`; the entry never holds a secret. `tenancy.audit()` and `log-admin audit` list it.

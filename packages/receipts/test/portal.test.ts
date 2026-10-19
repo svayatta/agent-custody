@@ -470,11 +470,14 @@ describe("roles, invites, and two-step sign-in", () => {
 
   it("each role may do its tier and the tiers below it, and a refusal is a 403 that names the role needed", async () => {
     await tenancy.addTenant("rbac", "rbac", "test");
+    await new PortalStore(db).setBilling("rbac", { customerId: "cus_rbac", status: "active" });
     const writes: { least: Role; call: (cookie: string, who: Role) => ReturnType<typeof hit> }[] = [
       { least: "readonly", call: (c) => hit("GET", "/api/members", undefined, c) },
       { least: "reviewer", call: (c, who) => hit("POST", "/api/policies", { name: `v-${who}`, text: `permit(principal, action, resource); // ${who}` }, c) },
+      { least: "reviewer", call: async (c, who) => hit("POST", `/api/policies/${(await tenancy.addPolicy("rbac", `rm-${who}`, `permit(principal, action, resource); // rm ${who}`, "test")).id}/remove`, {}, c) },
       { least: "admin", call: (c, who) => hit("POST", "/api/keys", { label: who }, c) },
       { least: "owner", call: (c) => hit("POST", "/api/checkout", {}, c) },
+      { least: "owner", call: (c) => hit("POST", "/api/billing-portal", {}, c) },
     ];
     for (const role of ROLES) {
       const { cookie } = await account(`${role}@rbac.example`, "rbac", role);
@@ -548,6 +551,18 @@ describe("roles, invites, and two-step sign-in", () => {
     expect((await hit("GET", "/api/overview", undefined, invitee.cookie)).status).toBe(409);
   });
 
+  it("an invite sent before the tenant enforced single sign-on cannot be accepted afterwards", async () => {
+    await tenancy.addTenant("rbac4", "rbac4", "test");
+    const owner = await account("o@rbac4.example", "rbac4", "owner");
+    expect((await hit("POST", "/api/members", { email: "late@rbac4.example", role: "admin" }, owner.cookie)).status).toBe(200);
+    await new PortalStore(db).setSso({ tenant: "rbac4", protocol: "oidc", config: { issuer: "https://idp.rbac4.example", clientId: "c", clientSecret: "s" }, domains: ["rbac4.example"], defaultRole: "readonly", enforced: true });
+    const invitee = await account("late@rbac4.example");
+    const refused = await hit("POST", "/api/invites/accept", { tenant: "rbac4" }, invitee.cookie);
+    expect(refused.status).toBe(409);
+    expect(refused.json.error).toMatch(/identity provider/);
+    expect(await new PortalStore(db).roleOf(invitee.id, "rbac4")).toBeNull();
+  });
+
   // Time stands still in the middle of a step, so the window does not move during a test.
   const midStep = () => { const t = Math.floor(Date.now() / 30_000) * 30_000 + 15_000; vi.spyOn(Date, "now").mockReturnValue(t); return Math.floor(t / 30_000); };
 
@@ -592,6 +607,39 @@ describe("roles, invites, and two-step sign-in", () => {
 
     expect((await hit("POST", "/api/mfa/disable", { code: totp(key, step + 1) }, user.cookie, ip)).json).toEqual({ mfa: false });
     expect(cookieOf((await hit("POST", "/api/login", { email: "mfa1@example.com", password: "a-long-enough-password" }, undefined, ip)).cookies, "custody_session")).toBeDefined();
+  });
+
+  it("a stolen session cannot turn MFA off: no code, a wrong code, and the code that just signed in are all refused, and MFA stays on", async () => {
+    const step = midStep();
+    await tenancy.addTenant("mfa3", "mfa3", "test");
+    const user = await account("mfa3@example.com", "mfa3");
+    const key = Buffer.from("s".repeat(20));
+    await new PortalStore(db).setMfaSecret(user.id, key.toString("hex"));
+    await new PortalStore(db).enableMfa(user.id);
+    const ip = "10.5.0.1";
+    const half = cookieOf((await hit("POST", "/api/login", { email: "mfa3@example.com", password: "a-long-enough-password" }, undefined, ip)).cookies, "custody_mfa")!.split(";")[0];
+    expect((await hit("POST", "/api/login/mfa", { code: totp(key, step) }, half, ip)).status).toBe(200);
+    for (const body of [{}, { code: "000000" }, { code: totp(key, step) }]) {
+      expect([JSON.stringify(body), (await hit("POST", "/api/mfa/disable", body, user.cookie, ip)).status]).toEqual([JSON.stringify(body), 401]);
+    }
+    expect((await new PortalStore(db).mfa(user.id)).enabled).toBe(true);
+    expect((await hit("POST", "/api/mfa/disable", { code: totp(key, step + 1) }, user.cookie, ip)).json).toEqual({ mfa: false });
+  });
+
+  it("a code only moves MFA to the state it asks for: enabling when it is on, and disabling when it was never turned on, are refused with a valid code", async () => {
+    const step = midStep();
+    await tenancy.addTenant("mfa4", "mfa4", "test");
+    const on = await account("mfa4@example.com", "mfa4");
+    const onKey = Buffer.from("o".repeat(20));
+    await new PortalStore(db).setMfaSecret(on.id, onKey.toString("hex"));
+    await new PortalStore(db).enableMfa(on.id);
+    expect((await hit("POST", "/api/mfa/enable", { code: totp(onKey, step) }, on.cookie, "10.6.0.1")).status).toBe(409);
+
+    const half = await account("mfa5@example.com", "mfa4");
+    const halfKey = Buffer.from("h".repeat(20));
+    await new PortalStore(db).setMfaSecret(half.id, halfKey.toString("hex"));
+    expect((await hit("POST", "/api/mfa/disable", { code: totp(halfKey, step) }, half.cookie, "10.6.0.2")).status).toBe(409);
+    expect((await new PortalStore(db).mfa(half.id)).secret).toBe(halfKey.toString("hex"));
   });
 
   it("wrong codes are throttled per account whatever the address, and per address whatever the account", async () => {
@@ -701,7 +749,7 @@ describe("enterprise sign-in", () => {
     expect((await store.members("sso-co")).map((m) => m.email)).toEqual(["ann@sso.example"]);
   });
 
-  it("refuses an address outside the tenant's domains, a state that is not the cookie's, a cookie from another tenant's flow, a member of another tenant, and an unverified password account that is not bare; and replaces a bare one", async () => {
+  it("refuses an address outside the tenant's domains, a state that is not the cookie's, a cookie from another tenant's flow, a member of another tenant, and an unverified member of the same tenant", async () => {
     await setup("sso-co", "sso.example");
     await setup("other-co", "other.example");
     const outside = await signIn("sso-co", { email: "eve@evil.example" });
@@ -719,18 +767,60 @@ describe("enterprise sign-in", () => {
     expect([moved.status, sessionOf(moved)]).toEqual([403, undefined]);
     expect(await store.roleOf(bob.id, "sso-co")).toBeNull();
 
-    const squatter = await store.createUser("cy@sso.example", "a-long-enough-password");
-    const replaced = await signIn("sso-co", { email: "cy@sso.example" });
-    expect(replaced.status).toBe(200);
-    expect([await store.user(squatter.id), await store.authenticate("cy@sso.example", "a-long-enough-password")]).toEqual([null, null]);
-
-    const dot = await store.createUser("dot@sso.example", "a-long-enough-password");
-    await store.addMember(dot.id, "other-co", "readonly");
-    const unverified = await signIn("sso-co", { email: "dot@sso.example" });
+    const own = await store.createUser("own@sso.example", "a-long-enough-password");
+    await store.addMember(own.id, "sso-co", "owner");
+    const unverified = await signIn("sso-co", { email: "own@sso.example" });
     expect([unverified.status, sessionOf(unverified)]).toEqual([409, undefined]);
+    expect(await store.user(own.id)).not.toBeNull();
 
     const twoAts = await signIn("sso-co", { email: "a@evil.example@sso.example" });
     expect([twoAts.status, sessionOf(twoAts)]).toEqual([403, undefined]);
+  });
+
+  it("an address registered first never locks the person out: a bare account, an account that created a tenant, and an account with a linked provider all lose the address to the provider's sign-in", async () => {
+    await setup("sso-co", "sso.example");
+    const bare = await store.createUser("cy@sso.example", "a-long-enough-password");
+    const bareSession = `custody_session=${signSession(SECRET, bare.id)}`;
+    const tenantOwner = await post("api/register", { email: "new.hire@sso.example", password: "a-long-enough-password", tenant: "squat-co", name: "Sam Squat", company: "Squat Co" });
+    expect(tenantOwner.status).toBe(200);
+    const squat = (await store.userByEmail("new.hire@sso.example"))!;
+    const linked = await store.createUser("lin@sso.example", "a-long-enough-password");
+    await store.linkIdentity("github", "gh-lin", "someone@elsewhere.example", linked.id);
+
+    for (const [email, old] of [["cy@sso.example", bare], ["new.hire@sso.example", squat], ["lin@sso.example", linked]] as const) {
+      const cb = await signIn("sso-co", { email });
+      expect([email, cb.status]).toEqual([email, 200]);
+      const fresh = (await store.userByEmail(email))!;
+      expect(fresh.id).not.toBe(old.id);
+      expect(await store.roleOf(fresh.id, "sso-co")).toBe("readonly");
+      expect(await store.authenticate(email, "a-long-enough-password")).toBeNull();
+      expect(await store.user(old.id)).toBeNull();
+      expect(await store.identities(old.id)).toEqual([]);
+    }
+    expect((await get("api/me", bareSession)).status).toBe(401);
+    // the tenant that the squatter created stays, with no member, for the operator
+    expect((await tenancy.tenant("squat-co"))?.id).toBe("squat-co");
+    expect(await store.members("squat-co")).toEqual([]);
+  });
+
+  it("a member that an admin removed does not come back through the provider, until an admin invites the address again", async () => {
+    await setup("sso-co", "sso.example");
+    const boss = await verifiedUser("boss@sso.example", "sso-co", "owner");
+    const owner = `custody_session=${signSession(SECRET, boss.id)}`;
+    const mal = sessionOf(await signIn("sso-co", { email: "mal@sso.example" }))!;
+    expect((await me(mal)).role).toBe("readonly");
+    const malId = (await store.userByEmail("mal@sso.example"))!.id;
+    expect((await post(`api/members/${malId}/remove`, {}, owner)).status).toBe(200);
+    expect((await me(mal)).tenant).toBeNull();
+
+    const again = await signIn("sso-co", { email: "mal@sso.example" });
+    expect([again.status, sessionOf(again)]).toEqual([403, undefined]);
+    expect(await store.roleOf(malId, "sso-co")).toBeNull();
+
+    expect((await post("api/members", { email: "mal@sso.example", role: "reviewer" }, owner)).status).toBe(200);
+    const back = sessionOf(await signIn("sso-co", { email: "mal@sso.example" }))!;
+    expect(await me(back)).toMatchObject({ tenant: "sso-co", role: "reviewer" });
+    expect(await store.invitesFor("mal@sso.example")).toEqual([]);
   });
 
   it("an enforced tenant refuses a member's password and GitHub sign-in, ends their password session, and takes members from the provider only", async () => {
