@@ -1,16 +1,10 @@
-# Deploys the log's host over SSH with a key that can run only deploy/upgrade.sh (deploy/README.md says how to set it
-# up). A release tag builds the image (image.yml); when that succeeds, this moves log, signer, and portal to the
-# version and checks the log from outside. A merge to main that changes site/ rebuilds the docs site. By hand from the
-# Actions tab: "docs", or a published version. Nothing runs until the repository variable DEPLOY_HOST is set.
+# Deploys the log's host by hand, from the Actions tab: "docs" rebuilds the docs site, a published version such as
+# 0.8.0 moves log, signer, and portal to that image and then checks the log from outside. It runs over SSH with a key
+# that can run only deploy/upgrade.sh (deploy/README.md says how to set it up), and does nothing until the repository
+# variable DEPLOY_HOST is set.
 name: deploy
 
 on:
-  workflow_run:
-    workflows: [image]
-    types: [completed]
-  push:
-    branches: [main]
-    paths: ["site/**"]
   workflow_dispatch:
     inputs:
       target:
@@ -26,23 +20,14 @@ concurrency:
 
 jobs:
   deploy:
-    if: >-
-      vars.DEPLOY_HOST != '' && (github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v')))
+    if: vars.DEPLOY_HOST != ''
     runs-on: ubuntu-latest
     environment: production
     steps:
       - id: what
         env:
-          EVENT: ${{ github.event_name }}
-          TAG: ${{ github.event.workflow_run.head_branch }}
-          INPUT: ${{ github.event.inputs.target }}
+          target: ${{ github.event.inputs.target }}
         run: |
-          case "$EVENT" in
-            workflow_run) target="${TAG#v}" ;;
-            push) target=docs ;;
-            *) target="$INPUT" ;;
-          esac
           if [ "$target" != docs ] && ! printf '%s\n' "$target" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'; then
             echo "expected docs or a version such as 0.8.0, got '$target'" >&2
             exit 1

@@ -30,7 +30,9 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
   - **Replay builder:** `scripts/replay.ts` packages example 27 and state example 07 as a folder of receipts and public keys that anyone can verify with the published packages.
 - **State:** example 07 lists a call whose consumed beliefs are withheld under a capture rule as INCOMPLETE in a blast radius. With the customer's key, the same query finds the call.
 - **Site:** the landing page leads with the local refund demo and shows its six steps (#117).
-- **Deploy:** `deploy/upgrade.sh` upgrades the log's host to a published version and rolls back if the new one is not healthy, or with `docs` rebuilds the docs site. `.github/workflows/deploy.yml` runs it over SSH after a release tag's image is built, and for site changes on main. It does nothing until `DEPLOY_HOST` is set; see `deploy/README.md`.
+- **Release and deploy:**
+  - **Automatic publish:** a version tag publishes the packages from CI (`release.yml`, trusted publishing, once `PUBLISH_FROM_CI` is `true`). The log image and the MCP Registry listing follow only after the release succeeds, so the image is never built before its package exists.
+  - **Manual deploy:** `deploy/upgrade.sh` upgrades the log's host to a published version and rolls back if the new one is not healthy, or with `docs` rebuilds the docs site. The `deploy` workflow runs it over SSH, by hand, with a key that can run nothing else; see `deploy/README.md`.
 
 ## 0.7.0 — 2026-10-15
 

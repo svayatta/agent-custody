@@ -43,7 +43,7 @@ The volume at `/data` is the whole state: the log and the key. Back it up; a los
 
 ## Deploying from GitHub Actions
 
-`.github/workflows/deploy.yml` deploys the host over SSH. When `image.yml` has built the image for a `v*` tag, it runs `deploy/upgrade.sh <version>` on the host, then `agent-custody log-check` from outside. A merge to main that changes `site/` runs `deploy/upgrade.sh docs`. Run it by hand from the Actions tab with `docs` or a version. It does nothing until the repository variable `DEPLOY_HOST` is set.
+`.github/workflows/deploy.yml` deploys the host over SSH, by hand from the Actions tab. With a version it runs `deploy/upgrade.sh <version>` on the host and then `agent-custody log-check` from outside. Run it with a version once `image.yml` has built that image, which happens after the release workflow publishes. With `docs` it runs `deploy/upgrade.sh docs`. It does nothing until the repository variable `DEPLOY_HOST` is set.
 
 `deploy/upgrade.sh` is also the command an operator runs by hand on the host: `./upgrade.sh docs`, or `./upgrade.sh 0.8.0`.
 - **`docs`:** brings the checkout to main (and recreates Caddy if the Caddyfile changed) and rebuilds the docs site.
@@ -66,7 +66,7 @@ Setup, once:
    - **Repository variables:** `DEPLOY_HOST`, `LOG_URL`, and `CHECKPOINTS_URL`. Set `DEPLOY_USER` if the key is not root's.
 5. Delete the local copy of the private key.
 
-The images come from the published npm package, so the release order stays: publish, push the tag, then `image.yml` builds and this workflow deploys. Anything that runs `docker compose` on the host can take root, which is why the key is pinned to the one script rather than given a user of its own.
+The images come from the published npm package, so the order is: push the tag, `release.yml` publishes, `image.yml` builds, then run this workflow with the version. Anything that runs `docker compose` on the host can take root, which is why the key is pinned to the one script rather than given a user of its own.
 
 ## One VM, docker compose
 
