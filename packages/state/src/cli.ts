@@ -89,7 +89,7 @@ const USAGE = `agent-custody-memory <command>
   review --verify-case <case.json|case.html> [--issuer-key <pub>] [--principal-key <pub>] [--log-key <pub>] [--upstream-key <pub>] [--log-id <id>] [--json]
                                                    repeat every receipt check offline; supplied keys replace the bundled trust set
   export --ledger <ledger.sqlite|postgres://…> --out <ledger.jsonl>  the auditable JSONL of any ledger, one event per line; also the feed for a warehouse
-  blast --ledger <ledger.jsonl> --receipts <dir> --fact <factId> [--json]
+  blast --ledger <ledger.jsonl> --receipts <dir> --fact <factId> [--capture-key-env NAME] [--json]
                                                    everything that relied on a fact: later calls, derived beliefs, and whether it was retracted
 `;
 

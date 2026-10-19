@@ -497,6 +497,9 @@ export function formatReport(r: VerifyResult): string {
   const byProvider = hasUpstream && isProviderAttestation((p.execution as { upstream?: unknown }).upstream);
   const attestedAs = upstreamCheck?.ok ? (byProvider ? "attested (shared secret)" : "attested") : p.execution.provenance;
   const note = !hasUpstream ? "" : upstreamCheck ? (upstreamCheck.ok ? ` (${byProvider ? upstreamCheck.detail : `signed by upstream ${upstreamCheck.detail}`})` : " (upstream signature FAILED)") : byProvider ? " (carries a provider delivery; pass the provider secret to check it)" : " (carries an upstream signature; pass --upstream-key to check it)";
-  row("execution", attestedAs, `${p.execution.status}${note}`);
+  // a refusal says why, as the receipt records it; under a capture rule the reason is a commitment, and the report says so rather than printing it
+  const reason = "reason" in p.execution ? p.execution.reason : undefined;
+  const why = reason === undefined ? "" : typeof reason === "string" ? `: ${reason}` : ": (reason withheld under the capture rule)";
+  row("execution", attestedAs, `${p.execution.status}${why}${note}`);
   return lines.join("\n");
 }
