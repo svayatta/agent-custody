@@ -380,8 +380,9 @@ export class PortalStore {
    * The account behind an identity that the tenant's IdP vouched for: the linked one; else the account with that
    * email, linked from now on, if it verified its address; else a new verified account with a random password.
    * The IdP proves the address, so an account that never verified it loses the address: the account goes, with its
-   * password, its sessions, and its links. A tenant that it owned stays for the operator. The one exception is an
-   * unverified member of this same tenant, who verifies by password first (UnverifiedAccountError). An account with
+   * password, its sessions, and its links. A tenant that it owned stays for the operator. There are two exceptions: an
+   * unverified member of this same tenant, who verifies by password first (UnverifiedAccountError), and an
+   * unverified member of another tenant that has other members, who is refused. An account with
    * no tenant joins with the default role. A member that an admin removed joins again only through a new invite,
    * with the invited role.
    */
@@ -394,19 +395,23 @@ export class PortalStore {
     let user = linked[0] ? await this.user(linked[0].user_id) : null;
     const known = !!user;
     user ??= await this.userByEmail(id.email);
-    if (user && !known && !user.emailVerifiedAt) {
-      if ((await this.tenantOf(user.id)) === s.tenant) throw new UnverifiedAccountError(id.email);
-      for (const t of ["members", "identities"]) await this.client.query(`DELETE FROM ${this.p}${t} WHERE user_id = $1`, [user.id]);
-      await this.client.query(`DELETE FROM ${this.p}users WHERE id = $1`, [user.id]);
-      user = null;
-    }
-    const home = user ? await this.tenantOf(user.id) : null;
-    if (home && home !== s.tenant) throw new SsoRefusedError(`the account ${id.email} belongs to another tenant`);
+    const unverified = !!user && !known && !user.emailVerifiedAt;
+    let home = user ? await this.tenantOf(user.id) : null;
+    if (unverified && home === s.tenant) throw new UnverifiedAccountError(id.email);
+    // deleting an unverified account would strand the other members of the tenant that it belongs to
+    if (home && home !== s.tenant && (!unverified || (await this.client.query(`SELECT 1 FROM ${this.p}members WHERE tenant_id = $1 AND user_id <> $2 LIMIT 1`, [home, user!.id])).rows.length)) throw new SsoRefusedError(`the account ${id.email} belongs to another tenant`);
     let role = s.defaultRole;
+    // the removal is looked up before an unverified account goes, or the person would rejoin as a new account
     if (user && !home && (await this.client.query(`SELECT 1 FROM ${this.p}removed WHERE tenant_id = $1 AND user_id = $2`, [s.tenant, user.id])).rows.length) {
       const invited = await this.takeInvite(s.tenant, id.email);
       if (!invited) throw new SsoRefusedError(`${id.email} was removed from ${s.tenant}; an admin must invite the address again`);
       role = invited;
+    }
+    if (unverified) {
+      for (const t of ["members", "identities"]) await this.client.query(`DELETE FROM ${this.p}${t} WHERE user_id = $1`, [user!.id]);
+      await this.client.query(`DELETE FROM ${this.p}users WHERE id = $1`, [user!.id]);
+      user = null;
+      home = null;
     }
     if (!user) {
       user = await this.createUser(id.email, randomBytes(32).toString("hex"));

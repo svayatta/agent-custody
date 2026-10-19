@@ -823,6 +823,43 @@ describe("enterprise sign-in", () => {
     expect(await store.invitesFor("mal@sso.example")).toEqual([]);
   });
 
+  it("a removed member that never verified the address does not come back through the provider either, until an admin invites the address again", async () => {
+    await setup("sso-co", "sso.example");
+    const boss = await verifiedUser("boss2@sso.example", "sso-co", "owner");
+    const owner = `custody_session=${signSession(SECRET, boss.id)}`;
+    const uv = await store.createUser("uv@sso.example", "a-long-enough-password");
+    await store.addMember(uv.id, "sso-co", "admin");
+    expect((await post(`api/members/${uv.id}/remove`, {}, owner)).status).toBe(200);
+
+    const again = await signIn("sso-co", { email: "uv@sso.example" });
+    expect([again.status, sessionOf(again)]).toEqual([403, undefined]);
+    expect(await store.roleOf(uv.id, "sso-co")).toBeNull();
+    expect(await store.userByEmail("uv@sso.example")).toMatchObject({ id: uv.id });
+    expect(await store.user(uv.id)).not.toBeNull();
+
+    expect((await post("api/members", { email: "uv@sso.example", role: "reviewer" }, owner)).status).toBe(200);
+    const back = sessionOf(await signIn("sso-co", { email: "uv@sso.example" }))!;
+    expect(await me(back)).toMatchObject({ tenant: "sso-co", role: "reviewer" });
+  });
+
+  it("an unverified owner of another tenant with other members is refused and keeps the account; a sole member of another tenant loses the address", async () => {
+    await setup("sso-co", "sso.example");
+    await tenancy.addTenant("dom-labs", "dom-labs", "test");
+    const lab = await store.createUser("lab@sso.example", "a-long-enough-password");
+    await store.addMember(lab.id, "dom-labs", "owner");
+    const mate = await verifiedUser("mate@elsewhere.example", "dom-labs", "reviewer");
+    const refused = await signIn("sso-co", { email: "lab@sso.example" });
+    expect([refused.status, sessionOf(refused)]).toEqual([403, undefined]);
+    expect(await store.user(lab.id)).not.toBeNull();
+    expect(await store.roleOf(lab.id, "dom-labs")).toBe("owner");
+    expect(await store.roleOf(mate.id, "dom-labs")).toBe("reviewer");
+
+    await store.removeMember("dom-labs", mate.id);
+    expect((await signIn("sso-co", { email: "lab@sso.example" })).status).toBe(200);
+    expect(await store.user(lab.id)).toBeNull();
+    expect(await store.roleOf((await store.userByEmail("lab@sso.example"))!.id, "sso-co")).toBe("readonly");
+  });
+
   it("an enforced tenant refuses a member's password and GitHub sign-in, ends their password session, and takes members from the provider only", async () => {
     await setup("sso-co", "sso.example", { enforced: true });
     const pat = await verifiedUser("pat@sso.example", "sso-co", "reviewer");
