@@ -12,13 +12,14 @@ export interface CaseFileOptions {
   receiptsDir: string;
   ledger?: Ledger;
   /** Public keys only. Capture keys, disclosures, salts, and provider secrets are deliberately unsupported. */
-  keys?: Pick<VerifyOptions, "issuerKeys" | "principalKeys" | "logKeys" | "upstreamKeys" | "logId">;
+  keys?: Pick<VerifyOptions, "issuerKeys" | "principalKeys" | "approvalKeys" | "logKeys" | "upstreamKeys" | "logId">;
 }
 
 export interface CaseFileKey { keyid: string; pem: string }
 export interface CaseFileKeys {
   issuerKeys: CaseFileKey[];
   principalKeys: CaseFileKey[];
+  approvalKeys: CaseFileKey[];
   logKeys: CaseFileKey[];
   upstreamKeys: CaseFileKey[];
   logId?: string;
@@ -60,7 +61,7 @@ function caseProblem(file: any): string | null {
   if (!object(d) || !Array.isArray(d.receipts) || !d.receipts.every(summary) || !Array.isArray(d.withheld) || !d.withheld.every(summary) || !Array.isArray(d.derivedFacts) || !d.derivedFacts.every(fact) || !Array.isArray(d.stillBelieved) || !d.stillBelieved.every(fact) || !Array.isArray(p.missingReceipts) || !p.missingReceipts.every(id)) return "malformed downstream snapshot";
   if (Object.keys(p.receipts).some((k) => !id(k)) || Object.values(p.receipts).some((b) => !object(b))) return "malformed receipt map";
   if (!object(file.keys)) return "malformed public key set";
-  for (const role of ["issuerKeys", "principalKeys", "logKeys", "upstreamKeys"]) {
+  for (const role of ["issuerKeys", "principalKeys", "approvalKeys", "logKeys", "upstreamKeys"]) {
     if (!Array.isArray(file.keys[role]) || file.keys[role].some((k: any) => !object(k) || typeof k.keyid !== "string" || !/^[0-9a-f]{64}$/.test(k.keyid) || typeof k.pem !== "string" || !/^-----BEGIN PUBLIC KEY-----[\s\S]*-----END PUBLIC KEY-----\s*$/.test(k.pem))) return "malformed public keys (only public SPKI PEM is accepted)";
   }
   if (file.keys.logId !== undefined && typeof file.keys.logId !== "string") return "malformed log id";
@@ -86,8 +87,8 @@ export async function buildCaseFile(options: CaseFileOptions, receiptId: string)
       if (!pack.missingReceipts.includes(id)) pack.missingReceipts.push(id);
     }
   }
-  const keys: CaseFileKeys = { issuerKeys: [], principalKeys: [], logKeys: [], upstreamKeys: [] };
-  for (const role of ["issuerKeys", "principalKeys", "logKeys", "upstreamKeys"] as const) {
+  const keys: CaseFileKeys = { issuerKeys: [], principalKeys: [], approvalKeys: [], logKeys: [], upstreamKeys: [] };
+  for (const role of ["issuerKeys", "principalKeys", "approvalKeys", "logKeys", "upstreamKeys"] as const) {
     keys[role] = (options.keys?.[role] ?? []).map((key) => {
       if (key.publicKey.type !== "public" || key.publicKey.asymmetricKeyType !== "ed25519" || keyidOf(key.publicKey) !== key.keyid) throw new Error(`invalid ${role} public key or fingerprint`);
       return { keyid: key.keyid, pem: publicKeyToPem(key.publicKey) };
@@ -124,15 +125,15 @@ export function verifyCaseFile(file: CaseFile, trustedKeys?: CaseFileOptions["ke
     const problem = caseProblem(file);
     add("case file structure", !problem, problem ?? undefined);
     if (problem) return { ok: false, complete, trust, checks, receipts };
-    const imported = (role: "issuerKeys" | "principalKeys" | "logKeys" | "upstreamKeys") => file.keys[role].map((key) => {
+    const imported = (role: "issuerKeys" | "principalKeys" | "approvalKeys" | "logKeys" | "upstreamKeys") => file.keys[role].map((key) => {
       const ref = publicKeyFromPem(key.pem);
       if (ref.publicKey.type !== "public" || ref.publicKey.asymmetricKeyType !== "ed25519" || ref.keyid !== key.keyid) throw new Error(`${role} public key fingerprint mismatch`);
       return ref;
     });
-    const bundled = { issuerKeys: imported("issuerKeys"), principalKeys: imported("principalKeys"), logKeys: imported("logKeys"), upstreamKeys: imported("upstreamKeys"), ...(file.keys.logId === undefined ? {} : { logId: file.keys.logId }) };
+    const bundled = { issuerKeys: imported("issuerKeys"), principalKeys: imported("principalKeys"), approvalKeys: imported("approvalKeys"), logKeys: imported("logKeys"), upstreamKeys: imported("upstreamKeys"), ...(file.keys.logId === undefined ? {} : { logId: file.keys.logId }) };
     // Validate the supplied independent fingerprints too; don't silently accept a wrongly labelled trust anchor.
     const keys = trustedKeys ?? bundled;
-    for (const role of ["issuerKeys", "principalKeys", "logKeys", "upstreamKeys"] as const) {
+    for (const role of ["issuerKeys", "principalKeys", "approvalKeys", "logKeys", "upstreamKeys"] as const) {
       for (const key of keys[role] ?? []) if (key.publicKey.type !== "public" || key.publicKey.asymmetricKeyType !== "ed25519" || keyidOf(key.publicKey) !== key.keyid) throw new Error(`${role} public key fingerprint mismatch`);
     }
     const hasKeys = keys.issuerKeys.length > 0;
@@ -231,7 +232,7 @@ async function verifyCaseOffline() {
     if (problem) throw new Error(problem);
     if (!globalThis.crypto || !globalThis.crypto.subtle) throw new Error("WebCrypto is unavailable in this browser. Verification was not performed.");
     const keys = {};
-    for (const role of ["issuerKeys", "principalKeys", "logKeys", "upstreamKeys"]) {
+    for (const role of ["issuerKeys", "principalKeys", "approvalKeys", "logKeys", "upstreamKeys"]) {
       keys[role] = [];
       for (const ref of caseFile.keys[role]) {
         const key = await publicKeyFromPem(ref.pem);

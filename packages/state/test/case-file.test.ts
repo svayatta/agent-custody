@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash, webcrypto } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,6 +11,7 @@ import { decodeStatement, formatExplain } from "../src/explain.ts";
 import { Ledger } from "../src/ledger.ts";
 
 const vectors = JSON.parse(readFileSync(join(import.meta.dirname, "../../receipts/vectors/receipts.json"), "utf8"));
+const cli = join(import.meta.dirname, "..", "src", "cli.ts");
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
@@ -21,7 +23,7 @@ async function fixture(name = "gateway-precommit-executed", withLedger = false) 
   dirs.push(dir);
   writeFileSync(join(dir, `${id}.json`), JSON.stringify(bundle));
   const key = (name: string) => publicKeyFromPem(vectors.keys[name].publicKeyPem);
-  const keys = { issuerKeys: vector.issuerKeys.map(key), principalKeys: vector.principalKeys.map(key), logKeys: vector.logKeys.map(key), upstreamKeys: (vector.upstreamKeys ?? []).map(key), ...(vector.logId ? { logId: vector.logId } : {}) };
+  const keys = { issuerKeys: vector.issuerKeys.map(key), principalKeys: vector.principalKeys.map(key), approvalKeys: (vector.approvalKeys ?? []).map(key), logKeys: vector.logKeys.map(key), upstreamKeys: (vector.upstreamKeys ?? []).map(key), ...(vector.logId ? { logId: vector.logId } : {}) };
   const ledger = withLedger ? new Ledger(join(dir, "ledger.jsonl")) : undefined;
   const file = await buildCaseFile({ receiptsDir: dir, keys, ...(ledger ? { ledger } : {}) }, id);
   return { file, keys, dir, id, ledger };
@@ -75,6 +77,35 @@ describe("offline case files", () => {
     expect(decodeStatement(captured.pack.receipt).predicate.capture?.withheld.length).toBeGreaterThan(0);
     expect(captured.verification.receipts[captured.receiptId]!.checks.some((c) => c.detail?.includes("withheld"))).toBe(true);
     expect(captured.verification.complete).toBe(false);
+  });
+
+  it("bundles approval keys, so a receipt for a human-approved call verifies from the case file", async () => {
+    const { file, keys, dir, id } = await fixture("gateway-approved-two-humans");
+    expect(file.keys.approvalKeys).toHaveLength(2);
+    expect(file.verification.ok).toBe(true);
+    expect(verifyCaseFile(JSON.parse(JSON.stringify(file))).ok).toBe(true);
+    expect(verifyCaseFile(file, keys).ok).toBe(true);
+    // Independent keys replace the bundled set: without the approval keys, the approved receipt does not verify.
+    expect(verifyCaseFile(file, { ...keys, approvalKeys: [] }).ok).toBe(false);
+    const html = renderCaseFile(file);
+    expect(verifyCaseHtml(html).ok).toBe(true);
+    expect(verifyCaseHtml(html, keys).ok).toBe(true);
+    expect((await runBrowser(html)).report).toContain("RESULT: VERIFIED");
+    // The command line takes the keys as files, for the exported .json and for the exported .case.html.
+    const keyFile = (name: string) => { const path = join(dir, `${name}.pub`); writeFileSync(path, vectors.keys[name].publicKeyPem); return path; };
+    const keyArgs = ["--issuer-key", keyFile("approval-gateway"), "--principal-key", keyFile("approval-principal")];
+    const approvalArgs = ["--approval-key", keyFile("human"), "--approval-key", keyFile("second-human")];
+    for (const extension of ["json", "html"]) {
+      const destination = join(dir, `approved.case.${extension}`);
+      const made = spawnSync(process.execPath, [cli, "review", "--receipts", dir, "--case", id, "--out", destination, ...keyArgs, ...approvalArgs], { encoding: "utf8", timeout: 60_000 });
+      expect(made.status, made.stderr).toBe(0);
+      const checked = spawnSync(process.execPath, [cli, "review", "--verify-case", destination, ...keyArgs, ...approvalArgs], { encoding: "utf8", timeout: 60_000 });
+      expect(checked.status, checked.stdout + checked.stderr).toBe(0);
+      expect(checked.stdout).toContain("RESULT: VERIFIED");
+      const without = spawnSync(process.execPath, [cli, "review", "--verify-case", destination, ...keyArgs], { encoding: "utf8", timeout: 60_000 });
+      expect(without.status).toBe(1);
+      expect(without.stdout).toContain("RESULT: NOT VERIFIED");
+    }
   });
 
   it("treats missing keys as not checked and never trusts a saved successful report", async () => {

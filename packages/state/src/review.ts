@@ -18,7 +18,7 @@ export interface ReviewOptions {
   receiptsDir: string;
   ledger?: Ledger;
   /** with these, every receipt page carries its verification report */
-  keys?: Pick<VerifyOptions, "issuerKeys" | "principalKeys" | "logKeys" | "upstreamKeys" | "logId">;
+  keys?: Pick<VerifyOptions, "issuerKeys" | "principalKeys" | "approvalKeys" | "logKeys" | "upstreamKeys" | "logId">;
   /** shown in the page header, e.g. the team or the deployment */
   title?: string;
   /** Initial search; static exports include only the matching receipts. Only public receipt fields are searched. */

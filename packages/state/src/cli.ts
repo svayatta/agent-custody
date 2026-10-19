@@ -77,7 +77,7 @@ const USAGE = `agent-custody-memory <command>
   explain ... --out <action.json> --sign <key>     the same as one signed action pack, every downstream receipt inside
   explain --verify <action.json> --key <pub> [--issuer-key <pub>] [--principal-key <pub>] [--log-key <pub>]
                                                    checks the pack, the receipt inside it, and every downstream receipt
-  review --receipts <dir> [--ledger <ledger>] [--issuer-key <pub>] [--principal-key <pub>] [--log-key <pub>] [--log-id <id>] [--port 8791] [--host 127.0.0.1] [--title <text>]
+  review --receipts <dir> [--ledger <ledger>] [--issuer-key <pub>] [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub>] [--log-id <id>] [--port 8791] [--host 127.0.0.1] [--title <text>]
                                                    the explain output as pages, for the reviewer who will not open a terminal: an index of every
                                                    receipt with its verdict, one page per receipt with the ten answers and the verification report.
                                                    Serves on loopback; put it behind your own login if you expose it.
@@ -86,7 +86,7 @@ const USAGE = `agent-custody-memory <command>
   review ... --out <dir>                           static pages with search and downloadable offline case files
   review ... --case <receiptId> --out <case.html|case.json>
                                                    one portable case, with public keys and fresh offline verification in the HTML
-  review --verify-case <case.json|case.html> [--issuer-key <pub>] [--principal-key <pub>] [--log-key <pub>] [--upstream-key <pub>] [--log-id <id>] [--json]
+  review --verify-case <case.json|case.html> [--issuer-key <pub>] [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub>] [--upstream-key <pub>] [--log-id <id>] [--json]
                                                    repeat every receipt check offline; supplied keys replace the bundled trust set
   export --ledger <ledger.sqlite|postgres://…> --out <ledger.jsonl>  the auditable JSONL of any ledger, one event per line; also the feed for a warehouse
   blast --ledger <ledger.jsonl> --receipts <dir> --fact <factId> [--capture-key-env NAME] [--json]
@@ -235,9 +235,9 @@ async function main(argv: string[]): Promise<number> {
       return verification && !verification.ok ? 1 : pack.missingReceipts.length ? 1 : 0;
     }
     case "review": {
-      const { values } = parseArgs({ args: rest, options: { receipts: { type: "string" }, ledger: { type: "string" }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, "log-key": { type: "string", multiple: true }, "upstream-key": { type: "string", multiple: true }, "log-id": { type: "string" }, port: { type: "string", default: "8791" }, host: { type: "string", default: "127.0.0.1" }, title: { type: "string" }, out: { type: "string" }, transaction: { type: "string" }, customer: { type: "string" }, agent: { type: "string" }, from: { type: "string" }, to: { type: "string" }, case: { type: "string" }, "verify-case": { type: "string" }, json: { type: "boolean", default: false } } });
-      const hasKeys = [values["issuer-key"], values["principal-key"], values["log-key"], values["upstream-key"]].some((k) => k?.length) || !!values["log-id"];
-      const keys = hasKeys ? { issuerKeys: (values["issuer-key"] ?? []).map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), ...(values["log-key"]?.length ? { logKeys: values["log-key"].map(loadPublicKey) } : {}), ...(values["upstream-key"]?.length ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}), ...(values["log-id"] ? { logId: values["log-id"] } : {}) } : undefined;
+      const { values } = parseArgs({ args: rest, options: { receipts: { type: "string" }, ledger: { type: "string" }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, "approval-key": { type: "string", multiple: true }, "log-key": { type: "string", multiple: true }, "upstream-key": { type: "string", multiple: true }, "log-id": { type: "string" }, port: { type: "string", default: "8791" }, host: { type: "string", default: "127.0.0.1" }, title: { type: "string" }, out: { type: "string" }, transaction: { type: "string" }, customer: { type: "string" }, agent: { type: "string" }, from: { type: "string" }, to: { type: "string" }, case: { type: "string" }, "verify-case": { type: "string" }, json: { type: "boolean", default: false } } });
+      const hasKeys = [values["issuer-key"], values["principal-key"], values["approval-key"], values["log-key"], values["upstream-key"]].some((k) => k?.length) || !!values["log-id"];
+      const keys = hasKeys ? { issuerKeys: (values["issuer-key"] ?? []).map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), ...(values["approval-key"]?.length ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}), ...(values["log-key"]?.length ? { logKeys: values["log-key"].map(loadPublicKey) } : {}), ...(values["upstream-key"]?.length ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}), ...(values["log-id"] ? { logId: values["log-id"] } : {}) } : undefined;
       if (values["verify-case"]) {
         const text = readFileSync(values["verify-case"], "utf8");
         // Only a name that ends in .json is read as JSON. A browser renders many other names (.html, .shtml, .ehtml) as HTML, so those get the byte check.
