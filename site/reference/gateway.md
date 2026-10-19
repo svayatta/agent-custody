@@ -1,6 +1,6 @@
 # The gateway
 
-A separate process between the agent and its tools. The agent connects to it as an MCP server and sees only the tools its grant names; the gateway checks the grant, fetches the facts the policy needs, evaluates the policy, forwards or refuses the call, and issues a signed receipt whose hash goes to the log. For tools named in `precommit`, the authorization is logged before the call is forwarded.
+A separate process between the agent and its tools. The agent connects to it as an MCP server and sees only the tools its grant names; the gateway checks the grant, fetches the facts the policy needs, evaluates the policy, forwards or refuses the call, and issues a signed receipt whose hash goes to the log. For tools named in `precommit`, the authorization is logged before the call is forwarded. Tools named in `approvals` also require short-lived human signatures over the exact action.
 
 ## The config file
 
@@ -34,16 +34,38 @@ A separate process between the agent and its tools. The agent connects to it as 
 | `policyFile` | path | the Cedar policy; its SHA-256 is in every receipt |
 | `facts` | array | lookups the gateway makes itself before deciding: `name` under `context.facts`, the upstream `tool` to call, `args` templates where `"$args.<key>"` copies the agent's argument, `forTools` the intercepted tools that trigger it, `optional` skips the lookup when the template's argument is absent |
 | `precommit` | array of tool names or `["*"]` | consequential tools: the authorization is logged before the call is forwarded, and the call is withheld if the log will not take it or answers with a head or proof that does not verify |
+| `approvals` | `{ trustedKeys: path[], usedDir: path, maxLifetimeSeconds?: number, tools: [{ tool, minApprovers?: 1 \| 2, fields?: { amount?, currency?, beneficiary? } }] }`, *optional* | exact-action human approval rules; nonempty trust list and tools, unique tool names; paths resolve relative to this file. Defaults to one trusted signer and a lifetime cap of 3600 seconds (`maxLifetimeSeconds`, a positive integer: the gateway refuses an approval whose `expiresAt` minus `issuedAt` is longer). `"*"` covers all agent calls, an exact rule takes precedence. [Below](#human-approvals) |
 | `operations` | `{ database, budgets, tools }`, *optional* | durable financial operations: stable ids, provider keys, atomic daily reservations and reconciliation; configured tools always precommit, including observe mode. [Below](#financial-operations) |
 | `revokedGrants` | path, *optional* | a JSON array of grant digests (sha256 over the grant's signed payload), re-read whenever the file changes and checked on every call against every link of the grant's chain; `agent-custody revoke` appends to it. A file that cannot be read denies every call |
 | `capture` | map of tool name or `"*"` to `{ args?, result?, facts? }`, *optional* | private evidence: what the receipt file carries of each tool's arguments, result, and facts. Each side is `{ "mode": "clear" \| "digest" \| "encrypted", "clear"?: [fields] }`: `clear` records the value (the default); `digest` withholds every top-level field not listed in `clear` and leaves a salted sha256 commitment in its place; `encrypted` does the same and carries the value encrypted under the capture key. Digests and signatures are always over the whole call, and the policy decides on the real values. [Below](#private-evidence) |
 | `captureKeyEnv` | environment variable name, *optional* | the 32-byte key (64 hex characters or base64) that encrypts withheld fields in mode `encrypted`, read at startup and never from the file; a rule in mode `encrypted` without it fails at startup |
-| `mode` | `"enforce"` (default) or `"observe"` | observe forwards every call the grant allows and records the decision the policy would have made, with `enforced: false` on the receipt; nothing is withheld, and a log that refuses an authorization is printed instead. The grant itself is enforced in both modes: out of scope, expired, or revoked is denied and never forwarded. The way to run a new policy against real traffic before turning it on |
+| `mode` | `"enforce"` (default) or `"observe"` | observe records Cedar decisions with `enforced: false` and forwards calls despite Cedar denial; authorization log failure is printed instead of withholding. Grants and configured human approvals remain enforced, including fresh checks before forwarding. The way to run a new policy against real traffic before turning it on |
 | `receiptsDir` | path | one `<receiptId>.json` per receipt, and `<receiptId>.authorization.json` for pre-committed calls |
 | `logFile` | path | a local Merkle log, one leaf per line. Exactly one of `logFile` or `log` |
 | `log` | `{ url, tokenEnv?, hashOnly?, timeoutMs?, keys?, logId? }` | a remote log: the tenant's append URL, the bearer token's environment variable, `hashOnly: true` to send only the leaf hash (use it for any log run by someone else), how long one append may take (default 10000 ms), the log's public key files to pin (without them its key document is fetched from the log once and pinned; required when `precommit` is not empty), and the id its tree heads must carry. Every append's answer is verified against them before a pre-committed call is forwarded |
 | `otel` | *optional* | OpenTelemetry export, one span per receipt, after the receipt, never on its path |
 | `splunk` | *optional* | Splunk HTTP Event Collector export, one event per receipt, the token from the environment |
+
+### Human approvals
+
+```json
+{ "approvals": {
+  "trustedKeys": ["keys/approver.pub", "keys/second-approver.pub"],
+  "usedDir": "approvals-used",
+  "maxLifetimeSeconds": 900,
+  "tools": [{ "tool": "stripe.refund", "minApprovers": 2, "fields": { "beneficiary": "customer_id" } }]
+} }
+```
+
+`Gateway.handleCall` and MCP `tools/call` take a DSSE envelope in `_meta["agent-custody/approval"]`, made with [`createApproval`](./sdk-typescript#human-approvals). This key is removed before forwarding. The signed payload binds the grant's principal and agent, tool name, full argument digest, optional amount/currency/beneficiary, and validity window. Action field names default to `amount`, `currency`, and `beneficiary`; `fields` maps each to a top-level argument name. Amounts must be safe integers in minor units. Extra arguments also affect the digest.
+
+`minApprovers: 2` counts two distinct trusted keys. The operator assigns keys to distinct people; the signatures do not prove that two keys belong to different humans. An exact rule for a configured fact-lookup tool is rejected at startup. The wildcard protects agent calls and leaves internal fact lookups unchanged.
+
+The first check runs before facts and Cedar; failures issue denial receipts even in observe mode. A valid approval does not override grants or Cedar. After awaited facts and any pre-commit append, a fresh check and exclusive consumption happen immediately before forwarding; expiry or a concurrent use then withholds the call. The receipt records `approval: { envelope?, requiredApprovers, fields?, checkedAt, status, reason?, approverKeyids, consumedAt?, provenance: "observed" }`. `status` is `"approved"` or `"denied"`; a malformed or untrusted approval statement is not embedded, and only individually verified trusted signatures are retained. Pre-commit authorizations include the initial approval record; the final receipt adds the consumption result.
+
+`usedDir` must persist across restarts and be shared by every gateway accepting these approvals, on a filesystem with consistent exclusive creation. A consumed id stays burned after crashes, log failures, or unknown upstream outcomes. Do not remove records while the approvals can remain valid. No automatic pruning or outcome reconciliation is supplied. An offline verifier checks approval signatures and action binding with separately trusted [`approvalKeys`](./verify#verify); it cannot establish global single use.
+
+Under a private capture rule the receipt withholds `approval.envelope` and `approval.reason` as commitments, because the envelope carries the action fields and an unsalted full-argument digest that would disclose private values or confirm guesses. The status, times, and signer key ids stay in clear. Verifying the signatures and the full binding needs the capture key or a disclosure. When nothing under `request.args` is withheld for the call, an approved envelope stays in clear. The [approval guide](/receipts/approvals) covers the complete workflow and privacy boundary.
 
 ### A REST API as an upstream
 

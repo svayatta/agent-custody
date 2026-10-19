@@ -60,6 +60,10 @@ const order = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 /** A gateway can deny before Cedar runs. Such a denial cannot be changed by replacing Cedar text. */
 function gateProblem(p: ReceiptPredicate): string | null {
   if (p.issuer.kind !== "gateway") return null;
+  // The approval gate runs before Cedar and records its refusal as a deny. The approval record, which stays in clear
+  // under a private rule, says so. A later approval refusal beside an allow, or beside an unenforced deny, means that
+  // Cedar did run.
+  if (p.policy?.decision === "deny" && p.policy.enforced !== false && p.approval?.status === "denied") return "non-policy gate: the approval was refused before Cedar ran";
   // A failed gatherFacts never assigns its partial result to the receipt. With private errors, no facts, and no
   // determining policy ids, an evaluation error and missing lookup inputs are indistinguishable. Observe mode may
   // even have executed this call, so execution status cannot establish whether Cedar ran.
