@@ -283,7 +283,7 @@ export interface LettaLike {
 export interface LettaOptions {
   /** the agent whose archival memory receives the fact */
   agentId: string;
-  /** tags attached to every passage, beside the custody tags; default none */
+  /** tags attached to every passage, beside the custody tags; list() returns only passages that carry all of them; default none */
   tags?: string[];
 }
 
@@ -324,7 +324,7 @@ export function lettaStore(client: LettaLike, opts: LettaOptions): Store {
               for (const p of page) {
                 if (!p.id || !fresh.has(p.id)) continue;
                 const factTag = p.tags?.find((t) => t.startsWith("fact:"));
-                if (p.id && factTag && p.tags!.includes("agent-custody")) out.push({ externalId: p.id, factId: factTag.slice("fact:".length), text: p.text, ...stored(p.tags!.find((t) => t.startsWith("stored:"))?.slice("stored:".length), p.created_at) });
+                if (p.id && factTag && p.tags!.includes("agent-custody") && (opts.tags ?? []).every((t) => p.tags!.includes(t))) out.push({ externalId: p.id, factId: factTag.slice("fact:".length), text: p.text, ...stored(p.tags!.find((t) => t.startsWith("stored:"))?.slice("stored:".length), p.created_at) });
               }
               const last = page.at(-1)?.id;
               if (page.length < limit || !last) return out;

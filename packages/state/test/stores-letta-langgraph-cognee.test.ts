@@ -141,6 +141,40 @@ describe("Letta listing, through the real client", () => {
     }
   });
 
+  it("lists only the passages that carry every tag of the store, so a repair on one tag-scoped ledger leaves the passages of another on the same agent", async () => {
+    const passages: { id: string; text: string; tags: string[] }[] = [];
+    const letta = await fake((r) => {
+      const m = r.path.match(/^\/v1\/agents\/agent-1\/archival-memory(\?.*)?$/);
+      if (!m) return undefined;
+      if (r.method === "POST") {
+        const b = JSON.parse(r.body) as { text: string; tags: string[] };
+        const id = `passage-${passages.length}`;
+        passages.push({ id, text: b.text, tags: b.tags });
+        return { status: 200, body: [{ id, text: b.text, tags: b.tags }] };
+      }
+      return { status: 200, body: passages };
+    });
+    try {
+      const client = new Letta({ apiKey: "test-key", baseURL: letta.url });
+      const a = lettaStore(client, { agentId: "agent-1", tags: ["tenant:a"] });
+      const b = await serverWith([lettaStore(client, { agentId: "agent-1", tags: ["tenant:b"] })]);
+      await b.client.callTool({ name: "memory.write", arguments: { subject: "acct:b", predicate: "plan", value: "pro", space: "org" } });
+      const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+      for (const p of passages) p.tags = p.tags.map((t) => (t.startsWith("stored:") ? `stored:${hourAgo}` : t));
+      expect(passages).toHaveLength(1);
+      expect(await a.list!()).toEqual([]);
+      const a2 = await serverWith([a]);
+      const r = value((await a2.client.callTool({ name: "memory.repair", arguments: { reason: "append failed" } })) as CallToolResult);
+      expect(r.repaired).toEqual([]);
+      expect(passages).toHaveLength(1);
+      expect(await lettaStore(client, { agentId: "agent-1", tags: ["tenant:b"] }).list!()).toHaveLength(1);
+      await a2.client.close();
+      await b.client.close();
+    } finally {
+      letta.close();
+    }
+  });
+
   it("stops with an error when the backend ignores the cursor", async () => {
     const page = Array.from({ length: 100 }, (_, i) => ({ id: `p-${i}`, text: `t ${i}`, tags: ["agent-custody", `fact:f-${i}`] }));
     const letta = await fake((r) => (r.method === "GET" ? { status: 200, body: page } : undefined));

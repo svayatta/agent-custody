@@ -683,19 +683,20 @@ describe("repair: store entries whose ledger append failed", () => {
     await client.close();
   });
 
-  it("gives an entry that a failed delete left gone the same outcome as a delete that succeeded: unverified without a check, stillIndexed when search serves it", async () => {
+  it("gives an entry that a failed delete left gone the same outcome as a delete that succeeded: unverified without a check, stillIndexed when search serves it, verified when the check finds it gone", async () => {
     const { ledger } = flakyLedger();
     const plain = { ...memoryStore("plain"), verifyDeleted: undefined };
     const indexed = { ...memoryStore("indexed"), verifyDeleted: async () => false };
-    for (const s of [plain, indexed]) {
+    const checked = { ...memoryStore("checked"), verifyDeleted: async () => true };
+    for (const s of [plain, indexed, checked]) {
       s.rows.set("x", { externalId: "x", factId: `fact-${s.name}`, text: "t", storedAt: hourAgo() });
       // The row goes, and then the call times out: the server acted before the client gave up.
       s.delete = async (e: StoreEntry) => (s.rows.delete(e.externalId), Promise.reject(new Error("timeout")));
     }
-    const client = await connect(ledger, [plain, indexed]);
+    const client = await connect(ledger, [plain, indexed, checked]);
     const r = await repair(client);
     expect(r.isError).toBe(false);
-    expect(r.out.repaired).toMatchObject([{ store: "plain", outcome: "unverified" }, { store: "indexed", outcome: "stillIndexed" }]);
+    expect(r.out.repaired).toMatchObject([{ store: "plain", outcome: "unverified" }, { store: "indexed", outcome: "stillIndexed" }, { store: "checked", outcome: "verified" }]);
     await client.close();
   });
 
