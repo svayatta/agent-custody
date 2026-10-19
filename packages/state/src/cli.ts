@@ -102,7 +102,7 @@ const USAGE = `agent-custody-memory <command>
                                                    Serves on loopback; put it behind your own login if you expose it.
   review ... --out <dir>                           the same as static files, for a case file or a shared drive
   export --ledger <ledger.sqlite|postgres://…> --out <ledger.jsonl>  the auditable JSONL of any ledger, one event per line; also the feed for a warehouse
-  blast --ledger <ledger.jsonl> --receipts <dir> --fact <factId> [--json]
+  blast --ledger <ledger.jsonl> --receipts <dir> --fact <factId> [--capture-key-env NAME] [--json]
                                                    everything that relied on a fact: later calls, derived beliefs, and whether it was retracted
 `;
 

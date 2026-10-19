@@ -1,5 +1,5 @@
 // Aspect: stores that match the ledger. Source: src/server.ts (memory.repair), src/stores.ts (Store.list)
-// Run:    node examples/07-repair.ts        (after `bun run build` at the repository root)
+// Run:    node examples/09-repair.ts        (after `bun run build` at the repository root)
 // A write reaches the stores before the ledger. When the ledger append fails, a store keeps an entry that the ledger
 // has no fact for. memory.repair finds that entry. Once it is older than its cutoff (ten minutes), repair records a
 // repair event, removes the entry, and verifies the removal.
