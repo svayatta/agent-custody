@@ -9,8 +9,9 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { FactConfig, GatewayConfig, UpstreamConfig } from "./config.ts";
-import { digestOf, dsseVerify, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
+import { digestOf, dsseVerifiers, dsseVerify, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
 import { delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
+import { APPROVAL_META_KEY, DEFAULT_APPROVAL_LIFETIME_SECONDS, consumeApproval, verifyApproval, verifyApprovalStatement } from "./approval.ts";
 import { createIssuer, type PreparedReceipt } from "./issue.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
@@ -19,7 +20,7 @@ import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
 import { captureKeyFrom, effectiveRule } from "./capture.ts";
 import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
-import type { AuthorizationBundle, AuthorizationPredicate, FactRecord, OperationEvidence, ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "./receipt.ts";
+import type { ApprovalRecord, AuthorizationBundle, AuthorizationPredicate, FactRecord, OperationEvidence, ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "./receipt.ts";
 import { OPERATION_META_KEY, OperationStore, ownerAlive, type OperationRecord, type OperationStatus } from "./operations.ts";
 
 export const GATEWAY_VERSION = "0.1.0";
@@ -136,6 +137,8 @@ export function writeRevokedGrants(path: string, digests: string[]): void {
 export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOptions = {}): Promise<GatewayHost> {
   const gatewayKey = loadPrivateKey(cfg.identity.keyFile);
   const trusted = cfg.trustedPrincipalKeys.map(loadPublicKey);
+  const approvalKeys = cfg.approvals?.trustedKeys.map(loadPublicKey) ?? [];
+  const approvalRule = (tool: string) => cfg.approvals?.tools.find((rule) => rule.tool === tool) ?? cfg.approvals?.tools.find((rule) => rule.tool === "*");
   const policyText = readFileSync(cfg.policyFile, "utf8");
   const pDigest = policyDigest(policyText);
   // Private evidence: the key that encrypts withheld fields, read once; a rule in mode encrypted without it is a config error.
@@ -153,6 +156,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   // "*" covers the tools the agent calls; a lookup is the gateway's own read, so only an explicit name makes it consequential.
   for (const f of cfg.facts) {
     if (precommit.has(f.tool) || operationRule(f.tool)) throw new Error(`fact "${f.name}" uses tool ${f.tool}, which ${precommit.has(f.tool) ? "precommit" : "operations"} names as consequential; a fact lookup runs before the policy decides and must be a read`);
+    if (cfg.approvals?.tools.some((rule) => rule.tool === f.tool)) throw new Error(`fact "${f.name}" uses tool ${f.tool}, which requires approval; a fact lookup must be a read that does not require approval`);
   }
 
   // Revoked grants: digests of grant envelopes, from the file the operator edits (or `revoke` appends to), re-read
@@ -312,9 +316,14 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
 
     async function handleCall(params: CallParams): Promise<CallToolResult> {
       const tool = params.name;
-      // Snapshot before the first await: a caller cannot change the payment after its reservation was bound.
+      // An embedding caller can mutate its objects while a lookup or log append is awaited. Snapshot the call and
+      // approval before the first await, so the approved bytes are the bytes evaluated, logged, and forwarded. A caller
+      // also cannot change the payment after its reservation was bound.
       const args = structuredClone(params.arguments ?? {});
       const operationId = params._meta?.[OPERATION_META_KEY];
+      const suppliedApproval = params._meta?.[APPROVAL_META_KEY];
+      let approvalEnvelope: unknown;
+      try { approvalEnvelope = structuredClone(suppliedApproval); } catch { approvalEnvelope = undefined; }
       const receiptId = randomUUID();
       const timestamp = new Date().toISOString();
       const modelClaim = params._meta?.[MODEL_META_KEY];
@@ -330,6 +339,27 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       /** what the upstream answered, in full: the agent gets this; the receipt gets the captured view */
       let forwarded: CallToolResult | undefined;
       let authorization: AuthorizationBundle | undefined;
+      let approval: ApprovalRecord | undefined;
+      let approvedWindow: { issuedAt: number; expiresAt: number } | undefined;
+      const rule = approvalRule(tool);
+      const approvalBinding = { principal: delegation.principal, agent: delegation.agent, tool, args, ...(rule?.fields ? { fields: rule.fields } : {}) };
+      // Only an authenticated statement is embedded in the approval record. Untrusted or malformed metadata is never
+      // copied there: it could carry arbitrary text from withheld arguments. Under a private rule the issuer then
+      // withholds the embedded envelope as a commitment (see CLEAR_IN.approval in capture.ts), because even an
+      // authentic one carries the action fields and an unsalted digest of the arguments.
+      const signedApproval = rule ? verifyApprovalStatement(approvalEnvelope, approvalKeys) : undefined;
+      // Signatures lie outside the signed payload. Keep only entries that independently verify: an attacker can
+      // append an untrusted signature, or a forged duplicate of a trusted key id, without invalidating the approval.
+      const rawEnvelope = signedApproval?.ok ? approvalEnvelope as Envelope : undefined;
+      const envelope = rawEnvelope ? { ...rawEnvelope, signatures: rawEnvelope.signatures.filter((signature) => dsseVerifiers({ ...rawEnvelope, signatures: [signature] }, approvalKeys).length > 0) } : undefined;
+      const checkApproval = (at: string) => {
+        if (!rule) return undefined;
+        const checked = verifyApproval(approvalEnvelope, approvalKeys, approvalBinding, { at, minApprovers: rule.minApprovers, maxLifetimeSeconds: cfg.approvals!.maxLifetimeSeconds ?? DEFAULT_APPROVAL_LIFETIME_SECONDS });
+        approval = { ...(envelope ? { envelope } : {}), requiredApprovers: rule.minApprovers, ...(rule.fields ? { fields: rule.fields } : {}), checkedAt: at, status: checked.ok ? "approved" : "denied", approverKeyids: checked.ok ? checked.approverKeyids : [], ...(!checked.ok ? { reason: envelope ? checked.error : "approval rejected: malformed or untrusted statement" } : {}), provenance: "observed" };
+        return checked;
+      };
+      const initialApproval = checkApproval(timestamp);
+      const approvalProblem = initialApproval && !initialApproval.ok ? initialApproval.error : undefined;
       let operation: OperationRecord | undefined;
       let createdOperation = false;
       let attemptedOperation = false;
@@ -342,6 +372,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         policy = { decision: "deny", reasons: [], errors: [`delegation grant ${problem}`], policyDigest: pDigest };
       } else if (!inScope) {
         policy = { decision: "deny", reasons: [], errors: [`tool "${tool}" is not in the delegation scopes`], policyDigest: pDigest };
+      } else if (approvalProblem) {
+        policy = { decision: "deny", reasons: [], errors: [`approval rejected: ${approvalProblem}`], policyDigest: pDigest };
       } else {
         try {
           ({ facts, templates: factTemplates, results: factResults } = await gatherFacts(tool, args, upstreamMeta));
@@ -357,7 +389,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       }
       // Observe mode: the decision is recorded, never enforced. The receipt says so on every call, so a verifier can
       // tell a policy that was being tested from one that was in force.
-      if (cfg.mode === "observe" && !problem && inScope) policy = { ...policy, enforced: false };
+      if (cfg.mode === "observe" && !problem && inScope && !approvalProblem) policy = { ...policy, enforced: false };
       const forward = policy.decision === "allow" || policy.enforced === false;
 
       // Private evidence is applied by the issuer to the whole statement. What it cannot know by itself: a fact's lookup
@@ -381,6 +413,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         request: { args, argsDigest: digestOf(args), provenance: "claimed" as const },
         facts,
         consumed: { factIds: consumedNow, provenance: "observed" as const },
+        ...(approval ? { approval } : {}),
         operation: undefined as OperationEvidence | undefined,
       };
 
@@ -435,7 +468,34 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         }
       }
 
-      const late = execution ? null : forward ? grantProblem() : null;
+      let late = execution ? null : forward ? grantProblem() : null;
+      if (!execution && !late && forward && rule) {
+        // No awaits between this fresh check, the persistent atomic claim, and entering the upstream call. The
+        // claim is shared across sessions and processes, and a storage error withholds the side effect.
+        const at = new Date().toISOString();
+        const checked = checkApproval(at)!;
+        if (!checked.ok) {
+          execution = { status: "withheld", reason: `approval rejected before the call was forwarded: ${checked.error}`, provenance: "observed" };
+        } else {
+          try {
+            consumeApproval(cfg.approvals!.usedDir, checked.approval.approvalId, receiptId, at);
+            // A synchronous durable claim can block on storage. Recheck after it returns, because the grant or
+            // approval may have expired (or the grant been revoked) during that wait. A refusal keeps the claim.
+            const afterConsume = new Date().toISOString();
+            const finalCheck = checkApproval(afterConsume)!;
+            // Signature verification can be slow too. Read revocations after it, immediately before the cheap
+            // final window check, so a revocation made during that work still withholds this call.
+            late = grantProblem();
+            approval = { ...approval!, consumedAt: afterConsume };
+            if (!finalCheck.ok) execution = { status: "withheld", reason: `approval rejected before the call was forwarded: ${finalCheck.error}`, provenance: "observed" };
+            else approvedWindow = { issuedAt: Date.parse(finalCheck.approval.issuedAt), expiresAt: Date.parse(finalCheck.approval.expiresAt) };
+          } catch (e) {
+            const reason = `approval could not be consumed: ${String(e instanceof Error ? e.message : e)}`;
+            approval = { ...approval!, status: "denied", reason };
+            execution = { status: "withheld", reason, provenance: "observed" };
+          }
+        }
+      }
       if (execution) {
         // withheld: nothing was forwarded
       } else if (late) {
@@ -446,13 +506,26 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
           // The upstream learns which receipt this call is, and who the grant says is calling. An upstream that keeps
           // state, such as the memory server, cites the receipt as the source of what it stores.
           const observed = Object.fromEntries(Object.entries(facts).map(([k, f]) => [k, f.value]));
-          attemptedOperation = !!operation;
-          const result = await callUpstream(tool, args, { ...upstreamMeta, [OBSERVED_META_KEY]: observed, ...(operation ? { [OPERATION_META_KEY]: { id: operation.id, idempotencyKey: operation.idempotencyKey } } : {}) });
-          const evidence = upstreamEvidenceOf(result);
-          forwarded = result;
-          execution = { status: result.isError ? "failed" : "executed", result, resultDigest: digestOf(result), provenance: "observed", ...(evidence ? { upstream: evidence } : {}) };
-          noteServedFacts(result);
-          if (operation) operation = operations!.update(operation.id, { status: outcome(operation, result), result });
+          // Signature checks and revocation-file I/O can themselves take time. Sample once more after all of them,
+          // using the authenticated window directly, so this last check does no crypto or storage before forwarding.
+          const forwardAt = new Date().toISOString();
+          const forwardMs = Date.parse(forwardAt);
+          if (approval) approval = { ...approval, checkedAt: forwardAt, ...(approval.consumedAt ? { consumedAt: forwardAt } : {}) };
+          if (rule && (!approvedWindow || forwardMs < approvedWindow.issuedAt || forwardMs >= approvedWindow.expiresAt)) {
+            const reason = approvedWindow && forwardMs < approvedWindow.issuedAt ? "approval is not yet valid" : "approval has expired";
+            approval = { ...approval!, status: "denied", reason, approverKeyids: [] };
+            execution = { status: "withheld", reason: `approval rejected before the call was forwarded: ${reason}`, provenance: "observed" };
+          } else if (!delegationValidAt(delegation, forwardAt)) {
+            execution = { status: "withheld", reason: "the delegation grant is outside its validity window before the call was forwarded", provenance: "observed" };
+          } else {
+            attemptedOperation = !!operation;
+            const result = await callUpstream(tool, args, { ...upstreamMeta, [OBSERVED_META_KEY]: observed, ...(operation ? { [OPERATION_META_KEY]: { id: operation.id, idempotencyKey: operation.idempotencyKey } } : {}) });
+            const evidence = upstreamEvidenceOf(result);
+            forwarded = result;
+            execution = { status: result.isError ? "failed" : "executed", result, resultDigest: digestOf(result), provenance: "observed", ...(evidence ? { upstream: evidence } : {}) };
+            noteServedFacts(result);
+            if (operation) operation = operations!.update(operation.id, { status: outcome(operation, result), result });
+          }
         } catch (e) {
           execution = { status: "error", error: String(e instanceof Error ? e.message : e), provenance: "observed" };
           if (operation) operation = operations!.update(operation.id, { status: "unknown" });
@@ -466,6 +539,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       if (operation) head.operation = operationEvidence(operation, operation.status === "submitted" && !createdOperation ? "unknown" : operation.status);
       const issued = await issuer.issue({
         ...head,
+        ...(approval ? { approval } : {}),
         session: { id: null, toolUseId: null, provenance: "claimed" },
         model: { id: typeof modelClaim === "string" ? modelClaim : null, provenance: "claimed" },
         policy: { ...policy, provenance: "observed" },

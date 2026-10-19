@@ -4,6 +4,8 @@ import type { CaptureNote, Commitment } from "./capture.ts";
 import type { InclusionProof } from "./log.ts";
 import type { PolicyDecision } from "./policy.ts";
 import type { UpstreamEvidence } from "./upstream.ts";
+import type { ApprovalRecord } from "./approval.ts";
+export type { ApprovalRecord } from "./approval.ts";
 
 export const RECEIPT_TYPE = "application/vnd.in-toto+json";
 export const RECEIPT_PREDICATE_TYPE = "https://agent-custody.dev/receipt/v0.2";
@@ -63,6 +65,8 @@ export interface ReceiptPredicate {
   agent: { id: string; provenance: Provenance };
   /** Present on gateway receipts. Absent when the issuer had no signed grant to check against. */
   delegation?: { envelope: Envelope; provenance: "attested" };
+  /** The gateway's payload-bound human approval check, when this tool requires approval. */
+  approval?: ApprovalRecord;
   /** Correlation ids from the host, when it supplied any. Never checked, always claimed. */
   session: { id: string | null; toolUseId: string | null; provenance: "claimed" };
   model: { id: string | null; provenance: "claimed" };
@@ -111,7 +115,7 @@ export interface ReceiptPredicate {
 }
 
 /** What the gateway commits before a consequential call goes out: everything the receipt will say, except the outcome. */
-export type AuthorizationPredicate = Pick<ReceiptPredicate, "receiptId" | "timestamp" | "issuer" | "principal" | "agent" | "delegation" | "tool" | "request" | "facts" | "consumed" | "policy" | "capture" | "operation">;
+export type AuthorizationPredicate = Pick<ReceiptPredicate, "receiptId" | "timestamp" | "issuer" | "principal" | "agent" | "delegation" | "approval" | "tool" | "request" | "facts" | "consumed" | "policy" | "capture" | "operation">;
 
 export interface AuthorizationStatement {
   _type: "https://in-toto.io/Statement/v1";
