@@ -842,6 +842,41 @@ describe("enterprise sign-in", () => {
     expect(await me(back)).toMatchObject({ tenant: "sso-co", role: "reviewer" });
   });
 
+  it("a removed member that never verified the address cannot come back by first creating a tenant of their own", async () => {
+    await setup("sso-co", "sso.example");
+    const boss = await verifiedUser("boss3@sso.example", "sso-co", "owner");
+    const owner = `custody_session=${signSession(SECRET, boss.id)}`;
+    const reg = await post("api/register", { email: "uv2@sso.example", password: "a-long-enough-password" });
+    expect(reg.status).toBe(200);
+    const uvCookie = sessionOf(reg)!;
+    const uv = (await store.userByEmail("uv2@sso.example"))!;
+    await store.addMember(uv.id, "sso-co", "admin");
+    expect((await post(`api/members/${uv.id}/remove`, {}, owner)).status).toBe(200);
+
+    expect((await post("api/onboard", { tenant: "uv-own", name: "Uv Two", company: "Uv Own" }, uvCookie)).status).toBe(200);
+    expect(await store.roleOf(uv.id, "uv-own")).toBe("owner");
+
+    const again = await signIn("sso-co", { email: "uv2@sso.example" });
+    expect([again.status, sessionOf(again)]).toEqual([403, undefined]);
+    expect(await store.userByEmail("uv2@sso.example")).toMatchObject({ id: uv.id });
+    expect(await store.roleOf(uv.id, "uv-own")).toBe("owner");
+    expect(await store.roleOf(uv.id, "sso-co")).toBeNull();
+
+    expect((await post("api/members", { email: "uv2@sso.example", role: "reviewer" }, owner)).status).toBe(200);
+    const back = sessionOf(await signIn("sso-co", { email: "uv2@sso.example" }))!;
+    expect(await me(back)).toMatchObject({ tenant: "sso-co", role: "reviewer" });
+  });
+
+  it("a removal holds by address after the account is made again under a new id", async () => {
+    await setup("sso-co", "sso.example");
+    const gone = await verifiedUser("gone@sso.example", "sso-co", "reviewer");
+    await store.removeMember("sso-co", gone.id);
+    await db.query("DELETE FROM portal_users WHERE id = $1", [gone.id]);
+    const again = await signIn("sso-co", { email: "gone@sso.example" });
+    expect([again.status, sessionOf(again)]).toEqual([403, undefined]);
+    expect(await store.userByEmail("gone@sso.example")).toBeNull();
+  });
+
   it("an unverified owner of another tenant with other members is refused and keeps the account; a sole member of another tenant loses the address", async () => {
     await setup("sso-co", "sso.example");
     await tenancy.addTenant("dom-labs", "dom-labs", "test");

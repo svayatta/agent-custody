@@ -171,6 +171,8 @@ export class PortalStore {
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}invites (tenant_id TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL, invited_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, email))`);
         // who an admin removed from a tenant: single sign-on does not let them back in on its own
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}removed (tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (tenant_id, user_id))`);
+        // the address too, so the removal holds after the account is made again under a new id
+        await this.client.query(`ALTER TABLE ${p}removed ADD COLUMN IF NOT EXISTS email TEXT`);
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}sso (tenant_id TEXT PRIMARY KEY, protocol TEXT NOT NULL, config TEXT NOT NULL, domains TEXT[] NOT NULL, default_role TEXT NOT NULL, enforced BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
       })();
     }
@@ -299,7 +301,7 @@ export class PortalStore {
   async removeMember(tenantId: string, userId: string): Promise<boolean> {
     await this.init();
     const gone = (await this.client.query(`DELETE FROM ${this.p}members WHERE user_id = $1 AND tenant_id = $2 AND (role <> 'owner' OR EXISTS (SELECT 1 FROM ${this.p}members o WHERE o.tenant_id = $2 AND o.role = 'owner' AND o.user_id <> $1)) RETURNING user_id`, [userId, tenantId])).rows.length > 0;
-    if (gone) await this.client.query(`INSERT INTO ${this.p}removed (tenant_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [tenantId, userId]);
+    if (gone) await this.client.query(`INSERT INTO ${this.p}removed (tenant_id, user_id, email) SELECT $1, id, email FROM ${this.p}users WHERE id = $2 ON CONFLICT DO NOTHING`, [tenantId, userId]);
     return gone;
   }
   async invite(tenantId: string, email: string, role: Role, by: string): Promise<void> {
@@ -401,8 +403,8 @@ export class PortalStore {
     // deleting an unverified account would strand the other members of the tenant that it belongs to
     if (home && home !== s.tenant && (!unverified || (await this.client.query(`SELECT 1 FROM ${this.p}members WHERE tenant_id = $1 AND user_id <> $2 LIMIT 1`, [home, user!.id])).rows.length)) throw new SsoRefusedError(`the account ${id.email} belongs to another tenant`);
     let role = s.defaultRole;
-    // the removal is looked up before an unverified account goes, or the person would rejoin as a new account
-    if (user && !home && (await this.client.query(`SELECT 1 FROM ${this.p}removed WHERE tenant_id = $1 AND user_id = $2`, [s.tenant, user.id])).rows.length) {
+    // the removal is looked up before an unverified account goes, or the person would rejoin as a new account; an account of another tenant is no way around it
+    if (home !== s.tenant && (await this.client.query(`SELECT 1 FROM ${this.p}removed WHERE tenant_id = $1 AND (email = $3 OR user_id = $2)`, [s.tenant, user?.id ?? "", id.email])).rows.length) {
       const invited = await this.takeInvite(s.tenant, id.email);
       if (!invited) throw new SsoRefusedError(`${id.email} was removed from ${s.tenant}; an admin must invite the address again`);
       role = invited;
