@@ -14,7 +14,7 @@ import { createDelegation, decodeDelegation, delegateFrom } from "../src/delegat
 import { createGateway, createGatewayHost, RECEIPT_META_KEY } from "../src/gateway.ts";
 import { grantHeader, serveHttp } from "../src/gateway-http.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
-import { verifyBundle } from "../src/verify.ts";
+import { formatReport, verifyBundle } from "../src/verify.ts";
 import { buildFixture, type Fixture } from "../scripts/fixture.ts";
 
 const decode = (b: ReceiptBundle) => JSON.parse(Buffer.from(b.envelope.payload, "base64").toString()) as ReceiptStatement;
@@ -95,6 +95,9 @@ describe("the grant on every call", () => {
       const no = await session.handleCall({ name: "customer.lookup", arguments: { customer_id: "cust_123" } });
       expect(no.isError).toBe(true);
       expect(text(no)).toMatch(/delegation grant has been revoked/);
+      // the verifier's report says why the call was refused, as the signed receipt records it
+      const deniedBundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${String(no._meta?.[RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle;
+      expect(formatReport(verifyBundle(deniedBundle, { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], logFile: fx.logFile }))).toMatch(/^execution\s+observed\s+denied: delegation grant has been revoked$/m);
       expect(() => host.open(grant)).toThrow(/has been revoked/);
       expect(host.revoked()).toEqual([session.grantDigest]);
     } finally {
