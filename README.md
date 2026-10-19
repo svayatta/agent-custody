@@ -16,6 +16,8 @@ It is a chain of custody for both what an agent does and what it believes: autho
 
 Receipts are the unit. State is the ledger of what the agent came to believe from them. Both append to the same kind of signed log and are checked by the same kind of verifier.
 
+Try the [live Codex recovery demo](packages/state/examples/codex-recovery/README.md): a real agent handles a support request using incorrect customer memory, then an operator traces possible consequences, approves corrections and simulated credit compensation, and verifies the evidence.
+
 ## What each piece is for, and when you need it
 
 <!-- #region pieces -->
