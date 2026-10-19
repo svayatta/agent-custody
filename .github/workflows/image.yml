@@ -1,13 +1,15 @@
 # Builds the log server image from deploy/Dockerfile and pushes it to GitHub Container Registry for amd64 and
 # arm64, each on a runner of its own architecture (emulating arm64 under QEMU crashes npm with SIGILL), then
-# merges the two into one tag. Runs on a version tag (v0.3.0 builds from the published npm package of that
-# version) or by hand from the Actions tab with a version. Uses the repository's own token; no personal token.
+# merges the two into one tag. Runs when the release workflow has finished for a version tag (v0.3.0 builds from the
+# published npm package of that version, so it waits for the publish), or by hand from the Actions tab with a version.
+# Uses the repository's own token; no personal token.
 # The first push creates the package as private: make it public once in the package's settings.
 name: image
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_run:
+    workflows: [release]
+    types: [completed]
   workflow_dispatch:
     inputs:
       version:
@@ -23,6 +25,9 @@ env:
 
 jobs:
   build:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
     strategy:
       matrix:
         include:
@@ -33,8 +38,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - id: v
-        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" | sed 's/=v/=/' >> "$GITHUB_OUTPUT"
+        env:
+          VERSION: ${{ github.event.inputs.version || github.event.workflow_run.head_branch }}
+        run: echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -68,7 +77,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - id: v
-        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" | sed 's/=v/=/' >> "$GITHUB_OUTPUT"
+        env:
+          VERSION: ${{ github.event.inputs.version || github.event.workflow_run.head_branch }}
+        run: echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
