@@ -175,6 +175,22 @@ describe("Letta listing, through the real client", () => {
     }
   });
 
+  it("matches the tag set exactly, so a store whose tags are a subset or a superset of another's does not claim its passages", async () => {
+    const custody = ["agent-custody", "fact:f-1", "space:org", `stored:${new Date().toISOString()}`];
+    const passages = [{ id: "p-ab", text: "t", tags: [...custody, "tenant:a", "team:b"] }, { id: "p-a", text: "t", tags: [...custody, "tenant:a"] }, { id: "p-none", text: "t", tags: custody }];
+    const letta = await fake((r) => (r.path.match(/^\/v1\/agents\/agent-1\/archival-memory(\?.*)?$/) && r.method === "GET" ? { status: 200, body: passages } : undefined));
+    try {
+      const client = new Letta({ apiKey: "test-key", baseURL: letta.url });
+      const ids = async (tags?: string[]) => (await lettaStore(client, { agentId: "agent-1", ...(tags ? { tags } : {}) }).list!()).map((e) => e.externalId);
+      expect(await ids(["tenant:a"])).toEqual(["p-a"]);
+      expect(await ids(["team:b", "tenant:a"])).toEqual(["p-ab"]);
+      expect(await ids()).toEqual(["p-none"]);
+      expect(await ids(["tenant:b"])).toEqual([]);
+    } finally {
+      letta.close();
+    }
+  });
+
   it("stops with an error when the backend ignores the cursor", async () => {
     const page = Array.from({ length: 100 }, (_, i) => ({ id: `p-${i}`, text: `t ${i}`, tags: ["agent-custody", `fact:f-${i}`] }));
     const letta = await fake((r) => (r.method === "GET" ? { status: 200, body: page } : undefined));

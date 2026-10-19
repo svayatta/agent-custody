@@ -283,7 +283,7 @@ export interface LettaLike {
 export interface LettaOptions {
   /** the agent whose archival memory receives the fact */
   agentId: string;
-  /** tags attached to every passage, beside the custody tags; list() returns only passages that carry all of them; default none */
+  /** tags attached to every passage, beside the custody tags; list() returns only passages whose tags, beside the custody tags, are exactly this set; default none */
   tags?: string[];
 }
 
@@ -318,13 +318,15 @@ export function lettaStore(client: LettaLike, opts: LettaOptions): Store {
             const out: StoreEntry[] = [];
             const limit = 100;
             const seen = new Set<string>();
+            const own = new Set(opts.tags ?? []);
             for (let after: string | undefined; ; ) {
               const page = await client.agents.passages.list!(opts.agentId, { limit, ...(after ? { after } : {}) });
               const fresh = freshIds("letta", seen, page.flatMap((p) => (p.id ? [p.id] : [])));
               for (const p of page) {
                 if (!p.id || !fresh.has(p.id)) continue;
                 const factTag = p.tags?.find((t) => t.startsWith("fact:"));
-                if (p.id && factTag && p.tags!.includes("agent-custody") && (opts.tags ?? []).every((t) => p.tags!.includes(t))) out.push({ externalId: p.id, factId: factTag.slice("fact:".length), text: p.text, ...stored(p.tags!.find((t) => t.startsWith("stored:"))?.slice("stored:".length), p.created_at) });
+                const rest = new Set((p.tags ?? []).filter((t) => t !== "agent-custody" && !/^(fact|space|stored|receipt):/.test(t)));
+                if (p.id && factTag && p.tags!.includes("agent-custody") && rest.size === own.size && [...own].every((t) => rest.has(t))) out.push({ externalId: p.id, factId: factTag.slice("fact:".length), text: p.text, ...stored(p.tags!.find((t) => t.startsWith("stored:"))?.slice("stored:".length), p.created_at) });
               }
               const last = page.at(-1)?.id;
               if (page.length < limit || !last) return out;

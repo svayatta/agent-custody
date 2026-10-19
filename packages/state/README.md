@@ -223,7 +223,7 @@ The result is an error when `stillHeld` or `unrecorded` is not empty. Run the sw
 Limits:
 
 - An entry whose `storedAt` is missing or does not parse counts as young. The sweep never removes it. When the metadata has no `storedAt`, the adapters fall back to the creation time of the store: the `created_at` column for pgvector, and the creation time that the client reports for Mem0, Zep, Letta, and LangGraph. Cognee has a fallback only if its listing has a creation time. Letta records `storedAt` in the tag `stored:<iso>`.
-- One store scope belongs to one ledger. A store scope is a pgvector table, a Mem0 user, a Zep user or graph, a Letta agent with its tags, a LangGraph namespace, or a Cognee dataset. Two ledgers that share a scope already leak recall between them, and a repair on one ledger removes the entries of the other.
+- One store scope belongs to one ledger. A store scope is a pgvector table, a Mem0 user, a Zep user or graph, a Letta agent with its exact tag set, a LangGraph namespace, or a Cognee dataset. Two ledgers that share a scope already leak recall between them, and a repair on one ledger removes the entries of the other.
 - The clocks of the memory servers must agree to within a few minutes. `storedAt` comes from the clock of the writer, and the cutoff comes from the clock of the repairer.
 - A store without `list` is reported in `unlisted` and is not swept. Mem0, Zep, and Letta get `list` when their client has a method to list entries.
 - The sweep finds only entries that carry custody metadata (`source: "agent-custody"` and a fact id). It does not touch other entries in the store.
