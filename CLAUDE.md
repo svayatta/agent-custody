@@ -22,7 +22,6 @@ Before you work in an area, read its rules:
 
 ## Rules for all code
 
-- Write a code comment only when the code cannot explain itself. Keep it short. Do not put issue or PR numbers in code comments; they go in the commit message and the CHANGELOG.
 - The CLI runs on plain Node 22 through native type stripping. Do not use parameter properties or enums. Use `.ts` import specifiers.
 - The state package imports receipts from `dist/` through the `exports` map. Run `bun run build` at the root before you run a state example by hand.
 - Money is integer minor units. Cedar has no floats.
