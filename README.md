@@ -123,7 +123,7 @@ This whole loop is one runnable file, [packages/state/examples/02-receipt-to-bel
 - The reference at [docs.agent-custody.dev](https://docs.agent-custody.dev/): every feature, and the exact request and response of every function, endpoint, MCP tool, and command.
 - Want a log run by someone who is not you? [deploy/](deploy/README.md) has the container, a docker compose file for one VM, and Kubernetes manifests to run it on a machine the operator does not control; or take a tenant on the one we run, at [log.agent-custody.dev](https://agent-custody.dev/early-access), free for the first three.
 - Agents in Python, Go, Java, Rust, or anything else: the gateway is an MCP server and needs nothing from your language; for in-process receipts run the sidecar and use the Python package or a forty-line client. [sdk.md](packages/receipts/docs/sdk.md#other-languages-the-sidecar)
-- Twenty-six step-by-step examples in the receipts package and more in the state package: [receipts tutorials](packages/receipts/docs/tutorials.md), [state examples](packages/state/examples).
+- Twenty-nine step-by-step examples in the receipts package and more in the state package: [receipts tutorials](packages/receipts/docs/tutorials.md), [state examples](packages/state/examples).
 
 ## This repository is built under custody
 

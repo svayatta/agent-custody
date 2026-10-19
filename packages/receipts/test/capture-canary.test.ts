@@ -156,6 +156,9 @@ describe("the canary", () => {
         expect(bundleText(bundle), `${name}: the receipt carries the canary`).not.toContain(CANARY);
         const v = verifyBundle(bundle, { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], upstreamKeys: [loadPublicKey(fx.upstreamPub)], providerSecrets: { stripe: "whsec_canary" }, logFile: own.logFile });
         expect(v.ok, `${name}: ${formatReport(v)}`).toBe(true);
+        // the report a reviewer reads carries no more than the receipt: a refusal's reason is shown as withheld
+        expect(formatReport(v), `${name}: the report carries the canary`).not.toContain(CANARY);
+        if (p.execution.status === "denied" || p.execution.status === "withheld") expect(formatReport(v)).toMatch(/: \(reason withheld under the capture rule\)/);
         expect(p.tool.name).toBe(TOOLS[name] ?? "stripe.refund");
       }
       expect(statuses).toEqual({ executed: "executed", failed: "failed", thrown: "error", denied: "denied", "lookup isError": "denied", "lookup throws": "denied", "out of scope": "denied", withheld: "withheld" });
