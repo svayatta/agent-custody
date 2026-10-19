@@ -22,7 +22,7 @@ The agent followed its supplied business policy using an incorrect source belief
 
 ## Correction and review
 
-The operator introduced the CRM sync correction, retired the support grant, retracted `plan = enterprise`, and recorded `plan = free`. The analysis verified the existing receipts, then proposed:
+The operator introduced the CRM sync correction, retired the support grant, retracted `plan = enterprise`, and recorded `plan = free`. The analysis verified the existing receipts, then proposed the following plan. This block summarizes the plan's contents; it is not the literal program output.
 
 ```text
 retract: discount_percent = 20
@@ -35,6 +35,8 @@ reverse: the simulated 2500-pence credit
 Both writes and the credit were made after the session had been shown the wrong fact. That is evidence of possible dependency; it does not establish the model's reasoning or causation. The operator reviewed the concrete actions and ran the recovery command with the plan's digest.
 
 ## Verified outcome
+
+This block summarizes the fields of the verified report and the final line; it is not the literal program output.
 
 ```text
 ok: true

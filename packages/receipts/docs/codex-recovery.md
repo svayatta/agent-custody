@@ -123,7 +123,7 @@ The verifier checks receipt signatures, delegation, inclusion in the local log, 
 The regular suite never calls Codex or the network. It drives the same MCP servers and recovery functions with scripted calls, clearly labelled as scripted:
 
 ```sh
-node examples/08-support-recovery.ts
+node examples/10-support-recovery.ts
 bun run test test/codex-recovery.test.ts test/examples.test.ts
 ```
 

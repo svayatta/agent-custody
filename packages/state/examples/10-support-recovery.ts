@@ -1,6 +1,6 @@
 // Aspect: recovery after a support agent acts on a wrong plan; this version is scripted and offline.
 // Live Codex version: node examples/codex-recovery/run.ts run (see codex-recovery/README.md).
-// Run: node examples/08-support-recovery.ts (after `bun run build` at the repository root).
+// Run: node examples/10-support-recovery.ts (after `bun run build` at the repository root).
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";

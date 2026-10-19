@@ -186,7 +186,9 @@ export async function inspect(dir: string): Promise<RecoveryPlan> {
   // Do not silently call an untraced side effect "unaffected". This small demo cannot decide its recovery.
   const untraced = billing.credits.filter(c => c.status === "active" && !affected.has(c.receiptId));
   if (untraced.length) throw new Error("Active credit has no observed dependency on the plan; review it manually before recovery");
-  const writeFacts = [...new Set(retractFacts.map(f => f.predicate))].filter(predicate => !current.some(f => f.predicate === predicate && f.value === BENEFITS[predicate as keyof typeof BENEFITS]))
+  // Derive writes from every benefit the agent wrote, retracted or not, so a refreshed plan after a partial recovery still lists them.
+  const written = (await ledger.facts()).filter(f => f.actor === "codex-support" && f.subject === CUSTOMER && f.space === SPACE && Object.hasOwn(BENEFITS, f.predicate));
+  const writeFacts = [...new Set(written.map(f => f.predicate))].filter(predicate => !current.some(f => f.subject === CUSTOMER && f.predicate === predicate && f.value === BENEFITS[predicate as keyof typeof BENEFITS]))
     .map(predicate => ({ predicate, value: BENEFITS[predicate as keyof typeof BENEFITS] }));
   return {
     rootFactId,
@@ -219,7 +221,7 @@ export async function verifyRecovery(dir: string) {
   const current = await new Ledger(join(dir, "ledger.jsonl")).asOf();
   const corrected = current.some(f => f.subject === CUSTOMER && f.predicate === "plan" && f.value === "free");
   const remainingWrong = current.filter(f => f.subject === CUSTOMER && Object.hasOwn(BENEFITS, f.predicate) && f.value !== BENEFITS[f.predicate as keyof typeof BENEFITS]);
-  const ok = corrected && !remainingWrong.length && !plan.retractFacts.length && !plan.reverseCredits.length && readBilling(dir).credits.every(c => c.status === "reversed");
+  const ok = corrected && !remainingWrong.length && !plan.writeFacts.length && !plan.retractFacts.length && !plan.reverseCredits.length && readBilling(dir).credits.every(c => c.status === "reversed");
   const report = { ok, receiptsVerified: receipts.length, current: current.map(({ factId, predicate, value }) => ({ factId, predicate, value })), billing: readBilling(dir), agentCalls: plan.agentCalls, exposed: plan.exposed };
   if (!ok) throw new Error("Recovery incomplete: stale beliefs or active credits remain");
   return report;

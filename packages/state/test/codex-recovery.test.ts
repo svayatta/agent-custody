@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { digestOf } from "@agent-custody/receipts";
-import { call, correct, CUSTOMER, inspect, openGateway, prepare, recover, resultValue, saveJson, SPACE, verifiedReceipts } from "../examples/codex-recovery/scenario.ts";
+import { call, correct, CUSTOMER, inspect, openGateway, prepare, recover, resultValue, saveJson, SPACE, verifiedReceipts, verifyRecovery } from "../examples/codex-recovery/scenario.ts";
 import { readBilling } from "../examples/codex-recovery/billing.ts";
 
 async function fixture(exposed = true) {
@@ -51,6 +51,25 @@ describe("support recovery demo", () => {
     state.credits[0]!.amount = 1;
     saveJson(join(dir, "billing.json"), state);
     await expect(inspect(dir)).rejects.toThrow("differs from its receipt");
+  });
+
+  it("lists the corrective writes again after a partial recovery, and verify refuses until they exist", async () => {
+    const dir = await fixture();
+    const first = await inspect(dir);
+    expect(first.writeFacts).toEqual([{ predicate: "discount_percent", value: 0 }]);
+    // The operator retracts the wrong fact and reverses the credit; the process stops before the corrective write.
+    const operator = await openGateway(dir, "operator");
+    try {
+      await call(operator, "memory.retract", { factId: first.retractFacts[0]!.factId, reason: "partial recovery" });
+      await call(operator, "billing.reverseCredit", { credit_id: first.reverseCredits[0]!.id, reason: "partial recovery" });
+    } finally { await operator.close(); }
+    const refreshed = await inspect(dir);
+    expect(refreshed.retractFacts).toEqual([]);
+    expect(refreshed.writeFacts).toEqual(first.writeFacts);
+    await expect(verifyRecovery(dir)).rejects.toThrow("Recovery incomplete");
+    saveJson(join(dir, "recovery-plan.json"), refreshed);
+    const report = await recover(dir, digestOf(refreshed));
+    expect(report.current.map(f => [f.predicate, f.value])).toEqual([["plan", "free"], ["discount_percent", 0]]);
   });
 
   it("rejects a stale approval and altered receipt before making recovery calls", async () => {

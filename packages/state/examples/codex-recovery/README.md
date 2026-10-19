@@ -10,4 +10,4 @@ After installing dependencies, building the workspace, and signing in to Codex, 
 node examples/codex-recovery/run.ts run
 ```
 
-The runner prints the case directory and the exact recovery command to review. The offline companion is [08-support-recovery.ts](../08-support-recovery.ts); regular tests do not call a model or the network.
+The runner prints the case directory and the exact recovery command to review. The offline companion is [10-support-recovery.ts](../10-support-recovery.ts); regular tests do not call a model or the network.
