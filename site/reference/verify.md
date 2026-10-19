@@ -38,7 +38,7 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 | --- | --- |
 | receipt signature (issuer key) | the bundle was signed by a trusted issuer key; nothing else is decided if this fails |
 | receipt payload type | it is an in-toto statement with the receipt predicate type |
-| structural parts in clear | the capture note, if any, is well formed and names no structural part (ids, the tool, the grant, the status, the decision, the digests, a fact's tool, a provider's name), and those parts are what every later check assumes; nothing else is decided if this fails |
+| structural parts in clear | the capture note, if any, is well formed and names no structural part (ids, the tool, the grant, the status, the decision, the digests, a fact's tool, a provider's name), and those parts are present and of the right type: an attested principal's key id, the status, the decision and the policy digest, an authorization's tree head and proof, and an approval record; nothing else is decided if this fails |
 | issuer kind is known, issuer keyid matches signer | the receipt says who issued it and the signature agrees |
 | gateway receipt carries a delegation, carries a policy decision | gateway receipts embed both |
 | delegation signature (principal key) | the grant was signed by a trusted principal key |

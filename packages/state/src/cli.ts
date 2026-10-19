@@ -240,8 +240,8 @@ async function main(argv: string[]): Promise<number> {
       const keys = hasKeys ? { issuerKeys: (values["issuer-key"] ?? []).map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), ...(values["log-key"]?.length ? { logKeys: values["log-key"].map(loadPublicKey) } : {}), ...(values["upstream-key"]?.length ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}), ...(values["log-id"] ? { logId: values["log-id"] } : {}) } : undefined;
       if (values["verify-case"]) {
         const text = readFileSync(values["verify-case"], "utf8");
-        // The file name says which format the reader gets: a browser renders .html as HTML whatever it starts with.
-        const result = /\.x?html?$/i.test(values["verify-case"]) ? verifyCaseHtml(text, keys) : verifyCaseFile(JSON.parse(text), keys);
+        // Only a name that ends in .json is read as JSON. A browser renders many other names (.html, .shtml, .ehtml) as HTML, so those get the byte check.
+        const result = /\.json$/i.test(values["verify-case"]) ? verifyCaseFile(JSON.parse(text), keys) : verifyCaseHtml(text, keys);
         if (values.json) console.log(JSON.stringify(result, null, 2));
         else {
           for (const c of result.checks) console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? `  (${c.detail})` : ""}`);

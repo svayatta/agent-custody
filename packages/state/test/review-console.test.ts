@@ -139,7 +139,7 @@ describe("the review console", () => {
         const smuggled = artifact.replace("<body>", `<body><!--${data}-->`).replace(/(<script id="case-data" type="application\/json">)([\s\S]*?)(<\/script><script>)/, (_all, open: string, json: string, close: string) => `${open}${json.replace("support-lead", "cfo_alice")}${close}`);
         // The file name declares the format. Genuine case JSON with HTML in a string field, saved as .html, is not a page that renders its data. A page saved as .json is not JSON.
         const hybrid = JSON.stringify({ note: "<style>body{font-size:0}</style><h1>RESULT: VERIFIED</h1>", ...file! });
-        for (const [name, content] of [["hybrid.case.html", hybrid], ["page.case.json", artifact]] as const) {
+        for (const [name, content] of [["hybrid.case.html", hybrid], ["hybrid.case.shtml", hybrid], ["page.case.json", artifact]] as const) {
           const declared = join(dir, name);
           writeFileSync(declared, content);
           const run = spawnSync(process.execPath, [cli, ...verifyArgs.map((arg) => (arg === destination ? declared : arg))], { encoding: "utf8", timeout: 60_000 });

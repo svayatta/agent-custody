@@ -216,7 +216,11 @@ ${explainHtml(formatExplain(pack, verification, !!o.ledger))}
  * an error from the ledger or the disk is never taken for a defect of the record.
  */
 function recordProblem(receiptsDir: string, id: string): string | null {
-  return structuralProblem(decodeStatement(JSON.parse(readFileSync(join(receiptsDir, `${id}.json`), "utf8")) as ReceiptBundle).predicate);
+  const bundle = JSON.parse(readFileSync(join(receiptsDir, `${id}.json`), "utf8")) as ReceiptBundle;
+  // The tree head and the proof are not in the signed predicate, and the explain reads both.
+  const isObj = (v: unknown) => typeof v === "object" && v !== null;
+  if (!isObj(bundle.treeHead) || !Array.isArray(bundle.treeHead.signatures) || !isObj(bundle.inclusion)) return "the bundle has no tree head or no inclusion proof";
+  return structuralProblem(decodeStatement(bundle).predicate);
 }
 
 /** The page for a record that cannot be shown: a part that every check reads is missing or has the wrong type. */

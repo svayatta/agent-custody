@@ -2,6 +2,7 @@
 // show the ten answers and the report on each, serve the receipt itself, and write the same as files for a case
 // file. Receipts come from a real gateway in front of the memory server.
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -170,11 +171,12 @@ describe("a record that was changed after it was issued", () => {
 
   it("does not abort the export or answer 500 for a record that lacks a part that the pages read", async () => {
     const dir = mkdtempSync(join(tmpdir(), "review-malformed-"));
-    const save = (name: string, change: (predicate: Record<string, any>) => void) => {
+    const save = (name: string, change: (predicate: Record<string, any>) => void, unsigned?: (bundle: Record<string, any>) => void) => {
       const bundle = structuredClone(vectors.cases.find((c: { name: string }) => c.name === name).bundle) as ReceiptBundle;
       const statement = decodeStatement(bundle);
       change(statement.predicate as unknown as Record<string, any>);
       bundle.envelope.payload = Buffer.from(JSON.stringify(statement)).toString("base64");
+      unsigned?.(bundle as unknown as Record<string, any>);
       writeFileSync(join(dir, `${statement.predicate.receiptId}.json`), JSON.stringify(bundle));
       return statement.predicate.receiptId as string;
     };
@@ -185,13 +187,16 @@ describe("a record that was changed after it was issued", () => {
     const noDigest = save("gateway-denied", (p) => { delete p.policy.policyDigest; });
     const noInclusion = save("gateway-precommit-spliced", (p) => { delete p.authorization.inclusion; });
     const noKeyid = save("gateway-executed-private", (p) => { delete p.principal.keyid; });
-    const damaged = [noReasons, wrongType, noDigest, noInclusion, noKeyid];
+    // The tree head and the proof sit beside the signed payload, so a bundle can lose them and keep a valid predicate.
+    const noTreeHead = save("gateway-executed", (p) => { p.receiptId = randomUUID(); }, (b) => { delete b.treeHead; });
+    const noProof = save("gateway-denied", (p) => { p.receiptId = randomUUID(); }, (b) => { delete b.inclusion; });
+    const damaged = [noReasons, wrongType, noDigest, noInclusion, noKeyid, noTreeHead, noProof];
     // A timestamp that is a string but not a date breaks nothing that a page reads, so the record is not damaged.
     const oddTime = save("gateway-private-clear-result-upstream-attested", (p) => { p.timestamp = "not a date"; });
     const o = { receiptsDir: dir, keys };
 
     const out = join(dir, "site");
-    expect(await writeReview(o, out)).toEqual({ receipts: 7 });
+    expect(await writeReview(o, out)).toEqual({ receipts: 9 });
     expect(readFileSync(join(out, "r", `${good}.html`), "utf8")).toContain("RESULT: VERIFIED");
     const odd = readFileSync(join(out, "r", `${oddTime}.html`), "utf8");
     expect(odd).toContain("RESULT: NOT VERIFIED");
