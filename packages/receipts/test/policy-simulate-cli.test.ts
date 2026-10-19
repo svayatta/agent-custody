@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildFixture, buildSdkFixture, SDK_POLICY, type SdkFixture } from "../scripts/fixture.ts";
 import { pathKey } from "../src/capture.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
+import { APPROVAL_META_KEY, createApproval } from "../src/approval.ts";
 import { dsseSign, generateKeyPair, loadPrivateKey, writeKeyPair } from "../src/crypto.ts";
 import { createGateway, RECEIPT_META_KEY } from "../src/gateway.ts";
 import { policyDigest } from "../src/policy.ts";
@@ -277,3 +278,35 @@ describe("policy simulate CLI on plain Node", () => {
     expect(empty.stderr).toContain("no receipt bundles found");
   });
 });
+
+describe("policy simulate with human approvals", () => {
+  it("needs the approval keys to verify an approved call, and does not replay an approval refusal as a policy change", async () => {
+    const afx = buildFixture(join(dir, "approvals"));
+    const human = generateKeyPair();
+    const humanFiles = writeKeyPair(human, join(afx.dir, "keys"), "human");
+    const cfg = loadConfig(afx.configFile);
+    cfg.approvals = { trustedKeys: [humanFiles.pubFile], usedDir: join(afx.dir, "used-approvals"), tools: [{ tool: "stripe.refund", minApprovers: 1 }] };
+    const gw = await createGateway(cfg);
+    const args = { customer_id: "cust_123", amount: 2500, currency: "GBP", beneficiary: "acct_42" };
+    const approval = createApproval(human, { principal: "user_456", agent: "support-agent", tool: "stripe.refund", args, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    const approved = await gw.handleCall({ name: "stripe.refund", arguments: args, _meta: { [APPROVAL_META_KEY]: approval } });
+    const refused = await gw.handleCall({ name: "stripe.refund", arguments: args });
+    await gw.close();
+    expect(approved.isError).toBeFalsy();
+    expect(refused.isError).toBe(true);
+    // the recorded policy itself, so that nothing in the proposed policy can change a decision
+    const base = ["policy", "simulate", "--policy", join(afx.dir, "policy.cedar"), "--receipts", afx.receiptsDir, "--issuer-key", afx.gatewayPub, "--principal-key", afx.principalPub, "--json"];
+
+    const unkeyed = run(...base);
+    expect(unkeyed.status).toBe(1);
+    expect(unkeyed.stderr).toContain("approval signatures (human keys)");
+
+    const keyed = run(...base, "--approval-key", humanFiles.pubFile);
+    const report = JSON.parse(keyed.stdout) as SimulationReport;
+    // the refusal is skipped as a non-policy gate, so the report is incomplete; it is not listed as deny -> allow
+    expect(report).toMatchObject({ total: 2, evaluated: 1, unchanged: 1, changes: [], complete: false });
+    expect(report.skipped).toEqual([{ receiptId: String(refused._meta?.[RECEIPT_META_KEY]), tool: "stripe.refund", reason: expect.stringContaining("approval was refused before Cedar ran") }]);
+    expect(keyed.status).toBe(1);
+  });
+});
+

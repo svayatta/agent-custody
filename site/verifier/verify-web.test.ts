@@ -19,7 +19,7 @@ describe("browser verifier against the conformance vectors", () => {
   });
   for (const c of receipts.cases as any[]) {
     it(`receipts: ${c.name}`, async () => {
-      const r = await verifyBundle(c.bundle, { issuerKeys: await all(c.issuerKeys), principalKeys: await all(c.principalKeys), logKeys: await all(c.logKeys), ...(c.upstreamKeys ? { upstreamKeys: await all(c.upstreamKeys) } : {}), ...(c.providerSecrets ? { providerSecrets: c.providerSecrets } : {}), ...(c.logId ? { logId: c.logId } : {}), ...(c.log ? { logLeaves: c.log } : {}) });
+      const r = await verifyBundle(c.bundle, { issuerKeys: await all(c.issuerKeys), principalKeys: await all(c.principalKeys), logKeys: await all(c.logKeys), ...(c.approvalKeys ? { approvalKeys: await all(c.approvalKeys) } : {}), ...(c.upstreamKeys ? { upstreamKeys: await all(c.upstreamKeys) } : {}), ...(c.providerSecrets ? { providerSecrets: c.providerSecrets } : {}), ...(c.logId ? { logId: c.logId } : {}), ...(c.log ? { logLeaves: c.log } : {}) });
       expect({ ok: r.ok, failing: r.checks.filter((x) => !x.ok).map((x) => x.name) }).toEqual(c.expected);
     });
   }
