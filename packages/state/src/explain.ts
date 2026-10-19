@@ -176,7 +176,8 @@ export function formatExplain(pack: ActionPack, verification: VerifyResult | nul
   // under a capture rule a message is a commitment in the receipt; the explanation says so rather than printing it
   const text = (v: unknown): string => (typeof v === "string" ? v : "(withheld under the capture rule)");
   const errors: string[] = Array.isArray(p.policy?.errors) ? p.policy.errors : p.policy?.errors ? [text(p.policy.errors)] : [];
-  if (p.policy) more(`policy ${p.policy.policyDigest.slice(0, 12)} decided ${p.policy.decision}${p.policy.reasons.length ? ` by ${p.policy.reasons.join(", ")}` : ""}${errors.length ? `; errors: ${errors.join("; ")}` : ""}`);
+  if (p.reconciliation) more("no policy was evaluated: this receipt records a provider read that closes an earlier call");
+  else if (p.policy) more(`policy ${p.policy.policyDigest.slice(0, 12)} decided ${p.policy.decision}${p.policy.reasons.length ? ` by ${p.policy.reasons.join(", ")}` : ""}${errors.length ? `; errors: ${errors.join("; ")}` : ""}`);
   const facts = Object.entries(p.facts);
   row("WHAT THE AGENT SAW", facts.length ? facts.map(([k, f]) => `${k} = ${JSON.stringify(f.value)} (fetched by the gateway via ${f.tool})`).join("; ") : "no facts fetched for this call");
   // from the pack, not the receipt: under a capture rule the receipt holds a commitment, and the pack holds what the key opened
@@ -189,8 +190,9 @@ export function formatExplain(pack: ActionPack, verification: VerifyResult | nul
     for (const f of pack.consumed.facts) more(`  ${factLine(f)}`);
     for (const id of pack.consumed.unknown) more(`  ${id.slice(0, 8)} (not in this ledger)`);
   }
-  row("WHAT IT DID", `${p.tool.name} ${JSON.stringify(p.request.args)} -> ${p.execution.status}${p.execution.status === "denied" ? `: ${text(p.execution.reason)}` : p.execution.status === "withheld" ? `: ${text(p.execution.reason)}` : p.execution.status === "error" ? `: ${text(p.execution.error)}` : ""}`);
-  row("WHY", p.policy ? (p.policy.decision === "allow" ? `the policy permitted it${p.policy.reasons.length ? ` (${p.policy.reasons.join(", ")})` : ""}` : p.policy.enforced === false ? `the policy would have refused it, and was in observe mode, so the call went through: ${[...p.policy.reasons, ...errors].join("; ") || "no permit matched"}` : `the policy refused it: ${[...p.policy.reasons, ...errors].join("; ") || "no permit matched"}`) : "no policy was evaluated");
+  if (p.reconciliation) row("WHAT IT DID", `reconciliation: the gateway read ${p.reconciliation.lookup.tool} for ${p.tool.name}; the operation is ${p.operation?.status ?? "unknown"} (the tool did not run again)`);
+  else row("WHAT IT DID", `${p.tool.name} ${JSON.stringify(p.request.args)} -> ${p.execution.status}${p.execution.status === "denied" ? `: ${text(p.execution.reason)}` : p.execution.status === "withheld" ? `: ${text(p.execution.reason)}` : p.execution.status === "error" ? `: ${text(p.execution.error)}` : ""}`);
+  row("WHY", p.reconciliation ? "no policy was evaluated; the gateway read the provider record to close an earlier call" : p.policy ? (p.policy.decision === "allow" ? `the policy permitted it${p.policy.reasons.length ? ` (${p.policy.reasons.join(", ")})` : ""}` : p.policy.enforced === false ? `the policy would have refused it, and was in observe mode, so the call went through: ${[...p.policy.reasons, ...errors].join("; ") || "no permit matched"}` : `the policy refused it: ${[...p.policy.reasons, ...errors].join("; ") || "no permit matched"}`) : "no policy was evaluated");
   const th = pack.receipt.treeHead.signatures[0]?.keyid ?? "?";
   row("WHAT EVIDENCE", `receipt ${p.receiptId}, leaf ${pack.receipt.inclusion.leafIndex} of a log whose head is signed by ${th.slice(0, 12)}`);
   if (p.authorization) more(`authorization committed as leaf ${p.authorization.inclusion.leafIndex}, before the call was forwarded`);

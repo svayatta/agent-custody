@@ -1,5 +1,5 @@
 // Aspect: an enterprise tenant signs in through its own identity provider, and roles limit each member. Source: src/portal.ts, src/sso.ts
-// Run:    node examples/29-enterprise-sign-in.ts
+// Run:    node examples/31-enterprise-sign-in.ts
 //
 // The operator sets single sign-on for tenant acme: the identity provider, and the one email domain that it may sign
 // in. A person at that domain signs in through the provider and joins as readonly, so a policy write is refused. An
