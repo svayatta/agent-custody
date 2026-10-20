@@ -24,6 +24,8 @@ case "${1:-serve}" in
       echo "gateway: created the gateway key. Verifiers check receipts with its public key:" >&2
       cat "$key_dir/$key_name.pub" >&2
     fi
+    # advisory: print everything the config would fail on, then start, so the gateway's own message follows if it does
+    agent-custody check --config "$GATEWAY_CONFIG" >&2 || echo "gateway: the config check found errors; starting anyway" >&2
     exec agent-custody gateway --config "$GATEWAY_CONFIG" --http --host 0.0.0.0 --port "$GATEWAY_PORT" --idle-minutes "$GATEWAY_IDLE_MINUTES"
     ;;
   init)

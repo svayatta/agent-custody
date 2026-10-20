@@ -121,6 +121,8 @@ export interface GatewayHost {
   revoke(grantDigest: string): void;
   /** the digests revoked so far */
   revoked(): string[];
+  /** the names of every tool the upstreams offer, before any grant narrows them */
+  tools(): string[];
   /** Operator-only provider lookup. Never exposed as an agent tool. Unknown/pending reservations remain held until a terminal reconciliation receipt is committed. */
   reconcile(operationId: string): Promise<ReceiptBundle>;
   /** closes the upstreams; every session opened from this host is finished with */
@@ -585,6 +587,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     keyid: issuer.keyid,
     open,
     revoke,
+    tools: () => advertised.map((t) => t.name),
     revoked: () => {
       reloadRevoked();
       return [...revokedSet];
