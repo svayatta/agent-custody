@@ -12,6 +12,20 @@ The gateway has its own image and recipes in [gateway/](gateway/README.md): one 
 
 `ghcr.io/svayatta/agent-custody-log:<version>`, built for amd64 and arm64 by the `image` workflow from `deploy/Dockerfile` and the published npm package of that version. The compose file builds the same image locally if the registry has no such tag yet, so nothing waits on the registry. To publish a version by hand: `gh workflow run image.yml -f version=0.3.0`; a `v0.3.0` tag does the same. The first push creates the package as private; make it public once in the package settings on GitHub so `docker pull` needs no login.
 
+### Verifying an image
+
+Each pushed image is signed by the workflow that built it (cosign, keyless) and carries a provenance attestation and an SBOM. Pin the digest rather than a tag, and check the signature before you run it:
+
+```bash
+cosign verify ghcr.io/svayatta/agent-custody-log:0.8.0 \
+  --certificate-identity-regexp '^https://github.com/svayatta/agent-custody/\.github/workflows/(image|gateway-image)\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+docker buildx imagetools inspect ghcr.io/svayatta/agent-custody-log:0.8.0 --format '{{ json .SBOM }}'
+docker buildx imagetools inspect ghcr.io/svayatta/agent-custody-log:0.8.0 --format '{{ json .Provenance }}'
+```
+
+The workflow's step summary lists each release's digest. Base images in every Dockerfile and compose file are pinned by digest, and Dependabot proposes the updates. A pull request that touches `deploy/` builds the image from the workspace package and starts it (`smoke-log.sh`), and checks the compose files, the manifests, the shell scripts, and `upgrade.sh` (`test-upgrade.sh`), so a broken image or script is found before the release.
+
 ## The contract
 
 | variable | meaning | default |
@@ -39,7 +53,7 @@ The volume at `/data` is the whole state: the log and the key. Back it up; a los
 
 - `docker-compose.yaml` and `k8s/` share the variables in the table above.
 - The profiles `public` (Caddy TLS and the docs site) and `file` (the file-backed log, no Postgres) are off by default. Their variables must stay optional, so that `docker compose config` passes without them.
-- Check with `docker compose -f deploy/docker-compose.yaml config -q` and `kubectl kustomize deploy/k8s`. The gateway's files in `deploy/gateway` are checked the same way by the `gateway-image` workflow.
+- Check with `docker compose -f deploy/docker-compose.yaml config -q` and `kubectl kustomize deploy/k8s`. CI runs both, `shellcheck deploy/*.sh`, `test-upgrade.sh`, and the image smoke test on every pull request that touches `deploy/`. The gateway's files in `deploy/gateway` are checked the same way by the `gateway-image` workflow.
 - `.github/workflows/image.yml` pushes the image to ghcr.io on a `v*` tag or by hand (`gh workflow run image.yml -f version=X`). It uses `GITHUB_TOKEN`, never a personal token. It builds each architecture on a native runner (`ubuntu-24.04-arm` for arm64), then merges the digests into one tag. Do not merge these into one multi-arch job: npm under QEMU emulation dies with SIGILL.
 - The site build excludes `deploy/**`.
 

@@ -3,7 +3,7 @@
 # package of AGENT_CUSTODY_VERSION; a build from main puts a tarball of the workspace package in pkg/ and installs
 # that. Mounts: /config (read-only: gateway.json, policy.cedar, the principals' public keys) and /data (the gateway
 # key, receipts, the local log, the revocation file).
-FROM node:24-alpine
+FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f
 
 ARG AGENT_CUSTODY_VERSION=latest
 COPY pkg/ /tmp/pkg/

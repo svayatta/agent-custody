@@ -20,6 +20,17 @@ agent C ─┘      (this image)             │          └─ another agent (
 
 Pin a version in production. `latest` moves on every release, and `edge` on every merge. Every build starts the image and runs [smoke.sh](smoke.sh) before it is pushed: healthy, a connection with no grant refused, a demo grant accepted, and `docker stop` closing the gateway cleanly. The first push creates the package as private; make it public once in the package's settings so `docker pull` needs no login.
 
+Every pushed image is signed by the workflow that built it (cosign, keyless) and carries a provenance attestation and an SBOM. Check one before you run it, and pin the digest in production:
+
+```bash
+cosign verify ghcr.io/svayatta/agent-custody-gateway:0.8.0 \
+  --certificate-identity-regexp '^https://github.com/svayatta/agent-custody/\.github/workflows/(image|gateway-image)\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+docker buildx imagetools inspect ghcr.io/svayatta/agent-custody-gateway:0.8.0 --format '{{ json .SBOM }}'
+```
+
+The `gateway-image` workflow's step summary lists the digest of each build.
+
 ## Start one
 
 ```bash

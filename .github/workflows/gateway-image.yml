@@ -6,7 +6,8 @@
 #     `<version>`, `<major>.<minor>` and `latest`;
 #   - a pull request that touches deploy/gateway builds the image and runs the smoke test, and pushes nothing.
 # Run it by hand with a version to rebuild a release, or with none to rebuild main. Every build is smoke-tested
-# (deploy/gateway/smoke.sh) before it is pushed. Uses the repository's own token; no personal token.
+# (deploy/gateway/smoke.sh) before it is pushed. Every pushed image carries a provenance attestation and an SBOM and
+# is signed with cosign, keyless, by this workflow's identity (deploy/gateway/README.md says how to verify one). Uses the repository's own token; no personal token.
 # The first push creates the package as private: make it public once in the package's settings.
 name: gateway-image
 
@@ -48,7 +49,7 @@ jobs:
     if: github.event_name != 'workflow_run'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: docker compose -f deploy/gateway/docker-compose.yaml --profile init --profile tls config -q
       - run: kubectl kustomize deploy/gateway/k8s > /dev/null
       - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh
@@ -66,7 +67,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - id: v
@@ -80,9 +81,11 @@ jobs:
         env:
           VERSION: ${{ steps.v.outputs.version }}
         run: .github/scripts/wait-for-npm.sh "$VERSION"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         if: steps.v.outputs.release != 'true'
-      - uses: actions/setup-node@v7
+        with:
+          bun-version: 1.3.2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         if: steps.v.outputs.release != 'true'
         with:
           node-version: 22
@@ -92,9 +95,9 @@ jobs:
           bun install --frozen-lockfile
           bun run build
           (cd packages/receipts && bun pm pack --destination "$GITHUB_WORKSPACE/deploy/gateway/pkg")
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: build and smoke-test this platform's image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: deploy/gateway
           platforms: ${{ matrix.platform }}
@@ -106,18 +109,20 @@ jobs:
       - run: deploy/gateway/smoke.sh gateway-smoke:local
       - name: log in to the registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: push
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: deploy/gateway
           platforms: ${{ matrix.platform }}
           build-args: AGENT_CUSTODY_VERSION=${{ steps.v.outputs.version }}
+          provenance: mode=max
+          sbom: true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=agent-custody shared gateway
@@ -133,7 +138,7 @@ jobs:
         run: |
           mkdir -p /tmp/digests
           echo "${DIGEST#sha256:}" > "/tmp/digests/$(echo "$PLATFORM" | tr / -)"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: github.event_name != 'pull_request'
         with:
           name: gateway-digest-${{ strategy.job-index }}
@@ -145,6 +150,10 @@ jobs:
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     steps:
       - id: tags
         env:
@@ -159,17 +168,18 @@ jobs:
             echo "tags=$IMAGE:edge $IMAGE:sha-${SHA:0:7}" >> "$GITHUB_OUTPUT"
             echo "first=edge" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: /tmp/digests
           pattern: gateway-digest-*
           merge-multiple: true
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: one tag for both architectures
         working-directory: /tmp/digests
         env:
@@ -181,6 +191,11 @@ jobs:
           for t in $TAGS; do tag_args="$tag_args -t $t"; done
           # shellcheck disable=SC2086
           docker buildx imagetools create $tag_args $refs
-      - env:
+      - name: sign the image and record its digest
+        env:
           FIRST: ${{ steps.tags.outputs.first }}
-        run: docker buildx imagetools inspect "$IMAGE:$FIRST"
+        run: |
+          digest=$(docker buildx imagetools inspect "$IMAGE:$FIRST" --format '{{json .Manifest}}' | jq -r .digest)
+          cosign sign --yes "$IMAGE@$digest"
+          docker buildx imagetools inspect "$IMAGE:$FIRST"
+          { echo "### $IMAGE"; echo; echo "\`$IMAGE@$digest\`"; } >> "$GITHUB_STEP_SUMMARY"
