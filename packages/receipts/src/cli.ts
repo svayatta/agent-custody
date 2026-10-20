@@ -33,13 +33,22 @@ import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
 import { auditExtends, formatReport, verifyBundle } from "./verify.ts";
 import { formatSimulation, simulatePolicy, verifyOrphanAuthorization, type SimulationSkip } from "./simulate.ts";
 
-/** Resolves on SIGINT or SIGTERM: a container runtime and systemd stop a service with SIGTERM, which PID 1 ignores unless it is handled. */
+/**
+ * Resolves on SIGINT or SIGTERM: a container runtime and systemd stop a service with SIGTERM, which PID 1 ignores unless
+ * it is handled. The handlers are installed once, before a service starts, so a signal that arrives while it starts up
+ * is kept and the service closes as soon as it is running.
+ */
+let stopped: Promise<void> | undefined;
 function untilStopped(): Promise<void> {
-  return new Promise<void>((resolve) => {
+  stopped ??= new Promise<void>((resolve) => {
     process.once("SIGINT", resolve);
     process.once("SIGTERM", resolve);
   });
+  return stopped;
 }
+const SERVICES = new Set(["serve", "witness", "signer", "portal", "log"]);
+/** a command that waits for untilStopped(); a stdio gateway runs until its input closes and keeps the default signal behaviour */
+const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && (SERVICES.has(cmd) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
 
 /** A shared secret from an environment variable; never from the command line, where it would land in shell history. */
 function secretFrom(envName: string): string {
@@ -144,6 +153,7 @@ function loadTenants(path: string): Record<string, { file: string; tokens?: stri
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
+  if (runsUntilStopped(cmd, rest)) void untilStopped();
   switch (cmd) {
     case "reconcile": {
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, operation: { type: "string" } } });

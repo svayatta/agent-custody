@@ -44,3 +44,19 @@ describe("a service stopped with SIGTERM", () => {
     expect(r).toEqual({ code: 0, signal: null });
   });
 });
+
+describe("a stdio gateway stopped with SIGTERM", () => {
+  it("keeps the default behaviour and does not ignore the signal", async () => {
+    const fx = buildFixture(join(mkdtempSync(join(tmpdir(), "shutdown-stdio-")), "fx"));
+    const child = spawn(process.execPath, ["--import", "tsx", cli, "gateway", "--config", fx.configFile], { stdio: ["pipe", "pipe", "pipe"] });
+    const ended = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
+    await new Promise<void>((resolve, reject) => {
+      let seen = "";
+      child.stderr.on("data", (d: Buffer) => { seen += d; if (/agent-custody gateway: agent=/.test(seen)) resolve(); });
+      child.on("close", () => reject(new Error(`exited before it was ready:\n${seen}`)));
+    });
+    child.kill("SIGTERM");
+    const r = await ended;
+    expect(r.code === 0 || r.signal === "SIGTERM").toBe(true);
+  });
+});
