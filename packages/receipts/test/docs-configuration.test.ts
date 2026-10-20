@@ -7,7 +7,9 @@ import { GatewayConfigSchema } from "../src/config.ts";
 import { evaluate } from "../src/policy.ts";
 
 const doc = readFileSync(new URL("../docs/configuration.md", import.meta.url), "utf8");
-const json = [...doc.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]!);
+const fragments = [...doc.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]!);
+// the full config starts with a brace; the others are single keys shown in the prose
+const json = fragments.filter((b) => b.trimStart().startsWith("{"));
 const cedarBlocks = [...doc.matchAll(/```cedar\n([\s\S]*?)```/g)].map((m) => m[1]!);
 
 const req = (agentId: string, tool: string, args: Record<string, unknown>, facts: Record<string, unknown> = {}) => ({
@@ -19,8 +21,9 @@ const req = (agentId: string, tool: string, args: Record<string, unknown>, facts
 const verified = { customer: { verified: true } };
 
 describe("docs/configuration.md", () => {
-  it("has one gateway config and one policy, so the examples below are the ones the prose means", () => {
+  it("has one full gateway config and one policy, so the examples below are the ones the prose means", () => {
     expect(json.length).toBe(1);
+    expect(fragments.length).toBeGreaterThan(1);
     expect(cedarBlocks.length).toBe(1);
   });
 

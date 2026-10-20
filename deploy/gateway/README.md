@@ -45,7 +45,7 @@ curl http://127.0.0.1:8790/health
 
 An agent connects to `http://<gateway>:8790/mcp` and presents its grant as the base64url of the grant file, in `Authorization: Bearer <value>` or `X-Agent-Custody-Grant`. `base64 < grant.json | tr -d '\n=' | tr '+/' '-_'` makes the value. From JavaScript, `grantHeader(envelope)` does. One gateway serves every grant that is signed by a key in `trustedPrincipalKeys`.
 
-Who may use which tools, where the tools live, and a full example config are in [configuring the gateway](../../packages/receipts/docs/configuration.md). Check a config before you start it, in the same container image, with the same mounts and environment:
+[example/](example/README.md) is a complete config directory you can copy: a REST API, a policy, a fact lookup, and the steps to make the principal's key, issue grants, and run it. Who may use which tools, where the tools live, and the principal's key are in [configuring the gateway](../../packages/receipts/docs/configuration.md). Check a config before you start it, in the same container image, with the same mounts and environment:
 
 ```bash
 docker run --rm -v "$PWD/config:/config:ro" -v gateway-data:/data --env-file .env <image> check --config /config/gateway.json --connect

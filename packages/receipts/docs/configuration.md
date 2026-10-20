@@ -13,6 +13,8 @@ Who may use which tools, and where those tools live, is set in three files and a
 
 The agent configures none of them. It connects to the gateway as an MCP server, presents its grant, and sees only the tools the grant names.
 
+A complete, usable layout, one config directory with a policy, is in [deploy/gateway/example](https://github.com/svayatta/agent-custody/tree/main/deploy/gateway/example).
+
 ## How a call is decided
 
 For each call, in this order, and a refusal at any step is a signed receipt:
@@ -82,7 +84,7 @@ permit(principal == Agent::"support-agent", action == Action::"docs.send", resou
         "tools": [
           { "name": "customer.lookup", "method": "GET", "path": "/v1/customers/{customer_id}",
             "inputSchema": { "type": "object", "properties": { "customer_id": { "type": "string" } }, "required": ["customer_id"] } },
-          { "name": "billing.refund", "method": "POST", "path": "/v1/refunds", "idempotencyHeader": "Idempotency-Key",
+          { "name": "billing.refund", "method": "POST", "path": "/v1/refunds",
             "description": "Refund a customer. amount is in minor units.",
             "inputSchema": { "type": "object", "properties": { "customer_id": { "type": "string" }, "amount": { "type": "integer" } }, "required": ["customer_id", "amount"] } }
         ]
@@ -121,6 +123,40 @@ What each part does:
 Paths in `gateway.json` are resolved relative to the file, so `keys/principal.pub` sits beside it, and absolute paths are left as they are.
 
 **4. Each agent presents its own grant** when it connects: the grant file, base64url-encoded, as `Authorization: Bearer <value>` or `X-Agent-Custody-Grant`. [The gateway guide](usage.md#one-gateway-for-many-agents-over-http) and [wiring it into an agent host](usage.md#wiring-it-into-an-agent-host) show how for each host. Adding a third agent is issuing it a grant. The gateway config does not change.
+
+## The principal's key
+
+A grant is only as good as the key that signed it, so this is the key to handle with the most care. There are several keys in a deployment, and they are different:
+
+| key | who holds the private half | what the public half is for |
+| --- | --- | --- |
+| **The principal's key** | the person or organisation delegating authority, on their own machine | the gateway's `trustedPrincipalKeys`: it recognises a grant as genuine because this key signed it. A verifier also takes it, as `--principal-key`. |
+| **The gateway's key** | the gateway only, in `/data/keys` | verifiers check receipts against it (`--issuer-key`) |
+| **The log's key** | the log's signer | a verifier or a gateway pins it (`log.keys`, `--log-key`) |
+
+**Make it where grants are issued, not where the gateway runs.**
+
+```bash
+agent-custody keygen --dir ./principal --name principal
+```
+
+This writes `principal.key`, the private key, in PEM (PKCS#8) with mode 0600, and `principal.pub`, the public key, in PEM (SPKI), and prints the **key id**, the sha256 of the public key. Write the key id down: it is how you confirm, after copying, that the gateway holds the key you made.
+
+**Keep the private key off the gateway.** The gateway never needs it, and a gateway that held it would let anyone who broke into the gateway sign grants for any agent and any tool. So `principal.key` does not go in the gateway's config directory, the image, a ConfigMap, the repository, or CI. Keep it on the machine of whoever issues grants, on an encrypted disk or in a password or secrets manager, and back it up encrypted. `agent-custody grant --key principal.key` reads it from a file, so run that command where the file is.
+
+**Give the gateway the public key only.** Copy `principal.pub` into the gateway's config and list it:
+
+```json
+  "trustedPrincipalKeys": ["keys/principal.pub"]
+```
+
+In the Docker image that is `/config/keys/principal.pub`, mounted read-only; on Kubernetes it can sit in the ConfigMap, because it is public. List several keys to trust several principals: a grant is accepted when any listed key signed it, and one gateway can serve more than one organisation. A grant signed by a key that is not listed is refused when the agent connects (`delegation grant rejected`). The `--principal` name in a grant (`acme-support`) is only a label that receipts record; the trust is in the key.
+
+**Rotating it.** The gateway reads `trustedPrincipalKeys` when it starts, so a rotation is: make the new key pair; add the new public key to the list beside the old one and restart the gateway; issue new grants with the new key; when the old key's grants have expired or been revoked (grants last hours, so this is short), remove the old public key and restart. Verifiers need the new `--principal-key` as well, and accept both while old receipts matter.
+
+**If it is lost,** nothing already issued stops working, but no new grant can be signed: make a new pair and add its public key as above. **If it leaks,** remove its public key from `trustedPrincipalKeys` and restart the gateway, which ends open sessions and refuses every grant it signed from then on, and revoke any grant you want refused before that (`agent-custody revoke`). Then make a new pair.
+
+`agent-custody init` in the Docker image writes a *demo* principal key under `/config/demo` so that you can try the gateway in a minute. Delete that directory before production, and make the real key where grants are issued.
 
 ## In the Docker image
 

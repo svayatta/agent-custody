@@ -93,6 +93,16 @@ describe("agent-custody check", () => {
     expect(warns(r).some((f) => f.check === "upstream" && f.message.includes("/opt/mcp/none.js"))).toBe(true);
   });
 
+  it("a REST tool with idempotencyHeader and no operations entry is an error, because every call to it would fail", async () => {
+    const fx = fresh();
+    edit(fx.configFile, (c) => {
+      c.upstream = { rest: { baseUrl: "https://api.example.com", tools: [{ name: "pay.refund", method: "POST", path: "/refunds", idempotencyHeader: "Idempotency-Key" }] } };
+    });
+    const e = errors(await checkConfig(fx.configFile)).find((f) => f.check === "upstream");
+    expect(e?.message).toContain("pay.refund");
+    expect(e?.message).toContain("operations");
+  });
+
   it("a remote log with an empty precommit is a warning about evidence lost in an outage", async () => {
     const fx = fresh();
     edit(fx.configFile, (c) => { c.log = { url: "https://log.example.com/t/x/", hashOnly: true }; delete c.logFile; c.precommit = []; });

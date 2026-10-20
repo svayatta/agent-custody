@@ -147,6 +147,15 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
     for (const a of u.args) if ((a.startsWith("/") || a.startsWith("./")) && !existsSync(a)) add("warn", "upstream", `${"name" in u ? u.name : "upstream"}: the argument ${a} does not exist here; if it is a file the upstream needs, it must be inside the image`);
   }
 
+  // a REST tool with an idempotency header is a financial operation: every call to it fails unless `operations` configures it
+  const operationTools = new Set((cfg.operations?.tools ?? []).map((t) => t.tool));
+  for (const u of cfg.upstreams ?? (cfg.upstream ? [{ name: "upstream", ...cfg.upstream }] : [])) {
+    if (!("rest" in u)) continue;
+    for (const t of u.rest.tools) {
+      if (t.idempotencyHeader && !operationTools.has(t.name)) add("error", "upstream", `${"name" in u ? u.name : "upstream"}: the tool ${t.name} sets idempotencyHeader, which makes it a financial operation, and every call to it fails unless it is also listed under "operations"; remove idempotencyHeader, or configure it under operations (financial-operations.md)`);
+    }
+  }
+
   // where the gateway writes
   const writes: [string, string][] = [["receiptsDir", cfg.receiptsDir]];
   if (cfg.logFile) writes.push(["logFile", cfg.logFile]);
