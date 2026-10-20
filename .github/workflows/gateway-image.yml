@@ -54,7 +54,8 @@ jobs:
       - name: the compose file is valid with its required version set
         env:
           AGENT_CUSTODY_GATEWAY_VERSION: ci
-        run: docker compose -f deploy/gateway/docker-compose.yaml --profile init --profile tls config -q
+          CONSOLE_TOKEN: ci
+        run: docker compose -f deploy/gateway/docker-compose.yaml --profile init --profile tls --profile console config -q
       - run: kubectl kustomize deploy/gateway/k8s > /dev/null
       - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh .github/scripts/*.sh
 

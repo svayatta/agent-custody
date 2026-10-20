@@ -1,5 +1,6 @@
 #!/bin/sh
 # serve (default): starts the shared gateway on 0.0.0.0, creating the gateway key on first start.
+# console: starts the admin console for that gateway (token from CONSOLE_TOKEN), as a separate container of this image.
 # init: writes a starter config, an example policy, and a demo principal key and grant into /config.
 # Anything else is passed to the agent-custody CLI, so `docker exec <container> revoke --config ... --grant ...` works.
 set -eu
@@ -33,6 +34,18 @@ case "${1:-serve}" in
       *) echo "gateway: GATEWAY_CHECK must be strict, advisory, or off" >&2; exit 1 ;;
     esac
     exec agent-custody gateway --config "$GATEWAY_CONFIG" --http --host 0.0.0.0 --port "$GATEWAY_PORT" --idle-minutes "$GATEWAY_IDLE_MINUTES"
+    ;;
+  console)
+    # the admin console, as a service of its own: the same image, a token from CONSOLE_TOKEN, the same config and data
+    if [ -z "${CONSOLE_TOKEN:-}" ]; then
+      echo "gateway: console needs CONSOLE_TOKEN in the environment (for example: openssl rand -hex 32)" >&2
+      exit 1
+    fi
+    if [ ! -f "$GATEWAY_CONFIG" ]; then
+      echo "gateway: $GATEWAY_CONFIG not found. The console reads the gateway's config; mount it at $config_dir" >&2
+      exit 1
+    fi
+    exec agent-custody console --config "$GATEWAY_CONFIG" --host 0.0.0.0 --port "${CONSOLE_PORT:-8795}" ${GATEWAY_URL:+--gateway-url "$GATEWAY_URL"}
     ;;
   init)
     if [ -e "$GATEWAY_CONFIG" ]; then

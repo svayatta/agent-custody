@@ -77,6 +77,7 @@ For evidence a customer or auditor will accept, point `log` in `gateway.json` at
 | plain VM | [agent-custody-gateway.service](agent-custody-gateway.service) runs the same command under systemd. |
 | Kubernetes | `kubectl apply -k deploy/gateway/k8s`; the header of [k8s/kustomization.yaml](k8s/kustomization.yaml) lists the steps. |
 | TLS | `docker compose --profile tls up -d` puts Caddy in front on `GATEWAY_HOST`. |
+| the console | `docker compose --profile console up -d` runs the [admin console](../../packages/receipts/docs/console.md) from the same image on `127.0.0.1:8795`, with `CONSOLE_TOKEN` in `.env`: config, tools, receipts with a verdict each, a policy editor that replays recorded calls, and grant revocation. It mounts `./config` read-write, because it edits the policy file, so make that directory writable by the user it runs as (`UID` and `GID` in `.env`). Keep it on loopback or a private network. |
 
 ## What a shared gateway means, and its limits
 
