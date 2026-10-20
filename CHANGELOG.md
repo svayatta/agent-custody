@@ -2,6 +2,11 @@
 
 All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agent-custody` on PyPI, move in lockstep. The receipt format has stayed at v0.2 throughout; every addition to it is an optional field, so earlier receipts and the published conformance vectors remain valid.
 
+## Unreleased
+
+- **Deploy: the gateway as a service.** `deploy/gateway` is a container image, compose file, Kubernetes manifests and systemd unit for one shared gateway that every agent on a host or cluster connects to, each with its own grant. The `gateway-image` workflow builds it for amd64 and arm64 and pushes `ghcr.io/svayatta/agent-custody-gateway`: `edge` and `sha-<short>` on every merge to main, `<version>`, `<major>.<minor>` and `latest` on every release. Every build is smoke-tested before it is pushed. `init` writes a starter config, an example policy, and a demo grant.
+- **Fix: long-running services stop on SIGTERM.** The gateway, log, signer, portal and witness waited for SIGINT only, so a container runtime, systemd or Kubernetes stopped them with SIGKILL after the grace period. They now close and exit 0 on SIGTERM.
+
 ## 0.8.0 — 2026-10-19
 
 - **Receipts: human approvals (#111).** `approvals` in the gateway config names tools that need a signed, unexpired, single-use human approval, in every mode.

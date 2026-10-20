@@ -52,6 +52,67 @@ flowchart LR
 
 A customer who does not want a hosted log runs the same server from the container, the compose file, or the Kubernetes manifests in `deploy/`.
 
+## The shared gateway service
+
+For one agent session the host spawns the gateway on stdio and there is nothing to operate. For every agent on a host or cluster, run one shared gateway as a service (`ghcr.io/svayatta/agent-custody-gateway`, amd64 and arm64): each agent connects over HTTP and presents its own grant, and the tool credentials live in the gateway.
+
+```mermaid
+flowchart LR
+    subgraph AGENTS["Agents, any framework"]
+        A1["Agent A"]
+        A2["Agent B"]
+        A3["Agent C"]
+    end
+    TLS["TLS in front<br/>Caddy, ingress or mesh"]
+    subgraph GWC["Gateway container, one replica"]
+        GWS["agent-custody gateway --http<br/>one session per grant"]
+        CFGV["/config, read-only<br/>gateway.json, policy.cedar,<br/>principals' public keys"]
+        DATA[("/data<br/>gateway key, receipts,<br/>local log, revoked.json")]
+        ENVV["environment<br/>tool credentials, log token"]
+        CFGV --> GWS
+        ENVV --> GWS
+        GWS --> DATA
+    end
+    UP["Tools<br/>REST, MCP, A2A"]
+    LOGH["Hosted log"]
+    A1 -- "grant A" --> TLS
+    A2 -- "grant B" --> TLS
+    A3 -- "grant C" --> TLS
+    TLS --> GWS
+    GWS -- "only on allow" --> UP
+    GWS -- "leaf hash" --> LOGH
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent
+    participant TLS as TLS proxy
+    participant GW as Shared gateway
+    Agent->>TLS: initialize, Authorization: Bearer base64url(grant)
+    TLS->>GW: the same request
+    GW->>GW: verify the grant against trustedPrincipalKeys, window, revocation list
+    alt grant missing, forged, expired or revoked
+        GW-->>Agent: 403 with the reason, no session
+    else grant valid
+        GW-->>Agent: session id, tools limited to the grant's scopes
+    end
+    loop every call of the session
+        Agent->>GW: tools/call with the session id
+        GW->>GW: grant checked again, then the call path above
+        GW-->>Agent: result or reason, receipt id
+    end
+    Note over GW: a revoked or expired grant ends its session on the next request
+```
+
+[Running the gateway as a service](../../deploy/gateway/README.md) has the commands, the Kubernetes and systemd recipes, and what goes where. Its limits are part of the design:
+
+- A grant is a bearer credential: whoever holds it can connect as that agent until it expires or is revoked. Short lifetimes, a private network or mutual TLS, and revocation are the controls.
+- The transport is plain HTTP, so TLS comes from a proxy or mesh in front.
+- One replica: sessions are held in memory and the local log has one writer.
+- One policy and one gateway key apply to every agent on it; one gateway per team where that is not acceptable.
+- One process holds every agent's tool credentials, which is the point and also the blast radius.
+
 ## What the agent has to change
 
 | agent type | change | what you get |

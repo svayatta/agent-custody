@@ -18,6 +18,8 @@ The gateway is an MCP server because MCP is what the host already speaks to its 
 
 Being outside the agent's process is what lets the gateway do two things a log collector cannot: refuse a call before the tool runs, and sign the record with a key the agent never holds. One gateway runs per agent session, on stdio, as MCP hosts run their servers; it fronts several upstreams under one human-signed grant. [Setting it up](/receipts/usage).
 
+For every agent on a host or cluster, run one shared gateway as a service instead: `ghcr.io/svayatta/agent-custody-gateway` (amd64 and arm64), with a compose file, Kubernetes manifests and a systemd unit. Each agent connects over HTTP and presents its own grant, and the tool credentials live in the gateway. [Running the gateway as a service](../../deploy/gateway/README.md) has the steps and the limits: a grant is a bearer credential, the transport is plain HTTP, and one replica is the supported shape.
+
 ## The SDK: inside the agent, for tools that are not MCP servers
 
 For tools that are plain functions, the SDK hooks the framework the agent already uses: a Claude Code hook, a LangChain callback, a wrapped OpenAI Agents or Vercel AI tool. No new server, no change to the tool. The record is self-reported, since it comes from inside the process it describes, and every receipt says so with the `claimed` label. Agents in other languages get the same through the sidecar, a local HTTP process holding the key, with a Python package and Go, Java, and Rust clients. [The interceptor SDK](/receipts/sdk).
