@@ -45,6 +45,10 @@ base64 < support-agent.grant.json | tr -d '\n=' | tr '+/' '-_'     # the value a
 
 The support agent's grant can read and refund, within the policy. The report agent's grant names only `orders.get`, so it never sees the refund tool. The agent name in the grant (`support-agent`) is what the policy's `principal == Agent::"support-agent"` matches.
 
+## Retries and money
+
+This example does not use `operations`, so the gateway cannot tell a retry from a second refund: if an agent repeats `orders.refund` after a timeout, your API receives a second POST and refunds again. `precommit` makes sure there is evidence of each attempt; it does not deduplicate. For real money, configure [financial operations](../../../packages/receipts/docs/financial-operations.md): each refund gets a durable identity and an idempotency key your API must honor, its amount is reserved against a daily budget before it is forwarded, and an uncertain outcome is closed by reading your API's own record. That needs three things from you: the calling agent sends a persistent operation id in the call's `_meta`, your API honors the idempotency key header, and you give the gateway a read tool that returns the refund by that key. Do not add `idempotencyHeader` to the tool on its own: a tool with the header and no `operations` entry fails every call.
+
 ## Log to a log you do not run
 
 Replace `"logFile"` with a remote log, which is what lets an auditor accept a receipt without trusting you. `precommit` with a remote log requires the log's public key to be pinned:

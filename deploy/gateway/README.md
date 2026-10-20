@@ -51,7 +51,7 @@ An agent connects to `http://<gateway>:8790/mcp` and presents its grant as the b
 docker run --rm -v "$PWD/config:/config:ro" -v gateway-data:/data --env-file .env <image> check --config /config/gateway.json --connect
 ```
 
-The container runs the same check, without `--connect`, each time it starts and prints what it finds before the gateway's own startup messages.
+The container runs the same check, without `--connect`, each time it starts, and **does not start if it finds an error**: a mistyped key, a policy that does not parse, a missing credential variable, a path the gateway cannot write. Set `GATEWAY_CHECK=advisory` to print the findings and start anyway, or `GATEWAY_CHECK=off` to skip it.
 
 ## What goes where
 

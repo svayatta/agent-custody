@@ -52,6 +52,10 @@ describe("docs/configuration.md", () => {
     const p = cedarBlocks[0]!;
     expect(evaluate(p, req("support-agent", "billing.refund", { amount: 100000 }, verified)).decision).toBe("allow");
     expect(evaluate(p, req("support-agent", "billing.refund", { amount: 100001 }, verified)).decision).toBe("deny");
+    // a refund of nothing or less than nothing would otherwise pass the upper bound
+    expect(evaluate(p, req("support-agent", "billing.refund", { amount: 0 }, verified)).decision).toBe("deny");
+    expect(evaluate(p, req("support-agent", "billing.refund", { amount: -1 }, verified)).decision).toBe("deny");
+    expect(evaluate(p, req("support-agent", "billing.refund", { amount: 1 }, verified)).decision).toBe("allow");
     expect(evaluate(p, req("support-agent", "billing.refund", { amount: 500 }, { customer: { verified: false } })).decision).toBe("deny");
     expect(evaluate(p, req("support-agent", "billing.refund", { amount: 500 })).decision).toBe("deny");
   });

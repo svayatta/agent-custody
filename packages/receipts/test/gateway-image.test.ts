@@ -2,7 +2,7 @@
 // agent-custody command: init writes a starter config the gateway accepts, serve creates the key on first start and
 // serves the shared HTTP gateway on all interfaces, an agent without a grant is refused, and SIGTERM closes it.
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,6 +60,23 @@ describe("the gateway image entrypoint", () => {
     const r = run("init");
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("already exists");
+  });
+
+  it("serve refuses to start on a config the check calls an error, and rejects an unknown GATEWAY_CHECK value", async () => {
+    const badDir = join(dir, "bad-config");
+    mkdirSync(badDir);
+    cpSync(config, badDir, { recursive: true });
+    const cfg = JSON.parse(readFileSync(join(badDir, "gateway.json"), "utf8"));
+    cfg.precomit = ["example.lookup"];
+    writeFileSync(join(badDir, "gateway.json"), JSON.stringify(cfg));
+    const bad = { ...env, GATEWAY_CONFIG: join(badDir, "gateway.json"), GATEWAY_PORT: String(await freePort()) };
+    const strict = spawnSync("sh", [entrypoint, "serve"], { cwd: receipts, env: bad, encoding: "utf8", timeout: 30_000 });
+    expect(strict.status).toBe(1);
+    expect(strict.stderr).toContain("precomit");
+    expect(strict.stderr).toContain("not starting");
+    const off = spawnSync("sh", [entrypoint, "serve"], { cwd: receipts, env: { ...bad, GATEWAY_CHECK: "bogus" }, encoding: "utf8", timeout: 30_000 });
+    expect(off.status).toBe(1);
+    expect(off.stderr).toContain("GATEWAY_CHECK must be");
   });
 
   it("serve creates the gateway key, answers /health, refuses a connection with no grant, and exits 0 on SIGTERM", async () => {

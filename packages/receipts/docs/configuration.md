@@ -57,10 +57,12 @@ The grants limit *which tools*. The report agent's grant has no `billing.refund`
 permit(principal, action == Action::"customer.lookup", resource);
 permit(principal, action == Action::"kb.search", resource);
 
-// refunds: only the support agent, at most 1,000.00 (integer minor units), and only for a customer the gateway
-// itself found to be verified. context.facts comes from the gateway's own lookup, never from the agent.
+// refunds: only the support agent, a positive amount of at most 1,000.00 (integer minor units), and only for a
+// customer the gateway itself found to be verified. The gateway does not enforce a tool's inputSchema, so the policy
+// bounds the amount from below as well. context.facts comes from the gateway's own lookup, never from the agent.
 permit(principal == Agent::"support-agent", action == Action::"billing.refund", resource)
 when {
+  context.args.amount > 0 &&
   context.args.amount <= 100000 &&
   context.facts has customer &&
   context.facts.customer.verified == true
@@ -123,6 +125,8 @@ What each part does:
 Paths in `gateway.json` are resolved relative to the file, so `keys/principal.pub` sits beside it, and absolute paths are left as they are.
 
 **4. Each agent presents its own grant** when it connects: the grant file, base64url-encoded, as `Authorization: Bearer <value>` or `X-Agent-Custody-Grant`. [The gateway guide](usage.md#one-gateway-for-many-agents-over-http) and [wiring it into an agent host](usage.md#wiring-it-into-an-agent-host) show how for each host. Adding a third agent is issuing it a grant. The gateway config does not change.
+
+**Retries and money.** This config does not use `operations`, so the gateway cannot tell a retry from a second refund: an agent that repeats `billing.refund` after a timeout sends a second POST. For real money, configure [financial operations](financial-operations.md): each refund gets a durable identity and an idempotency key your API must honor, its amount is reserved against a daily budget before it is forwarded, and an uncertain outcome is closed by reading your API's own record. It needs the calling agent to send a persistent operation id in the call's `_meta`, an API that honors the idempotency key, and a read tool that returns the refund by that key.
 
 ## The principal's key
 
@@ -189,17 +193,17 @@ docker run --rm -v "$PWD/config:/config:ro" -v gateway-data:/data --env-file .en
 | it checks | an error or a warning |
 | --- | --- |
 | the config parses, with each problem and its path | **error** |
-| a key that is not in the schema (a typo such as `precomit` is otherwise silently ignored) | warning, with the key it nearly is |
+| a key that is not in the schema (a typo such as `precomit` is otherwise silently ignored, and the setting stays at its default) | **error**, with the key it nearly is |
 | the gateway key loads, and is not readable by other users | error, and a warning |
 | every trusted principal key loads | error |
-| the Cedar policy parses, and has at least one `permit` | error, and a warning |
-| every credential variable the config names is set | **error**: the gateway does not start without it |
+| the Cedar policy parses, and has at least one `permit` rule (a `permit(` in a comment does not count) | error, and a warning |
+| every credential variable the config names is set: upstream tokens and headers, the log's token, the capture key, the Splunk token, and the OpenTelemetry headers | **error**: the gateway does not start without it |
 | a stdio `command` exists, and a script argument exists | error, and a warning |
-| the receipts, log, and revocation paths can be written, and the revocation file is a JSON array | error |
+| the receipts, log, revocation, operations database, and approvals paths can be written, and the revocation file is a JSON array | error |
 | the grant the config names verifies, and is inside its window | error, and a warning near expiry |
 | a remote log with an empty `precommit` | warning: a log outage after a call leaves its side effect without evidence |
 
-With **`--connect`** it also starts the upstreams, which is where an unreachable server or **two upstreams offering the same tool** shows up, prints the tools they offer, and compares every tool name in `precommit`, `facts`, `approvals`, `operations`, and the grant's scopes with that list. A name that no upstream offers is reported. `--connect` starts your stdio upstreams and may create the receipts directory. It exits 1 on any error, so it can gate a deploy.
+With **`--connect`** it also starts the upstreams, which is where an unreachable server or **two upstreams offering the same tool** shows up, prints the tools they offer, and compares every tool name in `precommit`, `facts`, `approvals`, `operations`, and the grant's scopes with that list. A name in `precommit`, `facts`, `approvals`, or `operations` that no upstream offers is an **error** (for `precommit` it means the tool you meant is forwarded before it is logged); a grant scope that names nothing is a warning. `--connect` starts your stdio upstreams and may create the receipts directory. It exits 1 on any error, so it can gate a deploy.
 
 ## When the gateway does not start
 
@@ -215,4 +219,4 @@ With **`--connect`** it also starts the upstreams, which is where an unreachable
 | `EROFS` or a permission error on `receipts` | a writable path points into the read-only `/config` | use an absolute path under `/data` |
 | `403 delegation grant rejected: …` (an agent's connection) | the grant is expired, revoked, not signed by a trusted principal, or missing | issue a new grant, and check `trustedPrincipalKeys` |
 
-Run `agent-custody check --connect` first: it reports most of these together, instead of one at a time.
+The gateway image runs the static check every time it starts and does not start on an error (`GATEWAY_CHECK=advisory` prints the findings and starts anyway; `off` skips it), and the command exits 1 on an error, so it can gate a deploy. Run `agent-custody check --connect` first: it reports most of these together, instead of one at a time.

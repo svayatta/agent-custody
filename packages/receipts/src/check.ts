@@ -9,6 +9,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { GatewayConfigSchema, loadConfig, type GatewayConfig } from "./config.ts";
 import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair, type Envelope, type PublicKeyRef } from "./crypto.ts";
 import { delegationValidAt, verifyDelegation } from "./delegation.ts";
+import { hasPermitRule } from "./policy.ts";
 import { createGatewayHost } from "./gateway.ts";
 
 export interface CheckFinding {
@@ -74,7 +75,7 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
     for (const key of Object.keys(raw)) {
       if (known.includes(key)) continue;
       const near = known.find((k) => distance(k.toLowerCase(), key.toLowerCase()) <= 2);
-      add("warn", "config", `unknown key "${key}" is ignored${near ? `; did you mean "${near}"?` : ""}`);
+      add("error", "config", `unknown key "${key}" is ignored by the gateway${near ? `; did you mean "${near}"?` : ""} A mistyped key leaves the setting it was meant for at its default`);
     }
   }
 
@@ -117,7 +118,7 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
     const text = readFileSync(cfg.policyFile, "utf8");
     const r = cedar.checkParsePolicySet({ staticPolicies: text });
     if (r.type !== "success") for (const e of r.errors) add("error", "policy", `${cfg.policyFile}: ${e.message}`);
-    else if (!/\bpermit\s*\(/.test(text)) add("warn", "policy", `${cfg.policyFile} has no permit rule, so every call is denied`);
+    else if (!hasPermitRule(text)) add("warn", "policy", `${cfg.policyFile} has no permit rule, so every call is denied`);
     else add("ok", "policy", "the policy parses");
   }
   if (cfg.mode === "observe") add("warn", "mode", "observe mode forwards every call the grant allows and records what the policy would have decided; nothing is denied by policy");
@@ -131,6 +132,8 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
     if ("a2a" in u) for (const v of Object.values(u.a2a.headerEnv ?? {})) envNames.push([`upstream ${name}`, v]);
   }
   if (cfg.log?.tokenEnv) envNames.push(["log", cfg.log.tokenEnv]);
+  if (cfg.splunk?.tokenEnv) envNames.push(["splunk", cfg.splunk.tokenEnv]);
+  for (const v of Object.values(cfg.otel?.headersEnv ?? {})) envNames.push(["otel", v]);
   if (cfg.captureKeyEnv) envNames.push(["capture", cfg.captureKeyEnv]);
   const missing = envNames.filter(([, v]) => !process.env[v]);
   for (const [who, v] of missing) add("error", "environment", `${who}: the variable ${v} is not set here, and a gateway does not start without it`);
@@ -158,6 +161,8 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
 
   // where the gateway writes
   const writes: [string, string][] = [["receiptsDir", cfg.receiptsDir]];
+  if (cfg.operations) writes.push(["operations.database", cfg.operations.database]);
+  if (cfg.approvals) writes.push(["approvals.usedDir", cfg.approvals.usedDir]);
   if (cfg.logFile) writes.push(["logFile", cfg.logFile]);
   if (cfg.revokedGrants) writes.push(["revokedGrants", cfg.revokedGrants]);
   let writable = true;
@@ -167,7 +172,7 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
       add("error", "paths", `${key} ${path} cannot be created or written; in a container, use an absolute path under /data (/config is read-only)`);
     }
   }
-  if (writable) add("ok", "paths", "the receipts, log, and revocation paths are writable");
+  if (writable) add("ok", "paths", "every path the gateway writes can be written");
   if (cfg.revokedGrants && existsSync(cfg.revokedGrants)) {
     try {
       if (!Array.isArray(JSON.parse(readFileSync(cfg.revokedGrants, "utf8")))) throw new Error("expected a JSON array of grant digests");
@@ -237,7 +242,8 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   }
   if (tools) {
     const unknown = mentioned().filter(([, t]) => !tools!.includes(t));
-    for (const [where, t] of unknown) add(where === "precommit" || where === "grant scope" ? "warn" : "error", "tool names", `${where} names "${t}", which no upstream offers`);
+    // a scope that names nothing is harmless; a precommit name that matches nothing leaves that tool forwarded with no authorization committed first
+    for (const [where, t] of unknown) add(where === "grant scope" ? "warn" : "error", "tool names", `${where} names "${t}", which no upstream offers${where === "precommit" ? "; the tool you meant is forwarded before it is logged" : ""}`);
     if (!unknown.length) add("ok", "tool names", "every tool the config and the grant name is offered by an upstream");
   }
   return out;

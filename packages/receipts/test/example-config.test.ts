@@ -83,10 +83,10 @@ describe("deploy/gateway/example", () => {
     expect(refunds).toEqual([{ amount: 10000 }]);
   });
 
-  it("the policy refuses more than the order's total, more than the cap, and an order the gateway found not delivered", async () => {
+  it("the policy refuses a refund of nothing or less, more than the order's total, more than the cap, and an order the gateway found not delivered", async () => {
     const support = host.open(grants.support);
     const before = refunds.length;
-    for (const [order, amount] of [["o-1", 30000], ["o-2", 100]] as const) {
+    for (const [order, amount] of [["o-1", 0], ["o-1", -1], ["o-1", 30000], ["o-1", 60000], ["o-2", 100]] as const) {
       const r = await support.handleCall({ name: "orders.refund", arguments: { order_id: order, amount } });
       expect(r.isError, `${order} ${amount}`).toBe(true);
       expect(text(r as { content: unknown[] })).toContain("Denied by policy");

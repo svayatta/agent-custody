@@ -24,8 +24,14 @@ case "${1:-serve}" in
       echo "gateway: created the gateway key. Verifiers check receipts with its public key:" >&2
       cat "$key_dir/$key_name.pub" >&2
     fi
-    # advisory: print everything the config would fail on, then start, so the gateway's own message follows if it does
-    agent-custody check --config "$GATEWAY_CONFIG" >&2 || echo "gateway: the config check found errors; starting anyway" >&2
+    # GATEWAY_CHECK=strict (the default) refuses to start on a config the check calls an error, advisory prints the findings
+    # and starts anyway, off skips the check
+    case "${GATEWAY_CHECK:-strict}" in
+      off) ;;
+      advisory) agent-custody check --config "$GATEWAY_CONFIG" >&2 || echo "gateway: the config check found errors; starting anyway (GATEWAY_CHECK=advisory)" >&2 ;;
+      strict) agent-custody check --config "$GATEWAY_CONFIG" >&2 || { echo "gateway: the config check found errors, so the gateway is not starting. Fix them, or set GATEWAY_CHECK=advisory to start anyway" >&2; exit 1; } ;;
+      *) echo "gateway: GATEWAY_CHECK must be strict, advisory, or off" >&2; exit 1 ;;
+    esac
     exec agent-custody gateway --config "$GATEWAY_CONFIG" --http --host 0.0.0.0 --port "$GATEWAY_PORT" --idle-minutes "$GATEWAY_IDLE_MINUTES"
     ;;
   init)
