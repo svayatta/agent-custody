@@ -53,6 +53,8 @@ Framework hooks and adapters, including Claude Code, the OpenAI Agents SDK, the 
 
 ## How it fits together
 
+The [architecture guide](../../site/guide/architecture.md) adds the customer-side and hosted split, the data model, and sequence diagrams for onboarding, revocation, and verification.
+
 ```mermaid
 flowchart LR
     P["Principal<br/>(human or org, holds a signing key)"]
