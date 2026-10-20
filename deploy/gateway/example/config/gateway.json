@@ -1,0 +1,34 @@
+{
+  "identity": { "keyFile": "/data/keys/gateway.key" },
+  "upstream": {
+    "rest": {
+      "baseUrl": "https://api.example.com",
+      "headerEnv": { "authorization": "APP_API_AUTHORIZATION" },
+      "tools": [
+        {
+          "name": "orders.get",
+          "description": "Look an order up by id.",
+          "method": "GET",
+          "path": "/v1/orders/{order_id}",
+          "inputSchema": { "type": "object", "properties": { "order_id": { "type": "string" } }, "required": ["order_id"] }
+        },
+        {
+          "name": "orders.refund",
+          "description": "Refund part or all of an order. amount is in minor units (pence or cents).",
+          "method": "POST",
+          "path": "/v1/orders/{order_id}/refund",
+          "inputSchema": { "type": "object", "properties": { "order_id": { "type": "string" }, "amount": { "type": "integer" } }, "required": ["order_id", "amount"] }
+        }
+      ]
+    }
+  },
+  "trustedPrincipalKeys": ["keys/principal.pub"],
+  "policyFile": "policy.cedar",
+  "facts": [
+    { "name": "order", "tool": "orders.get", "args": { "order_id": "$args.order_id" }, "forTools": ["orders.refund"] }
+  ],
+  "precommit": ["orders.refund"],
+  "revokedGrants": "/data/revoked.json",
+  "receiptsDir": "/data/receipts",
+  "logFile": "/data/log.jsonl"
+}

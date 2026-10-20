@@ -26,6 +26,7 @@ import type { AdminOptions } from "./log-admin.ts";
 import { createRequire } from "node:module";
 import { pruneLog } from "./retention.ts";
 import { serveSidecar } from "./sidecar.ts";
+import { checkConfig, formatFindings } from "./check.ts";
 import { TREEHEAD_TYPE, type AuthorizationBundle, type ReceiptBundle, type TreeHead, type ReceiptStatement } from "./receipt.ts";
 import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
@@ -69,6 +70,10 @@ const USAGE = `agent-custody <command>
   revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them
   reconcile --config <gateway.json> --operation <uuid>   operator-only provider lookup; commits a receipt before closing an unknown/pending financial operation
+  check   --config <gateway.json> [--connect] [--json]
+                                                   what the gateway would fail on at startup, found before it starts: the config and its unknown keys, the keys,
+                                                   the Cedar policy, the grant, credential variables, stdio commands, and writable paths. --connect also starts the
+                                                   upstreams (tool-name collisions, unreachable servers) and checks every tool name the config and grant mention. Exits 1 on an error
   gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]
                                                    stdio: one gateway for the grant the config names. --http: one shared gateway, MCP over
                                                    Streamable HTTP at /mcp, each connection presenting its own grant as Authorization: Bearer
@@ -217,6 +222,13 @@ async function main(argv: string[]): Promise<number> {
       const chain = decodeDelegation(env)!;
       console.log(`delegated to ${chain.agent}: scopes [${chain.scopes.join(", ")}] until ${chain.expiresAt}, under ${decodeDelegation(parent)!.agent}'s grant from ${chain.principal}`);
       return 0;
+    }
+    case "check": {
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, connect: { type: "boolean", default: false }, json: { type: "boolean", default: false } } });
+      if (!values.config) throw new Error("check needs --config");
+      const findings = await checkConfig(values.config, { connect: values.connect });
+      console.log(values.json ? JSON.stringify(findings, null, 2) : formatFindings(findings));
+      return findings.some((f) => f.level === "error") ? 1 : 0;
     }
     case "revoke": {
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, grant: { type: "string" } } });
