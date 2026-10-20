@@ -79,6 +79,30 @@ describe("the gateway image entrypoint", () => {
     expect(off.stderr).toContain("GATEWAY_CHECK must be");
   });
 
+  it("console refuses to start without a token, and with one serves the console for the same config", async () => {
+    const without = spawnSync("sh", [entrypoint, "console"], { cwd: receipts, env: { ...env, CONSOLE_TOKEN: "" }, encoding: "utf8", timeout: 30_000 });
+    expect(without.status).toBe(1);
+    expect(without.stderr).toContain("CONSOLE_TOKEN");
+    const port = await freePort();
+    const child = spawn("sh", [entrypoint, "console"], { cwd: receipts, env: { ...env, CONSOLE_TOKEN: "entrypoint-test-token", CONSOLE_PORT: String(port) }, stdio: ["ignore", "pipe", "pipe"] });
+    let seen = "";
+    const up = new Promise<void>((resolve, reject) => {
+      const onData = (d: Buffer) => { seen += d; if (/agent-custody console: http/.test(seen)) resolve(); };
+      child.stdout.on("data", onData);
+      child.stderr.on("data", onData);
+      child.on("close", () => reject(new Error(`exited before it was ready:\n${seen}`)));
+    });
+    const ended = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
+    await up;
+    expect((await fetch(`http://127.0.0.1:${port}/healthz`)).status).toBe(200);
+    expect((await fetch(`http://127.0.0.1:${port}/api/overview`)).status).toBe(401);
+    const overview = await fetch(`http://127.0.0.1:${port}/api/overview`, { headers: { authorization: "Bearer entrypoint-test-token" } });
+    expect(overview.status).toBe(200);
+    expect(((await overview.json()) as { upstreams: unknown[] }).upstreams).toHaveLength(1);
+    child.kill("SIGTERM");
+    expect(await ended).toEqual({ code: 0, signal: null });
+  });
+
   it("serve creates the gateway key, answers /health, refuses a connection with no grant, and exits 0 on SIGTERM", async () => {
     const port = await freePort();
     const child = spawn("sh", [entrypoint, "serve"], { cwd: receipts, env: { ...env, GATEWAY_PORT: String(port) }, stdio: ["ignore", "pipe", "pipe"] });

@@ -5,6 +5,7 @@ export type { GatewayOptions } from "./gateway.ts";
 export { buildRequest, restUpstream } from "./rest.ts";
 export { openExporter, otlpExporter, spanFor } from "./otel.ts";
 export { hecEvent, splunkExporter } from "./splunk.ts";
+export { serveConsole, type ConsoleOptions, type RunningConsole } from "./console.ts";
 export { checkConfig, formatFindings, type CheckFinding, type CheckOptions } from "./check.ts";
 export { GRANT_HEADER, grantHeader, parseGrantHeader, serveHttp } from "./gateway-http.ts";
 export * from "./capture.ts";

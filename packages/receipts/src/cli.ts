@@ -27,6 +27,7 @@ import { createRequire } from "node:module";
 import { pruneLog } from "./retention.ts";
 import { serveSidecar } from "./sidecar.ts";
 import { checkConfig, formatFindings } from "./check.ts";
+import { serveConsole } from "./console.ts";
 import { TREEHEAD_TYPE, type AuthorizationBundle, type ReceiptBundle, type TreeHead, type ReceiptStatement } from "./receipt.ts";
 import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
@@ -47,7 +48,7 @@ function untilStopped(): Promise<void> {
   });
   return stopped;
 }
-const SERVICES = new Set(["serve", "witness", "signer", "portal", "log"]);
+const SERVICES = new Set(["serve", "witness", "signer", "portal", "log", "console"]);
 /** a command that waits for untilStopped(); a stdio gateway runs until its input closes and keeps the default signal behaviour */
 const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && (SERVICES.has(cmd) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
 
@@ -70,6 +71,10 @@ const USAGE = `agent-custody <command>
   revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them
   reconcile --config <gateway.json> --operation <uuid>   operator-only provider lookup; commits a receipt before closing an unknown/pending financial operation
+  console --config <gateway.json> [--port 8795] [--host 127.0.0.1] [--token-env CONSOLE_TOKEN] [--gateway-url <url>] [--state-dir <dir>]
+                                                   the admin console for a gateway: its config and tools, a config check, receipts with a verdict each, a policy editor that
+                                                   validates and replays recorded calls before it saves, grant inspection and revocation, and an audit trail of its own changes.
+                                                   A separate service from the gateway, behind a token read from the environment; it holds no principal key and never signs
   check   --config <gateway.json> [--connect] [--json]
                                                    what the gateway would fail on at startup, found before it starts: the config and its unknown keys, the keys,
                                                    the Cedar policy, the grant, credential variables, stdio commands, and writable paths. --connect also starts the
@@ -221,6 +226,15 @@ async function main(argv: string[]): Promise<number> {
       writeFileSync(values.out, JSON.stringify(env, null, 2));
       const chain = decodeDelegation(env)!;
       console.log(`delegated to ${chain.agent}: scopes [${chain.scopes.join(", ")}] until ${chain.expiresAt}, under ${decodeDelegation(parent)!.agent}'s grant from ${chain.principal}`);
+      return 0;
+    }
+    case "console": {
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, port: { type: "string", default: "8795" }, host: { type: "string", default: "127.0.0.1" }, "token-env": { type: "string", default: "CONSOLE_TOKEN" }, "gateway-url": { type: "string" }, "state-dir": { type: "string" } } });
+      if (!values.config) throw new Error("console needs --config");
+      const running = await serveConsole({ configFile: values.config, token: secretFrom(values["token-env"]), port: Number(values.port), host: values.host, ...(values["gateway-url"] ? { gatewayUrl: values["gateway-url"] } : {}), ...(values["state-dir"] ? { stateDir: values["state-dir"] } : {}) });
+      console.error(`agent-custody console: ${running.url} config=${values.config}${values.host === "0.0.0.0" || (values.host !== "127.0.0.1" && values.host !== "localhost") ? " (reachable beyond this host: put TLS in front and limit who can reach it)" : ""}`);
+      await untilStopped();
+      await running.close();
       return 0;
     }
     case "check": {

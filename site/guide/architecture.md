@@ -105,6 +105,8 @@ sequenceDiagram
     Note over GW: a revoked or expired grant ends its session on the next request
 ```
 
+An admin console runs from the same image as a separate service, with a token of its own: it reads the gateway's config, receipts and revocation file, edits the policy file, and revokes grants. It holds no principal key and signs nothing, and the gateway does not serve any admin page. See [the console](/receipts/console).
+
 [Running the gateway as a service](../../deploy/gateway/README.md) has the commands, the Kubernetes and systemd recipes, and what goes where. Its limits are part of the design:
 
 - A grant is a bearer credential: whoever holds it can connect as that agent until it expires or is revoked. Short lifetimes, a private network or mutual TLS, and revocation are the controls.

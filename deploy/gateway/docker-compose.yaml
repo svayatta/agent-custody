@@ -4,6 +4,7 @@
 #   mkdir config && UID=$(id -u) GID=$(id -g) docker compose --profile init run --rm init     a starter config, policy, and a demo grant in ./config
 #   docker compose up -d                                              the gateway on 127.0.0.1:8790, plain HTTP
 #   docker compose --profile tls up -d                                the same behind Caddy with automatic TLS on GATEWAY_HOST
+#   docker compose --profile console up -d                            the admin console on 127.0.0.1:8795 (needs CONSOLE_TOKEN in .env)
 #
 # The transport is plain HTTP and a grant is a bearer credential: keep the port on loopback or a private network, or
 # put the tls profile (or your own proxy or mesh) in front. Copy .env.example to .env and set AGENT_CUSTODY_GATEWAY_VERSION.
@@ -34,6 +35,38 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+
+  console:
+    # the admin console for this gateway: config, tools, receipts, policy editing with replay, grant revocation. A service of
+    # its own, not part of the gateway, so that the gateway never serves an admin page next to the agents' credentials.
+    # It reads and writes the same config and data as the gateway, so ./config is mounted read-write here (the policy file
+    # is what it edits). Keep the port on loopback or a private network and put TLS in front.
+    profiles: [console]
+    image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
+    command: ["console"]
+    restart: unless-stopped
+    user: "${UID:-10001}:${GID:-10001}"
+    environment:
+      CONSOLE_TOKEN: "${CONSOLE_TOKEN:?set CONSOLE_TOKEN in .env (openssl rand -hex 32)}"
+      GATEWAY_URL: "http://gateway:8790"
+    volumes:
+      - ./config:/config
+      - gateway-data:/data
+    ports:
+      - "${CONSOLE_BIND:-127.0.0.1}:${CONSOLE_PORT:-8795}:8795"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8795/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - gateway
 
   init:
     # one-off: writes a starter config into ./config, which must be writable by the user below

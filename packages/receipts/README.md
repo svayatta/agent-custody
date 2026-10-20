@@ -12,6 +12,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
 - [Tutorials](docs/tutorials.md): thirty runnable examples, one per aspect of the code, all executed by the test suite
 - [Financial operations](docs/financial-operations.md): durable operation ids, provider idempotency keys, atomic daily budget reservations, and reconciliation receipts for uncertain outcomes
+- [The gateway console](docs/console.md): an admin service for the person who runs a gateway: config, tools, receipts with a verdict each, a policy editor that replays recorded calls before it saves, grant revocation, and an audit trail
 - [Configuring the gateway](docs/configuration.md): who may use which tools and where the tools live, a worked example with two agents, the Docker image, and `agent-custody check` to validate a config before it starts
 - [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop, and the gateway as an A2A agent between agents that delegate to each other, private evidence: what the receipt file carries of each call, and searching receipts and exporting offline cases with the state package's review console
 - [Human approvals](docs/approvals.md): short-lived signatures over the exact action, two-person thresholds, single-use enforcement, and offline verification
