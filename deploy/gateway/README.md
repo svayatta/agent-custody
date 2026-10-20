@@ -18,24 +18,25 @@ agent C ─┘      (this image)             │          └─ another agent (
 | `edge`, `sha-<short>` | every merge to main that touches the receipts package or `deploy/gateway` | the source of that commit |
 | `<version>`, `<major>.<minor>`, `latest` | every release | the published npm package of that version |
 
-Pin a version in production. `latest` moves on every release, and `edge` on every merge. Every build starts the image and runs [smoke.sh](smoke.sh) before it is pushed: healthy, a connection with no grant refused, a demo grant accepted, and `docker stop` closing the gateway cleanly. The first push creates the package as private; make it public once in the package's settings so `docker pull` needs no login.
+Run a version, or better its digest, in production. `latest` moves on every release, and `edge` on every merge, so neither is a default anywhere in these files. The first release that carries the gateway image publishes its version tag; until then use `edge` to try it, not in production. Every build starts the image and runs [smoke.sh](smoke.sh) before it is pushed: healthy, a connection with no grant refused, a demo grant accepted, and `docker stop` closing the gateway cleanly. The first push creates the package as private; make it public once in the package's settings so `docker pull` needs no login.
 
 Every pushed image is signed by the workflow that built it (cosign, keyless) and carries a provenance attestation and an SBOM. Check one before you run it, and pin the digest in production:
 
 ```bash
 cosign verify ghcr.io/svayatta/agent-custody-gateway:0.8.0 \
-  --certificate-identity-regexp '^https://github.com/svayatta/agent-custody/\.github/workflows/(image|gateway-image)\.yml@' \
+  --certificate-identity-regexp '^https://github.com/svayatta/agent-custody/\.github/workflows/gateway-image\.yml@refs/heads/main$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 docker buildx imagetools inspect ghcr.io/svayatta/agent-custody-gateway:0.8.0 --format '{{ json .SBOM }}'
 ```
 
-The `gateway-image` workflow's step summary lists the digest of each build.
+The identity is pinned to this workflow on main: a release build (`workflow_run`) and a push to main both sign as the default branch, and a build of any other ref does not verify. The workflow refuses to point a version tag or `latest` at anything but the tagged release commit, and `edge` at anything but main. If a verify fails on a genuine image, print the certificate with `cosign verify ... | jq '.[0].optional'` and compare its identity before relaxing the check. The `gateway-image` workflow's step summary lists the digest of each build.
 
 ## Start one
 
 ```bash
 mkdir config
-docker run --rm -u "$(id -u):$(id -g)" -v "$PWD/config:/config" ghcr.io/svayatta/agent-custody-gateway init
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD/config:/config" ghcr.io/svayatta/agent-custody-gateway:<version> init
+echo 'AGENT_CUSTODY_GATEWAY_VERSION=<version>' > .env
 docker compose up -d        # or: docker run -d -v "$PWD/config:/config:ro" -v gateway-data:/data -p 127.0.0.1:8790:8790 <image>
 curl http://127.0.0.1:8790/health
 ```

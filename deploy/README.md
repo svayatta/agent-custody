@@ -18,13 +18,13 @@ Each pushed image is signed by the workflow that built it (cosign, keyless) and 
 
 ```bash
 cosign verify ghcr.io/svayatta/agent-custody-log:0.8.0 \
-  --certificate-identity-regexp '^https://github.com/svayatta/agent-custody/\.github/workflows/(image|gateway-image)\.yml@' \
+  --certificate-identity-regexp '^https://github.com/svayatta/agent-custody/\.github/workflows/image\.yml@refs/heads/main$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 docker buildx imagetools inspect ghcr.io/svayatta/agent-custody-log:0.8.0 --format '{{ json .SBOM }}'
 docker buildx imagetools inspect ghcr.io/svayatta/agent-custody-log:0.8.0 --format '{{ json .Provenance }}'
 ```
 
-The workflow's step summary lists each release's digest. Base images in every Dockerfile and compose file are pinned by digest, and Dependabot proposes the updates. A pull request that touches `deploy/` builds the image from the workspace package and starts it (`smoke-log.sh`), and checks the compose files, the manifests, the shell scripts, and `upgrade.sh` (`test-upgrade.sh`), so a broken image or script is found before the release.
+The identity is pinned to the `image` workflow on main (a release build runs as the default branch), and the workflow refuses to point a version tag or `latest` at anything but the tagged release commit. If a verify fails on a genuine image, print the certificate with `cosign verify ... | jq '.[0].optional'` and compare its identity before relaxing the check. The workflow's step summary lists each release's digest. Base images in every Dockerfile and compose file are pinned by digest, and Dependabot proposes the updates. A pull request that touches `deploy/` builds the image from the workspace package and starts it (`smoke-log.sh`), and checks the compose files, the manifests, the shell scripts, and `upgrade.sh` (`test-upgrade.sh`), so a broken image or script is found before the release.
 
 ## The contract
 

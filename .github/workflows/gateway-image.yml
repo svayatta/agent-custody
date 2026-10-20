@@ -19,6 +19,7 @@ on:
       - "deploy/gateway/**"
       - ".github/workflows/gateway-image.yml"
       - ".github/scripts/wait-for-npm.sh"
+      - ".github/scripts/require-release-commit.sh"
   pull_request:
     paths:
       - "packages/receipts/src/cli.ts"
@@ -50,9 +51,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - run: docker compose -f deploy/gateway/docker-compose.yaml --profile init --profile tls config -q
+      - name: the compose file is valid with its required version set
+        env:
+          AGENT_CUSTODY_GATEWAY_VERSION: ci
+        run: docker compose -f deploy/gateway/docker-compose.yaml --profile init --profile tls config -q
       - run: kubectl kustomize deploy/gateway/k8s > /dev/null
-      - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh
+      - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh .github/scripts/*.sh
 
   build:
     if: >-
@@ -69,13 +73,24 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha || (github.event.inputs.version && format('refs/tags/v{0}', github.event.inputs.version)) || github.sha }}
       - id: v
         env:
           VERSION: ${{ github.event.inputs.version || github.event.workflow_run.head_branch }}
         run: |
           version="${VERSION#v}"
-          if [ -n "$version" ]; then echo "release=true" >> "$GITHUB_OUTPUT"; echo "version=$version" >> "$GITHUB_OUTPUT"; else echo "release=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "$version" ]; then
+            .github/scripts/require-release-commit.sh "$version"
+            echo "release=true" >> "$GITHUB_OUTPUT"; echo "version=$version" >> "$GITHUB_OUTPUT"
+          else
+            # edge is main: a dispatch from any other ref must not move it
+            if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+              echo "::error::edge is built from main only; this run is on $GITHUB_REF. Pass a version to rebuild a release."
+              exit 1
+            fi
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: wait for npm to serve the version
         if: steps.v.outputs.release == 'true'
         env:
@@ -127,7 +142,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=agent-custody shared gateway
             org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha || github.sha }}
+            org.opencontainers.image.revision=${{ steps.v.outputs.sha }}
           cache-from: type=gha,scope=gateway-${{ matrix.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
       - name: record the digest

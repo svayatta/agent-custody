@@ -21,4 +21,8 @@ expect deploy/.env.example '^AGENT_CUSTODY_VERSION=[0-9]+\.[0-9]+\.[0-9]+'
 expect deploy/witness/.env.example '^AGENT_CUSTODY_VERSION=[0-9]+\.[0-9]+\.[0-9]+'
 expect deploy/k8s/kustomization.yaml 'newTag: "[0-9]+\.[0-9]+\.[0-9]+"'
 expect .github/workflows/monitor.yml '@agent-custody/receipts@[0-9]+\.[0-9]+\.[0-9]+'
+# the gateway files have no default version: a moving tag there would ship whatever was built last
+if grep -nE ':-latest|:-edge|newTag: "?(latest|edge)' deploy/gateway/docker-compose.yaml deploy/gateway/.env.example deploy/gateway/k8s/kustomization.yaml; then
+  echo "deploy/gateway names a moving tag as its default"; status=1
+fi
 exit $status

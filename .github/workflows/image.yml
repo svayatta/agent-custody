@@ -95,11 +95,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha || format('refs/tags/v{0}', github.event.inputs.version) }}
       - id: v
         env:
           VERSION: ${{ github.event.inputs.version || github.event.workflow_run.head_branch }}
-        run: echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          version="${VERSION#v}"
+          .github/scripts/require-release-commit.sh "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: wait for npm to serve the version
         env:
           VERSION: ${{ steps.v.outputs.version }}
@@ -131,7 +135,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=agent-custody reference log server
             org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha || github.sha }}
+            org.opencontainers.image.revision=${{ steps.v.outputs.sha }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
       - name: record the digest
         env:

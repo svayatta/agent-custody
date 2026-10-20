@@ -6,13 +6,13 @@
 #   docker compose --profile tls up -d                                the same behind Caddy with automatic TLS on GATEWAY_HOST
 #
 # The transport is plain HTTP and a grant is a bearer credential: keep the port on loopback or a private network, or
-# put the tls profile (or your own proxy or mesh) in front. Copy .env.example to .env for the settings below.
+# put the tls profile (or your own proxy or mesh) in front. Copy .env.example to .env and set AGENT_CUSTODY_GATEWAY_VERSION.
 
 name: agent-custody-gateway
 
 services:
   gateway:
-    image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:-latest}
+    image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
     restart: unless-stopped
     # tool credentials and the log token come from the environment, never from gateway.json
     env_file:
@@ -21,6 +21,10 @@ services:
     volumes:
       - ./config:/config:ro
       - gateway-data:/data
+    environment:
+      # the port inside the container is fixed; GATEWAY_PORT in .env is the host port only, and env_file would otherwise
+      # change the port the gateway and its health check use and leave the published mapping pointing at 8790
+      GATEWAY_PORT: "8790"
     ports:
       - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-8790}:8790"
     stop_grace_period: 30s
@@ -34,7 +38,7 @@ services:
   init:
     # one-off: writes a starter config into ./config, which must be writable by the user below
     profiles: [init]
-    image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:-latest}
+    image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
     command: ["init"]
     user: "${UID:-1000}:${GID:-1000}"
     volumes:

@@ -56,7 +56,7 @@ describe("a stdio gateway stopped with SIGTERM", () => {
       child.on("close", () => reject(new Error(`exited before it was ready:\n${seen}`)));
     });
     child.kill("SIGTERM");
-    const r = await ended;
-    expect(r.code === 0 || r.signal === "SIGTERM").toBe(true);
+    // with no handler the default action ends the process by the signal; a handler that closed it would exit 0
+    expect(await ended).toEqual({ code: null, signal: "SIGTERM" });
   });
 });

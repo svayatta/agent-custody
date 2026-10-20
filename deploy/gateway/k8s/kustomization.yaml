@@ -17,6 +17,9 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
+# Set the release before applying: `kustomize edit set image ghcr.io/svayatta/agent-custody-gateway=ghcr.io/svayatta/agent-custody-gateway:<version>`
+# or a digest with @sha256:. There is no default: `latest` moves on every release and `edge` on every merge. The first
+# release that carries the gateway image publishes its version tag.
 images:
   - name: ghcr.io/svayatta/agent-custody-gateway
-    newTag: latest
+    newTag: "SET-A-RELEASE-VERSION"

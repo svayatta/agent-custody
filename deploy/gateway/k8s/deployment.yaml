@@ -13,6 +13,8 @@ spec:
     metadata:
       labels: { app: agent-custody-gateway }
     spec:
+      # the pod never calls the Kubernetes API; the gateway already holds every agent's tool credentials and its key
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
