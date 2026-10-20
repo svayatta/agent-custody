@@ -13,7 +13,8 @@ fail() { echo "smoke: $*" >&2; docker logs "$name" >&2 2>&1 || true; exit 1; }
 
 mkdir "$work/config"
 docker run --rm -u "$(id -u):$(id -g)" -v "$work/config:/config" "$image" init > /dev/null 2>&1 || fail "init failed"
-[ -f "$work/config/gateway.json" ] && [ -f "$work/config/demo/grant.json" ] || fail "init wrote no config or grant"
+[ -f "$work/config/gateway.json" ] || fail "init wrote no config"
+[ -f "$work/config/demo/grant.json" ] || fail "init wrote no demo grant"
 
 docker run -d --name "$name" -v "$work/config:/config:ro" -p "127.0.0.1:$port:8790" "$image" > /dev/null
 i=0
