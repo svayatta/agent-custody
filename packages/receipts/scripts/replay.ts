@@ -9,6 +9,8 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statS
 import { join, relative, resolve } from "node:path";
 
 const receiptsPkg = resolve(import.meta.dirname, "..");
+// the README names the published packages of this version, so the commands in it run what built the folder
+const version = (JSON.parse(readFileSync(join(receiptsPkg, "package.json"), "utf8")) as { version: string }).version;
 const statePkg = resolve(receiptsPkg, "..", "state");
 const base = join(receiptsPkg, "examples-out", "replay");
 const name = "agent-custody-replay";
@@ -55,8 +57,8 @@ const refund = receiptIds(incomplete).map((id) => toolOf(incomplete, id)).find((
 if (!refund) throw new Error("no refund receipt in example 07");
 
 // ---- the README, with the commands for this replay's ids ----
-const R = "npx -y -p @agent-custody/receipts@0.7.0 agent-custody";
-const S = "npx -y -p @agent-custody/state@0.7.0 agent-custody-memory";
+const R = `npx -y -p @agent-custody/receipts@${version} agent-custody`;
+const S = `npx -y -p @agent-custody/state@${version} agent-custody-memory`;
 const verifyArgs = (dir: string, id: string) => `${dir}/receipts/${id}.json --issuer-key ${dir}/keys/gateway.pub --principal-key ${dir}/keys/principal.pub --log ${dir}/log.jsonl`;
 const blastArgs = `--ledger incomplete-evidence/ledger.jsonl --receipts incomplete-evidence/receipts --fact ${factId}`;
 // prints whether the bundle verified and the execution status with the reason the signed statement records
@@ -65,7 +67,7 @@ const table = deniedCalls.map((c) => `| \`${c.id}\` | ${c.tool} | ${c.status} |`
 const firstDenied = deniedCalls.find((c) => c.status === "denied")!;
 writeFileSync(join(out, "README.md"), `# agent-custody replay: a denied call and incomplete evidence
 
-Two runs of [agent-custody](https://github.com/svayatta/agent-custody) 0.7.0, kept as the evidence an outside reviewer
+Two runs of [agent-custody](https://github.com/svayatta/agent-custody) ${version}, kept as the evidence an outside reviewer
 would hold: signed receipts, public keys, the transparency log, and a transcript of each run. Everything is
 synthetic: keys generated for the run, a stand-in payments API, a made-up customer. No private key is included.
 

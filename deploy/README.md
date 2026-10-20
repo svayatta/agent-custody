@@ -41,6 +41,33 @@ The volume at `/data` is the whole state: the log and the key. Back it up; a los
 - `.github/workflows/image.yml` pushes the image to ghcr.io on a `v*` tag or by hand (`gh workflow run image.yml -f version=X`). It uses `GITHUB_TOKEN`, never a personal token. It builds each architecture on a native runner (`ubuntu-24.04-arm` for arm64), then merges the digests into one tag. Do not merge these into one multi-arch job: npm under QEMU emulation dies with SIGILL.
 - The site build excludes `deploy/**`.
 
+## Deploying from GitHub Actions
+
+`.github/workflows/deploy.yml` deploys the host over SSH, by hand from the Actions tab. With a version it runs `deploy/upgrade.sh <version>` on the host and then `agent-custody log-check` from outside. Run it with a version once `image.yml` has built that image, which happens after the release workflow publishes. With `docs` it runs `deploy/upgrade.sh docs`. It does nothing until the repository variable `DEPLOY_HOST` is set.
+
+`deploy/upgrade.sh` is also the command an operator runs by hand on the host: `./upgrade.sh docs`, or `./upgrade.sh 0.8.0`.
+- **`docs`:** brings the checkout to main (and recreates Caddy if the Caddyfile changed) and rebuilds the docs site.
+- **A version:** does the same, and also:
+  - backs up the log;
+  - sets `AGENT_CUSTODY_VERSION` in `.env`;
+  - pulls and restarts log, signer, and portal;
+  - waits up to two minutes for all three to be healthy. If they are not, it puts the previous version back and exits 1.
+
+Postgres and Caddy keep running.
+
+Setup, once:
+
+1. Make a key for the workflow alone, on a machine you trust: `ssh-keygen -t ed25519 -N '' -C deploy@github -f deploy_key`.
+2. On the host, add its public half to `/root/.ssh/authorized_keys` with a forced command, so the key can run `upgrade.sh` and nothing else:
+   `command="/opt/agent-custody/deploy/upgrade.sh",restrict ssh-ed25519 AAAA… deploy@github`. The script reads the target from `SSH_ORIGINAL_COMMAND` and refuses anything but `docs` or a version.
+3. Record the host key: `ssh-keyscan -t ed25519 <host>`, and compare its fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the host.
+4. In the repository settings, create the environment `production`. Add required reviewers to it if a release should wait for a person.
+   - **Environment secrets:** `DEPLOY_SSH_KEY` (the private key file) and `DEPLOY_KNOWN_HOSTS` (the `ssh-keyscan` line).
+   - **Repository variables:** `DEPLOY_HOST`, `LOG_URL`, and `CHECKPOINTS_URL`. Set `DEPLOY_USER` if the key is not root's.
+5. Delete the local copy of the private key.
+
+The images come from the published npm package, so the order is: push the tag, `release.yml` publishes, `image.yml` builds, then run this workflow with the version. Anything that runs `docker compose` on the host can take root, which is why the key is pinned to the one script rather than given a user of its own.
+
 ## One VM, docker compose
 
 Any Linux VM with Docker works. A Hetzner CX22 (2 vCPU, 4 GB, about 4 EUR a month) is more than the first tenants need; the log does a hash and a signature per append.

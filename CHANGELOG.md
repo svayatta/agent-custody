@@ -7,6 +7,38 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 - **Receipts:** enterprise identity for the hosted portal (issue #115). Roles: each member of a tenant is `owner`, `admin`, `reviewer`, or `readonly`. `readonly` reads, `reviewer` also publishes and removes policy versions, `admin` also manages API keys, invites, and members below owner (never an owner, never granting `owner`), and `owner` also manages billing. A write route that no role table lists needs `admin`. The last owner cannot be removed or demoted. New routes: `GET` and `POST /api/members`, `POST /api/members/<userId>/role`, `POST /api/members/<userId>/remove`, `POST /api/invites/remove`, and `POST /api/invites/accept`, which needs a verified address and allows one tenant per account. `/api/me` returns `role`, `mfa`, and `invites`. MFA: an account can turn on a time-based one-time password (RFC 6238, 6 digits, 30 seconds) with `POST /api/mfa/setup`, `/api/mfa/enable`, and `/api/mfa/disable`. `POST /api/login` then answers `{ "mfa": true }` with a five-minute `custody_mfa` cookie and no session, `POST /api/login/mfa` finishes the sign-in, and GitHub and Google sign-in go through the same code step. A code works once, and wrong codes are throttled per address and per account. `agent-custody log-admin --db-env NAME user mfa-reset <email>` turns MFA off for an account that lost its authenticator. `user mfa-reset`, `sso set`, and `sso remove` write the same audit entry as the other `log-admin` commands (`user.mfa-reset`, `sso.set`, `sso.remove`, with the actor `cli:<user>@<host>`; never a secret). Single sign-on per tenant, set by the operator with `log-admin sso set|show|remove`: OIDC (authorization code with PKCE; the `id_token` signature is checked against the IdP's key set, RS256 and ES256 only) or SAML 2.0 (service-provider initiated, signed assertions required, through the optional peer dependency `@node-saml/node-saml`, loaded when first needed). An IdP is trusted only for its tenant's email domains, and a domain belongs to one tenant. A sign-in creates or links the account, joins it to the tenant with the default role (an unverified password account with that address is deleted with its password, sessions, memberships, and linked providers, whether or not it created a tenant, so a squatter cannot lock the member out; a member that an admin removed rejoins through single sign-on only after a new invite), and skips the portal's MFA, because the IdP owns it. With `--enforce`, members cannot sign in by password, GitHub, or Google, their older sessions end, and invites are refused. Routes: `GET /auth/sso?email=`, `GET /auth/sso/<tenant>`, `GET /auth/sso/<tenant>/callback`, `GET /auth/sso/<tenant>/saml` (metadata), and `POST /auth/sso/<tenant>/saml/acs`. New module `src/sso.ts`, example 31, and the Dockerfile installs `@node-saml/node-saml@5` beside `pg`. The gateway kill switch was already covered: `agent-custody revoke` and `revokedGrants` (example 27); a test now also shows that another agent continues after one agent's grant is revoked.
 - **State, Python:** unchanged; released in step.
 
+## 0.8.0 — 2026-10-19
+
+- **Receipts: human approvals (#111).** `approvals` in the gateway config names tools that need a signed, unexpired, single-use human approval, in every mode.
+  - **Binding:** the approval is bound to the principal, the agent, the tool, the amount, the currency, the beneficiary, and a digest of every argument. One or two distinct approvers are required, and `maxLifetimeSeconds` caps the lifetime (default 3600).
+  - **Single use:** consumption is atomic in a `usedDir` that gateway processes share across restarts.
+  - **Checked again before forwarding:** expiry or revocation during fact lookups or precommit refuses the call with a signed receipt.
+  - **Evidence:** receipts and precommit authorizations carry the approval, and both verifiers check its signatures (`--approval-key`), validity window, payload binding, consumption, and precommit consistency.
+  - **Privacy:** under a private capture rule the approval envelope is withheld unless every argument is in clear and the tool name is not masked. A refusal carrying a valid approval still verifies.
+  - Tutorial 30.
+- **Receipts: financial operations (#112).** `operations` in the gateway config makes tools financial.
+  - **No second execution:** each call keeps one caller-chosen operation UUID, sends the provider an idempotency key, and reserves its amount against a daily budget in SQLite transactions shared across processes. A retry or a restart never forwards a second payment.
+  - **Outcomes:** submitted, pending, unknown, confirmed, or failed, recorded apart from execution.
+  - **Reconciliation:** `agent-custody reconcile --config gateway.json --operation <uuid>` (`GatewayHost.reconcile`) reads the provider's record and closes an unknown or pending outcome with a signed reconciliation receipt. A call the gateway can prove it never sent is closed and its reservation released. Recovery identifies a dead creator by PID and start time, and the authorization save refuses a call that recovery has closed.
+  - **Verification and export:** both verifiers check the operation linkage, and OTel, Splunk, `explain`, and `review` mark reconciliations.
+  - Tutorial 29.
+- **Receipts: policy simulation (#114).** `agent-custody policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key …` and `simulatePolicy` replay recorded calls against a proposed Cedar policy.
+  - **Trust:** every receipt is verified first, then replayed on its recorded arguments, facts, and grant.
+  - **Report:** each changed decision is listed with its receipt id.
+  - **Incomplete runs:** a call the replay cannot evaluate makes the run INCOMPLETE. That covers a gate refusal, withheld inputs, and an authorization whose receipt never arrived.
+  - **Flags:** `--approval-key`, `--capture-key-env`, and a repeatable `--disclose`.
+  - **Memory:** receipts stream one at a time.
+  - Tutorial 28.
+- **Receipts: other changes.**
+  - **Report:** the verify report shows why a call was refused (`denied: delegation grant has been revoked`), or says the reason is withheld under a capture rule.
+  - **Example 27:** revokes an agent's grant mid-session.
+  - **Replay builder:** `scripts/replay.ts` packages example 27 and state example 07 as a folder of receipts and public keys that anyone can verify with the published packages.
+- **State:** example 07 lists a call whose consumed beliefs are withheld under a capture rule as INCOMPLETE in a blast radius. With the customer's key, the same query finds the call.
+- **Site:** the landing page leads with the local refund demo and shows its six steps (#117).
+- **Release and deploy:**
+  - **Automatic publish:** a version tag publishes the packages from CI (`release.yml`, trusted publishing, once `PUBLISH_FROM_CI` is `true`). The log image and the MCP Registry listing follow only after the release succeeds, so the image is never built before its package exists.
+  - **Manual deploy:** `deploy/upgrade.sh` upgrades the log's host to a published version and rolls back if the new one is not healthy, or with `docs` rebuilds the docs site. The `deploy` workflow runs it over SSH, by hand, with a key that can run nothing else; see `deploy/README.md`.
+
 ## 0.7.0 — 2026-10-15
 
 - **State:** `blast` and `loadReceipts` know what they cannot see: a receipt that withholds its consumed fact ids under a capture rule is listed under `withheld` (`INCOMPLETE` in the report) rather than counted as having relied on nothing, and `--capture-key-env` / `loadReceipts(dir, { captureKey })` decrypts the ids of receipts in mode `encrypted`; `explain` says when the beliefs shown are withheld.

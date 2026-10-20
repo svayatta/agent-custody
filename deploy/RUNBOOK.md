@@ -14,7 +14,7 @@ What the pieces hold, so the blast radius of each procedure is clear:
 
 ## Routine
 
-**Upgrade.** Bump `AGENT_CUSTODY_VERSION` in `.env`, then:
+**Upgrade.** Run the `deploy` workflow from the Actions tab with the version once its image is built (`.github/workflows/deploy.yml`, set up in `deploy/README.md`), or `./upgrade.sh <version>` on the host. Either one does: backup, version, pull, restart, health, and the previous version back if the new one is not healthy. Without the script, bump `AGENT_CUSTODY_VERSION` in `.env`, then:
 
 ```bash
 docker compose --profile public pull && docker compose --profile public up -d
@@ -23,7 +23,7 @@ docker compose --profile public ps
 
 Both `log` and `signer` restart on the new image; Postgres and Caddy do not. Roll back by setting the previous version and running the same two commands. Then confirm from outside: `agent-custody log-check --log-url https://log.example.com/ --checkpoints-url https://checkpoints.example.com/ --tenant default`.
 
-**Docs.** `docs.<domain>` is the site built from the checkout on this host. After `git pull`, `./update-docs.sh` rebuilds the image and restarts the container; nothing else changes.
+**Docs.** `docs.<domain>` is the site built from the checkout on this host. Rebuild it with the `deploy` workflow and `docs`, or `./upgrade.sh docs` on the host, or after `git pull`, `./update-docs.sh`. Nothing else changes.
 
 **Caddyfile changes.** The `caddy` service mounts `./Caddyfile` as a single file, and `git pull` replaces that file rather than editing it, so the running container keeps the old one: `caddy reload` then re-reads the old config and reports success. After a pull that touches the Caddyfile, recreate the container instead, which drops every host for a second or two:
 
