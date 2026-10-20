@@ -43,7 +43,12 @@ jobs:
           POSTGRES_PASSWORD: ci
           SIGNER_TOKEN: ci
         run: docker compose -f deploy/docker-compose.yaml --profile public --profile file config -q
-      - run: docker compose -f deploy/witness/docker-compose.yaml config -q
+      - name: the witness compose file is valid with its required settings set
+        env:
+          WITNESS_LOG_URL: https://log.example.com/
+          WITNESS_CHECKPOINTS_URL: https://checkpoints.example.com/
+          WITNESS_HOST: witness.example.org
+        run: docker compose -f deploy/witness/docker-compose.yaml config -q
       - run: kubectl kustomize deploy/k8s > /dev/null
       - run: shellcheck -S warning deploy/*.sh
       - name: upgrade.sh deploys the release tag and rolls back
@@ -70,7 +75,7 @@ jobs:
       - name: pack the package from this checkout
         run: |
           bun install --frozen-lockfile
-          bun run build
+          bun run --filter @agent-custody/receipts build
           (cd packages/receipts && bun pm pack --destination "$GITHUB_WORKSPACE/deploy/pkg")
       - run: docker build -t log-smoke:local deploy
       - run: deploy/smoke-log.sh log-smoke:local

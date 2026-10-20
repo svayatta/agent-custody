@@ -53,7 +53,9 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm install -g npm@latest
       - run: bun install --frozen-lockfile
-      - run: bun run build
+      # one after the other: state imports receipts from its dist, and a parallel build can reach it first
+      - run: bun run --filter @agent-custody/receipts build
+      - run: bun run --filter @agent-custody/state build
       - name: pack with bun so workspace versions are rewritten
         run: |
           (cd packages/receipts && bun pm pack)

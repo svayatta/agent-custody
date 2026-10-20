@@ -93,7 +93,7 @@ jobs:
         if: steps.v.outputs.release != 'true'
         run: |
           bun install --frozen-lockfile
-          bun run build
+          bun run --filter @agent-custody/receipts build
           (cd packages/receipts && bun pm pack --destination "$GITHUB_WORKSPACE/deploy/gateway/pkg")
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: build and smoke-test this platform's image
