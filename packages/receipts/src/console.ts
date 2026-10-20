@@ -5,7 +5,7 @@
 // file, both of which the gateway reads. Every change is recorded in an append-only audit file.
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
 import { checkConfig } from "./check.ts";
@@ -30,6 +30,8 @@ export interface ConsoleOptions {
   gatewayUrl?: string;
   /** where the console keeps its audit file and the history of saved policies; default beside the receipts directory */
   stateDir?: string;
+  /** how long a --connect check may take before it is stopped and the upstreams it started are closed; default 60 seconds */
+  checkTimeoutMs?: number;
   log?: (message: string) => void;
 }
 
@@ -86,6 +88,27 @@ const decodePredicate = (bundle: ReceiptBundle): ReceiptPredicate | null => {
   }
 };
 
+/**
+ * What an operator should be asked to confirm before a policy is saved: no permit rule at all, or a permit rule that has no
+ * condition and names no action, which allows every tool in a grant's scopes. Replaying recorded calls cannot show the
+ * second one: it changes nothing for a history that never used what it allows.
+ */
+function policyIssues(text: string): string[] {
+  const issues: string[] = [];
+  if (!hasPermitRule(text)) issues.push("The policy has no permit rule, so every call would be denied.");
+  const parts = cedar.policySetTextToParts(text);
+  if (parts.type === "success") {
+    for (const p of parts.policies) {
+      const j = cedar.policyToJson(p);
+      if (j.type === "success" && j.json.effect === "permit" && j.json.action?.op === "All" && !(j.json.conditions?.length)) {
+        const who = j.json.principal?.op === "All" ? "for every agent" : "for the agent it names";
+        issues.push(`A permit rule has no action and no condition: it allows every tool in a grant's scopes, ${who}. A replay cannot show this, because it only re-decides calls that already happened.`);
+      }
+    }
+  }
+  return issues;
+}
+
 export async function serveConsole(options: ConsoleOptions): Promise<RunningConsole> {
   const log = options.log ?? ((m: string) => console.error(m));
   const tokenHash = sha(options.token);
@@ -94,6 +117,7 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
   const state = options.stateDir ?? join(dirname(loadConfig(options.configFile).receiptsDir), "console");
   mkdirSync(join(state, "policy-history"), { recursive: true });
   const auditFile = join(state, "audit.jsonl");
+  let connecting = false;
 
   const audit = (action: string, detail: Record<string, unknown>, by: string) => {
     appendFileSync(auditFile, JSON.stringify({ at: new Date().toISOString(), by, action, ...detail }) + "\n");
@@ -190,6 +214,44 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
       return { name, kind: "mcp-stdio", target: [u.command, ...u.args].join(" "), tools: null };
     });
 
+  // saves are serialised in this process, and a lock file in the state directory serialises another console on the same one
+  const lockFile = join(state, "policy.lock");
+  let saving: Promise<unknown> = Promise.resolve();
+  const withPolicyLock = <T,>(fn: () => T): Promise<T> => {
+    const run = saving.then(async () => {
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        try {
+          closeSync(openSync(lockFile, "wx"));
+          break;
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+          try {
+            if (Date.now() - statSync(lockFile).mtimeMs > 30_000) {
+              unlinkSync(lockFile);
+              continue;
+            }
+          } catch {
+            continue;
+          }
+          if (Date.now() > deadline) throw new HttpError(409, "another save is in progress; try again");
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+      try {
+        return fn();
+      } finally {
+        try {
+          unlinkSync(lockFile);
+        } catch {
+          /* already gone */
+        }
+      }
+    });
+    saving = run.catch(() => {});
+    return run;
+  };
+
   // ---- the API ----
 
   type Handler = (req: IncomingMessage, url: URL, by: string) => Promise<unknown>;
@@ -213,15 +275,26 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
         receiptCount: receipts.length,
         lastReceiptAt: receipts[0] ? new Date(receipts[0].mtime).toISOString() : null,
         gateway: await gatewayHealth(),
-        findings: await checkConfig(options.configFile),
+        findings: await checkConfig(options.configFile, { environment: "skip" }),
       };
     },
 
     "POST /api/check": async (req) => {
-      const body = object(await readBody(req));
-      const run = checkConfig(options.configFile, { connect: body.connect === true });
-      const limit = new Promise<never>((_, reject) => setTimeout(() => reject(new HttpError(504, "the check took longer than 60 seconds")), 60_000).unref());
-      return { findings: await Promise.race([run, limit]) };
+      const connect = object(await readBody(req)).connect === true;
+      if (connect) {
+        if (connecting) throw new HttpError(409, "a connect check is already running");
+        connecting = true;
+      }
+      const stop = new AbortController();
+      const timer = connect ? setTimeout(() => stop.abort(), options.checkTimeoutMs ?? 60_000) : undefined;
+      try {
+        const findings = await checkConfig(options.configFile, { connect, environment: "skip", signal: stop.signal });
+        if (stop.signal.aborted) throw new HttpError(504, "the check took too long and was stopped; the upstreams it started were closed");
+        return { findings };
+      } finally {
+        clearTimeout(timer);
+        if (connect) connecting = false;
+      }
     },
 
     "GET /api/policy": async () => {
@@ -234,7 +307,7 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
       const text = String(object(await readBody(req)).text ?? "");
       const r = cedar.checkParsePolicySet({ staticPolicies: text });
       const errors = r.type === "success" ? [] : r.errors.map((e) => e.message);
-      return { ok: r.type === "success", errors, digest: policyDigest(text), hasPermit: r.type === "success" && hasPermitRule(text) };
+      return { ok: r.type === "success", errors, digest: policyDigest(text), issues: r.type === "success" ? policyIssues(text) : [] };
     },
 
     "POST /api/policy/simulate": async (req) => {
@@ -279,20 +352,25 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
     "PUT /api/policy": async (req, _url, by) => {
       const body = object(await readBody(req));
       const text = String(body.text ?? "");
-      const cfg = loadConfig(options.configFile);
-      const current = readFileSync(cfg.policyFile, "utf8");
-      if (body.expectDigest !== policyDigest(current)) throw new HttpError(409, "the policy file changed since you loaded it; reload and try again");
       const parsed = cedar.checkParsePolicySet({ staticPolicies: text });
       if (parsed.type !== "success") throw new HttpError(400, `the policy does not parse: ${parsed.errors.map((e) => e.message).join("; ")}`);
-      if (!hasPermitRule(text) && body.allowNoPermit !== true) throw new HttpError(400, "the policy has no permit rule, so every call would be denied; confirm to save it anyway");
-      writeFileSync(join(state, "policy-history", `${new Date().toISOString().replace(/[:.]/g, "-")}-${policyDigest(current).slice(0, 12)}.cedar`), current);
-      try {
-        atomicWrite(cfg.policyFile, text);
-      } catch (e) {
-        throw new HttpError(500, `the policy file cannot be written (${e instanceof Error ? e.message : String(e)}); mount the config directory read-write for the console`);
-      }
-      audit("policy.save", { file: cfg.policyFile, from: policyDigest(current), to: policyDigest(text), bytes: text.length }, by);
-      return { digest: policyDigest(text), note: "saved; the gateway reads the policy when it starts, so restart it to apply the change" };
+      const issues = policyIssues(text);
+      if (issues.length && body.confirm !== true) throw new HttpError(400, `confirm before saving: ${issues.join(" ")}`);
+      // from reading the digest to the rename, nothing else may save: two tabs that loaded the same digest would otherwise both pass the
+      // check, the later rename would win, and the history of the lost edit would not even be the version it replaced
+      return withPolicyLock(() => {
+        const cfg = loadConfig(options.configFile);
+        const current = readFileSync(cfg.policyFile, "utf8");
+        if (body.expectDigest !== policyDigest(current)) throw new HttpError(409, "the policy file changed since you loaded it; reload and try again");
+        writeFileSync(join(state, "policy-history", `${new Date().toISOString().replace(/[:.]/g, "-")}-${policyDigest(current).slice(0, 12)}.cedar`), current);
+        try {
+          atomicWrite(cfg.policyFile, text);
+        } catch (e) {
+          throw new HttpError(500, `the policy file cannot be written (${e instanceof Error ? e.message : String(e)}); mount the config directory read-write for the console`);
+        }
+        audit("policy.save", { file: cfg.policyFile, from: policyDigest(current), to: policyDigest(text), bytes: text.length, confirmed: issues }, by);
+        return { digest: policyDigest(text), note: "saved; the gateway reads the policy when it starts, so restart it to apply the change" };
+      });
     },
 
     "POST /api/grants/inspect": async (req) => {
@@ -366,7 +444,8 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
   };
 
   const json = (res: ServerResponse, status: number, body: unknown) => {
-    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+    // a body that was refused unread leaves the connection with data on it: close it, so the next request does not reuse it
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff", ...(status === 413 ? { connection: "close" } : {}) });
     res.end(JSON.stringify(body));
   };
 

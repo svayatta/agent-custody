@@ -52,6 +52,13 @@ const SERVICES = new Set(["serve", "witness", "signer", "portal", "log", "consol
 /** a command that waits for untilStopped(); a stdio gateway runs until its input closes and keeps the default signal behaviour */
 const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && (SERVICES.has(cmd) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
 
+/** A secret kept in a file that only this process can read, such as a container secret mounted at /run/secrets. The file's path is not a secret; its contents are. */
+function tokenFromFile(path: string): string {
+  const v = readFileSync(path, "utf8").trim();
+  if (!v) throw new Error(`${path} is empty`);
+  return v;
+}
+
 /** A shared secret from an environment variable; never from the command line, where it would land in shell history. */
 function secretFrom(envName: string): string {
   const v = process.env[envName];
@@ -71,7 +78,7 @@ const USAGE = `agent-custody <command>
   revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them
   reconcile --config <gateway.json> --operation <uuid>   operator-only provider lookup; commits a receipt before closing an unknown/pending financial operation
-  console --config <gateway.json> [--port 8795] [--host 127.0.0.1] [--token-env CONSOLE_TOKEN] [--gateway-url <url>] [--state-dir <dir>]
+  console --config <gateway.json> [--port 8795] [--host 127.0.0.1] [--token-env CONSOLE_TOKEN | --token-file <path>] [--gateway-url <url>] [--state-dir <dir>]
                                                    the admin console for a gateway: its config and tools, a config check, receipts with a verdict each, a policy editor that
                                                    validates and replays recorded calls before it saves, grant inspection and revocation, and an audit trail of its own changes.
                                                    A separate service from the gateway, behind a token read from the environment; it holds no principal key and never signs
@@ -229,9 +236,9 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "console": {
-      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, port: { type: "string", default: "8795" }, host: { type: "string", default: "127.0.0.1" }, "token-env": { type: "string", default: "CONSOLE_TOKEN" }, "gateway-url": { type: "string" }, "state-dir": { type: "string" } } });
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, port: { type: "string", default: "8795" }, host: { type: "string", default: "127.0.0.1" }, "token-env": { type: "string", default: "CONSOLE_TOKEN" }, "token-file": { type: "string" }, "gateway-url": { type: "string" }, "state-dir": { type: "string" } } });
       if (!values.config) throw new Error("console needs --config");
-      const running = await serveConsole({ configFile: values.config, token: secretFrom(values["token-env"]), port: Number(values.port), host: values.host, ...(values["gateway-url"] ? { gatewayUrl: values["gateway-url"] } : {}), ...(values["state-dir"] ? { stateDir: values["state-dir"] } : {}) });
+      const running = await serveConsole({ configFile: values.config, token: values["token-file"] ? tokenFromFile(values["token-file"]) : secretFrom(values["token-env"]), port: Number(values.port), host: values.host, ...(values["gateway-url"] ? { gatewayUrl: values["gateway-url"] } : {}), ...(values["state-dir"] ? { stateDir: values["state-dir"] } : {}) });
       console.error(`agent-custody console: ${running.url} config=${values.config}${values.host === "0.0.0.0" || (values.host !== "127.0.0.1" && values.host !== "localhost") ? " (reachable beyond this host: put TLS in front and limit who can reach it)" : ""}`);
       await untilStopped();
       await running.close();

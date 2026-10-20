@@ -158,8 +158,10 @@ const SCRIPT = String.raw`
         function validate() {
           return api('POST', '/api/policy/validate', { text: area.value }).then(function (r) {
             clear(out);
-            if (r.ok) out.appendChild(h('p', { class: 'ok', text: 'The policy parses.' + (r.hasPermit ? '' : ' It has no permit rule, so every call would be denied.') }));
-            else r.errors.forEach(function (m) { out.appendChild(h('p', { class: 'bad', text: m })); });
+            if (r.ok) {
+              out.appendChild(h('p', { class: 'ok', text: 'The policy parses.' }));
+              r.issues.forEach(function (m) { out.appendChild(h('p', { class: 'warn', text: m })); });
+            } else r.errors.forEach(function (m) { out.appendChild(h('p', { class: 'bad', text: m })); });
             return r;
           });
         }
@@ -171,6 +173,7 @@ const SCRIPT = String.raw`
               say('');
               var r = s.report;
               out.appendChild(h('div', { class: 'card' }, h('h3', { text: 'Replay of recorded calls' }),
+                h('p', { class: 'muted', text: 'A replay re-decides calls that already happened. A limit that no recorded call reached, and an argument value that was never sent, are not covered, so a change that widens what is allowed can show no change here.' }),
                 h('p', { text: s.replayed + ' verified receipts replayed (' + s.unverified + ' skipped because they did not verify). ' + r.evaluated + ' evaluated, ' + r.unchanged + ' unchanged, ' + r.changeCount + ' would change.' + (r.complete ? '' : ' The replay is incomplete: ' + r.skipped.length + ' calls could not be replayed.') }),
                 r.changes.length ? (function () {
                   var t = h('table', null, h('tr', null, h('th', { text: 'receipt' }), h('th', { text: 'tool' }), h('th', { text: 'was' }), h('th', { text: 'would be' })));
@@ -183,8 +186,10 @@ const SCRIPT = String.raw`
         function save() {
           return validate().then(function (v) {
             if (!v.ok) return;
-            if (!window.confirm('Save this policy?' + (v.hasPermit ? '' : ' It has no permit rule: every call would be denied.') + '\n\nThe gateway reads the policy when it starts, so restart it to apply the change.')) return;
-            return api('PUT', '/api/policy', { text: area.value, expectDigest: policyDigest, allowNoPermit: !v.hasPermit }).then(function (r) {
+            var ask = 'Save this policy?\n\nThe gateway reads the policy when it starts, so restart it to apply the change.';
+            if (v.issues.length) ask = 'Confirm before saving:\n\n' + v.issues.join('\n\n') + '\n\nSave this policy anyway?';
+            if (!window.confirm(ask)) return;
+            return api('PUT', '/api/policy', { text: area.value, expectDigest: policyDigest, confirm: v.issues.length > 0 }).then(function (r) {
               policyDigest = r.digest;
               say('Saved (' + short(r.digest) + '). ' + r.note);
             });

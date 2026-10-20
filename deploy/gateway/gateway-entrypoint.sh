@@ -36,14 +36,19 @@ case "${1:-serve}" in
     exec agent-custody gateway --config "$GATEWAY_CONFIG" --http --host 0.0.0.0 --port "$GATEWAY_PORT" --idle-minutes "$GATEWAY_IDLE_MINUTES"
     ;;
   console)
-    # the admin console, as a service of its own: the same image, a token from CONSOLE_TOKEN, the same config and data
-    if [ -z "${CONSOLE_TOKEN:-}" ]; then
-      echo "gateway: console needs CONSOLE_TOKEN in the environment (for example: openssl rand -hex 32)" >&2
+    # the admin console, as a service of its own: the same image, the same config and data, and a token kept in a file that
+    # only this container is given (a container secret, /run/secrets/console_token) or, for a plain host, CONSOLE_TOKEN
+    token_file="${CONSOLE_TOKEN_FILE:-/run/secrets/console_token}"
+    if [ ! -f "$token_file" ] && [ -z "${CONSOLE_TOKEN:-}" ]; then
+      echo "gateway: console needs a token: a file at $token_file (a container secret), or CONSOLE_TOKEN in the environment (openssl rand -hex 32)" >&2
       exit 1
     fi
     if [ ! -f "$GATEWAY_CONFIG" ]; then
       echo "gateway: $GATEWAY_CONFIG not found. The console reads the gateway's config; mount it at $config_dir" >&2
       exit 1
+    fi
+    if [ -f "$token_file" ]; then
+      exec agent-custody console --config "$GATEWAY_CONFIG" --host 0.0.0.0 --port "${CONSOLE_PORT:-8795}" --token-file "$token_file" ${GATEWAY_URL:+--gateway-url "$GATEWAY_URL"}
     fi
     exec agent-custody console --config "$GATEWAY_CONFIG" --host 0.0.0.0 --port "${CONSOLE_PORT:-8795}" ${GATEWAY_URL:+--gateway-url "$GATEWAY_URL"}
     ;;

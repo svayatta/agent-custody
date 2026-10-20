@@ -1,10 +1,10 @@
 # One shared agent-custody gateway for every agent on this host or network: all their tool calls go through it, each
 # connection presents its own grant, and the tool credentials live here and never in an agent.
 #
-#   mkdir config && UID=$(id -u) GID=$(id -g) docker compose --profile init run --rm init     a starter config, policy, and a demo grant in ./config
+#   mkdir config && sudo chown 10001:10001 config && docker compose --profile init run --rm init     a starter config, policy, and a demo grant in ./config
 #   docker compose up -d                                              the gateway on 127.0.0.1:8790, plain HTTP
 #   docker compose --profile tls up -d                                the same behind Caddy with automatic TLS on GATEWAY_HOST
-#   docker compose --profile console up -d                            the admin console on 127.0.0.1:8795 (needs CONSOLE_TOKEN in .env)
+#   docker compose --profile console up -d                            the admin console on 127.0.0.1:8795 (needs ./console-token: see the secret below)
 #
 # The transport is plain HTTP and a grant is a bearer credential: keep the port on loopback or a private network, or
 # put the tls profile (or your own proxy or mesh) in front. Copy .env.example to .env and set AGENT_CUSTODY_GATEWAY_VERSION.
@@ -15,13 +15,16 @@ services:
   gateway:
     image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
     restart: unless-stopped
-    # tool credentials and the log token come from the environment, never from gateway.json
+    # the gateway and the console run as the same user, so what one writes the other can read: the gateway's key is mode 0600
+    user: "${GATEWAY_UID:-10001}:${GATEWAY_GID:-10001}"
+    # tool credentials and the log token come from the environment, never from gateway.json. The console's token is not in
+    # this file: it is a secret that only the console service is given
     env_file:
       - path: .env
         required: false
     volumes:
       - ./config:/config:ro
-      - gateway-data:/data
+      - ${GATEWAY_DATA:-gateway-data}:/data
     environment:
       # the port inside the container is fixed; GATEWAY_PORT in .env is the host port only, and env_file would otherwise
       # change the port the gateway and its health check use and leave the published mapping pointing at 8790
@@ -38,20 +41,23 @@ services:
 
   console:
     # the admin console for this gateway: config, tools, receipts, policy editing with replay, grant revocation. A service of
-    # its own, not part of the gateway, so that the gateway never serves an admin page next to the agents' credentials.
-    # It reads and writes the same config and data as the gateway, so ./config is mounted read-write here (the policy file
-    # is what it edits). Keep the port on loopback or a private network and put TLS in front.
+    # its own, not part of the gateway, so that the gateway never serves an admin page next to the agents' credentials, and
+    # never holds the token that can rewrite its policy: the token is a secret mounted only here, and this service is not given
+    # the gateway's .env, so it holds none of the upstream credentials either. It reads and writes the same config and data as
+    # the gateway, so ./config is mounted read-write here (the policy file is what it edits). Keep the port on loopback or a
+    # private network and put TLS in front.
     profiles: [console]
     image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
     command: ["console"]
     restart: unless-stopped
-    user: "${UID:-10001}:${GID:-10001}"
+    user: "${GATEWAY_UID:-10001}:${GATEWAY_GID:-10001}"
     environment:
-      CONSOLE_TOKEN: "${CONSOLE_TOKEN:?set CONSOLE_TOKEN in .env (openssl rand -hex 32)}"
       GATEWAY_URL: "http://gateway:8790"
+    secrets:
+      - console_token
     volumes:
       - ./config:/config
-      - gateway-data:/data
+      - ${GATEWAY_DATA:-gateway-data}:/data
     ports:
       - "${CONSOLE_BIND:-127.0.0.1}:${CONSOLE_PORT:-8795}:8795"
     healthcheck:
@@ -73,7 +79,7 @@ services:
     profiles: [init]
     image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
     command: ["init"]
-    user: "${UID:-1000}:${GID:-1000}"
+    user: "${GATEWAY_UID:-10001}:${GATEWAY_GID:-10001}"
     volumes:
       - ./config:/config
     environment:
@@ -92,6 +98,11 @@ services:
       - caddy-data:/data
     depends_on:
       - gateway
+
+secrets:
+  console_token:
+    # openssl rand -hex 32 > console-token && chmod 600 console-token
+    file: ${CONSOLE_TOKEN_FILE:-./console-token}
 
 volumes:
   gateway-data:

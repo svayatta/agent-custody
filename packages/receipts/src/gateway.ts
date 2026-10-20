@@ -107,6 +107,8 @@ export interface GatewayOptions {
   log?: LogSink;
   /** told about every receipt after it is written, in place of the exporter the config names */
   exporter?: ReceiptExporter;
+  /** cancels the start while it is connecting to the upstreams: every upstream already started is closed and the call rejects */
+  signal?: AbortSignal;
 }
 
 /**
@@ -194,35 +196,52 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   const upstreams = new Map<string, UpstreamClient>();
   const owner = new Map<string, string>();
   const advertised: Tool[] = [];
-  for (const { name, cfg: u } of upstreamConfigs) {
-    let client: UpstreamClient;
-    if ("rest" in u) {
-      client = restUpstream(name, { ...u.rest, tools: u.rest.tools.map((tool) => {
-        const rule = operationRule(tool.name);
-        return rule ? { ...tool, idempotencyHeader: rule.idempotencyHeader } : tool;
-      }) });
-    } else if ("a2a" in u) {
-      client = a2aUpstream(name, u.a2a);
-    } else if ("url" in u) {
-      client = new Client({ name: "agent-custody-gateway", version: GATEWAY_VERSION });
-      const token = u.tokenEnv ? process.env[u.tokenEnv] : undefined;
-      if (u.tokenEnv && !token) throw new Error(`upstream ${name}: environment variable ${u.tokenEnv} is not set`);
-      await (client as Client).connect(new StreamableHTTPClientTransport(new URL(u.url), token ? { requestInit: { headers: { authorization: `Bearer ${token}` } } } : {}));
-    } else {
-      client = new Client({ name: "agent-custody-gateway", version: GATEWAY_VERSION });
-      await (client as Client).connect(new StdioClientTransport({ command: u.command, args: u.args, env: upstreamEnv(u.env), stderr: "inherit" }));
-    }
-    upstreams.set(name, client);
-    const { tools } = await client.listTools();
-    for (const t of tools) {
-      const other = owner.get(t.name);
-      if (other) {
-        for (const c of upstreams.values()) await c.close();
-        throw new Error(`tool "${t.name}" is offered by both upstream "${other}" and upstream "${name}"; a gateway needs one owner per tool`);
+  const cancelled = options.signal
+    ? new Promise<never>((_, reject) => {
+        const stop = () => reject(new Error("the gateway start was cancelled"));
+        if (options.signal!.aborted) stop();
+        else options.signal!.addEventListener("abort", stop, { once: true });
+      })
+    : null;
+  cancelled?.catch(() => {});
+  /** a connection that hangs must not hold the start: it loses the race to a cancel */
+  const guard = <T,>(p: Promise<T>): Promise<T> => (cancelled ? Promise.race([p, cancelled]) : p);
+  try {
+    for (const { name, cfg: u } of upstreamConfigs) {
+      options.signal?.throwIfAborted();
+      let client: UpstreamClient;
+      if ("rest" in u) {
+        client = restUpstream(name, { ...u.rest, tools: u.rest.tools.map((tool) => {
+          const rule = operationRule(tool.name);
+          return rule ? { ...tool, idempotencyHeader: rule.idempotencyHeader } : tool;
+        }) });
+        upstreams.set(name, client);
+      } else if ("a2a" in u) {
+        client = a2aUpstream(name, u.a2a);
+        upstreams.set(name, client);
+      } else if ("url" in u) {
+        client = new Client({ name: "agent-custody-gateway", version: GATEWAY_VERSION });
+        upstreams.set(name, client);
+        const token = u.tokenEnv ? process.env[u.tokenEnv] : undefined;
+        if (u.tokenEnv && !token) throw new Error(`upstream ${name}: environment variable ${u.tokenEnv} is not set`);
+        await guard((client as Client).connect(new StreamableHTTPClientTransport(new URL(u.url), token ? { requestInit: { headers: { authorization: `Bearer ${token}` } } } : {})));
+      } else {
+        client = new Client({ name: "agent-custody-gateway", version: GATEWAY_VERSION });
+        upstreams.set(name, client);
+        await guard((client as Client).connect(new StdioClientTransport({ command: u.command, args: u.args, env: upstreamEnv(u.env), stderr: "inherit" })));
       }
-      owner.set(t.name, name);
-      advertised.push(t);
+      const { tools } = await guard(client.listTools());
+      for (const t of tools) {
+        const other = owner.get(t.name);
+        if (other) throw new Error(`tool "${t.name}" is offered by both upstream "${other}" and upstream "${name}"; a gateway needs one owner per tool`);
+        owner.set(t.name, name);
+        advertised.push(t);
+      }
     }
+  } catch (e) {
+    // an upstream that was started stays running unless it is closed here: a failed or cancelled start leaves nothing behind
+    for (const c of upstreams.values()) await c.close().catch(() => {});
+    throw e;
   }
 
   for (const rule of cfg.operations?.tools ?? []) {
