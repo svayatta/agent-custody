@@ -2,6 +2,38 @@
 
 All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agent-custody` on PyPI, move in lockstep. The receipt format has stayed at v0.2 throughout; every addition to it is an optional field, so earlier receipts and the published conformance vectors remain valid.
 
+## 0.8.0 — 2026-10-19
+
+- **Receipts: human approvals (#111).** `approvals` in the gateway config names tools that need a signed, unexpired, single-use human approval, in every mode.
+  - **Binding:** the approval is bound to the principal, the agent, the tool, the amount, the currency, the beneficiary, and a digest of every argument. One or two distinct approvers are required, and `maxLifetimeSeconds` caps the lifetime (default 3600).
+  - **Single use:** consumption is atomic in a `usedDir` that gateway processes share across restarts.
+  - **Checked again before forwarding:** expiry or revocation during fact lookups or precommit refuses the call with a signed receipt.
+  - **Evidence:** receipts and precommit authorizations carry the approval, and both verifiers check its signatures (`--approval-key`), validity window, payload binding, consumption, and precommit consistency.
+  - **Privacy:** under a private capture rule the approval envelope is withheld unless every argument is in clear and the tool name is not masked. A refusal carrying a valid approval still verifies.
+  - Tutorial 30.
+- **Receipts: financial operations (#112).** `operations` in the gateway config makes tools financial.
+  - **No second execution:** each call keeps one caller-chosen operation UUID, sends the provider an idempotency key, and reserves its amount against a daily budget in SQLite transactions shared across processes. A retry or a restart never forwards a second payment.
+  - **Outcomes:** submitted, pending, unknown, confirmed, or failed, recorded apart from execution.
+  - **Reconciliation:** `agent-custody reconcile --config gateway.json --operation <uuid>` (`GatewayHost.reconcile`) reads the provider's record and closes an unknown or pending outcome with a signed reconciliation receipt. A call the gateway can prove it never sent is closed and its reservation released. Recovery identifies a dead creator by PID and start time, and the authorization save refuses a call that recovery has closed.
+  - **Verification and export:** both verifiers check the operation linkage, and OTel, Splunk, `explain`, and `review` mark reconciliations.
+  - Tutorial 29.
+- **Receipts: policy simulation (#114).** `agent-custody policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key …` and `simulatePolicy` replay recorded calls against a proposed Cedar policy.
+  - **Trust:** every receipt is verified first, then replayed on its recorded arguments, facts, and grant.
+  - **Report:** each changed decision is listed with its receipt id.
+  - **Incomplete runs:** a call the replay cannot evaluate makes the run INCOMPLETE. That covers a gate refusal, withheld inputs, and an authorization whose receipt never arrived.
+  - **Flags:** `--approval-key`, `--capture-key-env`, and a repeatable `--disclose`.
+  - **Memory:** receipts stream one at a time.
+  - Tutorial 28.
+- **Receipts: other changes.**
+  - **Report:** the verify report shows why a call was refused (`denied: delegation grant has been revoked`), or says the reason is withheld under a capture rule.
+  - **Example 27:** revokes an agent's grant mid-session.
+  - **Replay builder:** `scripts/replay.ts` packages example 27 and state example 07 as a folder of receipts and public keys that anyone can verify with the published packages.
+- **State:** example 07 lists a call whose consumed beliefs are withheld under a capture rule as INCOMPLETE in a blast radius. With the customer's key, the same query finds the call.
+- **Site:** the landing page leads with the local refund demo and shows its six steps (#117).
+- **Release and deploy:**
+  - **Automatic publish:** a version tag publishes the packages from CI (`release.yml`, trusted publishing, once `PUBLISH_FROM_CI` is `true`). The log image and the MCP Registry listing follow only after the release succeeds, so the image is never built before its package exists.
+  - **Manual deploy:** `deploy/upgrade.sh` upgrades the log's host to a published version and rolls back if the new one is not healthy, or with `docs` rebuilds the docs site. The `deploy` workflow runs it over SSH, by hand, with a key that can run nothing else; see `deploy/README.md`.
+
 ## 0.7.0 — 2026-10-15
 
 - **State:** `blast` and `loadReceipts` know what they cannot see: a receipt that withholds its consumed fact ids under a capture rule is listed under `withheld` (`INCOMPLETE` in the report) rather than counted as having relied on nothing, and `--capture-key-env` / `loadReceipts(dir, { captureKey })` decrypts the ids of receipts in mode `encrypted`; `explain` says when the beliefs shown are withheld.
