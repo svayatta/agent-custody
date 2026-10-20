@@ -93,7 +93,7 @@ export default withMermaid(
             { text: "Explain, review, packs", link: "/reference/state-tools" },
             { text: "Command line", link: "/reference/cli" },
           ] },
-          { text: "Guides", items: [{ text: "Getting started", link: "/guide/getting-started" }, { text: "Deployment", link: "/guide/deployment" }, { text: "Writing policies", link: "/receipts/policies" }, { text: "Verifying a receipt", link: "/receipts/verification" }] },
+          { text: "Guides", items: [{ text: "Getting started", link: "/guide/getting-started" }, { text: "Architecture", link: "/guide/architecture" }, { text: "Deployment", link: "/guide/deployment" }, { text: "Writing policies", link: "/receipts/policies" }, { text: "Verifying a receipt", link: "/receipts/verification" }] },
         ],
         "/": [
         { text: "Start here", items: [
@@ -101,7 +101,7 @@ export default withMermaid(
           { text: "FAQ: where the data goes", link: "/faq" },
           { text: "Use cases, with their policies", link: "/use-cases" },
           { text: "Getting started", link: "/guide/getting-started" },
-          { text: "Deployment", link: "/guide/deployment" },
+          { text: "Architecture", link: "/guide/architecture" }, { text: "Deployment", link: "/guide/deployment" },
           { text: "This repository, under custody", link: "/custody" },
           { text: "Changelog", link: "/changelog" },
         ] },

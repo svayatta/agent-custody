@@ -1,6 +1,6 @@
 # Deployment
 
-Nobody's agent calls agent-custody. The agent never learns it exists. There are three places the layer can sit, and a deployment uses whichever of them the job needs.
+The [architecture page](/guide/architecture) has the diagrams: what runs on the customer's side, what is hosted, and the sequence of a call. Nobody's agent calls agent-custody. The agent never learns it exists. There are three places the layer can sit, and a deployment uses whichever of them the job needs.
 
 ```
 agent host  (Claude Code, LangGraph, the OpenAI Agents SDK, your own loop)
