@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-custody-gateway
+  labels: { app: agent-custody-gateway }
+spec:
+  selector: { app: agent-custody-gateway }
+  ports:
+    - { name: http, port: 8790, targetPort: http }

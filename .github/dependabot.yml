@@ -23,3 +23,12 @@ updates:
       # the image tracks the current Node LTS line by hand; a major bump lands when that line changes
       - dependency-name: node
         update-types: ["version-update:semver-major"]
+  - package-ecosystem: docker
+    directory: /deploy/gateway
+    schedule: { interval: weekly }
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: docker
+    directory: /deploy/witness
+    schedule: { interval: weekly }

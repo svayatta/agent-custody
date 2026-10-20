@@ -2,6 +2,13 @@
 
 All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agent-custody` on PyPI, move in lockstep. The receipt format has stayed at v0.2 throughout; every addition to it is an optional field, so earlier receipts and the published conformance vectors remain valid.
 
+## Unreleased
+
+- **Deploy: the gateway as a service.** `deploy/gateway` is a container image, compose file, Kubernetes manifests and systemd unit for one shared gateway that every agent on a host or cluster connects to, each with its own grant. The `gateway-image` workflow builds it for amd64 and arm64 and pushes `ghcr.io/svayatta/agent-custody-gateway`: `edge` and `sha-<short>` on every merge to main, `<version>`, `<major>.<minor>` and `latest` on every release. Every build is smoke-tested before it is pushed. `init` writes a starter config, an example policy, and a demo grant.
+- **Deploy: a release deploys the release.** `upgrade.sh` checks out the tag `v<version>` before it deploys, so the compose file, the Caddyfile, and the scripts on the host are the released ones and not main's, and it restores the previous checkout on a rollback. The `AGENT_CUSTODY_VERSION` defaults in the compose files, the Dockerfile, `.env.example`, and the Kubernetes manifest, and the monitor's pinned version, are checked against the package version on every pull request and again on the release tag. A pull request that touches `deploy/` builds the log image from the workspace package, starts it, and checks the compose files, the manifests, the scripts, and `upgrade.sh` against a throwaway repository.
+- **Supply chain: signed, attested, pinned.** Every pushed image (log and gateway) carries a provenance attestation and an SBOM and is signed with cosign, keyless; the digest of each release is in the workflow's step summary. Base images are pinned by digest, third-party GitHub Actions by commit, and bun by version, with Dependabot proposing updates. The monitor runs the pinned release, not `@latest`.
+- **Fix: long-running services stop on SIGTERM.** The gateway, log, signer, portal and witness waited for SIGINT only, so a container runtime, systemd or Kubernetes stopped them with SIGKILL after the grace period. They now close and exit 0 on SIGTERM.
+
 ## 0.8.0 — 2026-10-19
 
 - **Receipts: human approvals (#111).** `approvals` in the gateway config names tools that need a signed, unexpired, single-use human approval, in every mode.

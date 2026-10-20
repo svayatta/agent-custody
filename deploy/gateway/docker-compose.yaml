@@ -1,0 +1,65 @@
+# One shared agent-custody gateway for every agent on this host or network: all their tool calls go through it, each
+# connection presents its own grant, and the tool credentials live here and never in an agent.
+#
+#   mkdir config && UID=$(id -u) GID=$(id -g) docker compose --profile init run --rm init     a starter config, policy, and a demo grant in ./config
+#   docker compose up -d                                              the gateway on 127.0.0.1:8790, plain HTTP
+#   docker compose --profile tls up -d                                the same behind Caddy with automatic TLS on GATEWAY_HOST
+#
+# The transport is plain HTTP and a grant is a bearer credential: keep the port on loopback or a private network, or
+# put the tls profile (or your own proxy or mesh) in front. Copy .env.example to .env and set AGENT_CUSTODY_GATEWAY_VERSION.
+
+name: agent-custody-gateway
+
+services:
+  gateway:
+    image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
+    restart: unless-stopped
+    # tool credentials and the log token come from the environment, never from gateway.json
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./config:/config:ro
+      - gateway-data:/data
+    environment:
+      # the port inside the container is fixed; GATEWAY_PORT in .env is the host port only, and env_file would otherwise
+      # change the port the gateway and its health check use and leave the published mapping pointing at 8790
+      GATEWAY_PORT: "8790"
+    ports:
+      - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-8790}:8790"
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  init:
+    # one-off: writes a starter config into ./config, which must be writable by the user below
+    profiles: [init]
+    image: ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
+    command: ["init"]
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./config:/config
+    environment:
+      DATA_DIR: /data
+
+  caddy:
+    profiles: [tls]
+    image: caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    # GATEWAY_HOST is the DNS name that points at this host; Caddy gets its certificate for it
+    command: ["caddy", "reverse-proxy", "--from", "${GATEWAY_HOST:-localhost}", "--to", "gateway:8790"]
+    volumes:
+      - caddy-data:/data
+    depends_on:
+      - gateway
+
+volumes:
+  gateway-data:
+  caddy-data:

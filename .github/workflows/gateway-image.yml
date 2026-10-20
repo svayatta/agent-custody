@@ -1,0 +1,216 @@
+# Builds the shared gateway image (deploy/gateway) and pushes it to GitHub Container Registry for amd64 and arm64,
+# each on a runner of its own architecture, then merges the two into one tag. Three ways in:
+#   - a push to main builds from this checkout's source (the package is packed from the workspace) and pushes the
+#     tags `edge` and `sha-<short sha>`;
+#   - a finished release for a version tag builds from the published npm package of that version and pushes
+#     `<version>`, `<major>.<minor>` and `latest`;
+#   - a pull request that touches deploy/gateway builds the image and runs the smoke test, and pushes nothing.
+# Run it by hand with a version to rebuild a release, or with none to rebuild main. Every build is smoke-tested
+# (deploy/gateway/smoke.sh) before it is pushed. Every pushed image carries a provenance attestation and an SBOM and
+# is signed with cosign, keyless, by this workflow's identity (deploy/gateway/README.md says how to verify one). Uses the repository's own token; no personal token.
+# The first push creates the package as private: make it public once in the package's settings.
+name: gateway-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/receipts/**"
+      - "deploy/gateway/**"
+      - ".github/workflows/gateway-image.yml"
+      - ".github/scripts/wait-for-npm.sh"
+      - ".github/scripts/require-release-commit.sh"
+  pull_request:
+    paths:
+      - "packages/receipts/src/cli.ts"
+      - "deploy/gateway/**"
+      - ".github/workflows/gateway-image.yml"
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "published @agent-custody/receipts version to build, e.g. 0.8.0; empty builds main from source"
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: gateway-image-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/agent-custody-gateway
+
+jobs:
+  config:
+    if: github.event_name != 'workflow_run'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: the compose file is valid with its required version set
+        env:
+          AGENT_CUSTODY_GATEWAY_VERSION: ci
+        run: docker compose -f deploy/gateway/docker-compose.yaml --profile init --profile tls config -q
+      - run: kubectl kustomize deploy/gateway/k8s > /dev/null
+      - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh .github/scripts/*.sh
+
+  build:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || (github.event.inputs.version && format('refs/tags/v{0}', github.event.inputs.version)) || github.sha }}
+      - id: v
+        env:
+          VERSION: ${{ github.event.inputs.version || github.event.workflow_run.head_branch }}
+        run: |
+          version="${VERSION#v}"
+          if [ -n "$version" ]; then
+            .github/scripts/require-release-commit.sh "$version"
+            echo "release=true" >> "$GITHUB_OUTPUT"; echo "version=$version" >> "$GITHUB_OUTPUT"
+          else
+            # edge is main: a dispatch from any other ref must not move it
+            if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+              echo "::error::edge is built from main only; this run is on $GITHUB_REF. Pass a version to rebuild a release."
+              exit 1
+            fi
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: wait for npm to serve the version
+        if: steps.v.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: .github/scripts/wait-for-npm.sh "$VERSION"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        if: steps.v.outputs.release != 'true'
+        with:
+          bun-version: 1.3.2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        if: steps.v.outputs.release != 'true'
+        with:
+          node-version: 22
+      - name: pack the package from this checkout
+        if: steps.v.outputs.release != 'true'
+        run: |
+          bun install --frozen-lockfile
+          bun run --filter @agent-custody/receipts build
+          (cd packages/receipts && bun pm pack --destination "$GITHUB_WORKSPACE/deploy/gateway/pkg")
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: build and smoke-test this platform's image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: deploy/gateway
+          platforms: ${{ matrix.platform }}
+          build-args: AGENT_CUSTODY_VERSION=${{ steps.v.outputs.version }}
+          load: true
+          tags: gateway-smoke:local
+          cache-from: type=gha,scope=gateway-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=gateway-${{ matrix.platform }}
+      - run: deploy/gateway/smoke.sh gateway-smoke:local
+      - name: log in to the registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: deploy/gateway
+          platforms: ${{ matrix.platform }}
+          build-args: AGENT_CUSTODY_VERSION=${{ steps.v.outputs.version }}
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=agent-custody shared gateway
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.revision=${{ steps.v.outputs.sha }}
+          cache-from: type=gha,scope=gateway-${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: record the digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir -p /tmp/digests
+          echo "${DIGEST#sha256:}" > "/tmp/digests/$(echo "$PLATFORM" | tr / -)"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: github.event_name != 'pull_request'
+        with:
+          name: gateway-digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - id: tags
+        env:
+          VERSION: ${{ github.event.inputs.version || github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          version="${VERSION#v}"
+          if [ -n "$version" ]; then
+            echo "tags=$IMAGE:$version $IMAGE:${version%.*} $IMAGE:latest" >> "$GITHUB_OUTPUT"
+            echo "first=$version" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=$IMAGE:edge $IMAGE:sha-${SHA:0:7}" >> "$GITHUB_OUTPUT"
+            echo "first=edge" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: /tmp/digests
+          pattern: gateway-digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: one tag for both architectures
+        working-directory: /tmp/digests
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          refs=""
+          for f in *; do refs="$refs $IMAGE@sha256:$(cat "$f")"; done
+          tag_args=""
+          for t in $TAGS; do tag_args="$tag_args -t $t"; done
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tag_args $refs
+      - name: sign the image and record its digest
+        env:
+          FIRST: ${{ steps.tags.outputs.first }}
+        run: |
+          digest=$(docker buildx imagetools inspect "$IMAGE:$FIRST" --format '{{json .Manifest}}' | jq -r .digest)
+          cosign sign --yes "$IMAGE@$digest"
+          docker buildx imagetools inspect "$IMAGE:$FIRST"
+          { echo "### $IMAGE"; echo; echo "\`$IMAGE@$digest\`"; } >> "$GITHUB_STEP_SUMMARY"
