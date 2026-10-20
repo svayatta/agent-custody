@@ -26,14 +26,56 @@ In code: `buildActionPack(receiptsDir, receiptId, ledger?)`, `signActionPack(pac
 
 ## `review`
 
-The explain output as pages for the reviewer who will not open a terminal.
+Search receipts and read the ten answers in a browser, then export a portable case for another reviewer.
 
 ```bash
-agent-custody-memory review --receipts receipts [--ledger ledger.sqlite] [--issuer-key …] [--principal-key …] [--log-key …] [--log-id …] [--port 8791] [--host 127.0.0.1] [--title "Support agents, September"]
+agent-custody-memory review --receipts receipts [--ledger ledger.sqlite] [--issuer-key …] [--principal-key …] [--approval-key …] [--log-key …] [--upstream-key …] [--log-id …] [--port 8791] [--host 127.0.0.1] [--title "Support agents, September"]
+agent-custody-memory review … [--transaction re_123] [--customer cust_123] [--agent support-agent] [--from 2026-10-01T00:00:00Z] [--to 2026-10-31T23:59:59Z]
 agent-custody-memory review … --out review-site/
+agent-custody-memory review … --case <receiptId> --out refund.case.html
+agent-custody-memory review … --case <receiptId> --out refund.case.json
+agent-custody-memory review --verify-case <refund.case.json|refund.case.html> [--issuer-key …] [--principal-key …] [--approval-key …] [--log-key …] [--upstream-key …] [--log-id …] [--json]
 ```
 
-Serves, on loopback with no login of its own, `/` (an index of every receipt: when, tool, outcome, agent, principal, producer, verdict) and `/r/<receiptId>` (the ten answers, the verification report, the bundle at `/r/<receiptId>.json`). `--out` writes the same as `index.html` and `r/<id>.html` beside `r/<id>.json`. In code: `listReceipts`, `renderIndex`, `renderReceipt`, `serveReview`, `writeReview`.
+Serves on `127.0.0.1` by default, with no login of its own. The pages load no outside content. The index shows when, tool, outcome, transaction and customer ids, agent, principal, producer, and verification verdict. Search filters combine with AND; ids and agent ids are exact and case sensitive. `from` and `to` are inclusive ISO 8601 date-times with `Z` or an explicit UTC offset, and an inverted or invalid range is rejected. Search reads only the public signed view: named identifiers in arguments, results (including complete JSON objects in MCP text), and gateway facts. It does not search prose or restore values withheld by a capture rule. Search stops at 64 levels of nesting and ignores JSON text longer than 64 KiB. A receipt with such a skipped value, including JSON text just below the depth cap, is marked "partially indexed" (`truncated: true` on its row), and an id filter keeps it in the list. A record that lacks a part the pages read (it fails the verifier's structural check) gets a NOT VERIFIED page that names the problem; it does not stop an export or answer 500. A ledger or file error is not a defect of the record: it fails the export and the live page answers 500. A record whose receipt id differs from its file name is listed as NOT VERIFIED ("file name does not match receipt id") and linked by file name, and the header counts the files that cannot be read.
+
+| route | response |
+| --- | --- |
+| `GET /` | receipt index and search form |
+| `GET /?transaction=re_123&customer=cust_123&agent=support-agent&from=2026-10-01T00:00:00Z&to=2026-10-31T23:59:59Z` | matching receipt rows; each query parameter is optional |
+| `GET /r/<receiptId>` | ten answers, verification report, bundle and case downloads |
+| `GET /r/<receiptId>.json` | bundle as issued |
+| `GET /r/<receiptId>.case.html` | standalone offline HTML case download |
+| `GET /r/<receiptId>.case.json` | portable case data download |
+
+`--out <dir>` writes `index.html`, `r/<id>.html`, `r/<id>.json`, `r/<id>.case.html`, and `r/<id>.case.json`. CLI filters decide which receipts enter an export; the static index filters only that exported set in the browser, including when opened locally. `--case <receiptId> --out <file.html|file.json>` exports one case directly.
+
+A case carries the action pack's primary, belief-source, and downstream receipt bundles, embedded signed authorizations, log heads and inclusion proofs, the supplied public keys with SHA-256 fingerprints, the ten answers, and the ledger snapshot when provided. The HTML embeds the verifier and uses WebCrypto to check signatures, digests, authorizations, and inclusion proofs afresh when opened; it makes no external requests. Its historical export report is not accepted as verification evidence. The page result is not independent, because the script is in the same file as the data; the page says so, and it does not compare the ten answers with the receipts. Use `--verify-case` for that. Without a ledger, belief dependencies remain `unknown without a ledger`; withheld evidence and missing receipts remain explicit.
+
+Confirm the public key fingerprints through an independent trusted source before relying on their identity: bundled keys prove internal consistency. `--verify-case` takes the format from the file name (`.json` as JSON, every other name as a page; content that does not match the name fails) and recomputes verification from the JSON or from the `case-data` script of the page, uses bundled keys by default, and exits 1 on failure. It rebuilds the ten answers from the signed receipt, prints them, and fails the check `ten answers match the signed receipt and the unsigned ledger snapshot` when the saved `explanation` differs. For a `.case.html` it also fails the check `page is exactly what its case data renders` unless the page is byte for byte what the data renders with this build of the package (an edit, a second copy of the data, or another build fails it); trust the printed answers, not the page. The belief, dependency, and reversal lines come from the unsigned ledger snapshot in the file, so a forged snapshot with matching answers passes: those lines are not attested. Independent key flags replace the entire bundled trust set, so provide all issuer, principal, log, and upstream keys that the case requires; the key flags may be repeated for rotations. The JSON report includes `ok`, `complete`, `trust` (`bundled`, `independent`, or `none`), `checks`, and a verification report per receipt. `complete` requires a ledger and no missing receipts, unknown consumed beliefs, or withheld dependency evidence; it does not attest the ledger snapshot. The ledger data is an unsigned exporter assertion. The ten answers are checked against the signed receipt, but the belief answers still rest on that ledger data. Cryptographic verification establishes what the signed gateway record says and detects receipt tampering; it does not independently prove an external payment side effect. Export reads no private key, capture key, disclosure, or issuer salts file, and withheld values stay unavailable.
+
+In code:
+
+```ts
+import { loadPublicKey } from "@agent-custody/receipts";
+import { buildCaseFile, listReceipts, renderCaseFile, verifyCaseFile } from "@agent-custody/state";
+
+const keys = {
+  issuerKeys: [loadPublicKey("keys/gateway.pub")],
+  principalKeys: [loadPublicKey("keys/principal.pub")],
+};
+const options = { receiptsDir: "receipts", keys }; // add ledger to answer belief dependency questions
+const rows = listReceipts(options, { transaction: "re_123", customer: "cust_123" });
+const file = await buildCaseFile(options, rows[0]!.receiptId);
+const checked = verifyCaseFile(file, keys);
+const html = renderCaseFile(file);
+```
+
+`ReviewOptions` accepts `receiptsDir`, optional `ledger`, `keys`, `title`, and `search: ReceiptSearch`. `keys` contains `issuerKeys`, `principalKeys`, and optional `approvalKeys`, `logKeys`, `upstreamKeys`, and `logId`. `listReceipts(options, query = options.search ?? {})` returns newest-first rows with `transactionIds` and `customerIds` alongside the receipt fields and verdict. A row has `file` (the file name without `.json`, which links use) and, for a record that does not match its file name, `problem` and `verified: false`. `scanReceipts(options, query)` returns `{ rows, unreadable }`, where `unreadable` counts the files that could not be decoded. `ReceiptSearch` has optional string fields `transaction`, `customer`, `agent`, `from`, and `to`; `validateReceiptSearch(query)` rejects invalid filters, `receiptSearchTerms(predicate)` returns public `transactionIds` and `customerIds`, and `matchesReceiptSearch(predicate, query)` applies the combined filters.
+
+`buildCaseFile({ receiptsDir, ledger?, keys? }, receiptId): Promise<CaseFile>` constructs the portable case. `verifyCaseFile(file, trustedKeys?): CaseFileVerification` reruns verification, `parseCaseHtml(html): CaseFile` reads the `case-data` script of a rendered `.case.html` (it does not validate; `verifyCaseFile` does), `verifyCaseHtml(html, trustedKeys?)` verifies a rendered page and its data, `CaseFileVerification.answers` holds the rebuilt ten answers, and `renderCaseFile(file): string` renders the standalone HTML. `CaseFile` contains `version`, `generatedAt`, `receiptId`, `withLedger`, `pack: ActionPack`, `keys` (public `{ keyid, pem }` arrays by role and optional `logId`), `explanation`, and the export-time `verification`. The page APIs remain `renderIndex(rows, options, link, staticPage?, unreadable?)`, `renderReceipt(pack, verification, options, backLink, rawLink)`, `serveReview(options, { port, host? })`, and `writeReview(options, outDir)`.
+
+[The runnable review example](https://github.com/svayatta/agent-custody/blob/main/packages/state/examples/08-review-console.ts) makes a refund through a real gateway in front of the local fake Stripe server, searches its returned transaction id and customer, and exports and verifies the case without a payment provider.
 
 ## `pack`
 

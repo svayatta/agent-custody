@@ -5,13 +5,14 @@ A receipt is verified with public keys alone: no server, no account, no trust in
 ## `verify`
 
 ```bash
-agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub [--log-key log.pub | --log-url https://log.example.com/] [--log-id acme] [--upstream-key upstream.pub] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log log.jsonl] [--disclose disclosure.json] [--capture-key-env NAME] [--json]
+agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub [--approval-key approver.pub] [--log-key log.pub | --log-url https://log.example.com/] [--log-id acme] [--upstream-key upstream.pub] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log log.jsonl] [--disclose disclosure.json] [--capture-key-env NAME] [--json]
 ```
 
 | option | meaning |
 | --- | --- |
 | `--issuer-key` (repeatable) | keys trusted to issue receipts: gateway keys, SDK application keys. `--gateway-key` is an alias |
 | `--principal-key` (repeatable) | keys whose grants are accepted; may be omitted for SDK receipts |
+| `--approval-key` (repeatable) | human keys trusted to sign exact-action approvals; required to validate a forwarded call carrying approval evidence; a refusal needs none. Never falls back to issuer or principal keys |
 | `--log-key` / `--log-url` | the key of a log run by someone else, given as a file or fetched from the log's key document and pinned by keyid |
 | `--log-id` | every tree head must name this log |
 | `--upstream-key` | an upstream that signs its results; the execution then verifies as attested |
@@ -27,7 +28,9 @@ Exit 0 when every check passes, 1 otherwise. The text report is one line per che
 { "ok": true, "checks": [{ "name": "receipt signature (issuer key)", "ok": true, "detail": "keyid 9d442884f3d4" }, { "name": "delegation signature (principal key)", "ok": true, "detail": "signed by 19b2d2a2a213" }, …], "statement": { "…": "the decoded statement" } }
 ```
 
-In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKeys?, providerSecrets?, logFile?, logId?, disclosed?, captureKey? }): { ok, checks, statement }` and `formatReport(result): string`. Keys are `PublicKeyRef`s from `loadPublicKey(path)` or `publicKeyFromPem(pem)`; `fetchLogKeys(url)` returns `{ doc, keys }` from a key document.
+In code: `verifyBundle(bundle, { issuerKeys, principalKeys, approvalKeys?, logKeys?, upstreamKeys?, providerSecrets?, logFile?, logId?, disclosed?, captureKey? }): { ok, checks, statement }` and `formatReport(result): string`. Keys are `PublicKeyRef`s from `loadPublicKey(path)` or `publicKeyFromPem(pem)`; `fetchLogKeys(url)` returns `{ doc, keys }` from a key document.
+
+An approval record makes its checks mandatory for a forwarded call, even when `approvalKeys` is empty. A refusal receipt, such as a Cedar denial after a valid approval, runs only `approval consistent with execution` and verifies without approval keys. The browser verifier takes a separate human approval key input and cannot restore hidden values; use the Node verifier with `--disclose` or `--capture-key-env` for those. Under a private capture rule the receipt withholds the signed envelope, which contains action fields plus an unsalted argument digest, so the approval checks pass as committed until it is restored. See [human approvals](/receipts/approvals). Offline verification cannot prove that the approval was never used elsewhere; single use relies on the gateway's persistent shared consumption store.
 
 ### The checks
 
@@ -35,7 +38,7 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | --- | --- |
 | receipt signature (issuer key) | the bundle was signed by a trusted issuer key; nothing else is decided if this fails |
 | receipt payload type | it is an in-toto statement with the receipt predicate type |
-| structural parts in clear | the capture note, if any, is well formed and names no structural part (ids, the tool, the grant, the status, the decision, the digests, a fact's tool, a provider's name), and those parts are what every later check assumes; nothing else is decided if this fails |
+| structural parts in clear | the capture note, if any, is well formed and names no structural part (ids, the tool, the grant, the status, the decision, the digests, a fact's tool, a provider's name), and those parts are present and of the right type: an attested principal's key id, the status, the decision and the policy digest, an authorization's tree head and proof, and an approval record; nothing else is decided if this fails |
 | issuer kind is known, issuer keyid matches signer | the receipt says who issued it and the signature agrees |
 | gateway receipt carries a delegation, carries a policy decision | gateway receipts embed both |
 | delegation signature (principal key) | the grant was signed by a trusted principal key |
@@ -44,6 +47,10 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | executed tool within delegated scope | if the tool ran, the grant covered it |
 | principal is claimed, not attested | SDK receipts: the principal is a config string and labelled so |
 | disclosure names this receipt | only with `--disclose`: the file's `receiptId` is this receipt's |
+| approval signatures (human keys) | a forwarded call carrying an approval record has the required number of distinct signatures from separately trusted `approvalKeys`. A withheld envelope passes as committed until it is disclosed or decrypted, unless nothing under `request.args` is withheld: then it fails |
+| approval payload binding | that approval names this principal, agent, tool, complete arguments, and mapped amount/currency/beneficiary. If any argument remains withheld, this passes as committed until the arguments are disclosed or decrypted, as `request args digest` does |
+| approval valid at forward time | the recorded check and consumption occurred inside the approval validity window |
+| approval consistent with execution | forwarded calls carrying approval evidence have an approved, consumed record with matching signer observations; denied or withheld calls can verify as authentic refusals despite an invalid approval |
 | request args digest | the arguments match their digest (salted from the field salts when any argument is withheld) and the statement's subject: recomputed when they are in clear, disclosed with `--disclose`, or decrypted with `--capture-key-env`; when values are withheld and neither is given it passes as committed, the detail saying "committed, not recomputed" and how many values are withheld; a path the note names that holds no commitment, or a disclosure that contradicts a commitment, fails it with the path named |
 | execution result digest | executed and failed calls: the result matches `execution.resultDigest` (salted from the field salts when any part is withheld), under the same rules |
 | fact `<name>` value, fact `<name>` args | a captured fact's commitments hold against the disclosed or decrypted value, or pass as committed when neither is given |
@@ -53,6 +60,8 @@ In code: `verifyBundle(bundle, { issuerKeys, principalKeys, logKeys?, upstreamKe
 | upstream signature not checked | only when the result, the delivery body, its signature or bind, or (with the result withheld) the upstream's signed envelope is withheld and a key or secret was given: the signature cannot be checked against a result the verifier cannot see, so this passes with a note in place of the signature check |
 | policy decision consistent with execution | an enforced `deny` never sits beside `executed`; a `deny` with `enforced: false` (observe mode) may, and the detail says so |
 | authorization … (five checks) | pre-committed calls: the authorization verifies, names this call, was allowed, is included in the log, and precedes the receipt leaf |
+| authorization carries this approval | the precommit and receipt carry the same human approval envelope, threshold, and field mapping |
+| authorization approval was valid | for a forwarded call, the precommit itself recorded an approved statement, distinct trusted signer observations, and a check inside the signed approval window |
 | operation …; authorization names this operation | financial evidence is gateway-observed, identifies the original receipt, and carries the committed operation id, provider key, lookup digest, and budget; terminal outcomes need reconciliation unless the call was withheld; a retry of an existing operation is a `withheld` receipt that names the original, and a private receipt withholds the operation id and links by key |
 | reconciliation original …; reconciliation original evidence verifies | the embedded original receipt or crash-surviving authorization verifies with its own signature, grant, commitments and inclusion proof; nested reconciliations are refused |
 | reconciliation links the original operation; reconciliation lookup matches authorization; reconciliation lookup args match request | the original identity and budget are preserved, and the provider lookup and arguments match the mapping committed before forwarding |

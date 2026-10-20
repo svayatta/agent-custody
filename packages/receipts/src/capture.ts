@@ -291,6 +291,12 @@ const CLEAR_IN = {
   execution: new Set(["status", "resultDigest", "provenance"]),
   upstream: new Set(["provider"]),
   consumed: new Set(["provenance"]),
+  /**
+   * The gateway's own observations of its approval check: the status, the times, the signers' key ids, and the config's
+   * argument mapping. The envelope is not here: the agent supplied it, and it carries the action fields and an unsalted
+   * digest of the arguments. The reason is not here either: it can quote the statement.
+   */
+  approval: new Set(["status", "requiredApprovers", "checkedAt", "consumedAt", "approverKeyids", "fields", "provenance"]),
   /** the host's correlation ids are supplied by the agent's process or its call: values, withheld; the provenance stays */
   session: new Set(["provenance"]),
   model: new Set(["provenance"]),
@@ -319,6 +325,7 @@ export interface PrivateView<P> {
 
 /** The parts an authorization and its receipt share; the receipt's view takes them from the authorization's, commitments and salts alike. */
 const SHARED_WITH_AUTHORIZATION = ["request", "facts", "policy", "consumed"];
+const APPROVAL_ENVELOPE = ["approval", "envelope"];
 
 /**
  * The statement a receipt carries under a tool's rule: the predicate with every non-structural value withheld as the
@@ -342,8 +349,9 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
   if (prior) {
     for (const part of SHARED_WITH_AUTHORIZATION) if (own(prior.predicate as unknown as Record<string, unknown>, part)) out[part] = (prior.predicate as unknown as Record<string, unknown>)[part];
     for (const w of prior.predicate.capture?.withheld ?? []) {
-      // a part the receipt does not share (the operation, whose status changes) is withheld again below, once
-      if (!SHARED_WITH_AUTHORIZATION.includes(w[0]!)) continue;
+      // a part the receipt does not share (the operation, whose status changes) is withheld again below, once; the
+      // approval envelope is shared, though the rest of the approval record changes
+      if (!SHARED_WITH_AUTHORIZATION.includes(w[0]!) && pathKey(w) !== pathKey(APPROVAL_ENVELOPE)) continue;
       withheld.push(w);
       const s = ownOf(prior.salts, pathKey(w));
       if (s) salts[pathKey(w)] = s;
@@ -393,7 +401,8 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
   const resultSide = sideOf(rule, "result", key);
   const factsSide = sideOf(rule, "facts", key);
   for (const [key_, value] of Object.entries(predicate as unknown as Record<string, unknown>)) {
-    if (CLEAR_TOP.has(key_)) continue;
+    // the approval record is handled after the loop: whether its envelope may stay depends on what the arguments withheld
+    if (CLEAR_TOP.has(key_) || key_ === "approval") continue;
     if (prior && SHARED_WITH_AUTHORIZATION.includes(key_)) continue;
     // no policy was evaluated: structural, not a value
     if (key_ === "policy" && value === null) continue;
@@ -485,6 +494,23 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
       object(["reconciliation"], value, { clear: new Set(["original", "lookup"]), key: k });
       if (isObject(value.lookup)) object(["reconciliation", "lookup"], value.lookup, { clear: new Set(["tool", "args", "statusPath", "identityPath", "confirmed", "failed"]), key: k });
     } else hide([key_], value, k);
+  }
+  const approval = (predicate as { approval?: unknown }).approval;
+  if (isObject(approval)) {
+    // Beside arguments of which nothing is withheld, an approved envelope adds nothing: its payload equals the public
+    // call, and the gateway checked that. It stays, so a verifier can run the binding check on it (the analogue of
+    // isPlainAttestation). A denied envelope may carry another call's fields, so it is withheld, unless the
+    // authorization already showed it. A masked tool name is never kept beside its envelope.
+    const argsPublic = !withheld.some((w) => under(w, ["request", "args"])) && !ctx.unknownTool;
+    for (const [f, v] of Object.entries(approval)) {
+      if (CLEAR_IN.approval.has(f)) continue;
+      const path = ["approval", f];
+      // the authorization and the receipt carry the same envelope, so they carry the same commitment to it
+      const earlier = f === "envelope" && prior ? getAt(prior.predicate, path) : undefined;
+      if (f === "envelope" && argsPublic && (approval.status === "approved" || (earlier !== undefined && !isCommitment(earlier)))) continue;
+      if (isCommitment(earlier)) out = setAt(out, path, earlier);
+      else hide(path, v, f === "envelope" && argsSide ? argsSide.key : k);
+    }
   }
   if (withheld.length) out.capture = { mode, withheld } satisfies CaptureNote;
   return { predicate: out as unknown as P, salts };

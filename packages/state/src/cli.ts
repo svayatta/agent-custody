@@ -18,6 +18,8 @@ import { loadScenarios, signReport, verifyReport } from "./evals-file.ts";
 import { buildPack, formatPack, signPack, verifyPack } from "./pack.ts";
 import { buildActionPack, formatExplain, signActionPack, verifyActionPack } from "./explain.ts";
 import { serveReview, writeReview } from "./review.ts";
+import { buildCaseFile, renderCaseFile, verifyCaseFile, verifyCaseHtml } from "./case-file.ts";
+import { validateReceiptSearch } from "./search.ts";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -96,11 +98,17 @@ const USAGE = `agent-custody-memory <command>
   explain ... --out <action.json> --sign <key>     the same as one signed action pack, every downstream receipt inside
   explain --verify <action.json> --key <pub> [--issuer-key <pub>] [--principal-key <pub>] [--log-key <pub>]
                                                    checks the pack, the receipt inside it, and every downstream receipt
-  review --receipts <dir> [--ledger <ledger>] [--issuer-key <pub>] [--principal-key <pub>] [--log-key <pub>] [--log-id <id>] [--port 8791] [--host 127.0.0.1] [--title <text>]
+  review --receipts <dir> [--ledger <ledger>] [--issuer-key <pub>] [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub>] [--log-id <id>] [--port 8791] [--host 127.0.0.1] [--title <text>]
                                                    the explain output as pages, for the reviewer who will not open a terminal: an index of every
                                                    receipt with its verdict, one page per receipt with the ten answers and the verification report.
                                                    Serves on loopback; put it behind your own login if you expose it.
-  review ... --out <dir>                           the same as static files, for a case file or a shared drive
+  review ... [--transaction <id>] [--customer <id>] [--agent <id>] [--from <ISO>] [--to <ISO>] [--upstream-key <pub>]
+                                                   search public receipt fields by exact IDs and an inclusive time window
+  review ... --out <dir>                           static pages with search and downloadable offline case files
+  review ... --case <receiptId> --out <case.html|case.json>
+                                                   one portable case, with public keys and fresh offline verification in the HTML
+  review --verify-case <case.json|case.html> [--issuer-key <pub>] [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub>] [--upstream-key <pub>] [--log-id <id>] [--json]
+                                                   repeat every receipt check offline; supplied keys replace the bundled trust set
   export --ledger <ledger.sqlite|postgres://…> --out <ledger.jsonl>  the auditable JSONL of any ledger, one event per line; also the feed for a warehouse
   blast --ledger <ledger.jsonl> --receipts <dir> --fact <factId> [--capture-key-env NAME] [--json]
                                                    everything that relied on a fact: later calls, derived beliefs, and whether it was retracted
@@ -243,11 +251,37 @@ async function main(argv: string[]): Promise<number> {
       return verification && !verification.ok ? 1 : pack.missingReceipts.length ? 1 : 0;
     }
     case "review": {
-      const { values } = parseArgs({ args: rest, options: { receipts: { type: "string" }, ledger: { type: "string" }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, "log-key": { type: "string", multiple: true }, "log-id": { type: "string" }, port: { type: "string", default: "8791" }, host: { type: "string", default: "127.0.0.1" }, title: { type: "string" }, out: { type: "string" } } });
-      if (!values.receipts) throw new Error("review needs --receipts");
-      const keys = values["issuer-key"]?.length ? { issuerKeys: values["issuer-key"].map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), ...(values["log-key"]?.length ? { logKeys: values["log-key"].map(loadPublicKey) } : {}), ...(values["log-id"] ? { logId: values["log-id"] } : {}) } : undefined;
+      const { values } = parseArgs({ args: rest, options: { receipts: { type: "string" }, ledger: { type: "string" }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, "approval-key": { type: "string", multiple: true }, "log-key": { type: "string", multiple: true }, "upstream-key": { type: "string", multiple: true }, "log-id": { type: "string" }, port: { type: "string", default: "8791" }, host: { type: "string", default: "127.0.0.1" }, title: { type: "string" }, out: { type: "string" }, transaction: { type: "string" }, customer: { type: "string" }, agent: { type: "string" }, from: { type: "string" }, to: { type: "string" }, case: { type: "string" }, "verify-case": { type: "string" }, json: { type: "boolean", default: false } } });
+      const hasKeys = [values["issuer-key"], values["principal-key"], values["approval-key"], values["log-key"], values["upstream-key"]].some((k) => k?.length) || !!values["log-id"];
+      const keys = hasKeys ? { issuerKeys: (values["issuer-key"] ?? []).map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), ...(values["approval-key"]?.length ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}), ...(values["log-key"]?.length ? { logKeys: values["log-key"].map(loadPublicKey) } : {}), ...(values["upstream-key"]?.length ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}), ...(values["log-id"] ? { logId: values["log-id"] } : {}) } : undefined;
+      if (values["verify-case"]) {
+        const text = readFileSync(values["verify-case"], "utf8");
+        // Only a name that ends in .json is read as JSON. A browser renders many other names (.html, .shtml, .ehtml) as HTML, so those get the byte check.
+        const result = /\.json$/i.test(values["verify-case"]) ? verifyCaseFile(JSON.parse(text), keys) : verifyCaseHtml(text, keys);
+        if (values.json) console.log(JSON.stringify(result, null, 2));
+        else {
+          for (const c of result.checks) console.log(`${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? `  (${c.detail})` : ""}`);
+          if (result.answers !== undefined) console.log(`\nTHE TEN ANSWERS, rebuilt from the signed receipt and the file's ledger snapshot (trust these, not a saved copy):\n${result.answers}`);
+          console.log(`\nRESULT: ${result.ok ? "VERIFIED" : "NOT VERIFIED"}`);
+          if (!result.complete) console.log("INCOMPLETE: missing evidence, unknown or withheld beliefs, or no ledger; dependency and reversal answers remain limited.");
+          console.log(keys ? "Checked against independently supplied public keys." : "Checked against bundled public keys; confirm their fingerprints with a trusted source.");
+        }
+        return result.ok ? 0 : 1;
+      }
+      if (!values.receipts) throw new Error("review needs --receipts, or --verify-case <case.json|case.html>");
+      if (values.case && (!values.out || !/\.(?:html|json)$/.test(values.out))) throw new Error("review --case needs --out <case.html|case.json>");
+      const search = { ...(values.transaction ? { transaction: values.transaction } : {}), ...(values.customer ? { customer: values.customer } : {}), ...(values.agent ? { agent: values.agent } : {}), ...(values.from ? { from: values.from } : {}), ...(values.to ? { to: values.to } : {}) };
+      validateReceiptSearch(search);
       const ledger = values.ledger ? new Ledger(values.ledger) : undefined;
-      const o = { receiptsDir: values.receipts, ...(ledger ? { ledger } : {}), ...(keys ? { keys } : {}), ...(values.title ? { title: values.title } : {}) };
+      const o = { receiptsDir: values.receipts, search, ...(ledger ? { ledger } : {}), ...(keys ? { keys } : {}), ...(values.title ? { title: values.title } : {}) };
+      if (values.case) {
+        try {
+          const file = await buildCaseFile(o, values.case);
+          writeFileSync(values.out!, values.out!.endsWith('.html') ? renderCaseFile(file) : JSON.stringify(file, null, 2));
+          console.log(`wrote offline case file to ${values.out}`);
+          return 0;
+        } finally { await ledger?.close(); }
+      }
       if (values.out) {
         const r = await writeReview(o, values.out);
         console.log(`wrote ${r.receipts} receipt page(s) and the index to ${values.out}`);

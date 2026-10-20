@@ -39,6 +39,7 @@ Suggested reading order is the numbering. Output lands in `examples-out/`, which
 | 27 | revoking an agent's authority mid-session | [27-revocation.ts](../examples/27-revocation.ts) | a support agent and the sub-agent it delegated to, both mid-session on one gateway, cut off on their next call when the operator runs `agent-custody revoke` from another process: no key rotated, no restart, each refusal a signed receipt that verifies, and a new session, a repacked grant, or a fresh delegation from it all refused | `src/gateway.ts` (`revokedGrants`, re-read on every call), `src/delegation.ts` (`grantDigest`, the chain), `src/cli.ts` (`revoke`) |
 | 28 | policy simulation | [28-policy-simulation.ts](../examples/28-policy-simulation.ts) | three refunds recorded in observe mode, then the gateway stopped and their receipts replayed against a lower limit: only one changes decision, grouped by tool and reason with its receipt id, the proposed policy digest saved with the run | `src/simulate.ts`, `src/cli.ts` |
 | 29 | financial operations | [29-financial-operations.ts](../examples/29-financial-operations.ts) | a refund accepted before its response is dropped, a restart and retry producing no second request, the unknown reservation blocking an over-budget refund, and a provider reconciliation receipt that verifies | `src/operations.ts`, `src/gateway.ts`, `src/verify.ts` |
+| 30 | payload-bound human approvals | [30-payload-bound-approvals.ts](../examples/30-payload-bound-approvals.ts) | two people sign the exact refund; missing approval, one signer, changed amount or beneficiary, extra arguments, and expiry are refused; the approved call executes once, its replay is refused, and every receipt verifies with separately trusted approval keys | `src/approval.ts`, `src/gateway.ts`, `src/verify.ts` |
 
 ## How policies are defined, in one paragraph
 
@@ -47,6 +48,7 @@ A policy is a Cedar file. The gateway turns each tool call into a Cedar request:
 ## Where each guide goes deeper
 
 - [usage.md](usage.md): gateway setup and wiring into hosts
+- [approvals.md](approvals.md): exact-action signatures, two-person thresholds, consumption, and privacy limits
 - [financial-operations.md](financial-operations.md): payment retries, budget reservations, provider contract, and operator reconciliation
 - [sdk.md](sdk.md): the interceptor and every adapter
 - [policies.md](policies.md): the Cedar mapping, evaluation rules, tested examples, gotchas

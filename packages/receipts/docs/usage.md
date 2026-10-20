@@ -143,6 +143,43 @@ node src/cli.ts gateway --config ./gateway.json
 
 You will not normally run this by hand. The agent host spawns it, as below.
 
+## Require a human approval
+
+A grant can permit a tool while a human must still approve each exact action. Add `approvals` to the gateway config:
+
+```json
+{
+  "approvals": {
+    "trustedKeys": ["keys/approver.pub", "keys/second-approver.pub"],
+    "usedDir": "approvals-used",
+    "tools": [{ "tool": "stripe.refund", "minApprovers": 2, "fields": { "beneficiary": "customer_id" } }]
+  }
+}
+```
+
+The caller puts an approver-signed DSSE envelope in `_meta["agent-custody/approval"]`. It binds the principal, agent, tool, complete argument digest, amount in integer minor units, currency, beneficiary, and expiry. The gateway refuses an approval whose lifetime exceeds `approvals.maxLifetimeSeconds` (default `3600`). A second approver countersigns the same envelope for a two-key rule. Missing, expired, mismatched, or insufficiently signed approvals deny the call even in observe mode. A valid approval still needs a valid grant and an allowing policy.
+
+The gateway checks again and consumes the approval id immediately before forwarding. Keep `usedDir` persistent and shared by every gateway that accepts the same approvals; a restart, crash, or unknown upstream outcome never releases a consumed id. The receipt embeds the approval evidence; `verify --approval-key` uses separate human public keys to check it. Single use is enforced by the store, not proved globally by one offline receipt.
+
+Under a private capture rule the receipt withholds the approval envelope as a commitment, because it carries the action fields and an unsalted digest of all arguments. The status, the times, and the signer key ids stay in clear. Full approval verification then requires the capture key or a disclosure. [The approval guide](approvals.md) covers signing, field mappings, failure recovery, and these privacy limits; [tutorial 30](../examples/30-payload-bound-approvals.ts) runs it end to end.
+
+## Review a transaction and export its case
+
+The state package's `agent-custody-memory review` opens the receipts as a local review console, with one receipt's ten answers and verification report behind each index row:
+
+```bash
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --transaction re_123 --customer cust_123 --agent support-agent --from 2026-10-01T00:00:00Z --to 2026-10-31T23:59:59Z
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --out review-site/
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --case <receiptId> --out refund.case.html
+agent-custody-memory review --receipts receipts --issuer-key keys/gateway.pub --principal-key keys/principal.pub --case <receiptId> --out refund.case.json
+agent-custody-memory review --verify-case refund.case.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub --json
+agent-custody-memory review --verify-case refund.case.html --issuer-key keys/gateway.pub --principal-key keys/principal.pub
+```
+
+`--transaction`, `--customer`, and `--agent` match exact case-sensitive ids; all filters combine with AND. `--from` and `--to` are inclusive ISO date-times with `Z` or a UTC offset. Search covers public arguments, results, and gateway facts; a withheld identifier is unavailable. A record whose receipt id differs from its file name stays in the index as NOT VERIFIED, and the header counts the files that cannot be read. A receipt with a value that search skipped (deeper than 64 levels, or JSON text over 64 KiB) is marked "partially indexed" and stays in the list under an id filter. `--ledger <path>` adds belief dependencies, `--log-key <pub>` and `--log-id <id>` check the log, and `--upstream-key <pub>` checks signed upstream results. `--host` defaults to `127.0.0.1`, `--port` to `8791`; `--title <text>` labels the console. It has no authentication of its own. A directory export includes the index, receipt pages and bundles, and portable HTML/JSON cases; its browser search covers the exported set.
+
+The standalone `.case.html` repeats cryptographic checks on the signed evidence with embedded WebCrypto code, offline and without external requests. That result is not independent, because the script is in the same file as the data, and the page does not compare the ten answers with the receipts. Check the `.case.html` or its JSON companion independently with `--verify-case`. The file name sets the format: `.json` is read as JSON, every other name is read as a page, and content that does not match fails. It rebuilds the ten answers from the signed receipt and prints them, it fails a `.case.html` that is not exactly what its data renders, and it exits 1 on failure. Trust the printed answers, not the page. The belief, dependency, and reversal lines come from the unsigned ledger snapshot and are not attested; public key flags may be repeated and replace the entire bundled trust set. Confirm bundled key fingerprints with a trusted source. Cases include signed receipts, authorizations, log heads and proofs, public keys, and the ten answers; explanation and ledger snapshots are unsigned exporter assertions. Verification proves the recorded gateway decision and detects receipt tampering, not an external payment side effect. Without a ledger the belief questions remain unknown. Private keys, capture keys, disclosures, and issuer salts files are not exported, and withheld values stay unavailable. [The state guide](../../state/README.md#explain-one-action) and [runnable example](../../state/examples/08-review-console.ts) cover the full flow.
+
 ## Financial operations
 
 For payments, configure `operations` to bind a caller-retained operation UUID to the full call, reserve its amount atomically, and pass an idempotency key to the provider. Existing operations are never forwarded again on retry, and an allowed retry gets a `withheld` receipt of its own. API execution and financial settlement have separate statuses; uncertain outcomes hold their reservations until an operator's provider read commits a reconciliation receipt. The [financial operations guide](financial-operations.md) has the config, provider contract, and `agent-custody reconcile` command. [Tutorial 29](../examples/29-financial-operations.ts) runs the lost-response/restart scenario offline.
@@ -185,7 +222,7 @@ A reviewer verifies such a receipt three ways:
 
 The salts file, `receipts/salts/<id>.json`, is written for the owner alone (mode 0600 in a 0700 directory) and is as sensitive as the values: with it a guess can be confirmed. In mode `digest` it is also the only copy of each salt: lose it, and nobody can disclose those values again, not even the party that holds them, since a value alone cannot be checked against its commitment; the receipt then verifies only as committed. Back the directory up with the receipts, under the same access control as the values themselves. Mode `encrypted` carries each salt inside the ciphertext and nowhere else (the salts file holds only the digest-only ones), so the key alone recovers everything; choose it when a key is easier to keep safe than a directory of files. The key must be 32 random bytes: a reviewer sees its sha256 as `keyid` in every encrypted commitment, which is harmless for a random key and an offline oracle for a key derived from a passphrase. `agent-custody prune` removes the salts and the pre-committed authorization with the receipt.
 
-The limits. A commitment covers a top-level field, so a field is withheld whole, not in part; put what a reviewer may see in fields of its own. An upstream's own signature covers `contentDigest`, an unsalted sha256 over `{ content, isError }` that the upstream computes, so a reviewer holding the upstream's key and a guess of the whole result can confirm the guess; the gateway cannot salt what the upstream signs. A `digest`-only value can be recomputed only by whoever holds it. A result's top-level `_meta` is withheld whatever the rule says, but a `content` item listed in `clear` is kept whole, its own item-level `_meta` or annotations included; list `content` in `clear` only when every item is fit for a reviewer. The verifier cannot tell a redacted receipt from a complete one beyond the capture note; what it establishes is that whatever is shown, disclosed, or decrypted is the value the signed digest was made over. Nothing here changes what the log receives: a remote log run with `hashOnly` gets leaf hashes, as before, and the exporters are handed the same view as the file and carry digests only. The browser verifier at agent-custody.dev/verify reports the committed case and takes no key or disclosure; use the command-line verifier for those. Tutorial 26 runs the refund above end to end.
+The limits. A signed human approval carries its action fields and an unsalted full-argument digest, so a private rule withholds its envelope; see [approval privacy limits](approvals.md#privacy-limits). A commitment covers a top-level field, so a field is withheld whole, not in part; put what a reviewer may see in fields of its own. An upstream's own signature covers `contentDigest`, an unsalted sha256 over `{ content, isError }` that the upstream computes, so a reviewer holding the upstream's key and a guess of the whole result can confirm the guess; the gateway cannot salt what the upstream signs. A `digest`-only value can be recomputed only by whoever holds it. A result's top-level `_meta` is withheld whatever the rule says, but a `content` item listed in `clear` is kept whole, its own item-level `_meta` or annotations included; list `content` in `clear` only when every item is fit for a reviewer. The verifier cannot tell a redacted receipt from a complete one beyond the capture note; what it establishes is that whatever is shown, disclosed, or decrypted is the value the signed digest was made over. Nothing here changes what the log receives: a remote log run with `hashOnly` gets leaf hashes, as before, and the exporters are handed the same view as the file and carry digests only. The browser verifier at agent-custody.dev/verify reports the committed case and takes no key or disclosure; use the command-line verifier for those. Tutorial 26 runs the refund above end to end.
 
 ## One gateway for many agents, over HTTP
 
@@ -290,7 +327,7 @@ Any other MCP client works the same way: Python's `mcp` package, LangGraph's MCP
 | --- | --- | --- | --- |
 | executed | as returned by upstream | upstream's content, untouched | `_meta["agent-custody/receipt"]` |
 | upstream returned an error | `true` | upstream's content | same |
-| denied by scope or policy | `true` | `Denied by policy: <reason> (receipt <id>)` | same |
+| denied by scope, approval, or policy | `true` | `Denied by policy: <reason> (receipt <id>)` | same |
 | upstream unreachable | `true` | `Upstream error: <message> (receipt <id>)` | same |
 
 The receipt id is the file name under `receiptsDir`.

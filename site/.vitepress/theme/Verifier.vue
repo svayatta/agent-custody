@@ -7,6 +7,7 @@ import { formatReport, publicKeyFromPem, verifyBundle, type Result } from "../..
 const bundleText = ref("");
 const issuerPem = ref("");
 const principalPem = ref("");
+const approvalPem = ref("");
 const logPem = ref("");
 const upstreamPem = ref("");
 const stripeSecret = ref("");
@@ -18,13 +19,14 @@ const error = ref("");
 const busy = ref(false);
 const supported = typeof globalThis.crypto?.subtle?.importKey === "function";
 
-const samples = computed(() => (vectors.cases as any[]).filter((c) => ["gateway-executed", "gateway-precommit-executed", "gateway-executed-upstream-attested", "gateway-executed-stripe-webhook", "gateway-denied", "sdk-executed", "remote-log-with-log-key"].includes(c.name)));
+const samples = computed(() => (vectors.cases as any[]).filter((c) => ["gateway-executed", "gateway-approved-two-humans", "gateway-precommit-executed", "gateway-executed-upstream-attested", "gateway-executed-stripe-webhook", "gateway-denied", "sdk-executed", "remote-log-with-log-key"].includes(c.name)));
 
 function load(c: any) {
   const pem = (names: string[]) => names.map((n) => (vectors.keys as any)[n].publicKeyPem).join("\n");
   bundleText.value = JSON.stringify(c.bundle, null, 2);
   issuerPem.value = pem(c.issuerKeys);
   principalPem.value = pem(c.principalKeys);
+  approvalPem.value = pem(c.approvalKeys ?? []);
   logPem.value = pem(c.logKeys);
   upstreamPem.value = pem(c.upstreamKeys ?? []);
   stripeSecret.value = c.providerSecrets?.stripe ?? "";
@@ -64,6 +66,7 @@ onMounted(async () => {
     bundleText.value = JSON.stringify(JSON.parse(b), null, 2);
     issuerPem.value = issuer;
     principalPem.value = "";
+    approvalPem.value = "";
     logPem.value = log;
     await verify();
   } catch (e) {
@@ -84,7 +87,7 @@ async function verify() {
     const issuerKeys = await keys(issuerPem.value);
     if (issuerKeys.length === 0) throw new Error("at least one issuer public key (SPKI PEM) is required");
     const logLeaves = logText.value.trim() ? logText.value.trim().split("\n").map((l) => JSON.parse(l) as string) : undefined;
-    const r = await verifyBundle(bundle, { issuerKeys, principalKeys: await keys(principalPem.value), logKeys: await keys(logPem.value), upstreamKeys: await keys(upstreamPem.value), ...(stripeSecret.value || githubSecret.value ? { providerSecrets: { ...(stripeSecret.value ? { stripe: stripeSecret.value } : {}), ...(githubSecret.value ? { github: githubSecret.value } : {}) } } : {}), ...(logLeaves ? { logLeaves } : {}) });
+    const r = await verifyBundle(bundle, { issuerKeys, principalKeys: await keys(principalPem.value), approvalKeys: await keys(approvalPem.value), logKeys: await keys(logPem.value), upstreamKeys: await keys(upstreamPem.value), ...(stripeSecret.value || githubSecret.value ? { providerSecrets: { ...(stripeSecret.value ? { stripe: stripeSecret.value } : {}), ...(githubSecret.value ? { github: githubSecret.value } : {}) } } : {}), ...(logLeaves ? { logLeaves } : {}) });
     result.value = r;
     report.value = formatReport(r);
   } catch (e) {
@@ -110,6 +113,7 @@ async function verify() {
     <div class="grid">
       <div><label>Issuer public keys (gateway or SDK app, SPKI PEM, one or more)</label><textarea v-model="issuerPem" rows="5" spellcheck="false" placeholder="-----BEGIN PUBLIC KEY-----"></textarea></div>
       <div><label>Principal public keys (for gateway receipts)</label><textarea v-model="principalPem" rows="5" spellcheck="false" placeholder="-----BEGIN PUBLIC KEY-----"></textarea></div>
+      <div><label>Human approval public keys (for approved actions)</label><textarea v-model="approvalPem" rows="5" spellcheck="false" placeholder="-----BEGIN PUBLIC KEY-----"></textarea></div>
       <div><label>Log public keys (only for receipts logged to a remote log)</label><textarea v-model="logPem" rows="5" spellcheck="false" placeholder="-----BEGIN PUBLIC KEY-----"></textarea></div>
       <div><label>Upstream public keys (only when the upstream signed its result)</label><textarea v-model="upstreamPem" rows="5" spellcheck="false" placeholder="-----BEGIN PUBLIC KEY-----"></textarea></div>
       <div><label>Provider secrets (only when the upstream attached a Stripe webhook or GitHub delivery; stays in your browser)</label><input v-model="stripeSecret" placeholder="Stripe webhook signing secret, whsec_…" /><input v-model="githubSecret" placeholder="GitHub webhook secret" style="margin-top:0.3rem" /></div>
