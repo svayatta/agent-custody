@@ -1,10 +1,15 @@
 # Publishes packages/receipts/server.json to the official MCP Registry as io.github.svayatta/agent-custody.
-# Run it by hand from the Actions tab after the npm release that server.json names: the registry checks that the
-# published @agent-custody/receipts carries the matching mcpName. GitHub OIDC grants io.github.<repository owner>/*,
-# so no token or secret is involved, and org publishing does not depend on anyone's personal org-role lookup.
+# Runs when the release workflow has finished for a version tag, or by hand from the Actions tab, after the npm release
+# that server.json names: the registry checks that the published @agent-custody/receipts carries the matching mcpName,
+# so the job first waits for npm to serve that version.
+# GitHub OIDC grants io.github.<repository owner>/*, so no token or secret is involved, and org publishing does not
+# depend on anyone's personal org-role lookup.
 name: mcp-registry
 
 on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -16,9 +21,16 @@ env:
 
 jobs:
   publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Wait for npm to serve the version
+        run: .github/scripts/wait-for-npm.sh "$(jq -r .version packages/receipts/server.json)"
       - name: Install mcp-publisher
         run: |
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher

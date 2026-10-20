@@ -1,0 +1,58 @@
+# Deploys the log's host by hand, from the Actions tab: "docs" rebuilds the docs site, a published version such as
+# 0.8.0 moves log, signer, and portal to that image and then checks the log from outside. It runs over SSH with a key
+# that can run only deploy/upgrade.sh (deploy/README.md says how to set it up), and does nothing until the repository
+# variable DEPLOY_HOST is set.
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "docs, or a published version such as 0.8.0"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: vars.DEPLOY_HOST != ''
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - id: what
+        env:
+          target: ${{ github.event.inputs.target }}
+        run: |
+          if [ "$target" != docs ] && ! printf '%s\n' "$target" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "expected docs or a version such as 0.8.0, got '$target'" >&2
+            exit 1
+          fi
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+      - name: run deploy/upgrade.sh on the host
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ vars.DEPLOY_HOST }}
+          SSH_USER: ${{ vars.DEPLOY_USER || 'root' }}
+          TARGET: ${{ steps.what.outputs.target }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 "$SSH_USER@$HOST" "$TARGET"
+      - uses: actions/setup-node@v7
+        if: steps.what.outputs.target != 'docs' && vars.LOG_URL != ''
+        with:
+          node-version: 22
+      - name: check the log from outside
+        if: steps.what.outputs.target != 'docs' && vars.LOG_URL != ''
+        env:
+          VERSION: ${{ steps.what.outputs.target }}
+          LOG_URL: ${{ vars.LOG_URL }}
+          CHECKPOINTS_URL: ${{ vars.CHECKPOINTS_URL }}
+        run: npx -y -p "@agent-custody/receipts@$VERSION" agent-custody log-check --log-url "$LOG_URL" --checkpoints-url "$CHECKPOINTS_URL" --tenant default
