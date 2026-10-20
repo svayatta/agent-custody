@@ -48,7 +48,7 @@ flowchart LR
 | the gateway key, the principal key, the grant, the Cedar policy, the revocation list | the signer that holds the log's key, apart from the process facing the internet |
 | the tool credentials (Stripe key and the like), held by the gateway, not the agent | signed checkpoints on a second host, and the outside monitor |
 | the full receipts, with arguments and results, under the customer's capture rules | the tenant portal: registration, tokens, usage against the plan, billing, export |
-| the optional memory server and its ledger | the witness, which must run on a machine the log's operator does not control |
+| the optional memory server and its ledger | the witness software, which must run on a machine the log's operator does not control; no independent operator runs one for our log yet |
 
 A customer who does not want a hosted log runs the same server from the container, the compose file, or the Kubernetes manifests in `deploy/`.
 
@@ -314,7 +314,7 @@ sequenceDiagram
 - **Only calls through the gateway.** A credential in the agent's environment, a second direct route in the host config, or code that calls an API on its own is outside it. Taking those away is a deployment decision.
 - **The SDK and sidecar record, they do not prove.** They run in the process they describe, so their receipts are `claimed`.
 - **The hosted log does not see grants or policy.** It sees leaf hashes. A receipt names the grant and carries the policy digest, and a verifier checks both against public keys.
-- **The operator can rewrite a local log.** A remote log, published checkpoints, and a witness are what detect that.
+- **The operator can rewrite a local log.** A remote log, published checkpoints, and a witness are what detect that. The witness ships in the package, but a second, independent operator for our log is still being sought, so today the checkpoints are published and the witness step is not yet independent.
 - **There is no hosted control plane yet.** Grants, revocation and Cedar policy are managed on the customer's gateway; the portal manages the log, tokens, usage and billing.
 - **Policy changes need a restart; grant revocations do not.**
 - **Failure mode:** a `precommit` tool is withheld while the log is unreachable. That is deliberate and it is a denial of service on the agent.
