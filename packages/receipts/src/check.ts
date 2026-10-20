@@ -21,6 +21,14 @@ export interface CheckFinding {
 export interface CheckOptions {
   /** start the upstreams and compare tool names with what they offer */
   connect?: boolean;
+  /**
+   * "check" (the default) requires every credential variable the config names to be set in this process. "skip" is for a
+   * process that is not the gateway and deliberately does not hold its credentials, such as the console: they are not
+   * checked, and an upstream that needs one is not started.
+   */
+  environment?: "check" | "skip";
+  /** cancels --connect while it is starting the upstreams; whatever was started is closed */
+  signal?: AbortSignal;
 }
 
 const distance = (a: string, b: string): number => {
@@ -135,9 +143,11 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   if (cfg.splunk?.tokenEnv) envNames.push(["splunk", cfg.splunk.tokenEnv]);
   for (const v of Object.values(cfg.otel?.headersEnv ?? {})) envNames.push(["otel", v]);
   if (cfg.captureKeyEnv) envNames.push(["capture", cfg.captureKeyEnv]);
-  const missing = envNames.filter(([, v]) => !process.env[v]);
+  const skipEnvironment = options.environment === "skip";
+  const missing = skipEnvironment ? [] : envNames.filter(([, v]) => !process.env[v]);
   for (const [who, v] of missing) add("error", "environment", `${who}: the variable ${v} is not set here, and a gateway does not start without it`);
-  if (envNames.length && !missing.length) add("ok", "environment", `${envNames.length} credential variable${envNames.length === 1 ? " is" : "s are"} set`);
+  if (envNames.length && skipEnvironment) add("ok", "environment", `not checked here: this process does not hold the gateway's credentials (${[...new Set(envNames.map(([, v]) => v))].join(", ")}); run agent-custody check where the gateway runs`);
+  else if (envNames.length && !missing.length) add("ok", "environment", `${envNames.length} credential variable${envNames.length === 1 ? " is" : "s are"} set`);
 
   // stdio upstreams: the command must exist where the gateway runs
   for (const u of cfg.upstreams ?? (cfg.upstream ? [{ name: "upstream", ...cfg.upstream }] : [])) {
@@ -220,6 +230,10 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   }
 
   // a gateway key that does not exist yet (the container creates it on first start) must not stop the upstreams being tried
+  if (skipEnvironment && envNames.length) {
+    add("warn", "upstreams", "not started: the upstreams need credentials that this process does not hold, by design. Run `agent-custody check --connect` where the gateway runs, for example `docker compose exec gateway agent-custody check --config /config/gateway.json --connect`");
+    return out;
+  }
   let connectCfg = cfg;
   let scratch: string | undefined;
   if (!existsSync(cfg.identity.keyFile)) {
@@ -228,7 +242,7 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   }
   let tools: string[] | undefined;
   try {
-    const host = await createGatewayHost(connectCfg);
+    const host = await createGatewayHost(connectCfg, options.signal ? { signal: options.signal } : {});
     try {
       tools = host.tools();
     } finally {

@@ -205,6 +205,8 @@ docker run --rm -v "$PWD/config:/config:ro" -v gateway-data:/data --env-file .en
 
 With **`--connect`** it also starts the upstreams, which is where an unreachable server or **two upstreams offering the same tool** shows up, prints the tools they offer, and compares every tool name in `precommit`, `facts`, `approvals`, `operations`, and the grant's scopes with that list. A name in `precommit`, `facts`, `approvals`, or `operations` that no upstream offers is an **error** (for `precommit` it means the tool you meant is forwarded before it is logged); a grant scope that names nothing is a warning. `--connect` starts your stdio upstreams and may create the receipts directory. It exits 1 on any error, so it can gate a deploy.
 
+**A console for all of this.** [The gateway console](console.md) shows the same config, the tools, and the check in a browser, and edits the policy with a replay of recorded calls before it saves.
+
 ## When the gateway does not start
 
 | the message | the cause | the fix |

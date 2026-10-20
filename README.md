@@ -118,6 +118,7 @@ This whole loop is one runnable file, [packages/state/examples/02-receipt-to-bel
 - Log to a server the operator does not control, so tree heads are signed by a key that is not yours. [verification.md](packages/receipts/docs/verification.md)
 - Verify a receipt in the browser, nothing uploaded, and check a second implementation against the published conformance vectors. [agent-custody.dev/verify](https://agent-custody.dev/verify), [vectors](https://agent-custody.dev/receipt/vectors)
 - Prove a log was never rewritten: keep any receipt's tree head, later audit that the log still extends it. [verification.md](packages/receipts/docs/verification.md)
+- Run the console for a gateway: config, tools, receipts with a verdict each, a policy editor that replays recorded calls before it saves, and grant revocation, as a service of its own. [console.md](packages/receipts/docs/console.md).
 - Configure the gateway: who may use which tools, where the tools live, a worked example, and `agent-custody check` to validate a config before it starts. [configuration.md](packages/receipts/docs/configuration.md).
 - Run one shared gateway for every agent on a host or cluster: a container image for amd64 and arm64, compose, Kubernetes, and systemd recipes, a starter config. [deploy/gateway](deploy/gateway/README.md).
 - See how it fits together, with diagrams: what runs on the customer's side, what is hosted, the sequence of a call, onboarding, revocation, and verification. [Architecture](site/guide/architecture.md).
