@@ -26,6 +26,8 @@ docker buildx imagetools inspect ghcr.io/svayatta/agent-custody-log:0.8.0 --form
 
 The identity is pinned to the `image` workflow on main (a release build runs as the default branch), and the workflow refuses to point a version tag or `latest` at anything but the tagged release commit. If a verify fails on a genuine image, print the certificate with `cosign verify ... | jq '.[0].optional'` and compare its identity before relaxing the check. The workflow's step summary lists each release's digest. Base images in every Dockerfile and compose file are pinned by digest, and Dependabot proposes the updates. A pull request that touches `deploy/` builds the image from the workspace package and starts it (`smoke-log.sh`), and checks the compose files, the manifests, the shell scripts, and `upgrade.sh` (`test-upgrade.sh`), so a broken image or script is found before the release.
 
+If a pull or an inspect fails with `pull access denied` or `insufficient_scope` on an image that is public, docker is probably sending a stored ghcr.io login that has expired or lacks access, and the registry rejects the login although an anonymous request would succeed. Run `docker logout ghcr.io` and try again: a public image needs no login. (The same applies to `docker buildx imagetools inspect`.)
+
 ## The contract
 
 | variable | meaning | default |

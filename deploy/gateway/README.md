@@ -31,6 +31,8 @@ docker buildx imagetools inspect ghcr.io/svayatta/agent-custody-gateway:0.8.0 --
 
 The identity is pinned to this workflow on main: a release build (`workflow_run`) and a push to main both sign as the default branch, and a build of any other ref does not verify. The workflow refuses to point a version tag or `latest` at anything but the tagged release commit, and `edge` at anything but main. If a verify fails on a genuine image, print the certificate with `cosign verify ... | jq '.[0].optional'` and compare its identity before relaxing the check. The `gateway-image` workflow's step summary lists the digest of each build.
 
+If a pull or an inspect fails with `pull access denied` or `insufficient_scope` on an image that is public, docker is probably sending a stored ghcr.io login that has expired or lacks access, and the registry rejects the login although an anonymous request would succeed. Run `docker logout ghcr.io` and try again: a public image needs no login. (The same applies to `docker buildx imagetools inspect`.)
+
 ## Start one
 
 ```bash
