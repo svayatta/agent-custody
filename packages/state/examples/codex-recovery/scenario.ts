@@ -186,6 +186,10 @@ export async function inspect(dir: string): Promise<RecoveryPlan> {
   // Do not silently call an untraced side effect "unaffected". This small demo cannot decide its recovery.
   const untraced = billing.credits.filter(c => c.status === "active" && !affected.has(c.receiptId));
   if (untraced.length) throw new Error("Active credit has no observed dependency on the plan; review it manually before recovery");
+  // A wrong benefit outside the blast radius gets no retraction, so a corrective write would leave two current facts.
+  const outside = current.filter(f => f.actor === "codex-support" && f.subject === CUSTOMER && f.space === SPACE && Object.hasOwn(BENEFITS, f.predicate) && f.value !== BENEFITS[f.predicate as keyof typeof BENEFITS])
+    .filter(f => !retractFacts.some(r => r.factId === f.factId));
+  if (outside.length) throw new Error("Current benefit has no observed dependency on the plan; review it manually before recovery");
   // Derive writes from every benefit the agent wrote, retracted or not, so a refreshed plan after a partial recovery still lists them.
   const written = (await ledger.facts()).filter(f => f.actor === "codex-support" && f.subject === CUSTOMER && f.space === SPACE && Object.hasOwn(BENEFITS, f.predicate));
   const writeFacts = [...new Set(written.map(f => f.predicate))].filter(predicate => !current.some(f => f.subject === CUSTOMER && f.predicate === predicate && f.value === BENEFITS[predicate as keyof typeof BENEFITS]))

@@ -97,6 +97,16 @@ describe("support recovery demo", () => {
     expect(readBilling(dir).credits[0]?.status).toBe("active");
   });
 
+  it("does not invent a dependency when a benefit was written without a memory read", async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), "codex-benefit-")), "case");
+    await prepare(dir);
+    const agent = await openGateway(dir, "agent");
+    try { await call(agent, "memory.write", { subject: CUSTOMER, predicate: "discount_percent", value: 20, space: SPACE }); }
+    finally { await agent.close(); }
+    await correct(dir);
+    await expect(inspect(dir)).rejects.toThrow("Current benefit has no observed dependency");
+  });
+
   it("reports no agent activity honestly instead of manufacturing an affected action", async () => {
     const dir = join(mkdtempSync(join(tmpdir(), "codex-no-action-")), "case");
     await prepare(dir);

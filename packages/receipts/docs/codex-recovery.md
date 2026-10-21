@@ -127,6 +127,6 @@ node examples/10-support-recovery.ts
 bun run test test/codex-recovery.test.ts test/examples.test.ts
 ```
 
-The checks cover approval, stale plans, revoked support authority, duplicate-credit prevention, receipt tampering, store/evidence consistency, missing observed dependencies, and runs without agent activity.
+The checks cover approval, stale plans, revoked support authority, duplicate-credit prevention, receipt tampering, store/evidence consistency, missing observed dependencies (a credit or a benefit that no memory read supports), the refresh after a partial recovery, and runs without agent activity.
 
 Codex integration references: [non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode), [MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
