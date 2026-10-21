@@ -13,7 +13,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Letta } from "@letta-ai/letta-client";
 import { InMemoryStore } from "@langchain/langgraph";
-import { Ledger } from "../src/ledger.ts";
+import { Ledger, type Fact } from "../src/ledger.ts";
 import { createMemoryServer } from "../src/server.ts";
 import { cogneeStore, langgraphStore, lettaStore } from "../src/stores.ts";
 
@@ -33,6 +33,10 @@ function fake(routes: (req: Seen) => { status: number; body: unknown } | undefin
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, seen, close: () => server.close(), fail })));
 }
 const value = (r: CallToolResult) => JSON.parse((r.content[0] as { text: string }).text);
+
+const aFact = (n: number): Fact => ({ factId: `fact-${n}`, subject: `acct:${n}`, predicate: "plan", value: "pro", space: "org", actor: "agent", source: { receiptId: null }, provenance: "claimed", validFrom: "2026-01-01T00:00:00.000Z", validTo: null, confidence: null });
+const ISO = expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+const expected = (n: number, externalId: string) => ({ externalId, factId: `fact-${n}`, text: `acct:${n} plan: pro`, storedAt: ISO });
 
 async function serverWith(stores: NonNullable<Parameters<typeof createMemoryServer>[1]>["stores"]) {
   const ledger = new Ledger(join(mkdtempSync(join(tmpdir(), "stores3-")), "ledger.jsonl"));
@@ -81,7 +85,7 @@ describe("Letta archival memory, through the real client", () => {
     expect(create.headers.authorization).toBe("Bearer test-key");
     const body = JSON.parse(create.body);
     expect(body.text).toBe("acct:42 plan: pro");
-    expect(body.tags).toEqual(["agent-custody", `fact:${w.fact.factId}`, "space:team:support", "support"]);
+    expect(body.tags).toEqual(["agent-custody", `fact:${w.fact.factId}`, "space:team:support", expect.stringMatching(/^stored:\d{4}-\d\d-\d\dT/), "support"]);
     const r = value((await ctx.client.callTool({ name: "memory.retract", arguments: { factId: w.fact.factId, reason: "wrong" } })) as CallToolResult);
     expect(r).toMatchObject({ removedFrom: ["letta"], verification: { letta: "verified" } });
     expect(letta.seen.some((s) => s.method === "DELETE" && s.path === "/v1/agents/agent-1/archival-memory/passage-1")).toBe(true);
@@ -100,6 +104,100 @@ describe("Letta archival memory, through the real client", () => {
       expect(await ctx.ledger.count()).toBe(before);
     } finally {
       letta.fail.on = false;
+    }
+  });
+});
+
+describe("Letta listing, through the real client", () => {
+  it("lists the passages that carry the custody tags, across every page of the cursor, and not the passages without them", async () => {
+    const passages: { id: string; text: string; tags: string[]; created_at?: string }[] = [];
+    const letta = await fake((r) => {
+      const m = r.path.match(/^\/v1\/agents\/agent-1\/archival-memory(\?.*)?$/);
+      if (!m) return undefined;
+      if (r.method === "POST") {
+        const b = JSON.parse(r.body) as { text: string; tags: string[] };
+        const id = `passage-${passages.length}`;
+        passages.push({ id, text: b.text, tags: b.tags });
+        return { status: 200, body: [{ id, text: b.text, tags: b.tags }] };
+      }
+      const q = new URLSearchParams(m[1]);
+      const from = q.has("after") ? passages.findIndex((p) => p.id === q.get("after")) + 1 : 0;
+      return { status: 200, body: passages.slice(from, from + Number(q.get("limit"))) };
+    });
+    try {
+      const store = lettaStore(new Letta({ apiKey: "test-key", baseURL: letta.url }), { agentId: "agent-1" });
+      const id = await store.put(aFact(0));
+      passages.push({ id: "foreign", text: "agent-written note", tags: ["notes"] });
+      // seed-1 stands for a passage an older version wrote: no stored tag, so the passage's created_at answers
+      for (let i = 1; i <= 120; i++) passages.push({ id: `seed-${i}`, text: `seed ${i}`, tags: ["agent-custody", `fact:fact-${i}`], ...(i === 1 ? { created_at: "2025-03-01T10:00:00Z" } : {}) });
+      const listed = await store.list!();
+      expect(listed).toHaveLength(121);
+      expect(listed[0]).toEqual(expected(0, id));
+      expect(listed.at(-1)).toEqual({ externalId: "seed-120", factId: "fact-120", text: "seed 120" }); // written by an older version: no storedAt
+      expect(listed.map((e) => e.externalId)).not.toContain("foreign");
+      expect(listed.find((e) => e.externalId === "seed-1")?.storedAt).toBe("2025-03-01T10:00:00.000Z");
+    } finally {
+      letta.close();
+    }
+  });
+
+  it("lists only the passages that carry every tag of the store, so a repair on one tag-scoped ledger leaves the passages of another on the same agent", async () => {
+    const passages: { id: string; text: string; tags: string[] }[] = [];
+    const letta = await fake((r) => {
+      const m = r.path.match(/^\/v1\/agents\/agent-1\/archival-memory(\?.*)?$/);
+      if (!m) return undefined;
+      if (r.method === "POST") {
+        const b = JSON.parse(r.body) as { text: string; tags: string[] };
+        const id = `passage-${passages.length}`;
+        passages.push({ id, text: b.text, tags: b.tags });
+        return { status: 200, body: [{ id, text: b.text, tags: b.tags }] };
+      }
+      return { status: 200, body: passages };
+    });
+    try {
+      const client = new Letta({ apiKey: "test-key", baseURL: letta.url });
+      const a = lettaStore(client, { agentId: "agent-1", tags: ["tenant:a"] });
+      const b = await serverWith([lettaStore(client, { agentId: "agent-1", tags: ["tenant:b"] })]);
+      await b.client.callTool({ name: "memory.write", arguments: { subject: "acct:b", predicate: "plan", value: "pro", space: "org" } });
+      const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+      for (const p of passages) p.tags = p.tags.map((t) => (t.startsWith("stored:") ? `stored:${hourAgo}` : t));
+      expect(passages).toHaveLength(1);
+      expect(await a.list!()).toEqual([]);
+      const a2 = await serverWith([a]);
+      const r = value((await a2.client.callTool({ name: "memory.repair", arguments: { reason: "append failed" } })) as CallToolResult);
+      expect(r.repaired).toEqual([]);
+      expect(passages).toHaveLength(1);
+      expect(await lettaStore(client, { agentId: "agent-1", tags: ["tenant:b"] }).list!()).toHaveLength(1);
+      await a2.client.close();
+      await b.client.close();
+    } finally {
+      letta.close();
+    }
+  });
+
+  it("matches the tag set exactly, so a store whose tags are a subset or a superset of another's does not claim its passages", async () => {
+    const custody = ["agent-custody", "fact:f-1", "space:org", `stored:${new Date().toISOString()}`];
+    const passages = [{ id: "p-ab", text: "t", tags: [...custody, "tenant:a", "team:b"] }, { id: "p-a", text: "t", tags: [...custody, "tenant:a"] }, { id: "p-none", text: "t", tags: custody }];
+    const letta = await fake((r) => (r.path.match(/^\/v1\/agents\/agent-1\/archival-memory(\?.*)?$/) && r.method === "GET" ? { status: 200, body: passages } : undefined));
+    try {
+      const client = new Letta({ apiKey: "test-key", baseURL: letta.url });
+      const ids = async (tags?: string[]) => (await lettaStore(client, { agentId: "agent-1", ...(tags ? { tags } : {}) }).list!()).map((e) => e.externalId);
+      expect(await ids(["tenant:a"])).toEqual(["p-a"]);
+      expect(await ids(["team:b", "tenant:a"])).toEqual(["p-ab"]);
+      expect(await ids()).toEqual(["p-none"]);
+      expect(await ids(["tenant:b"])).toEqual([]);
+    } finally {
+      letta.close();
+    }
+  });
+
+  it("stops with an error when the backend ignores the cursor", async () => {
+    const page = Array.from({ length: 100 }, (_, i) => ({ id: `p-${i}`, text: `t ${i}`, tags: ["agent-custody", `fact:f-${i}`] }));
+    const letta = await fake((r) => (r.method === "GET" ? { status: 200, body: page } : undefined));
+    try {
+      await expect(lettaStore(new Letta({ apiKey: "test-key", baseURL: letta.url }), { agentId: "agent-1" }).list!()).rejects.toThrow("letta: listing does not advance");
+    } finally {
+      letta.close();
     }
   });
 });
@@ -128,11 +226,28 @@ describe("a LangGraph store, where LangMem keeps its memories, the real InMemory
     expect(fg).toMatchObject({ erasedFromLedger: true, removedFrom: ["langgraph"], verification: { langgraph: "verified" } });
     expect(await store.search(["memories", "user_42"])).toEqual([]);
   });
+
+  it("lists the items that carry custody, across pages of 100, and not other items or other namespaces", async () => {
+    const mine = langgraphStore(store, { namespace: ["memories", "list"] });
+    const id = await mine.put(aFact(0));
+    for (let i = 1; i <= 120; i++) await store.put(["memories", "list"], `seed-${i}`, { content: `seed ${i}`, source: "agent-custody", factId: `fact-${i}` });
+    await store.put(["memories", "list"], "foreign", { content: "no custody here" });
+    await store.put(["memories", "elsewhere"], "other", { content: "x", source: "agent-custody", factId: "fact-x" });
+    await store.put(["memories", "list", "child"], "nested", { content: "x", source: "agent-custody", factId: "fact-n" });
+    const listed = await mine.list!();
+    expect(listed).toHaveLength(121);
+    expect(listed).toContainEqual(expected(0, id));
+    expect(listed.map((e) => e.externalId)).not.toContain("foreign");
+    expect(listed.map((e) => e.externalId)).not.toContain("other");
+    expect(listed.map((e) => e.externalId)).not.toContain("nested");
+    // an item an older version wrote has no storedAt in its value, so the item's creation time answers
+    expect(listed.find((e) => e.externalId === "seed-1")?.storedAt).toBe((await store.get(["memories", "list"], "seed-1"))!.createdAt.toISOString());
+  });
 });
 
 describe("Cognee, through its REST API", () => {
   let cognee: Awaited<ReturnType<typeof fake>>;
-  const items: { id: string; name: string; external_metadata: string }[] = [];
+  const items: { id: string; name: string; external_metadata: string; createdAt?: string }[] = [];
   let ctx: Awaited<ReturnType<typeof serverWith>>;
   beforeAll(async () => {
     process.env.TEST_COGNEE_KEY = "cognee-key";
@@ -176,6 +291,21 @@ describe("Cognee, through its REST API", () => {
     const fg = value((await ctx.client.callTool({ name: "memory.forget", arguments: { factId: w2.fact.factId, reason: "deletion request" } })) as CallToolResult);
     expect(fg).toMatchObject({ erasedFromLedger: true, removedFrom: ["cognee"], verification: { cognee: "verified" } });
     expect(items).toEqual([]);
+  });
+
+  it("lists the data items that carry custody metadata, and not the other items of the dataset", async () => {
+    const store = cogneeStore({ url: cognee.url, datasetId: "ds-1", apiKeyEnv: "TEST_COGNEE_KEY" });
+    const id = await store.put(aFact(0));
+    items.push({ id: "data-foreign", name: "a note", external_metadata: "{}" });
+    try {
+      // the data listing carries no text, so the entry has none
+      expect(await store.list!()).toEqual([{ externalId: id, factId: "fact-0", text: "", storedAt: ISO }]);
+      // an item an older version wrote has no storedAt in its metadata, so the item's createdAt answers
+      items.push({ id: "data-legacy", name: "old", external_metadata: JSON.stringify({ source: "agent-custody", factId: "fact-9" }), createdAt: "2025-03-01T10:00:00Z" });
+      expect((await store.list!()).find((e) => e.externalId === "data-legacy")?.storedAt).toBe("2025-03-01T10:00:00.000Z");
+    } finally {
+      items.length = 0;
+    }
   });
 
   it("a missing credential variable fails at construction, and a refusing Cognee fails the write with nothing recorded", async () => {

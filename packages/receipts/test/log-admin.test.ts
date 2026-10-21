@@ -208,6 +208,10 @@ describe("registrations", () => {
     const user = await portal.createUser("ops@buyer.example", "correct horse battery staple", { name: "Ola Buyer", company: "Buyer GmbH", role: "CISO", phone: "+49 30 1234", telegram: "olabuyer" });
     await tenancy.addTenant("buyer", "buyer-eu", "test");
     await portal.addMember(user.id, "buyer");
+    // registered earlier than the owner, but not the owner
+    const colleague = await portal.createUser("rev@buyer.example", "correct horse battery staple");
+    await db.query("UPDATE portal_users SET created_at = created_at - interval '1 day' WHERE id = $1", [colleague.id]);
+    await portal.addMember(colleague.id, "buyer", "reviewer");
     await portal.setBilling("buyer", { customerId: "cus_1", subscriptionId: "sub_1", status: "active" });
     await tenancy.setPlan("buyer", "team", "test");
     const { token } = await tenancy.addToken("buyer", "fleet", "test");

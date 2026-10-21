@@ -96,6 +96,22 @@ describe.skipIf(!dockerUp)("pgvector write-through, against Postgres with the ex
     expect(all.map((x) => x.text)).toEqual(["acct:42 plan: enterprise"]);
   });
 
+  it("lists the rows that carry custody metadata, with the time stored, and not the rows without it", async () => {
+    const store = pgvectorStore(pool, { embed, dimensions: DIMS, table: "custody_memories" });
+    const f = { factId: "list-1", subject: "acct:1", predicate: "plan", value: "pro", space: "org", actor: "a", source: { receiptId: null }, provenance: "claimed" as const, validFrom: "t", validTo: null, confidence: null };
+    await store.put(f);
+    // a row an older version wrote has no storedAt in its metadata: the created_at column answers; a foreign row has no custody
+    const vec = `[${new Array(DIMS).fill(0.5).join(",")}]`;
+    await pool.query("INSERT INTO custody_memories (id, text, embedding, metadata) VALUES ('old-1', 'old fact', $1, $2), ('foreign-1', 'note', $1, '{}')", [vec, JSON.stringify({ source: "agent-custody", factId: "old-fact" })]);
+    try {
+      const iso = expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+      const listed = (await store.list!()).filter((e) => ["list-1", "old-1", "foreign-1"].includes(e.externalId)).sort((x, y) => x.externalId.localeCompare(y.externalId));
+      expect(listed).toEqual([{ externalId: "list-1", factId: "list-1", text: "acct:1 plan: pro", storedAt: iso }, { externalId: "old-1", factId: "old-fact", text: "old fact", storedAt: iso }]);
+    } finally {
+      await pool.query("DELETE FROM custody_memories WHERE id IN ('list-1', 'old-1', 'foreign-1')");
+    }
+  });
+
   it("refuses a table name that is not an identifier and an embedding of the wrong length", async () => {
     expect(() => pgvectorStore(pool, { embed, dimensions: DIMS, table: "x; drop table y" })).toThrow(/plain identifier/);
     const wrong = pgvectorStore(pool, { embed: async () => [1, 2], dimensions: DIMS, table: "custody_memories" });
