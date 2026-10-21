@@ -191,6 +191,14 @@ describe("Letta listing, through the real client", () => {
     }
   });
 
+  it("refuses a tag with a custody prefix, because list() would never match the tag set", () => {
+    const client = new Letta({ apiKey: "test-key", baseURL: "http://127.0.0.1:1" });
+    for (const tag of ["space:eu", "receipt:r-1", "stored:now", "fact:f-1", "agent-custody"]) {
+      expect(() => lettaStore(client, { agentId: "agent-1", tags: ["ok", tag] })).toThrow(`the tag "${tag}" is reserved`);
+    }
+    expect(() => lettaStore(client, { agentId: "agent-1", tags: ["tenant:a", "spaces"] })).not.toThrow();
+  });
+
   it("stops with an error when the backend ignores the cursor", async () => {
     const page = Array.from({ length: 100 }, (_, i) => ({ id: `p-${i}`, text: `t ${i}`, tags: ["agent-custody", `fact:f-${i}`] }));
     const letta = await fake((r) => (r.method === "GET" ? { status: 200, body: page } : undefined));
