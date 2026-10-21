@@ -281,7 +281,12 @@ export class PortalStore {
   }
   async addMember(userId: string, tenantId: string, role: Role = "owner"): Promise<void> {
     await this.init();
-    await this.client.query(`INSERT INTO ${this.p}members (user_id, tenant_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [userId, tenantId, role]);
+    // A join clears the removal of the tenant in the same statement. Every join follows an invite, a new tenant, or a sign-in with no removal.
+    await this.client.query(
+      `WITH j AS (INSERT INTO ${this.p}members (user_id, tenant_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING)
+       DELETE FROM ${this.p}removed WHERE tenant_id = $2 AND (user_id = $1 OR email = (SELECT email FROM ${this.p}users WHERE id = $1))`,
+      [userId, tenantId, role],
+    );
   }
   async roleOf(userId: string, tenantId: string): Promise<Role | null> {
     await this.init();

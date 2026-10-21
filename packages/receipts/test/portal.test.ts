@@ -823,6 +823,20 @@ describe("enterprise sign-in", () => {
     expect(await store.invitesFor("mal@sso.example")).toEqual([]);
   });
 
+  it("an accepted invite clears the removal, so the row does not outlive the rejoin", async () => {
+    await setup("sso-co", "sso.example");
+    const boss = await verifiedUser("boss4@sso.example", "sso-co", "owner");
+    const owner = `custody_session=${signSession(SECRET, boss.id)}`;
+    const gone = await verifiedUser("clear@sso.example", "sso-co", "reviewer");
+    expect((await post(`api/members/${gone.id}/remove`, {}, owner)).status).toBe(200);
+    const removals = async () => (await db.query("SELECT 1 FROM portal_removed WHERE tenant_id = 'sso-co' AND email = 'clear@sso.example'")).rows.length;
+    expect(await removals()).toBe(1);
+
+    expect((await post("api/members", { email: "clear@sso.example", role: "reviewer" }, owner)).status).toBe(200);
+    expect(sessionOf(await signIn("sso-co", { email: "clear@sso.example" }))).toBeDefined();
+    expect(await removals()).toBe(0);
+  });
+
   it("a removed member that never verified the address does not come back through the provider either, until an admin invites the address again", async () => {
     await setup("sso-co", "sso.example");
     const boss = await verifiedUser("boss2@sso.example", "sso-co", "owner");
