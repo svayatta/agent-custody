@@ -41,6 +41,7 @@ Suggested reading order is the numbering. Output lands in `examples-out/`, which
 | 29 | financial operations | [29-financial-operations.ts](../examples/29-financial-operations.ts) | a refund accepted before its response is dropped, a restart and retry producing no second request, the unknown reservation blocking an over-budget refund, and a provider reconciliation receipt that verifies | `src/operations.ts`, `src/gateway.ts`, `src/verify.ts` |
 | 30 | payload-bound human approvals | [30-payload-bound-approvals.ts](../examples/30-payload-bound-approvals.ts) | two people sign the exact refund; missing approval, one signer, changed amount or beneficiary, extra arguments, and expiry are refused; the approved call executes once, its replay is refused, and every receipt verifies with separately trusted approval keys | `src/approval.ts`, `src/gateway.ts`, `src/verify.ts` |
 | 31 | enterprise sign-in and roles | [31-enterprise-sign-in.ts](../examples/31-enterprise-sign-in.ts) | an enterprise tenant signs in through its own identity provider, a stand-in OIDC IdP: the operator sets single sign-on, a member joins as readonly and is refused a policy write, an owner promotes them to reviewer, and enforcement turns password sign-in off | `src/sso.ts`, `src/portal.ts` |
+| 32 | the gateway console | [32-console.ts](../examples/32-console.ts) | a gateway that has made two receipts, and its operator's console: a token on every route, the receipts with a verdict each, a stricter policy replayed against the recorded calls before it is saved, the save recorded with the old version kept and a stale edit refused, and a grant inspected, revoked, and then refused by the gateway | `src/console.ts`, `src/console-page.ts` |
 
 ## How policies are defined, in one paragraph
 
@@ -49,7 +50,9 @@ A policy is a Cedar file. The gateway turns each tool call into a Cedar request:
 ## Where each guide goes deeper
 
 - [usage.md](usage.md): gateway setup and wiring into hosts
+- [codex-recovery.md](codex-recovery.md): the opt-in live Codex support incident, operator-reviewed recovery, and its offline state example
 - [approvals.md](approvals.md): exact-action signatures, two-person thresholds, consumption, and privacy limits
+- [console.md](console.md): the admin console: run it, what each tab does, how it is protected, and its limits
 - [financial-operations.md](financial-operations.md): payment retries, budget reservations, provider contract, and operator reconciliation
 - [sdk.md](sdk.md): the interceptor and every adapter
 - [policies.md](policies.md): the Cedar mapping, evaluation rules, tested examples, gotchas

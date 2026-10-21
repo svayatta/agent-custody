@@ -20,6 +20,16 @@ export interface PolicyRequest {
   context: Record<string, unknown>;
 }
 
+/** True when the policy set contains a permit rule. Cedar answers, so a `permit(` in a comment does not count. */
+export function hasPermitRule(policyText: string): boolean {
+  const parts = cedar.policySetTextToParts(policyText);
+  if (parts.type !== "success") return false;
+  return parts.policies.some((p) => {
+    const j = cedar.policyToJson(p);
+    return j.type === "success" && j.json.effect === "permit";
+  });
+}
+
 export function policyDigest(policyText: string): string {
   return sha256Hex(policyText);
 }

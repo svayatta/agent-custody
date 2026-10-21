@@ -1,0 +1,31 @@
+# The shared gateway on a plain VM, without containers. Install the package (npm install -g @agent-custody/receipts),
+# create the user and the directories below, put gateway.json, policy.cedar and the public keys in /etc/agent-custody,
+# and the credentials the upstreams read in /etc/agent-custody/gateway.env (mode 0600).
+#
+#   sudo useradd --system --home /var/lib/agent-custody --create-home custody
+#   sudo install -d -o custody -g custody /var/lib/agent-custody/keys
+#   sudo systemctl enable --now agent-custody-gateway
+#
+# The gateway key is created once with: sudo -u custody agent-custody keygen --dir /var/lib/agent-custody/keys --name gateway
+# The path in gateway.json: identity.keyFile = /var/lib/agent-custody/keys/gateway.key.
+[Unit]
+Description=agent-custody shared gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=custody
+EnvironmentFile=-/etc/agent-custody/gateway.env
+ExecStart=/usr/bin/env agent-custody gateway --config /etc/agent-custody/gateway.json --http --host 127.0.0.1 --port 8790
+Restart=on-failure
+RestartSec=5
+# SIGTERM closes the gateway cleanly; give in-flight calls time to finish
+TimeoutStopSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/agent-custody
+
+[Install]
+WantedBy=multi-user.target

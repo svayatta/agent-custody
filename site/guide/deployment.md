@@ -1,6 +1,6 @@
 # Deployment
 
-Nobody's agent calls agent-custody. The agent never learns it exists. There are three places the layer can sit, and a deployment uses whichever of them the job needs.
+The [architecture page](/guide/architecture) has the diagrams: what runs on the customer's side, what is hosted, and the sequence of a call. Nobody's agent calls agent-custody. The agent never learns it exists. There are three places the layer can sit, and a deployment uses whichever of them the job needs.
 
 ```
 agent host  (Claude Code, LangGraph, the OpenAI Agents SDK, your own loop)
@@ -17,6 +17,8 @@ the tool servers the agent already used: Stripe, GitHub, the memory server, seve
 The gateway is an MCP server because MCP is what the host already speaks to its tools. It is a transparent proxy in that protocol, the way an API gateway sits in front of an HTTP service. The only change on the agent's side is one line of host config: where it named the Stripe MCP server, it now names the gateway, and the gateway forwards. The agent still believes it is talking to Stripe.
 
 Being outside the agent's process is what lets the gateway do two things a log collector cannot: refuse a call before the tool runs, and sign the record with a key the agent never holds. One gateway runs per agent session, on stdio, as MCP hosts run their servers; it fronts several upstreams under one human-signed grant. [Setting it up](/receipts/usage).
+
+For every agent on a host or cluster, run one shared gateway as a service instead: `ghcr.io/svayatta/agent-custody-gateway` (amd64 and arm64), with a compose file, Kubernetes manifests and a systemd unit. Each agent connects over HTTP and presents its own grant, and the tool credentials live in the gateway. [Running the gateway as a service](../../deploy/gateway/README.md) has the steps and the limits: a grant is a bearer credential, the transport is plain HTTP, and one replica is the supported shape.
 
 ## The SDK: inside the agent, for tools that are not MCP servers
 

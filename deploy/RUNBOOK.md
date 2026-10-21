@@ -14,7 +14,7 @@ What the pieces hold, so the blast radius of each procedure is clear:
 
 ## Routine
 
-**Upgrade.** Run the `deploy` workflow from the Actions tab with the version once its image is built (`.github/workflows/deploy.yml`, set up in `deploy/README.md`), or `./upgrade.sh <version>` on the host. Either one does: backup, version, pull, restart, health, and the previous version back if the new one is not healthy. Without the script, bump `AGENT_CUSTODY_VERSION` in `.env`, then:
+**Upgrade.** Run the `deploy` workflow from the Actions tab with the version once its image is built (`.github/workflows/deploy.yml`, set up in `deploy/README.md`), or `./upgrade.sh <version>` on the host. Either one does: backup, check out the release tag `v<version>` (so the compose file, the Caddyfile, and the scripts are the released ones and not main's), version, pull, restart, health, and the previous version and its checkout back if the new one is not healthy. A version deploy leaves the checkout on the tag; `docs` returns it to main. Without the script, bump `AGENT_CUSTODY_VERSION` in `.env`, then:
 
 ```bash
 docker compose --profile public pull && docker compose --profile public up -d
