@@ -347,7 +347,7 @@ sequenceDiagram
     GW-->>Sub: denied, the revocation covers every grant delegated from it
 ```
 
-Revocation is per grant and takes effect on the next call, with no restart and no key rotation. Editing the Cedar policy is separate and is read when the gateway starts.
+Revocation is per grant and takes effect on the next call, with no restart and no key rotation. The Cedar policy is re-read the same way: a changed `policy.cedar` applies from the next call, a policy that does not parse is refused and the one in force stays, and every change is recorded with both digests.
 
 ## Verifying a receipt without trusting the operator
 
@@ -379,7 +379,6 @@ sequenceDiagram
 - **The hosted log does not see grants or policy.** It sees leaf hashes. A receipt names the grant and carries the policy digest, and a verifier checks both against public keys.
 - **The operator can rewrite a local log.** A remote log, published checkpoints, and a witness are what detect that. The witness ships in the package, but a second, independent operator for our log is still being sought, so today the checkpoints are published and the witness step is not yet independent.
 - **There is no hosted control plane yet.** Grants, revocation and Cedar policy are managed on the customer's gateway; the portal manages the log, tokens, usage and billing.
-- **Policy changes need a restart; grant revocations do not.**
 - **Failure mode:** a `precommit` tool is withheld while the log is unreachable. That is deliberate and it is a denial of service on the agent.
 - **No transparent egress proxy.** Arbitrary HTTP from agent code is not intercepted.
 

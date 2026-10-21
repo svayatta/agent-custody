@@ -1,7 +1,8 @@
 // The MCP gateway: sits between an agent and its upstreams, MCP servers or REST APIs, enforces scope + Cedar policy,
 // and emits a signed, logged receipt for every tool call, allowed or denied.
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -19,7 +20,7 @@ import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
 import { captureKeyFrom, effectiveRule } from "./capture.ts";
-import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
+import { evaluate, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
 import type { ApprovalRecord, AuthorizationBundle, AuthorizationPredicate, FactRecord, OperationEvidence, ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "./receipt.ts";
 import { OPERATION_META_KEY, OperationStore, ownerAlive, type OperationRecord, type OperationStatus } from "./operations.ts";
 
@@ -123,6 +124,8 @@ export interface GatewayHost {
   revoke(grantDigest: string): void;
   /** the digests revoked so far */
   revoked(): string[];
+  /** sha256 of the policy in force: the one the next call is evaluated under */
+  policyDigest(): string;
   /** the names of every tool the upstreams offer, before any grant narrows them */
   tools(): string[];
   /** Operator-only provider lookup. Never exposed as an agent tool. Unknown/pending reservations remain held until a terminal reconciliation receipt is committed. */
@@ -143,8 +146,56 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   const trusted = cfg.trustedPrincipalKeys.map(loadPublicKey);
   const approvalKeys = cfg.approvals?.trustedKeys.map(loadPublicKey) ?? [];
   const approvalRule = (tool: string) => cfg.approvals?.tools.find((rule) => rule.tool === tool) ?? cfg.approvals?.tools.find((rule) => rule.tool === "*");
-  const policyText = readFileSync(cfg.policyFile, "utf8");
-  const pDigest = policyDigest(policyText);
+  // The Cedar policy, re-read whenever the file changes, like the revocation list. A call is evaluated under the policy
+  // in force when it starts, and its receipt names that policy's digest. A changed file that cannot be read or does not
+  // parse is refused and the policy in force stays: never an allow, and never a fall back to no policy. Every change
+  // and every refusal is printed and appended to receiptsDir/policy-reloads.jsonl with both digests and the time.
+  let policyNow = (() => { const text = readFileSync(cfg.policyFile, "utf8"); return { text, digest: policyDigest(text) }; })();
+  const policyStat = () => { const st = statSync(cfg.policyFile); return `${st.ino}:${st.mtimeMs}:${st.size}`; };
+  let policySeen = policyStat();
+  const policyReloads = join(cfg.receiptsDir, "policy-reloads.jsonl");
+  const recordReload = (entry: Record<string, unknown>) => {
+    try {
+      mkdirSync(cfg.receiptsDir, { recursive: true });
+      appendFileSync(policyReloads, JSON.stringify({ at: new Date().toISOString(), file: cfg.policyFile, ...entry }) + "\n");
+    } catch (e) {
+      console.error(`agent-custody gateway: cannot record the policy change in ${policyReloads}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const refuseReload = (to: string | null, errors: string[]) => {
+    console.error(`agent-custody gateway: POLICY NOT RELOADED: ${cfg.policyFile} ${errors.join("; ")}; policy ${policyNow.digest} stays in force`);
+    recordReload({ event: "refused", from: policyNow.digest, to, errors });
+  };
+  const currentPolicy = (): { text: string; digest: string } => {
+    let seen: string;
+    try {
+      seen = policyStat();
+    } catch (e) {
+      if (policySeen !== "unreadable") refuseReload(null, [`cannot be read (${e instanceof Error ? e.message : String(e)})`]);
+      policySeen = "unreadable";
+      return policyNow;
+    }
+    if (seen === policySeen) return policyNow;
+    policySeen = seen;
+    let text: string;
+    try {
+      text = readFileSync(cfg.policyFile, "utf8");
+    } catch (e) {
+      refuseReload(null, [`cannot be read (${e instanceof Error ? e.message : String(e)})`]);
+      return policyNow;
+    }
+    const digest = policyDigest(text);
+    if (digest === policyNow.digest) return policyNow;
+    const errors = policyParseErrors(text);
+    if (errors.length > 0) {
+      refuseReload(digest, [`does not parse: ${errors.join("; ")}`]);
+      return policyNow;
+    }
+    console.error(`agent-custody gateway: policy reloaded from ${cfg.policyFile}: ${policyNow.digest} -> ${digest}`);
+    recordReload({ event: "reloaded", from: policyNow.digest, to: digest });
+    policyNow = { text, digest };
+    return policyNow;
+  };
   // Private evidence: the key that encrypts withheld fields, read once; a rule in mode encrypted without it is a config error.
   const captureKey = cfg.captureKeyEnv ? captureKeyFrom(process.env[cfg.captureKeyEnv] ?? (() => { throw new Error(`capture key: environment variable ${cfg.captureKeyEnv} is not set`); })()) : undefined;
   for (const [tool, rule] of Object.entries(cfg.capture ?? {})) {
@@ -337,6 +388,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
 
     async function handleCall(params: CallParams): Promise<CallToolResult> {
       const tool = params.name;
+      const { text: policyText, digest: pDigest } = currentPolicy();
       // An embedding caller can mutate its objects while a lookup or log append is awaited. Snapshot the call and
       // approval before the first await, so the approved bytes are the bytes evaluated, logged, and forwarded. A caller
       // also cannot change the payment after its reservation was bound.
@@ -606,6 +658,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     keyid: issuer.keyid,
     open,
     revoke,
+    policyDigest: () => currentPolicy().digest,
     tools: () => advertised.map((t) => t.name),
     revoked: () => {
       reloadRevoked();
@@ -657,7 +710,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
           principal: initial.principal, agent: initial.agent, delegation: initial.delegation,
           session: { id: null, toolUseId: null, provenance: "claimed" }, model: { id: null, provenance: "claimed" },
           tool: initial.tool, request: { args: lookup.args, argsDigest: digestOf(lookup.args), provenance: "claimed" },
-          facts: {}, policy: { decision: "allow", reasons: ["reconciliation: the gateway read the provider record and evaluated no policy"], errors: [], policyDigest: pDigest, provenance: "observed" },
+          facts: {}, policy: { decision: "allow", reasons: ["reconciliation: the gateway read the provider record and evaluated no policy"], errors: [], policyDigest: currentPolicy().digest, provenance: "observed" },
           operation: operationEvidence(op, status), reconciliation: { original, lookup },
           execution: { status: "executed", result, resultDigest: digestOf(result), provenance: "observed" },
         };

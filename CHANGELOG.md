@@ -2,6 +2,10 @@
 
 All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agent-custody` on PyPI, move in lockstep. The receipt format has stayed at v0.2 throughout; every addition to it is an optional field, so earlier receipts and the published conformance vectors remain valid.
 
+## Unreleased
+
+- **Gateway: reload the Cedar policy without a restart (issue #145).** The gateway re-reads `policyFile` whenever it changes (inode, mtime, or size), as it does `revokedGrants`, and evaluates the next call under the new policy, for stdio, HTTP, A2A, and observe mode, with no dropped session. A call already evaluating finishes under the policy it started with, and its receipt carries that digest. A changed file that does not parse, or cannot be read, is refused: the policy in force stays, never an allow, and `POLICY NOT RELOADED` goes to stderr. Each change and refusal is appended to `receipts/policy-reloads.jsonl` with the time and both digests. `GatewayHost.policyDigest()` returns the digest in force. The console no longer tells the operator to restart after a save.
+
 ## 0.9.0 — 2026-10-21
 
 - **State:** a live Codex support recovery demo (example 10; guide `docs/codex-recovery.md` in the receipts package). A Codex agent works through the gateway and writes a wrong benefit and a credit, because of a wrong CRM plan. The operator corrects the plan. `inspect` traces the blast radius and plans the retractions, the corrective writes, and the credit reversals. `recover` runs the plan only with an approval that equals the digest of the saved plan, and `verify` checks the stores against the receipts. `inspect` refuses a credit or a current benefit that no memory read supports, because the demo cannot decide its recovery. After a partial recovery, a refreshed plan lists the corrective writes again.
