@@ -16,8 +16,8 @@ services:
     build:
       context: .
       args:
-        AGENT_CUSTODY_VERSION: ${AGENT_CUSTODY_VERSION:-0.6.3}
-    image: ghcr.io/svayatta/agent-custody-log:${AGENT_CUSTODY_VERSION:-0.6.3}
+        AGENT_CUSTODY_VERSION: ${AGENT_CUSTODY_VERSION:-0.8.0}
+    image: ghcr.io/svayatta/agent-custody-log:${AGENT_CUSTODY_VERSION:-0.8.0}
     restart: unless-stopped
     environment:
       ROLE: signer
@@ -41,8 +41,8 @@ services:
     build:
       context: .
       args:
-        AGENT_CUSTODY_VERSION: ${AGENT_CUSTODY_VERSION:-0.3.0}
-    image: ghcr.io/svayatta/agent-custody-log:${AGENT_CUSTODY_VERSION:-0.6.3}
+        AGENT_CUSTODY_VERSION: ${AGENT_CUSTODY_VERSION:-0.8.0}
+    image: ghcr.io/svayatta/agent-custody-log:${AGENT_CUSTODY_VERSION:-0.8.0}
     restart: unless-stopped
     env_file:
       - path: .env
@@ -90,7 +90,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    image: ghcr.io/svayatta/agent-custody-log:${AGENT_CUSTODY_VERSION:-0.6.3}
+    image: ghcr.io/svayatta/agent-custody-log:${AGENT_CUSTODY_VERSION:-0.8.0}
     restart: unless-stopped
     env_file:
       - path: .env
@@ -141,7 +141,7 @@ services:
 
   caddy:
     profiles: ["public"]
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
     restart: unless-stopped
     depends_on:
       log:
@@ -167,7 +167,7 @@ services:
 
   postgres:
     # The store for leaves (as hashes), tenants, and hashed tokens; one writer per tenant is enforced inside it.
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     restart: unless-stopped
     environment:
       POSTGRES_DB: custody_log
@@ -186,7 +186,7 @@ services:
   log-file:
     # The file-backed reference server alone: one tenant, no Postgres. What deploy/ was before phase 2.
     profiles: ["file"]
-    image: ghcr.io/svayatta/agent-custody-log:${AGENT_CUSTODY_VERSION:-0.6.3}
+    image: ghcr.io/svayatta/agent-custody-log:${AGENT_CUSTODY_VERSION:-0.8.0}
     restart: unless-stopped
     env_file:
       - path: .env

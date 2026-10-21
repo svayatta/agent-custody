@@ -26,12 +26,38 @@ import type { AdminOptions } from "./log-admin.ts";
 import { createRequire } from "node:module";
 import { pruneLog } from "./retention.ts";
 import { serveSidecar } from "./sidecar.ts";
+import { checkConfig, formatFindings } from "./check.ts";
+import { serveConsole } from "./console.ts";
 import { TREEHEAD_TYPE, type AuthorizationBundle, type ReceiptBundle, type TreeHead, type ReceiptStatement } from "./receipt.ts";
 import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
 import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
 import { auditExtends, formatReport, verifyBundle } from "./verify.ts";
 import { formatSimulation, simulatePolicy, verifyOrphanAuthorization, type SimulationSkip } from "./simulate.ts";
+
+/**
+ * Resolves on SIGINT or SIGTERM: a container runtime and systemd stop a service with SIGTERM, which PID 1 ignores unless
+ * it is handled. The handlers are installed once, before a service starts, so a signal that arrives while it starts up
+ * is kept and the service closes as soon as it is running.
+ */
+let stopped: Promise<void> | undefined;
+function untilStopped(): Promise<void> {
+  stopped ??= new Promise<void>((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
+  return stopped;
+}
+const SERVICES = new Set(["serve", "witness", "signer", "portal", "log", "console"]);
+/** a command that waits for untilStopped(); a stdio gateway runs until its input closes and keeps the default signal behaviour */
+const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && (SERVICES.has(cmd) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
+
+/** A secret kept in a file that only this process can read, such as a container secret mounted at /run/secrets. The file's path is not a secret; its contents are. */
+function tokenFromFile(path: string): string {
+  const v = readFileSync(path, "utf8").trim();
+  if (!v) throw new Error(`${path} is empty`);
+  return v;
+}
 
 /** A shared secret from an environment variable; never from the command line, where it would land in shell history. */
 function secretFrom(envName: string): string {
@@ -52,6 +78,14 @@ const USAGE = `agent-custody <command>
   revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them
   reconcile --config <gateway.json> --operation <uuid>   operator-only provider lookup; commits a receipt before closing an unknown/pending financial operation
+  console --config <gateway.json> [--port 8795] [--host 127.0.0.1] [--token-env CONSOLE_TOKEN | --token-file <path>] [--gateway-url <url>] [--state-dir <dir>]
+                                                   the admin console for a gateway: its config and tools, a config check, receipts with a verdict each, a policy editor that
+                                                   validates and replays recorded calls before it saves, grant inspection and revocation, and an audit trail of its own changes.
+                                                   A separate service from the gateway, behind a token read from the environment; it holds no principal key and never signs
+  check   --config <gateway.json> [--connect] [--json]
+                                                   what the gateway would fail on at startup, found before it starts: the config and its unknown keys, the keys,
+                                                   the Cedar policy, the grant, credential variables, stdio commands, and writable paths. --connect also starts the
+                                                   upstreams (tool-name collisions, unreachable servers) and checks every tool name the config and grant mention. Exits 1 on an error
   gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]
                                                    stdio: one gateway for the grant the config names. --http: one shared gateway, MCP over
                                                    Streamable HTTP at /mcp, each connection presenting its own grant as Authorization: Bearer
@@ -136,6 +170,7 @@ function loadTenants(path: string): Record<string, { file: string; tokens?: stri
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
+  if (runsUntilStopped(cmd, rest)) void untilStopped();
   switch (cmd) {
     case "reconcile": {
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, operation: { type: "string" } } });
@@ -200,6 +235,22 @@ async function main(argv: string[]): Promise<number> {
       console.log(`delegated to ${chain.agent}: scopes [${chain.scopes.join(", ")}] until ${chain.expiresAt}, under ${decodeDelegation(parent)!.agent}'s grant from ${chain.principal}`);
       return 0;
     }
+    case "console": {
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, port: { type: "string", default: "8795" }, host: { type: "string", default: "127.0.0.1" }, "token-env": { type: "string", default: "CONSOLE_TOKEN" }, "token-file": { type: "string" }, "gateway-url": { type: "string" }, "state-dir": { type: "string" } } });
+      if (!values.config) throw new Error("console needs --config");
+      const running = await serveConsole({ configFile: values.config, token: values["token-file"] ? tokenFromFile(values["token-file"]) : secretFrom(values["token-env"]), port: Number(values.port), host: values.host, ...(values["gateway-url"] ? { gatewayUrl: values["gateway-url"] } : {}), ...(values["state-dir"] ? { stateDir: values["state-dir"] } : {}) });
+      console.error(`agent-custody console: ${running.url} config=${values.config}${values.host === "0.0.0.0" || (values.host !== "127.0.0.1" && values.host !== "localhost") ? " (reachable beyond this host: put TLS in front and limit who can reach it)" : ""}`);
+      await untilStopped();
+      await running.close();
+      return 0;
+    }
+    case "check": {
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, connect: { type: "boolean", default: false }, json: { type: "boolean", default: false } } });
+      if (!values.config) throw new Error("check needs --config");
+      const findings = await checkConfig(values.config, { connect: values.connect });
+      console.log(values.json ? JSON.stringify(findings, null, 2) : formatFindings(findings));
+      return findings.some((f) => f.level === "error") ? 1 : 0;
+    }
     case "revoke": {
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, grant: { type: "string" } } });
       if (!values.config || !values.grant) throw new Error("revoke needs --config and --grant");
@@ -228,7 +279,7 @@ async function main(argv: string[]): Promise<number> {
         const grant = cfg.grantFile ? (JSON.parse(readFileSync(cfg.grantFile, "utf8")) as Envelope) : undefined;
         const running = await serveA2a(host, a2a, { port: Number(values.port), host: values.host, ...(grant ? { grant } : {}) });
         console.error(`agent-custody gateway (a2a): ${running.url} keyid=${host.keyid} fronting ${a2a.url} as ${a2a.prefix}.send; card at ${running.url}/.well-known/agent-card.json`);
-        await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+        await untilStopped();
         await running.close();
         await host.close();
         return 0;
@@ -237,7 +288,7 @@ async function main(argv: string[]): Promise<number> {
         const host = await createGatewayHost(loadConfig(values.config));
         const running = await serveHttp(host, { port: Number(values.port), host: values.host, idleMs: Number(values["idle-minutes"]) * 60_000 });
         console.error(`agent-custody gateway: ${running.url} keyid=${host.keyid} one session per grant; GET /health`);
-        await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+        await untilStopped();
         await running.close();
         await host.close();
         return 0;
@@ -263,7 +314,7 @@ async function main(argv: string[]): Promise<number> {
       const issuer = createSdkIssuer(loadSdkConfig(values.config));
       const running = await serveSidecar(issuer, { port: Number(values.port), host: values.host });
       console.error(`agent-custody serve: ${running.url} agent=${issuer.agentId} keyid=${issuer.keyid} log=${issuer.log.kind}:${issuer.log.where}`);
-      await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+      await untilStopped();
       await running.close();
       return 0;
     }
@@ -296,7 +347,7 @@ async function main(argv: string[]): Promise<number> {
       }
       console.error(`agent-custody witness: keyid=${w.keyid} watching ${values["log-url"]} via ${values["checkpoints-url"]} every ${values.every}s, writing to ${values.out}`);
       w.start(everyMs);
-      await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+      await untilStopped();
       w.stop();
       return 0;
     }
@@ -308,7 +359,7 @@ async function main(argv: string[]): Promise<number> {
       const kp = loadPrivateKey(values.key);
       const running = await serveSigner(kp, { port: Number(values.port), host: values.host, ...(token ? { token } : {}), retired: (values["retired-key"] ?? []).map(retiredKey) });
       console.error(`agent-custody signer: ${running.url} keyid=${kp.keyid} ${token ? "token required" : "open: bind this to a private network"}${values["retired-key"]?.length ? ` retired=${values["retired-key"].length}` : ""}`);
-      await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+      await untilStopped();
       await running.close();
       return 0;
     }
@@ -363,7 +414,7 @@ async function main(argv: string[]): Promise<number> {
       }
       const running = await servePortal({ tenancy, client, secret, publicUrl: values["public-url"], ...(values["checkpoints-url"] ? { checkpointsUrl: values["checkpoints-url"] } : {}), ...(values["portal-url"] ? { portalUrl: values["portal-url"] } : {}), ...(keyid ? { keyid } : {}), ...(stripe ? { stripe } : {}), ...(mail ? { mail } : {}), ...(oauth ? { oauth } : {}), trustProxy: values["trust-proxy"] }, { port: Number(values.port), host: values.host });
       console.error(`agent-custody portal: ${running.url} log=${values["public-url"]} billing=${stripe ? "stripe" : "off"}${values["trust-proxy"] ? " trust-proxy" : ""}`);
-      await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+      await untilStopped();
       await running.close();
       return 0;
     }
@@ -465,7 +516,7 @@ async function main(argv: string[]): Promise<number> {
       const publisher = checkpoints ? new CheckpointPublisher(resolver, signer, checkpoints, everyMs, undefined, heartbeatMs) : null;
       publisher?.start();
       console.error(`agent-custody log: ${running.url} keyid=${signer.keyid} ${values["signer-url"] ? `signer=${values["signer-url"]} ` : ""}${where}${checkpoints ? ` checkpoints every ${values["checkpoint-every"]}s${values["checkpoint-dir"] ? ` to ${values["checkpoint-dir"]}` : ""}` : ""}${admin ? " admin page at /admin" : ""}`);
-      await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+      await untilStopped();
       publisher?.stop();
       await running.close();
       return 0;

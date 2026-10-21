@@ -23,7 +23,7 @@ await ledger.retract({ factId: a.fact.factId, actor: "user:admin", reason: "pois
 await ledger.asOf({ validAt: "2026-09-01T00:00:00Z", txAt: "2026-09-01T00:00:00Z" });
 ```
 
-Runnable examples, all executed by the test suite. [10-support-recovery.ts](examples/10-support-recovery.ts) corrects stale benefits and compensates a simulated credit after a wrong-plan incident, with verified evidence. [08-review-console.ts](examples/08-review-console.ts) makes a refund through the gateway, finds it by transaction and customer, and exports an offline case file that verifies independently. [07-incomplete-evidence.ts](examples/07-incomplete-evidence.ts) makes the refund of example 06 private under a capture rule: blast radius without the customer's key lists the refund as INCOMPLETE rather than leaving it out, and with the key finds it. [06-actions-on-beliefs.ts](examples/06-actions-on-beliefs.ts) puts memory and a payments API behind one gateway and finds the refund in a belief's blast radius. [05-blast-radius.ts](examples/05-blast-radius.ts) walks from a retracted belief to everything that relied on it. [04-evals.ts](examples/04-evals.ts) scores the ledger and a naive store on the same memory incidents. [03-memory-behind-the-gateway.ts](examples/03-memory-behind-the-gateway.ts) runs the memory server as the gateway's upstream. [01-ledger.ts](examples/01-ledger.ts) walks through a wrong write and its undo. [02-receipt-to-belief.ts](examples/02-receipt-to-belief.ts) runs the whole loop with the receipts package: a tool call gets a signed receipt, the receipt is verified, the belief taken from it is recorded citing the receipt, and later retracted. Run them with `node examples/<file>` from this directory, after `bun run build` at the repository root.
+Runnable examples, all executed by the test suite. [10-support-recovery.ts](examples/10-support-recovery.ts) corrects stale benefits and compensates a simulated credit after a wrong-plan incident, with verified evidence. [09-repair.ts](examples/09-repair.ts) loses a ledger append after a store took the write, then finds and removes the orphan entry with `memory.repair`. [08-review-console.ts](examples/08-review-console.ts) makes a refund through the gateway, finds it by transaction and customer, and exports an offline case file that verifies independently. [07-incomplete-evidence.ts](examples/07-incomplete-evidence.ts) makes the refund of example 06 private under a capture rule: blast radius without the customer's key lists the refund as INCOMPLETE rather than leaving it out, and with the key finds it. [06-actions-on-beliefs.ts](examples/06-actions-on-beliefs.ts) puts memory and a payments API behind one gateway and finds the refund in a belief's blast radius. [05-blast-radius.ts](examples/05-blast-radius.ts) walks from a retracted belief to everything that relied on it. [04-evals.ts](examples/04-evals.ts) scores the ledger and a naive store on the same memory incidents. [03-memory-behind-the-gateway.ts](examples/03-memory-behind-the-gateway.ts) runs the memory server as the gateway's upstream. [01-ledger.ts](examples/01-ledger.ts) walks through a wrong write and its undo. [02-receipt-to-belief.ts](examples/02-receipt-to-belief.ts) runs the whole loop with the receipts package: a tool call gets a signed receipt, the receipt is verified, the belief taken from it is recorded citing the receipt, and later retracted. Run them with `node examples/<file>` from this directory, after `bun run build` at the repository root.
 
 For a real model choosing its own tools, run the opt-in [Codex support recovery demo](../receipts/docs/codex-recovery.md). Headless Codex handles a support request against incorrect CRM memory; an operator then reviews and approves recovery. It uses your Codex login and simulated billing. The regular test suite stays offline.
 
@@ -51,8 +51,9 @@ In the gateway's config, the memory server is the upstream, and the grant names 
 | `pack` (CLI) | one fact's history, receipts, holds, blast radius, and forget certificate as one signed artefact, verifiable offline | |
 | `memory.hold`, `memory.release` | legal hold: while it stands the fact cannot be forgotten by request or sweep | `factId`, `reason` |
 | `memory.sweep` | retention: forget what was learned before an instant, in a space or all, skipping held facts, reaching every store | `before`, `space`, `reason` |
+| `memory.repair` | finds the store entries that the ledger has no fact for, stored before a cutoff, and removes them once they are older than a cutoff; see [Write order and repair](#write-order-and-repair) | `reason`, `before` (earlier cutoff only) |
 | `memory.get` | one fact by id in any state, for the gateway's policy lookups | `factId` |
-| `memory.history` | every event that touched a fact | `factId` |
+| `memory.history` | every event that touched a fact, a repair of an orphan entry included | `factId` |
 
 **Quarantine.** Every fact carries a provenance: `claimed`, `attested`, or `verified`. A write that came through the gateway is `attested`: its actor is the agent named in a human-signed grant and its receipt exists. A write that arrived any other way is `claimed`, and claimed facts are quarantined: `memory.read` leaves them out unless the caller asks for `includeClaimed`, and the policy can refuse that. `memory.confirm`, accepted only through the gateway, lifts a claimed fact to attested with its own receipt and transaction time, so "was this fact still in quarantine on Tuesday" is answerable. A tool result an SDK-only agent wrote down cannot become something the rest of the fleet believes until an attested party says so. Over stdio the server has one client; shared over HTTP, below, gateways and direct writers feed one ledger and quarantine does its job.
 
@@ -183,7 +184,65 @@ const stores = [
 createMemoryServer(new Ledger("./ledger.jsonl"), { stores });
 ```
 
-Order matters and is fixed: the ledger's checks run first, so a write it would refuse never reaches a store; the stores are written next, so their ids can be recorded; the ledger appends last. A store that refuses the write fails the write and nothing is recorded anywhere. On retraction the ledger goes first, since custody must not depend on a store being up, and a store that fails to remove is named in the error so the caller knows recall may still serve the value. The adapters are typed structurally and carry no runtime dependency on either vendor; the tests drive the real `mem0ai` and `@getzep/zep-cloud` clients against fake endpoints, offline.
+The `Store` interface is small. A custom store implements `name`, `put`, and `delete`, and can add `verifyDeleted` and `list`:
+
+```ts
+interface StoreEntry { externalId: string; factId: string; text: string; storedAt?: string }   // one entry a store holds for a fact; storedAt is the ISO time of the store write
+interface Store {
+  name: string;
+  put(fact): Promise<string>;                          // writes the fact, returns the store's own id
+  delete(entry: StoreEntry): Promise<void>;
+  verifyDeleted?(entry: StoreEntry): Promise<boolean>; // optional; without it a removal is "unverified"
+  list?(): Promise<StoreEntry[]>;                      // optional; every entry with custody metadata, for memory.repair
+}
+```
+
+**Breaking change for custom stores.** `remove(externalId, fact)` is now `delete(entry)`, and `verifyRemoved(externalId, fact)` is now `verifyDeleted(entry)`. Each takes one `StoreEntry`. Change `remove(id, fact)` to `delete({ externalId, factId, text })`. The names changed with the arguments: `createMemoryServer` refuses a store that has no `delete`, so a store written for the earlier interface fails at startup. It is never called with the wrong arguments, and its old check can never report an entry as verified. The `text` field is the text that `factText(fact)` returns, so a store no longer needs the whole fact. The `entryOf(fact, externalId)` function builds an entry from a fact. The adapters in this package use the new signature already. Every adapter implements `list`: pgvector and Cognee always, LangGraph when the store has `search`, and Mem0, Zep, and Letta when their client has a method that lists entries.
+
+The adapters are typed structurally and carry no runtime dependency on either vendor; the tests drive the real `mem0ai` and `@getzep/zep-cloud` clients against fake endpoints, offline.
+
+### Write order and repair
+
+The write order is fixed: validate, stores, ledger.
+
+1. The ledger's checks run first. A write that the ledger refuses never reaches a store.
+2. The stores are written next. The server needs the store ids to record them on the fact.
+3. The ledger appends last.
+
+A store that refuses the write fails the write, and nothing is recorded anywhere. A write whose stores take more than five minutes is refused before its ledger append; see the repair sweep below. The retraction order is the reverse: ledger, then stores. Custody must not depend on a store being up. A store that fails to remove is named in the error, so the caller knows that recall can still serve the value.
+
+The order has one cost. If the ledger append fails after the stores took the write, a store keeps an entry that the ledger has no fact for. That entry is an orphan: recall can serve it, and no event explains it. The repair sweep removes orphans.
+
+A write that is in progress looks like an orphan too: its entries are in the stores and not yet in the ledger. Two rules keep the sweep away from it. Each entry records `storedAt`, the time of its store write. The sweep removes only entries stored before a cutoff, which is ten minutes ago (the exported `REPAIR_MIN_AGE_MS`). And a write whose stores take more than five minutes, half of `REPAIR_MIN_AGE_MS`, is refused before its ledger append. So the entries of a write in progress are never older than the cutoff. This holds across server processes that share the stores. If a ledger append stalls for longer than that, the repair event decides: whichever record of the fact id reaches the ledger first wins, and the other fails with an error. In one server process, the ledger makes the check and the append of the two records one step. For servers in different processes, the window is the time between the check and the commit of one append. To close it, the check and the append must be one transaction in the shared ledger store, for example with a per-fact-id advisory lock. This version does not do that. A unique constraint on `fact_id` does not work: retract, confirm, hold, release, and forget events share the fact id of the fact, and an orphan in two stores has one repair event for each store.
+
+`memory.repair { reason, before? }` runs the sweep. The CLI runs it through a gateway, so the sweep has a receipt and runs as the principal in the gateway's grant:
+
+```bash
+agent-custody-memory repair --via repair-gateway.json --reason "ledger outage on 14 October" [--before <ISO instant>]
+```
+
+The cutoff is the earlier of `before` and ten minutes ago. `before` can move the cutoff earlier only, never later.
+
+For each store that has `list`, the sweep reads every entry with custody metadata. It removes an entry once only, if a listing holds it twice. It skips an entry whose fact id the ledger knows. It skips an entry that was not stored before the cutoff. For each other entry, the sweep first appends a `repair` event, as a retraction does with its ledger event. The event has the fact id from the entry's metadata, the actor, the reason, the receipt id, the store, and the store's id for the entry. Then the sweep removes the entry and asks the store's search whether the entry is gone (the same retries and outcomes as a forget). The outcome is in the result and in the receipt of the call: `verified`, `stillIndexed`, `unverified`, or `failed`. `memory.history` of the orphan's fact id shows the event. The first record of a fact id wins. The ledger refuses a repair for a fact id that it knows, and it refuses an assert for a fact id that has a repair event, so a late write fails with an error and the ledger never believes a fact that no store holds. In one server process, a repair of an entry that already has a repair event adds no second event: a retry after a failed removal uses the first event. One sweep runs at a time in a server process. If a store fails a delete and its listing then no longer holds the entry, the sweep treats the delete as done and verifies the entry as usual, so the outcome is `verified`, `stillIndexed`, or `unverified` by the same rules.
+
+The result is `{ before, repaired, unlisted, stillHeld, unrecorded }`:
+
+- `before` is the cutoff that the sweep used, as an ISO instant.
+- `repaired` is `[{ store, externalId, factId, outcome, eventId }]`.
+- `unlisted` is the names of the stores that have no `list`.
+- `stillHeld` is the errors of removals that failed. It also holds `<store>: cannot list: <error>` for a store whose listing failed. The sweep goes on with the other stores.
+- `unrecorded` is `[{ store, externalId, factId, error }]`: the entries that the sweep did not remove, because the ledger did not take the repair event. The next sweep tries them again.
+
+The result is an error when `stillHeld` or `unrecorded` is not empty. Run the sweep again after you fix the store or the ledger.
+
+Limits:
+
+- An entry whose `storedAt` is missing or does not parse counts as young. The sweep never removes it. When the metadata has no `storedAt`, the adapters fall back to the creation time of the store: the `created_at` column for pgvector, and the creation time that the client reports for Mem0, Zep, Letta, and LangGraph. Cognee has a fallback only if its listing has a creation time. Letta records `storedAt` in the tag `stored:<iso>`.
+- One store scope belongs to one ledger. A store scope is a pgvector table, a Mem0 user, a Zep user or graph, a Letta agent with its exact tag set, a LangGraph namespace, or a Cognee dataset. Two ledgers that share a scope already leak recall between them, and a repair on one ledger removes the entries of the other.
+- The clocks of the memory servers must agree to within a few minutes. `storedAt` comes from the clock of the writer, and the cutoff comes from the clock of the repairer.
+- A store without `list` is reported in `unlisted` and is not swept. Mem0, Zep, and Letta get `list` when their client has a method to list entries.
+- The sweep finds only entries that carry custody metadata (`source: "agent-custody"` and a fact id). It does not touch other entries in the store.
+- The Cognee data listing carries no text, so its entries have empty `text`. The adapter verifies by id, so this does not matter for the sweep.
 
 ## Scoring memory mutations
 
@@ -233,7 +292,7 @@ The ledger refuses to supersede a fact that is unknown, already superseded, or r
 ## Layout
 
 ```
-src/ledger.ts   the fact record, the event kinds, as-of queries, supersession, retraction, forget, holds, sweeps
+src/ledger.ts   the fact record, the event kinds, as-of queries, supersession, retraction, forget, holds, sweeps, repairs
 src/storage.ts  the store interface and its three stores: JSONL (default, auditable), SQLite (indexed, one machine), Postgres (shared); chosen by path or URL
 src/server.ts   the ledger as MCP tools; source and actor taken from the gateway's _meta
 src/http.ts     the memory server over Streamable HTTP with bearer auth, for a shared ledger
@@ -243,9 +302,9 @@ src/search.ts   exact transaction, customer, agent and time filters over the pub
 src/case-file.ts  portable HTML/JSON evidence with public keys, fresh offline verification and the ten answers
 src/verify-web.ts  the browser verifier embedded in portable HTML case files
 src/pack.ts     the custody pack: build, sign, verify, format
-src/cli.ts      agent-custody-memory serve (stdio or --http, with --retention and --forget-key-env), sweep (ledger-only or --via a gateway), eval, explain, review, pack, export, blast
+src/cli.ts      agent-custody-memory serve (stdio or --http, with --retention and --forget-key-env), sweep (ledger-only or --via a gateway), repair (--via a gateway), eval, explain, review, pack, export, blast
 src/blast.ts    blast radius: from receipts' consumed facts and the ledger's source receipts, forward
-src/stores.ts   write-through adapters: Mem0, Zep, pgvector, Letta, a LangGraph store (LangMem), and Cognee, and the Store interface for others
+src/stores.ts   write-through adapters: Mem0, Zep, pgvector, Letta, a LangGraph store (LangMem), and Cognee, and the Store interface (put, delete, verifyDeleted, list) for others
 src/evals.ts    the memory-mutation harness: scenarios, scoring, report
 src/evals-ledger.ts  the ledger and a naive overwrite store behind the harness interface
 src/evals-file.ts    scenario files, validated; signed eval reports and their verification
@@ -267,6 +326,7 @@ tsconfig.build.json  emits dist/ for consumers; the repo itself runs the .ts dir
 - Explain one action: from a receipt id, who, who authorized it, what was allowed, what the agent saw, what it did, why, the evidence, whether it verifies, what depended on it, and what needs reversal; the same as a signed action pack that carries every downstream receipt.
 - The custody pack: a fact's history with receipts, holds, blast radius, and forget certificate as one signed artefact, verified as a whole.
 - Removal verification: after a retraction, forget, or sweep the server asks each store's search whether the value still surfaces and records verified, stillIndexed, unverified, or failed per store, in the receipt.
+- Repair of a failed ledger append: `memory.repair` and `repair --via` find the store entries that the ledger has no fact for, remove and verify them, and record a `repair` event under the entry's fact id. The Store interface takes a `StoreEntry` and has an optional `list`.
 - Retention and legal hold: a receipted sweep forgets what was learned before an instant and reaches the stores; a hold refuses forget and sweep until released, as events on the fact's history.
 - Value-level quarantine: a write may cite a fact the gateway fetched itself; the value must match it and the fact is then `verified`, the provenance level above attested, or the write is refused.
 - Attested executions: with a key, the memory server signs its results for the gateway's receipt, so a verifier holding its public key sees memory calls as attested.
