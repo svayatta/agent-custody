@@ -503,6 +503,7 @@ td.no { color: var(--ink-3); }
 .final h2 { margin: 0 auto 16px; }
 .final .sub { margin: 0 auto 32px; }
 .final .cmd { margin: 0 auto 24px; text-align: left; }
+.final .note { margin: 0 0 24px; }
 .final .ctas { justify-content: center; margin-bottom: 0; }
 
 /* Footer */
