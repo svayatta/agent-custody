@@ -114,6 +114,7 @@ The memory server in `@agent-custody/state` is an upstream like any other, so it
 | `memory.read` | the query, and `includeClaimed` or `requireVerified` when the caller asks for them | |
 | `memory.retract`, `memory.forget`, `memory.hold`, `memory.release` | `factId` and `reason` | `target`, the fact being changed |
 | `memory.sweep` | `before`, `space`, `reason` | |
+| `memory.repair` | `reason`, and optionally `before` (an earlier cutoff) | |
 | `memory.confirm` | `factId` | |
 
 A looked-up `target` has `space`, `actor`, `provenance` (`claimed`, `attested`, or `verified`), `subject`, `predicate`, `value`, and `retracted`. Fields that would be null are absent, so test with `has`. The lookup config that makes `target` available is in the [state package README](../../state/README.md#the-memory-server).

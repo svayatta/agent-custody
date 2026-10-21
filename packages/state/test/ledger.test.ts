@@ -37,6 +37,33 @@ describe.each(backends)("fact ledger on %s", (name, file) => {
     expect((await l.asOf({ subject: "acct:42", predicate: "plan" })).map((f) => f.space)).toEqual(["org", "user:me"]);
   });
 
+  it("records the repair of a store entry the ledger has no fact for, under that entry's fact id, and refuses one it has", async () => {
+    const l = new Ledger(file(), clock());
+    const kept = await l.assert({ subject: "acct:42", predicate: "plan", value: "pro", space: "org", actor: "agent:support" });
+    const ev = await l.repair({ factId: "orphan-1", store: "vec", externalId: "row-1", actor: "ops", reason: "append failed" });
+    expect(await l.history("orphan-1")).toEqual([ev]);
+    expect(await l.get("orphan-1")).toBeUndefined();
+    expect((await l.asOf()).map((f) => f.factId)).toEqual([kept.fact.factId]);
+    await expect(l.repair({ factId: kept.fact.factId, store: "vec", externalId: "row-2", actor: "ops", reason: "x" })).rejects.toThrow(/is in the ledger/);
+  });
+
+  it("lets the first record of a fact id win: a repair then blocks a late assert, and a repair of the same entry adds no second event", async () => {
+    const l = new Ledger(file(), clock());
+    const first = await l.repair({ factId: "orphan-2", store: "vec", externalId: "row-1", actor: "ops", reason: "append failed" });
+    expect(await l.repair({ factId: "orphan-2", store: "vec", externalId: "row-1", actor: "ops", reason: "again" })).toEqual(first);
+    await expect(l.assert({ factId: "orphan-2", subject: "acct:42", predicate: "plan", value: "pro", space: "org", actor: "agent:support" })).rejects.toThrow(/claimed by a repair/);
+    expect(await l.history("orphan-2")).toEqual([first]);
+    expect(await l.get("orphan-2")).toBeUndefined();
+  });
+
+  it("keeps one outcome when an assert and a repair of the same fact id start together", async () => {
+    const l = new Ledger(file(), clock());
+    const input = { factId: "race-1", subject: "acct:42", predicate: "plan", value: "pro", space: "org", actor: "agent:support" };
+    const results = await Promise.allSettled([l.assert(input), l.repair({ factId: "race-1", store: "vec", externalId: "row-1", actor: "ops", reason: "x" })]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(await l.history("race-1")).toHaveLength(1);
+  });
+
   it("superseding a fact ends its validity where the replacement begins, so the old value is still true for its own interval", async () => {
     const c = clock();
     const l = new Ledger(file(), c);

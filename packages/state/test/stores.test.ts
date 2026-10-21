@@ -14,6 +14,7 @@ import { ZepClient } from "@getzep/zep-cloud";
 import { Ledger } from "../src/ledger.ts";
 import { createMemoryServer } from "../src/server.ts";
 import { mem0Store, zepStore } from "../src/stores.ts";
+import type { Fact } from "../src/ledger.ts";
 
 interface Seen { method: string; path: string; body: any; auth: string | undefined }
 /** A store index that keeps surfacing a deleted item for `lag` searches after the delete: the thing #10 exists to catch. */
@@ -42,7 +43,7 @@ function laggingIndex() {
   };
 }
 
-function fake(routes: (req: Seen) => { status: number; body: unknown } | undefined): Promise<{ url: string; seen: Seen[]; close(): void; fail: { on: boolean } }> {
+function fake(routes: (req: Seen) => { status: number; body: unknown; headers?: Record<string, string> } | undefined): Promise<{ url: string; seen: Seen[]; close(): void; fail: { on: boolean } }> {
   const seen: Seen[] = [];
   const fail = { on: false };
   const server: Server = createServer(async (req, res) => {
@@ -51,7 +52,7 @@ function fake(routes: (req: Seen) => { status: number; body: unknown } | undefin
     const s: Seen = { method: req.method!, path: req.url!, body: raw ? JSON.parse(raw) : null, auth: req.headers.authorization };
     seen.push(s);
     const r = fail.on ? { status: 500, body: { error: "store down" } } : (routes(s) ?? { status: 404, body: { error: "no route" } });
-    res.writeHead(r.status, { "content-type": "application/json" });
+    res.writeHead(r.status, { "content-type": "application/json", ...("headers" in r ? r.headers : {}) });
     res.end(JSON.stringify(r.body));
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${(server.address() as any).port}`, seen, close: () => server.close(), fail })));
@@ -117,7 +118,7 @@ describe("write-through stores", () => {
     expect(add.body.messages).toEqual([{ role: "user", content: "acct:42 plan: pro" }]);
     expect(add.body.user_id).toBe("user_42");
     expect(add.body.infer).toBe(false);
-    expect(add.body.metadata).toMatchObject({ space: "team:support", actor: "support-agent", provenance: "claimed", source: "agent-custody" });
+    expect(add.body.metadata).toMatchObject({ space: "team:support", actor: "support-agent", provenance: "claimed", source: "agent-custody", storedAt: ISO });
     const graph = zep.seen.find((s) => s.path === "/graph")!;
     expect(graph.body.user_id).toBe("user_42");
     expect(graph.body.type).toBe("json");
@@ -208,7 +209,7 @@ describe("write-through stores", () => {
 
   it("a store without search is reported as unverified, never verified", async () => {
     const calls: string[] = [];
-    const blind = { name: "blind", async put() { calls.push("put"); return "b1"; }, async remove() { calls.push("remove"); } };
+    const blind = { name: "blind", async put() { calls.push("put"); return "b1"; }, async delete() { calls.push("delete"); } };
     const [a, b] = InMemoryTransport.createLinkedPair();
     await createMemoryServer(new Ledger(join(mkdtempSync(join(tmpdir(), "blind-")), "l.jsonl")), { stores: [blind] }).connect(a);
     const c = new Client({ name: "t", version: "0" });
@@ -216,7 +217,97 @@ describe("write-through stores", () => {
     const w = value((await c.callTool({ name: "memory.write", arguments: { subject: "s", predicate: "p", value: 1, space: "org" } })) as CallToolResult);
     const r = value((await c.callTool({ name: "memory.forget", arguments: { factId: w.fact.factId, reason: "r" } })) as CallToolResult);
     expect(r.verification).toEqual({ blind: "unverified" });
-    expect(calls).toEqual(["put", "remove"]);
+    expect(calls).toEqual(["put", "delete"]);
     await c.close();
+  });
+});
+
+const aFact = (n: number): Fact => ({ factId: `fact-${n}`, subject: `acct:${n}`, predicate: "plan", value: "pro", space: "org", actor: "agent", source: { receiptId: null }, provenance: "claimed", validFrom: "2026-01-01T00:00:00.000Z", validTo: null, confidence: null });
+const ISO = expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+const expected = (f: Fact, externalId: string) => ({ externalId, factId: f.factId, text: `${f.subject} ${f.predicate}: ${f.value}`, storedAt: ISO });
+
+describe("listing what a store holds, through the real clients", () => {
+  const servers: { close(): void }[] = [];
+  afterAll(() => servers.forEach((s) => s.close()));
+
+  it("mem0 lists the memories of its user that carry custody metadata, across every page", async () => {
+    process.env.MEM0_TELEMETRY = "false";
+    const mems: { id: string; memory: string; user_id: string; metadata: Record<string, unknown>; created_at?: string }[] = [];
+    const srv = await fake((r) => {
+      if (r.method === "POST" && r.path === "/v3/memories/add/") {
+        const id = `mem_${mems.length}`;
+        mems.push({ id, memory: r.body.messages[0].content, user_id: r.body.user_id, metadata: r.body.metadata });
+        return { status: 200, body: [{ id, memory: r.body.messages[0].content, event: "ADD" }] };
+      }
+      const page = r.path.match(/^\/v3\/memories\/\?page=(\d+)&page_size=(\d+)$/);
+      if (r.method === "POST" && page) {
+        const [n, size] = [Number(page[1]), Number(page[2])];
+        const mine = mems.filter((m) => m.user_id === r.body.filters.user_id);
+        // DRF answers a page past the end with 404
+        if (n > 1 && (n - 1) * size >= mine.length) return { status: 404, body: { detail: "Invalid page." } };
+        return { status: 200, body: { count: mine.length, next: n * size < mine.length ? "more" : null, previous: null, results: mine.slice((n - 1) * size, n * size) } };
+      }
+      return undefined;
+    });
+    servers.push(srv);
+    const store = mem0Store(new MemoryClient({ apiKey: "test-key", host: srv.url }), { userId: "user_42" });
+    const f = aFact(0);
+    const id = await store.put(f);
+    // 150 more custody memories force a second page; the other two carry no custody or belong to another user
+    // seed_1 stands for a memory an older version wrote: no storedAt in the metadata, so the memory's created_at answers
+    for (let i = 1; i <= 150; i++) mems.push({ id: `seed_${i}`, memory: `seed ${i}`, user_id: "user_42", metadata: { source: "agent-custody", factId: `fact-${i}` }, ...(i === 1 ? { created_at: "2025-03-01T10:00:00Z" } : {}) });
+    mems.push({ id: "foreign", memory: "not ours", user_id: "user_42", metadata: {} }, { id: "other-user", memory: "x", user_id: "user_7", metadata: { source: "agent-custody", factId: "fact-x" } });
+    const listed = await store.list!();
+    expect(listed).toHaveLength(151);
+    expect(listed).toContainEqual(expected(f, id));
+    expect(listed.map((e) => e.externalId)).not.toContain("foreign");
+    expect(listed.map((e) => e.externalId)).not.toContain("other-user");
+    expect(listed.find((e) => e.externalId === "seed_1")?.storedAt).toBe("2025-03-01T10:00:00.000Z");
+    // exactly one full page: `next` is null, and the page after it would be a 404 that the listing must not ask for
+    for (let i = 0; i < 100; i++) mems.push({ id: `full_${i}`, memory: `full ${i}`, user_id: "user_100", metadata: { source: "agent-custody", factId: `fact-f${i}` } });
+    expect(await mem0Store(new MemoryClient({ apiKey: "test-key", host: srv.url }), { userId: "user_100" }).list!()).toHaveLength(100);
+  });
+
+  it("zep lists the episodes of its user or graph, follows the next-cursor header, and rebuilds the indexed text from the JSON data", async () => {
+    const eps: { uuid: string; content: string; created_at?: string }[] = [];
+    const srv = await fake((r) => {
+      if (r.method === "POST" && r.path === "/graph") {
+        const uuid = `ep_${eps.length}`;
+        eps.push({ uuid, content: r.body.data });
+        return { status: 200, body: { uuid, content: r.body.data, created_at: new Date().toISOString() } };
+      }
+      const list = r.path.match(/^\/graph\/episodes\/(user|graph)\/([^/]+)$/);
+      if (r.method === "POST" && list) {
+        if (list[2] !== "user_42" && list[2] !== "g1") return undefined;
+        const from = Number(r.body.cursor ?? 0);
+        const end = Math.min(from + 2, eps.length);
+        return { status: 200, headers: (end < eps.length ? { "Zep-Next-Cursor": String(end) } : {}) as Record<string, string>, body: eps.slice(from, end).map((e) => ({ created_at: new Date().toISOString(), ...e })) };
+      }
+      return undefined;
+    });
+    servers.push(srv);
+    const client = new ZepClient({ apiKey: "test-key", baseUrl: srv.url });
+    const f = aFact(1);
+    const byUser = zepStore(client, { userId: "user_42" });
+    const id = await byUser.put(f);
+    // an episode without custody data, and one that is not JSON, push the second custody episode onto page 2
+    eps.push({ uuid: "foreign", content: JSON.stringify({ hello: "world" }) }, { uuid: "plain", content: "free text" });
+    const id2 = await byUser.put({ ...aFact(2), value: { tier: 2 } });
+    // an episode an older version wrote has no storedAt in its data, so the episode's created_at answers
+    eps.push({ uuid: "legacy", content: JSON.stringify({ subject: "acct:3", predicate: "plan", value: "pro", factId: "fact-3", source: "agent-custody" }), created_at: "2025-03-01T10:00:00Z" });
+    const listed = await byUser.list!();
+    expect(listed).toEqual([expected(f, id), { externalId: id2, factId: "fact-2", text: 'acct:2 plan: {"tier":2}', storedAt: ISO }, { externalId: "legacy", factId: "fact-3", text: "acct:3 plan: pro", storedAt: "2025-03-01T10:00:00.000Z" }]);
+    expect(await zepStore(client, { graphId: "g1" }).list!()).toEqual(listed);
+  });
+
+  it("zep stops with an error when the cursor does not advance", async () => {
+    const srv = await fake((r) => (r.path.startsWith("/graph/episodes/user/") ? { status: 200, headers: { "Zep-Next-Cursor": "same" }, body: [{ uuid: "ep_1", content: "{}", created_at: new Date().toISOString() }] } : undefined));
+    servers.push(srv);
+    await expect(zepStore(new ZepClient({ apiKey: "test-key", baseUrl: srv.url }), { userId: "user_42" }).list!()).rejects.toThrow("zep: listing does not advance");
+  });
+
+  it("a client without a list method gives a store without list", () => {
+    expect(mem0Store({ add: async () => [], delete: async () => ({}) }, { userId: "u" }).list).toBeUndefined();
+    expect(zepStore({ graph: { add: async () => ({ uuid: "u" }), episode: { delete: async () => ({}) } } }, { userId: "u" }).list).toBeUndefined();
   });
 });
