@@ -115,6 +115,6 @@ interface Store {
 | `mem0Store(client, { userId, infer? })` | a `mem0ai` `MemoryClient` | `infer` off by default, so the memory is the fact verbatim |
 | `zepStore(client, { userId } \| { graphId })` | a `@getzep/zep-cloud` client | one episode per fact |
 | `pgvectorStore(client, { embed, dimensions, table, topK? })` | a `pg` pool | one row per fact keyed by the fact id; removal verified by nearest-neighbour search |
-| `lettaStore(client, { agentId, tags? })` | a `@letta-ai/letta-client` `Letta` | archival passages, custody as tags |
+| `lettaStore(client, { agentId, tags? })` | a `@letta-ai/letta-client` `Letta` | archival passages, custody as tags; `tags` must not be `agent-custody` or start with `fact:`, `space:`, `stored:`, or `receipt:`; a change to `tags` strands the passages written under the old tags, and `memory.repair` cannot remove the orphans among them |
 | `langgraphStore(store, { namespace })` | any LangGraph `BaseStore` | one item per fact keyed by the fact id; where LangMem keeps its memories |
 | `cogneeStore({ url, datasetId, apiKeyEnv? \| tokenEnv? })` | Cognee's REST API | no client package exists; the id is found by listing the dataset |
