@@ -103,6 +103,7 @@ console.log(formatSimulation(report));
 | `runId`, `timestamp` | a UUID for this run and its ISO timestamp |
 | `policyDigest`, `previousPolicyDigests` | sha256 of the proposed text and the sorted distinct original digests |
 | `total`, `evaluated`, `unchanged` | supplied calls, replayed calls, and calls whose decision stayed the same |
+| `reconciliations` | reconciliation receipts: provider reads with no policy decision. A replay counts them here, not in `evaluated` or `skipped`, and they do not make the report incomplete |
 | `changes` | `{ receiptId, tool, previous, proposed }[]`: both decisions for every changed call |
 | `groups` | `{ tool, reason, receiptIds }[]`: changed calls grouped by the proposed reasons or errors |
 | `skipped` | `{ receiptId, tool, reason }[]`: unavailable inputs, missing baseline, or calls stopped before policy evaluation |

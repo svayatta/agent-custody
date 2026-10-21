@@ -38,6 +38,8 @@ export interface SimulationReport {
   total: number;
   evaluated: number;
   unchanged: number;
+  /** Reconciliation receipts. Each is a provider read with no policy decision, so a replay counts it here and not in `evaluated` or `skipped`. */
+  reconciliations: number;
   complete: boolean;
   changes: SimulationChange[];
   skipped: SimulationSkip[];
@@ -116,6 +118,7 @@ export function simulatePolicy(policyText: string, receipts: Iterable<ReceiptPre
     total: unreplayable.length,
     evaluated: 0,
     unchanged: 0,
+    reconciliations: 0,
     complete: true,
     changes: [],
     skipped: [...unreplayable],
@@ -129,6 +132,7 @@ export function simulatePolicy(policyText: string, receipts: Iterable<ReceiptPre
     const skip = (reason: string) => { report.skipped.push({ receiptId, tool, reason }); };
     const broken = structuralProblem(original);
     if (broken) { skip(`malformed receipt: ${broken}`); continue; }
+    if (original.reconciliation !== undefined) { report.reconciliations++; continue; }
     if (original.policy === null) { skip("no recorded policy decision (record-only receipt)"); continue; }
     const previous = original.policy;
     if (typeof previous.policyDigest !== "string" || !previous.policyDigest || !strings(previous.reasons)
@@ -203,7 +207,7 @@ export function formatSimulation(report: SimulationReport): string {
     `Timestamp: ${report.timestamp}`,
     `Proposed policy: ${report.policyDigest}`,
     `Previous policies: ${report.previousPolicyDigests.join(", ") || "none"}`,
-    `Receipts: ${report.total}; evaluated: ${report.evaluated}; unchanged: ${report.unchanged}; changed: ${report.changes.length}; skipped: ${report.skipped.length}`,
+    `Receipts: ${report.total}; evaluated: ${report.evaluated}; unchanged: ${report.unchanged}; reconciliations: ${report.reconciliations}; changed: ${report.changes.length}; skipped: ${report.skipped.length}`,
   ];
   for (const group of report.groups) {
     lines.push("", `${group.tool}: ${group.reason}`);
