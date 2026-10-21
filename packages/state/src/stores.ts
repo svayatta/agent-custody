@@ -283,15 +283,19 @@ export interface LettaLike {
 export interface LettaOptions {
   /** the agent whose archival memory receives the fact */
   agentId: string;
-  /** tags attached to every passage, beside the custody tags; list() returns only passages whose tags, beside the custody tags, are exactly this set; default none */
+  /** tags attached to every passage, beside the custody tags; list() returns only passages whose tags, beside the custody tags, are exactly this set; a tag that is `agent-custody` or starts with `fact:`, `space:`, `stored:`, or `receipt:` is reserved, and lettaStore throws on it; default none */
   tags?: string[];
 }
+
+const lettaCustodyTag = (t: string) => t === "agent-custody" || /^(fact|space|stored|receipt):/.test(t);
 
 /**
  * Letta keeps archival memory as passages with text and tags, no free metadata. Custody travels as tags
  * (`agent-custody`, `fact:<id>`, `space:<name>`, `receipt:<id>`) so a passage always leads back to its fact.
  */
 export function lettaStore(client: LettaLike, opts: LettaOptions): Store {
+  const reserved = opts.tags?.find(lettaCustodyTag);
+  if (reserved !== undefined) throw new Error(`lettaStore: the tag "${reserved}" is reserved for custody; use another tag`);
   const tagsFor = (f: Fact) => ["agent-custody", `fact:${f.factId}`, `space:${f.space}`, `stored:${new Date().toISOString()}`, ...(f.source.receiptId ? [`receipt:${f.source.receiptId}`] : []), ...(opts.tags ?? [])];
   return {
     name: "letta",
@@ -325,7 +329,7 @@ export function lettaStore(client: LettaLike, opts: LettaOptions): Store {
               for (const p of page) {
                 if (!p.id || !fresh.has(p.id)) continue;
                 const factTag = p.tags?.find((t) => t.startsWith("fact:"));
-                const rest = new Set((p.tags ?? []).filter((t) => t !== "agent-custody" && !/^(fact|space|stored|receipt):/.test(t)));
+                const rest = new Set((p.tags ?? []).filter((t) => !lettaCustodyTag(t)));
                 if (p.id && factTag && p.tags!.includes("agent-custody") && rest.size === own.size && [...own].every((t) => rest.has(t))) out.push({ externalId: p.id, factId: factTag.slice("fact:".length), text: p.text, ...stored(p.tags!.find((t) => t.startsWith("stored:"))?.slice("stored:".length), p.created_at) });
               }
               const last = page.at(-1)?.id;
