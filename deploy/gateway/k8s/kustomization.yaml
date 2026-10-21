@@ -1,0 +1,25 @@
+# The shared gateway on Kubernetes: one replica (sessions are held in memory and the local log has one writer), a
+# volume for the gateway key, receipts and the local log, and a ClusterIP Service. TLS and who may reach the Service
+# are yours to add (an Ingress with cert-manager, a mesh, or a NetworkPolicy): the transport is plain HTTP and a
+# grant is a bearer credential.
+#
+#   kubectl create namespace agent-custody-gateway
+#   kubectl -n agent-custody-gateway create configmap gateway-config --from-file=./config      gateway.json, policy.cedar, keys/ (public only)
+#   kubectl -n agent-custody-gateway create secret generic gateway-env --from-literal=MY_API_TOKEN='Bearer ...'
+#   kubectl apply -k deploy/gateway/k8s
+#
+# Create the ConfigMap from a config written with `init`, after deleting demo/. A ConfigMap flattens directories, so
+# list the public key at its flat name in gateway.json (trustedPrincipalKeys: ["principal.pub"]).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agent-custody-gateway
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+# Set the release before applying: `kustomize edit set image ghcr.io/svayatta/agent-custody-gateway=ghcr.io/svayatta/agent-custody-gateway:<version>`
+# or a digest with @sha256:. There is no default: `latest` moves on every release and `edge` on every merge. The first
+# release that carries the gateway image publishes its version tag.
+images:
+  - name: ghcr.io/svayatta/agent-custody-gateway
+    newTag: "SET-A-RELEASE-VERSION"

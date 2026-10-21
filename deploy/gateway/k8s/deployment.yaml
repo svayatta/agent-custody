@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-custody-gateway
+  labels: { app: agent-custody-gateway }
+spec:
+  # One replica: sessions live in memory and the local log has one writer, so never two pods on the same volume.
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: agent-custody-gateway }
+  template:
+    metadata:
+      labels: { app: agent-custody-gateway }
+    spec:
+      # the pod never calls the Kubernetes API; the gateway already holds every agent's tool credentials and its key
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: gateway
+          image: ghcr.io/svayatta/agent-custody-gateway
+          ports:
+            - { name: http, containerPort: 8790 }
+          env:
+            - { name: GATEWAY_CONFIG, value: /config/gateway.json }
+          # credentials the upstreams read; the Secret is created by hand and is optional here
+          envFrom:
+            - secretRef: { name: gateway-env, optional: true }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: config
+          configMap: { name: gateway-config }
+        - name: data
+          persistentVolumeClaim: { claimName: agent-custody-gateway-data }
+        - name: tmp
+          emptyDir: {}
