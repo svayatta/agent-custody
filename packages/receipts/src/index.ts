@@ -10,8 +10,10 @@ export { checkConfig, formatFindings, type CheckFinding, type CheckOptions } fro
 export { GRANT_HEADER, grantHeader, parseGrantHeader, serveHttp } from "./gateway-http.ts";
 export * from "./capture.ts";
 export { A2A_CARD_PATH, A2A_RECEIPT_METADATA_KEY, A2A_STREAM_META_KEY, a2aUpstream, fetchAgentCard, serveA2a, textOf } from "./a2a.ts";
-export { deliverMail, founderNote, PortalStore, portalHandler, readSession, sendFollowUps, servePortal, signSession, stripeRequest, verifyStripeSignature } from "./portal.ts";
-export type { MailOptions, OAuthOptions, PortalOptions, PortalUser, Profile, RunningPortal, StripeOptions } from "./portal.ts";
+export { deliverMail, founderNote, PortalStore, portalHandler, readSession, readSessionVia, sendFollowUps, servePortal, signSession, SsoRefusedError, stripeRequest, verifyStripeSignature } from "./portal.ts";
+export type { MailOptions, OAuthOptions, PortalOptions, PortalUser, Profile, RunningPortal, SsoSetting, StripeOptions } from "./portal.ts";
+export { oidcAuthorizeUrl, oidcExchange, pkce, samlAuthorizeUrl, samlValidate } from "./sso.ts";
+export type { OidcConfig, SamlConfig, SsoIdentity } from "./sso.ts";
 export type { HttpGatewayOptions, RunningHttpGateway } from "./gateway-http.ts";
 export type { A2aServerOptions, AgentCard, ResolvedCard, RunningA2aServer } from "./a2a.ts";
 export { exportLog, formatExport } from "./log-export.ts";

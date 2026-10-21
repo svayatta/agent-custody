@@ -6,7 +6,7 @@ FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed
 ARG AGENT_CUSTODY_VERSION=0.8.0
 # A release installs the published package; a pull request check puts a tarball of the workspace package in pkg/.
 COPY pkg/ /tmp/pkg/
-RUN if ls /tmp/pkg/*.tgz > /dev/null 2>&1; then npm install -g /tmp/pkg/*.tgz pg@8; else npm install -g "@agent-custody/receipts@${AGENT_CUSTODY_VERSION}" pg@8; fi \
+RUN if ls /tmp/pkg/*.tgz > /dev/null 2>&1; then npm install -g /tmp/pkg/*.tgz pg@8 @node-saml/node-saml@5; else npm install -g "@agent-custody/receipts@${AGENT_CUSTODY_VERSION}" pg@8 @node-saml/node-saml@5; fi \
   && rm -rf /tmp/pkg \
   && adduser -D -u 10001 custody \
   && mkdir -p /data/keys /checkpoints /witnessed \

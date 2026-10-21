@@ -85,6 +85,12 @@ Web pages and the hosted log:
 - The portal session cookie is `HttpOnly; SameSite=Strict`, and every portal API write requires a JSON body. Together they stop a cross-site page from acting as the user.
 - The portal reads Google's id token without a signature check, because the token arrives from Google's token endpoint over TLS in the same code exchange. Do not read an id token from any other source this way.
 - The portal links a provider sign-in to a password account only when the account's email is verified (issue #103). The Stripe webhook checks `Stripe-Signature` and never touches an enterprise tenant. It ignores an event id that it applied already, and an event older than the last one applied (issue #105).
+- Single sign-on is set by the operator only (`log-admin sso`), never through a portal route. A domain belongs to one tenant, and an IdP is trusted only for its tenant's domains.
+- A single sign-on proof of an address wins over an account that never verified it, so an address registered first cannot lock the member out (`findOrCreateSsoUser`). A member that an admin removed rejoins through single sign-on only after a new invite. `log-admin sso set`, `sso remove`, and `user mfa-reset` write an audit entry through `PostgresTenancy.record`, with the actor `cli:<user>@<host>` and never a secret.
+- The `id_token` of an SSO IdP is checked for its signature against the IdP's own key set (RS256 and ES256 only), then for issuer, audience, nonce, and expiry. The Google exception above does not extend to it.
+- For SAML, read only the signed assertion. Its bearer `SubjectConfirmationData` must answer the request id that the sign-in cookie holds. Never verify an XML signature by hand: use the library.
+- An MFA code is single use. The `custody_mfa` cookie is never a session. An SSO sign-in skips the portal's MFA only because the IdP owns it.
+- A new portal write route needs the `admin` role unless the role table in `site/reference/hosted.md` lists it. An admin never touches an owner or grants `owner`. The last owner stays.
 - Every path under `/admin`, the page included, needs the admin token. The admin routes throttle failed attempts per address.
 - `Verifier.vue` fetches only receipt ids that match `^[0-9a-f-]{36}$`, and only files under `/custody/` on its own origin.
 - The log rate-limits each token and caps the request body (64 KiB by default). A tenant route answers only to that tenant's token.
