@@ -245,7 +245,7 @@ export interface AuditEntry {
   id: number;
   at: string;
   actor: string;
-  action: "tenant.add" | "tenant.disable" | "tenant.plan" | "token.add" | "token.revoke" | "policy.add" | "policy.remove";
+  action: "tenant.add" | "tenant.disable" | "tenant.plan" | "token.add" | "token.revoke" | "policy.add" | "policy.remove" | "sso.set" | "sso.remove" | "user.mfa-reset";
   tenantId: string | null;
   detail: Record<string, unknown>;
 }
@@ -286,7 +286,9 @@ export class PostgresTenancy {
     return this.ready;
   }
 
-  private async record(actor: string | undefined, action: AuditEntry["action"], tenantId: string | null, detail: Record<string, unknown>): Promise<void> {
+  /** Writes one audit entry. `detail` never holds a secret or a token. */
+  async record(actor: string | undefined, action: AuditEntry["action"], tenantId: string | null, detail: Record<string, unknown>): Promise<void> {
+    await this.init();
     await this.client.query(`INSERT INTO ${this.prefix}audit (actor, action, tenant_id, detail) VALUES ($1, $2, $3, $4)`, [actor ?? "unattributed", action, tenantId, JSON.stringify(detail)]);
   }
 

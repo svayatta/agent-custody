@@ -10,7 +10,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, typ
 import { z } from "zod";
 import { signResult, type KeyPair } from "@agent-custody/receipts";
 import type { Fact, Ledger } from "./ledger.ts";
-import type { RemovalOutcome, Store } from "./stores.ts";
+import { entryOf, type RemovalOutcome, type Store, type StoreEntry } from "./stores.ts";
 
 export const SERVER_VERSION = "0.1.0";
 /** The same keys the receipts gateway sets on the upstream call. Duplicated here so this package needs no runtime import from receipts. */
@@ -43,6 +43,7 @@ const Get = z.object({ factId: z.string().min(1) });
 const Forget = z.object({ factId: z.string().min(1), reason: z.string().min(1), keepDigest: z.boolean().optional() });
 const Hold = z.object({ factId: z.string().min(1), reason: z.string().min(1) });
 const Sweep = z.object({ before: iso.optional(), space: z.string().min(1).optional(), reason: z.string().min(1), keepDigest: z.boolean().optional() });
+const Repair = z.object({ reason: z.string().min(1), before: iso.optional() });
 
 const str = { type: "string" as const };
 const isoStr = { type: "string" as const, description: "an ISO 8601 date-time with a UTC offset, for example 2026-10-15T09:00:00Z" };
@@ -87,6 +88,11 @@ export const TOOLS: Tool[] = [
     name: "memory.sweep",
     description: "Retention: forget every fact the ledger learned of before an instant, in one space or all, skipping held facts, and remove each from every store. Without `before`, the server's configured retention windows decide per space. The receipt is the record of the sweep.",
     inputSchema: { type: "object", properties: { before: isoStr, space: str, reason: str, keepDigest: { type: "boolean" } }, required: ["reason"] },
+  },
+  {
+    name: "memory.repair",
+    description: "Find and remove store entries that the ledger has no fact for. A write reaches the stores before the ledger, so a failed ledger append leaves such an entry. For each store that can list its entries: every entry with custody metadata, stored more than ten minutes ago, whose fact id the ledger does not know is removed, a repair event is recorded under that fact id first, and then the removal is made and verified. A write that is still in progress then fails at its ledger append. A repair of an entry that has a repair event adds no second event. `before` can only move the cutoff earlier. Returns { before, repaired, unlisted, stillHeld, unrecorded }: the cutoff, what was removed with the store's answer, the stores that cannot list, the removals and listings that failed, and the entries that stay because the ledger did not take the repair event.",
+    inputSchema: { type: "object", properties: { reason: str, before: isoStr }, required: ["reason"] },
   },
   {
     name: "memory.get",
@@ -138,6 +144,12 @@ export function retentionCutoff(retention: Record<string, string>, space: string
   return null;
 }
 
+/**
+ * How old a store entry must be before repair may remove it. A write whose stores take more than half of it fails
+ * before its ledger append, so the entry of a write in progress is never this old.
+ */
+export const REPAIR_MIN_AGE_MS = 10 * 60_000;
+
 const json = (v: unknown): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify(v) }] });
 const fail = (msg: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: msg }] });
 
@@ -145,6 +157,9 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
   const server = new Server({ name: "agent-custody-memory", version: SERVER_VERSION }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
   const trustMeta = opts.trustMeta ?? opts.requireGateway !== false;
+  // A store written for remove(externalId, fact) and verifyRemoved would get an entry where it expects an id, and its
+  // check could then report an entry as gone that is still there: a false erasure certificate. Refuse it.
+  for (const store of opts.stores ?? []) if (typeof store.delete !== "function") throw new Error(`store ${store.name} has no delete(entry); remove(externalId, fact) and verifyRemoved are now delete(entry) and verifyDeleted(entry)`);
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     // A caller that is not the gateway gets no say in who it is or what was observed: its _meta is dropped whole.
     const meta = trustMeta ? ((req.params._meta ?? {}) as Record<string, unknown>) : {};
@@ -153,43 +168,47 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
     return opts.identity && receiptId ? signResult(result, opts.identity, receiptId, req.params.name) : result;
   });
   /**
-   * Removes a fact from every store it was written to, then asks each store's search whether it is really gone.
-   * The outcome per store is what the receipt records: verified, stillIndexed, unverified (the store cannot say), or failed.
+   * Removes one entry from a store, then asks the store's search whether it is really gone. The outcome is what the
+   * receipt records: verified, stillIndexed, unverified (the store cannot say), or failed, with the store's error.
    */
+  async function removeEntry(store: Store, entry: StoreEntry): Promise<{ outcome: RemovalOutcome; error?: string }> {
+    try {
+      await store.delete(entry);
+    } catch (e) {
+      return { outcome: "failed", error: `${store.name}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    return { outcome: await verifyEntry(store, entry) };
+  }
+
+  /** Asks the store's search whether a deleted entry is gone. A store without a check cannot say. */
+  async function verifyEntry(store: Store, entry: StoreEntry): Promise<RemovalOutcome> {
+    if (!store.verifyDeleted) return "unverified";
+    const attempts = Math.max(1, opts.verify?.attempts ?? 3);
+    const delayMs = opts.verify?.delayMs ?? 200;
+    for (let i = 0; i < attempts; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, delayMs * 2 ** (i - 1)));
+      try {
+        if (await store.verifyDeleted(entry)) return "verified";
+      } catch {
+        // The store could not be asked; that is not the same as the value being gone.
+        return "unverified";
+      }
+    }
+    return "stillIndexed";
+  }
+
+  /** Removes a fact from every store it was written to. */
   async function removeFromStores(fact: Fact | undefined): Promise<{ removedFrom: string[]; stillHeld: string[]; verification: Record<string, RemovalOutcome> }> {
     const removedFrom: string[] = [];
     const stillHeld: string[] = [];
     const verification: Record<string, RemovalOutcome> = {};
-    const attempts = Math.max(1, opts.verify?.attempts ?? 3);
-    const delayMs = opts.verify?.delayMs ?? 200;
     for (const store of opts.stores ?? []) {
       const id = fact?.external?.[store.name];
       if (!id) continue;
-      try {
-        await store.remove(id, fact!);
-        removedFrom.push(store.name);
-      } catch (e) {
-        stillHeld.push(`${store.name}: ${e instanceof Error ? e.message : String(e)}`);
-        verification[store.name] = "failed";
-        continue;
-      }
-      if (!store.verifyRemoved) {
-        verification[store.name] = "unverified";
-        continue;
-      }
-      let gone = false;
-      let checked = true;
-      for (let i = 0; i < attempts && !gone; i++) {
-        if (i > 0) await new Promise((r) => setTimeout(r, delayMs * 2 ** (i - 1)));
-        try {
-          gone = await store.verifyRemoved(id, fact!);
-        } catch {
-          // The store could not be asked; that is not the same as the value being gone.
-          checked = false;
-          break;
-        }
-      }
-      verification[store.name] = !checked ? "unverified" : gone ? "verified" : "stillIndexed";
+      const { outcome, error } = await removeEntry(store, entryOf(fact!, id));
+      verification[store.name] = outcome;
+      if (error) stillHeld.push(error);
+      else removedFrom.push(store.name);
     }
     return { removedFrom, stillHeld, verification };
   }
@@ -199,6 +218,58 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
     const ev = await ledger.forget({ factId, actor: who.actor, reason, source: { receiptId: who.receiptId }, ...(keepDigest === undefined ? {} : { keepDigest }), compact });
     const { removedFrom, stillHeld, verification } = await removeFromStores(fact);
     return { factId: ev.factId, valueDigest: ev.valueDigest, digestKind: ev.digestKind, txTime: ev.txTime, actor: ev.actor, reason: ev.reason, source: ev.source, erasedFromLedger: true, removedFrom, stillHeld, verification };
+  }
+  /** The tail of the sweeps queued in this process. */
+  let repairTurn: Promise<void> = Promise.resolve();
+
+  async function repairSweep(a: z.infer<typeof Repair>, who: { actor: string; receiptId: string | null }): Promise<CallToolResult> {
+    // `before` can only move the cutoff earlier: a later one would reach the entries of a write in progress.
+    const cutoff = Math.min(a.before ? Date.parse(a.before) : Infinity, Date.now() - REPAIR_MIN_AGE_MS);
+    const repaired: { store: string; externalId: string; factId: string; outcome: RemovalOutcome; eventId: string }[] = [];
+    const unrecorded: { store: string; externalId: string; factId: string; error: string }[] = [];
+    const unlisted: string[] = [];
+    const stillHeld: string[] = [];
+    for (const store of opts.stores ?? []) {
+      if (!store.list) {
+        unlisted.push(store.name);
+        continue;
+      }
+      let entries: StoreEntry[];
+      try {
+        entries = await store.list();
+      } catch (e) {
+        stillHeld.push(`${store.name}: cannot list: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+      const seen = new Set<string>();
+      for (const entry of entries) {
+        if (seen.has(entry.externalId)) continue;
+        seen.add(entry.externalId);
+        // A young entry may be a write in progress. So is one whose time is missing or does not parse.
+        if (!(Date.parse(entry.storedAt ?? "") < cutoff)) continue;
+        // The ledger records the repair first, as a retraction does. A write that is still in progress then fails at
+        // its own append, and a write that has appended makes this refuse. Either way the first record wins.
+        let ev;
+        try {
+          if (await ledger.get(entry.factId)) continue;
+          ev = await ledger.repair({ factId: entry.factId, store: store.name, externalId: entry.externalId, actor: who.actor, reason: a.reason, source: { receiptId: who.receiptId } });
+        } catch (e) {
+          // The ledger now knows the fact: the write won, and its entry stays. Otherwise nothing was removed. A ledger
+          // that cannot answer does not stop the sweep: the entries that it already removed keep their outcomes.
+          if (!(await ledger.get(entry.factId).catch(() => undefined))) unrecorded.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, error: e instanceof Error ? e.message : String(e) });
+          continue;
+        }
+        let { outcome, error } = await removeEntry(store, entry);
+        // Another server may have removed the entry already, and the store may then fail the delete. When the listing of
+        // the store no longer holds the entry, the delete is done, and the usual check decides the outcome.
+        if (error && (await store.list().then((now) => !now.some((e) => e.externalId === entry.externalId), () => false))) ({ outcome, error } = { outcome: await verifyEntry(store, entry), error: undefined });
+        if (error) stillHeld.push(error);
+        repaired.push({ store: store.name, externalId: entry.externalId, factId: entry.factId, outcome, eventId: ev.eventId });
+      }
+    }
+    const out = { before: new Date(cutoff).toISOString(), repaired, unlisted, stillHeld, unrecorded };
+    if (stillHeld.length > 0 || unrecorded.length > 0) return { isError: true, content: [{ type: "text", text: `repair incomplete: ${[...stillHeld, ...unrecorded.map((u) => `${u.store} ${u.externalId}: not removed, because the ledger did not record the repair: ${u.error}`)].join("; ")}` }, { type: "text", text: JSON.stringify(out) }] };
+    return json(out);
   }
   async function handle(name: string, args: Record<string, unknown>, meta: Record<string, unknown>, receiptId: string | null): Promise<CallToolResult> {
     const gatewayAgent = typeof meta[AGENT_META_KEY] === "string" ? (meta[AGENT_META_KEY] as string) : null;
@@ -230,7 +301,10 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
           const external: Record<string, string> = {};
           const factId = randomUUID();
           const preview: Fact = { ...input, factId, validFrom: input.validFrom ?? new Date().toISOString(), validTo: null, confidence: input.confidence ?? null };
+          // A failed append leaves the stores holding a fact the ledger lacks; memory.repair finds and removes it.
+          const started = Date.now();
           for (const store of opts.stores ?? []) external[store.name] = await store.put(preview);
+          if (Date.now() - started > REPAIR_MIN_AGE_MS / 2) return fail(`the stores took more than ${REPAIR_MIN_AGE_MS / 120_000} minutes; the write is refused, and memory.repair removes what the stores took`);
           const ev = await ledger.assert({ ...input, factId, external });
           return json({ fact: ev.fact, eventId: ev.eventId, txTime: ev.txTime, supersedes: ev.supersedes });
         }
@@ -295,6 +369,13 @@ export function createMemoryServer(ledger: Ledger, opts: MemoryServerOptions = {
           const out = { before: a.before ?? null, retention: a.before ? null : (opts.retention ?? null), space: a.space ?? null, forgotten: forgotten.map((o) => ({ factId: o.factId, valueDigest: o.valueDigest, digestKind: o.digestKind, removedFrom: o.removedFrom, verification: o.verification })), held, stillHeld };
           if (stillHeld.length > 0) return { isError: true, content: [{ type: "text", text: `swept the ledger, but some values are still held by stores: ${stillHeld.join("; ")}` }, { type: "text", text: JSON.stringify(out) }] };
           return json(out);
+        }
+        case "memory.repair": {
+          const a = Repair.parse(args);
+          // One sweep at a time in this process: a second sweep then lists after the first has removed its entries.
+          const turn = repairTurn.then(() => repairSweep(a, who));
+          repairTurn = turn.then(() => {}, () => {});
+          return await turn;
         }
         case "memory.get": {
           const a = Get.parse(args);

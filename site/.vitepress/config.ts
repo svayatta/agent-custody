@@ -112,6 +112,7 @@ export default withMermaid(
           { text: "Configuring the gateway", link: "/receipts/configuration" },
           { text: "The gateway console", link: "/receipts/console" },
           { text: "The gateway", link: "/receipts/usage" },
+          { text: "Live Codex recovery demo", link: "/receipts/codex-recovery" },
           { text: "Payload-bound approvals", link: "/receipts/approvals" },
           { text: "The interceptor SDK and other languages", link: "/receipts/sdk" },
           { text: "Writing policies", link: "/receipts/policies" },

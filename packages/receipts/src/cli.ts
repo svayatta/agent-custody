@@ -19,7 +19,8 @@ import { fetchWitnessKeys, Witness } from "./witness.ts";
 import { checkLog, formatLogCheck } from "./log-check.ts";
 import { serveHttp } from "./gateway-http.ts";
 import { serveA2a } from "./a2a.ts";
-import { PortalStore, sendFollowUps, servePortal, type MailOptions, type OAuthOptions, type StripeOptions } from "./portal.ts";
+import { PortalStore, sendFollowUps, servePortal, type MailOptions, type OAuthOptions, type Role, type StripeOptions } from "./portal.ts";
+import type { OidcConfig, SamlConfig } from "./sso.ts";
 import { exportLog, formatExport } from "./log-export.ts";
 import { CheckpointPublisher, fileResolver, type LogResolver } from "./log-sink.ts";
 import type { AdminOptions } from "./log-admin.ts";
@@ -125,6 +126,10 @@ const USAGE = `agent-custody <command>
   log-admin --db-env NAME tenant add <id> [--log-id <id>] | tenant list | tenant disable <id> | tenant plan <id> <free|team|enterprise>
   log-admin --db-env NAME token add <tenant> --label <text> | token list <tenant> | token revoke <tenant> <hash-prefix>
   log-admin --db-env NAME audit [--tenant <id>]   who did what to tenants and tokens, newest first
+  log-admin --db-env NAME sso set <tenant> --domains a.com,b.com [--default-role readonly] [--enforce]
+            (--oidc-issuer <url> --oidc-client-id <id> --oidc-secret-env NAME | --saml-entry-point <url> --saml-cert <pem file> [--saml-idp-issuer <id>])
+  log-admin --db-env NAME sso show <tenant> | sso remove <tenant>   enterprise sign-in through the tenant's own identity provider
+  log-admin --db-env NAME user mfa-reset <email>   turns MFA off for a portal account that lost its authenticator
   portal  --db-env NAME --secret-env NAME --public-url <log url> [--checkpoints-url <url>] [--portal-url <url>] [--port 8792] [--host 127.0.0.1]
           [--stripe-key-env NAME --stripe-webhook-env NAME --stripe-price-team <price id>] [--trust-proxy]
                                                    the tenant portal: register, first key, usage against plan, keys, billing, export
@@ -419,7 +424,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "log-admin": {
-      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { "db-env": { type: "string" }, "log-id": { type: "string" }, label: { type: "string" }, file: { type: "string" }, tenant: { type: "string", default: "default" } } });
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { "db-env": { type: "string" }, "log-id": { type: "string" }, label: { type: "string" }, file: { type: "string" }, tenant: { type: "string", default: "default" }, domains: { type: "string" }, "default-role": { type: "string", default: "readonly" }, enforce: { type: "boolean", default: false }, "oidc-issuer": { type: "string" }, "oidc-client-id": { type: "string" }, "oidc-secret-env": { type: "string" }, "saml-entry-point": { type: "string" }, "saml-cert": { type: "string" }, "saml-idp-issuer": { type: "string" } } });
       if (!values["db-env"]) throw new Error("log-admin needs --db-env NAME");
       const tenancy = new PostgresTenancy(openPostgres(values["db-env"]));
       const [what, verb, ...args] = positionals;
@@ -444,6 +449,42 @@ async function main(argv: string[]): Promise<number> {
         for (const t of await tenancy.listTokens(args[0])) console.log(`${t.tokenHash.slice(0, 12)}  ${t.label.padEnd(24)} created ${t.createdAt}${t.revokedAt ? `  REVOKED ${t.revokedAt}` : ""}`);
       } else if (what === "token" && verb === "revoke" && args[0] && args[1]) {
         console.log(`revoked ${await tenancy.revokeToken(args[0], args[1], actor)} token(s)`);
+      } else if (what === "sso" && verb === "set" && args[0]) {
+        if (!(await tenancy.tenant(args[0]))) throw new Error(`unknown tenant ${args[0]}; add it first`);
+        if (!values.domains) throw new Error("sso set needs --domains");
+        let config: OidcConfig | SamlConfig;
+        if (values["oidc-issuer"]) {
+          if (!values["oidc-client-id"] || !values["oidc-secret-env"]) throw new Error("OIDC needs --oidc-issuer, --oidc-client-id, and --oidc-secret-env");
+          const clientSecret = process.env[values["oidc-secret-env"]];
+          if (!clientSecret) throw new Error(`environment variable ${values["oidc-secret-env"]} is not set`);
+          config = { issuer: values["oidc-issuer"], clientId: values["oidc-client-id"], clientSecret };
+        } else if (values["saml-entry-point"] && values["saml-cert"]) {
+          config = { entryPoint: values["saml-entry-point"], idpCert: readFileSync(values["saml-cert"], "utf8"), ...(values["saml-idp-issuer"] ? { idpIssuer: values["saml-idp-issuer"] } : {}) };
+        } else {
+          throw new Error("sso set needs the OIDC flags or --saml-entry-point with --saml-cert");
+        }
+        const domains = values.domains.split(",");
+        const protocol = "issuer" in config ? "oidc" : "saml";
+        await new PortalStore(openPostgres(values["db-env"])).setSso({ tenant: args[0], protocol, config, domains, defaultRole: values["default-role"] as Role, enforced: values.enforce });
+        await tenancy.record(actor, "sso.set", args[0], { protocol, ...("issuer" in config ? { issuer: config.issuer } : { entryPoint: config.entryPoint }), domains, defaultRole: values["default-role"], enforced: values.enforce });
+        console.log(`single sign-on set for ${args[0]}: ${domains.join(", ")}${values.enforce ? " (enforced)" : ""}`);
+      } else if (what === "sso" && verb === "show" && args[0]) {
+        const s = await new PortalStore(openPostgres(values["db-env"])).ssoOf(args[0]);
+        if (!s) throw new Error(`no single sign-on for ${args[0]}`);
+        const c = s.config as Partial<OidcConfig & SamlConfig>;
+        console.log([`protocol      ${s.protocol}`, ...(c.issuer ? [`issuer        ${c.issuer}`, `client id     ${c.clientId}`, "client secret  set"] : [`entry point   ${c.entryPoint}`, `idp issuer    ${c.idpIssuer ?? "(not pinned)"}`, "idp cert      set"]), `domains       ${s.domains.join(", ")}`, `default role  ${s.defaultRole}`, `enforced      ${s.enforced}`].join("\n"));
+      } else if (what === "sso" && verb === "remove" && args[0]) {
+        const removed = await new PortalStore(openPostgres(values["db-env"])).removeSso(args[0]);
+        if (removed) await tenancy.record(actor, "sso.remove", args[0], {});
+        console.log(`${removed ? "removed" : "there was no"} single sign-on for ${args[0]}`);
+      } else if (what === "user" && verb === "mfa-reset" && args[0]) {
+        const portal = new PortalStore(openPostgres(values["db-env"]));
+        const email = args[0].trim().toLowerCase();
+        const member = await portal.userByEmail(email);
+        if (!member) throw new Error(`no portal account with the address ${args[0]}`);
+        await portal.resetMfa(email);
+        await tenancy.record(actor, "user.mfa-reset", await portal.tenantOf(member.id), { email });
+        console.log(`MFA reset for ${args[0]}`);
       } else if (what === "audit") {
         for (const e of await tenancy.audit({ ...(values.tenant !== "default" ? { tenant: values.tenant } : {}), limit: 100 })) console.log(`${e.at}  ${e.actor.padEnd(40)} ${e.action.padEnd(14)} ${(e.tenantId ?? "").padEnd(20)} ${Object.entries(e.detail).map(([k, v]) => `${k}=${v}`).join(" ")}`);
       } else if (what === "import") {
