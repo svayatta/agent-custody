@@ -15,6 +15,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [The gateway console](docs/console.md): an admin service for the person who runs a gateway: config, tools, receipts with a verdict each, a policy editor that replays recorded calls before it saves, grant revocation, and an audit trail
 - [Configuring the gateway](docs/configuration.md): who may use which tools and where the tools live, a worked example with two agents, the Docker image, and `agent-custody check` to validate a config before it starts
 - [Usage guide](docs/usage.md): gateway setup, wiring into Claude Desktop, Claude Code, or your own agent loop, and the gateway as an A2A agent between agents that delegate to each other, private evidence: what the receipt file carries of each call, and searching receipts and exporting offline cases with the state package's review console
+- [Live Codex recovery demo](docs/codex-recovery.md): a real support agent, incorrect CRM memory, operator-reviewed compensation, and verified receipts; an opt-in live run with offline regression coverage
 - [Human approvals](docs/approvals.md): short-lived signatures over the exact action, two-person thresholds, single-use enforcement, and offline verification
 - [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin and Google ADK callbacks through the Python package, and wrapping tool functions in anything else
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples, and replaying history against a proposed policy with `policy simulate`
@@ -108,6 +109,7 @@ Every receipt names its issuer, and the verifier prints what that issuer kind is
 | host or framework | producer | enforce + record | record only | tested against |
 | --- | --- | --- | --- | --- |
 | any MCP host: Claude Desktop, Claude Code, Cursor, custom | gateway | yes | | a real MCP client and upstream over stdio |
+| Codex CLI (headless) | gateway | yes | | a manual `codex exec` run and offline MCP recovery checks; [guide](docs/codex-recovery.md) |
 | Claude Code | SDK | `hook` command, PreToolUse deny | PostToolUse | the documented hook contract, via stdin |
 | Claude Agent SDK | SDK | `claudeAgentHooks` | same | the same handler |
 | OpenAI Agents SDK (JS) | SDK | `wrapTools` | `observeRunner` | a real `Runner` with a scripted model |
@@ -276,7 +278,7 @@ scripts/           fake Stripe upstream (signs its results with --key), a second
 examples/          thirty runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
 test/              unit tests per module, end-to-end gateway test, SDK and hook tests,
                    adapter tests against the real packages, and a test that runs every policy in docs/policies.md
-docs/              tutorials, usage (gateway), approvals, sdk, policies, verification
+docs/              tutorials, usage (gateway), codex-recovery (live demo), approvals, sdk, policies, verification
 ```
 
 ## Plan
@@ -285,6 +287,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Done**
 
+- Live Codex support recovery demo: model-selected MCP calls, incorrect CRM memory, a reviewed recovery plan, simulated credit compensation, and verified evidence; [guide](docs/codex-recovery.md), with offline regression coverage.
 - Payload-bound human approvals: short-lived signatures over the principal, agent, tool, full arguments, amount, currency, and beneficiary; configurable one- or two-key thresholds, enforced even in observe mode, a configurable lifetime cap, persistent atomic single-use consumption before forwarding, and independent approval-key verification. [Guide](docs/approvals.md), tutorial 30.
 - Gateway: MCP proxy, signed delegation, gateway-fetched facts, Cedar policy, denial receipts, Merkle log, offline verifier.
 - Receipt schema carries the issuer kind, so a verifier reads gateway versus SDK before anything else.

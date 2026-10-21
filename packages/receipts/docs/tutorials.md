@@ -49,6 +49,7 @@ A policy is a Cedar file. The gateway turns each tool call into a Cedar request:
 ## Where each guide goes deeper
 
 - [usage.md](usage.md): gateway setup and wiring into hosts
+- [codex-recovery.md](codex-recovery.md): the opt-in live Codex support incident, operator-reviewed recovery, and its offline state example
 - [approvals.md](approvals.md): exact-action signatures, two-person thresholds, consumption, and privacy limits
 - [console.md](console.md): the admin console: run it, what each tab does, how it is protected, and its limits
 - [financial-operations.md](financial-operations.md): payment retries, budget reservations, provider contract, and operator reconciliation

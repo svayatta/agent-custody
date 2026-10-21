@@ -9,6 +9,8 @@ bun run site:build    # site/.vitepress/dist
 
 Relative links in the docs are rewritten at build time: links to markdown pages become site links, links to source files become links into the repository on GitHub.
 
+The live Codex recovery guide lives in [`packages/receipts/docs/codex-recovery.md`](../packages/receipts/docs/codex-recovery.md) and is published at `/receipts/codex-recovery`; the example directory links to that guide.
+
 The gateway reference and receipt specification cover financial operation outcomes and reconciliation; the complete configuration and recovery guide lives in `packages/receipts/docs/financial-operations.md`.
 
 ## Rules for site changes
