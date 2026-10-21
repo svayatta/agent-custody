@@ -281,12 +281,7 @@ export class PortalStore {
   }
   async addMember(userId: string, tenantId: string, role: Role = "owner"): Promise<void> {
     await this.init();
-    // A join clears the removal of the tenant in the same statement. Every join follows an invite, a new tenant, or a sign-in with no removal.
-    await this.client.query(
-      `WITH j AS (INSERT INTO ${this.p}members (user_id, tenant_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING)
-       DELETE FROM ${this.p}removed WHERE tenant_id = $2 AND (user_id = $1 OR email = (SELECT email FROM ${this.p}users WHERE id = $1))`,
-      [userId, tenantId, role],
-    );
+    await this.client.query(`INSERT INTO ${this.p}members (user_id, tenant_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [userId, tenantId, role]);
   }
   async roleOf(userId: string, tenantId: string): Promise<Role | null> {
     await this.init();
@@ -303,6 +298,7 @@ export class PortalStore {
     await this.init();
     return (await this.client.query(`UPDATE ${this.p}members SET role = $3 WHERE user_id = $1 AND tenant_id = $2 AND ($3 = 'owner' OR role <> 'owner' OR EXISTS (SELECT 1 FROM ${this.p}members o WHERE o.tenant_id = $2 AND o.role = 'owner' AND o.user_id <> $1)) RETURNING user_id`, [userId, tenantId, role])).rows.length > 0;
   }
+  // The removal record stays after a rejoin by invite. It has no effect while the user is a member: only findOrCreateSsoUser reads it, and only when the home tenant differs.
   async removeMember(tenantId: string, userId: string): Promise<boolean> {
     await this.init();
     const gone = (await this.client.query(`DELETE FROM ${this.p}members WHERE user_id = $1 AND tenant_id = $2 AND (role <> 'owner' OR EXISTS (SELECT 1 FROM ${this.p}members o WHERE o.tenant_id = $2 AND o.role = 'owner' AND o.user_id <> $1)) RETURNING user_id`, [userId, tenantId])).rows.length > 0;
