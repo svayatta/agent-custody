@@ -14,7 +14,7 @@ The gateway has its own image and recipes in [gateway/](gateway/README.md): one 
 
 ### Verifying an image
 
-Each pushed image is signed by the workflow that built it (cosign, keyless) and carries a provenance attestation and an SBOM. Pin the digest rather than a tag, and check the signature before you run it:
+Each pushed image is signed by the workflow that built it (cosign, keyless) and carries a provenance attestation and an SBOM. Pin the digest rather than a tag, and check the signature before you run it. The signature is a Sigstore bundle that the registry keeps as an OCI 1.1 referrer of the image. Use cosign 3 or later to verify it: cosign 2 does not find it.
 
 ```bash
 cosign verify ghcr.io/svayatta/agent-custody-log:0.8.0 \
