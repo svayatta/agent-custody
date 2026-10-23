@@ -2,6 +2,10 @@
 
 All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agent-custody` on PyPI, move in lockstep. The receipt format has stayed at v0.2 throughout; every addition to it is an optional field, so earlier receipts and the published conformance vectors remain valid.
 
+## Unreleased
+
+- **Fix: `policy simulate` checks the receipt id against the file name.** A receipt copied over the file name of another receipt hid that call, counted the copy two times, and the report still said `COMPLETE`. The command now fails when `<id>.json` holds a receipt with another id, as it already does for an authorization file. A test also checks that `simulatePolicy` evaluates each receipt before it pulls the next.
+
 ## 0.9.0 — 2026-10-21
 
 - **State:** a live Codex support recovery demo (example 10; guide `docs/codex-recovery.md` in the receipts package). A Codex agent works through the gateway and writes a wrong benefit and a credit, because of a wrong CRM plan. The operator corrects the plan. `inspect` traces the blast radius and plans the retractions, the corrective writes, and the credit reversals. `recover` runs the plan only with an approval that equals the digest of the saved plan, and `verify` checks the stores against the receipts. `inspect` refuses a credit or a current benefit that no memory read supports, because the demo cannot decide its recovery. After a partial recovery, a refreshed plan lists the corrective writes again.
