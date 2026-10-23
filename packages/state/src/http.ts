@@ -8,7 +8,7 @@
 // server looks at it, so it can claim a fact but never attest one, whatever it puts in the call. A direct writer is
 // therefore never given the gateway's token.
 import { timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Ledger } from "./ledger.ts";
@@ -50,6 +50,12 @@ export function memoryHttpHandler(ledger: Ledger, opts: MemoryHttpOptions): (req
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
+    // The server is stateless and sends no server-initiated message, so it offers no GET stream. A held stream would also keep close() from finishing.
+    if (req.method !== "POST") {
+      res.writeHead(405, { allow: "POST", "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+      return;
+    }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     // A direct writer's _meta is dropped: with requireGateway it is then refused outright, without it its writes are claimed.
     const server = createMemoryServer(ledger, { ...opts, trustMeta: caller === "gateway" });
@@ -62,6 +68,23 @@ export function memoryHttpHandler(ledger: Ledger, opts: MemoryHttpOptions): (req
   };
 }
 
+/** How long a stop waits for requests in flight before it cuts the connections that remain. */
+const STOP_DEADLINE_MS = 3000;
+
+/** Stops listening. Requests in flight finish. Idle connections close at once, and any connection that remains after the deadline closes too. */
+function stopServer(server: Server): Promise<void> {
+  return new Promise((resolve) => {
+    const idle = setInterval(() => server.closeIdleConnections(), 100);
+    const deadline = setTimeout(() => server.closeAllConnections(), STOP_DEADLINE_MS);
+    server.close(() => {
+      clearInterval(idle);
+      clearTimeout(deadline);
+      resolve();
+    });
+    server.closeIdleConnections();
+  });
+}
+
 /** Starts the memory server over HTTP. Port 0 picks a free port. Host defaults to loopback; bind wider only behind auth. */
 export async function serveMemoryHttp(ledger: Ledger, opts: MemoryHttpOptions): Promise<RunningMemoryServer> {
   const host = opts.host ?? "127.0.0.1";
@@ -72,7 +95,7 @@ export async function serveMemoryHttp(ledger: Ledger, opts: MemoryHttpOptions): 
   return new Promise((resolve) => {
     server.listen(opts.port, host, () => {
       const { port } = server.address() as AddressInfo;
-      resolve({ url: `http://${host}:${port}/mcp`, close: () => new Promise((r) => server.close(() => r())) });
+      resolve({ url: `http://${host}:${port}/mcp`, close: () => stopServer(server) });
     });
   });
 }
