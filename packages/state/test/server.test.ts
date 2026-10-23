@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -13,6 +13,8 @@ import { createDelegation, createGateway, formatReport, generateKeyPair, loadCon
 import { Ledger } from "../src/ledger.ts";
 import { createMemoryServer } from "../src/server.ts";
 import { blastRadius, loadReceipts } from "../src/blast.ts";
+import { openStore } from "../src/storage.ts";
+import type { Store, StoreEntry } from "../src/stores.ts";
 
 const value = (r: CallToolResult) => JSON.parse((r.content[0] as { text: string }).text);
 
@@ -29,7 +31,7 @@ describe("memory server, driven directly", () => {
   afterAll(async () => client.close());
 
   it("lists the four tools", async () => {
-    expect((await client.listTools()).tools.map((t) => t.name)).toEqual(["memory.write", "memory.read", "memory.confirm", "memory.retract", "memory.forget", "memory.hold", "memory.release", "memory.sweep", "memory.get", "memory.history"]);
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual(["memory.write", "memory.read", "memory.confirm", "memory.retract", "memory.forget", "memory.hold", "memory.release", "memory.sweep", "memory.repair", "memory.get", "memory.history"]);
   });
 
   it("write, read, supersede, retract, history; the source is null, the actor is whatever the caller claims, and the fact is quarantined", async () => {
@@ -480,5 +482,274 @@ describe("retention windows and the receipted sweep trigger", () => {
     expect(sweepReceipt.statement!.predicate.agent).toEqual({ id: "retention-job", provenance: "attested" });
     expect(readFileSync(ledgerFile, "utf8")).not.toContain("+1 555 0100");
     expect(readFileSync(ledgerFile, "utf8")).toContain("+1 555 0200");
+  });
+});
+
+describe("repair: store entries whose ledger append failed", () => {
+  const hourAgo = () => new Date(Date.now() - 3_600_000).toISOString();
+  /** A store kept in a map. Its entries look an hour old, and it lists each one twice, as a listing over a changing set can. */
+  function memoryStore(name: string): Store & { rows: Map<string, StoreEntry> } {
+    const rows = new Map<string, StoreEntry>();
+    return {
+      name,
+      rows,
+      async put(fact) {
+        rows.set(`${name}-${fact.factId}`, { externalId: `${name}-${fact.factId}`, factId: fact.factId, text: `${fact.subject} ${fact.predicate}`, storedAt: hourAgo() });
+        return `${name}-${fact.factId}`;
+      },
+      async delete(e) {
+        rows.delete(e.externalId);
+      },
+      async verifyDeleted(e) {
+        return !rows.has(e.externalId);
+      },
+      async list() {
+        return [...rows.values(), ...rows.values()];
+      },
+    };
+  }
+  /** A ledger whose next append fails while `fail.next` is set. */
+  function flakyLedger() {
+    const fail = { next: false };
+    const events = openStore(join(mkdtempSync(join(tmpdir(), "memory-repair-")), "ledger.jsonl"));
+    const store = new Proxy(events, { get: (t, k) => (k === "append" ? async (e: any) => (fail.next ? ((fail.next = false), Promise.reject(new Error("disk full"))) : t.append(e)) : Reflect.get(t, k)) });
+    return { ledger: new Ledger(store), fail };
+  }
+  async function connect(ledger: Ledger, stores: Store[]) {
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await createMemoryServer(ledger, { stores, requireGateway: false, verify: { attempts: 1 } }).connect(a);
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(b);
+    return client;
+  }
+  const write = (subject: string) => ({ name: "memory.write", arguments: { subject, predicate: "plan", value: "pro", space: "org" } });
+  const repair = async (client: Client, args: Record<string, unknown> = {}) => {
+    const r = (await client.callTool({ name: "memory.repair", arguments: { reason: "append failed", ...args } })) as CallToolResult;
+    return { isError: r.isError === true, out: JSON.parse((r.content.at(-1) as { text: string }).text) };
+  };
+
+  it("removes the entry a failed append left, once, verifies the removal, records it, and keeps every entry the ledger has", async () => {
+    const { ledger, fail } = flakyLedger();
+    const listed = memoryStore("vec");
+    const unlisted = { ...memoryStore("kv"), list: undefined };
+    const client = await connect(ledger, [listed, unlisted]);
+    const kept = value((await client.callTool(write("acct:1"))) as CallToolResult).fact;
+    fail.next = true;
+    expect(((await client.callTool(write("acct:2"))) as CallToolResult).isError).toBe(true);
+    const [orphan] = [...listed.rows.values()].filter((e) => e.factId !== kept.factId);
+    expect(await ledger.get(orphan!.factId)).toBeUndefined();
+
+    const r = await repair(client);
+    expect(r.isError).toBe(false);
+    expect(r.out.repaired).toEqual([{ store: "vec", externalId: orphan!.externalId, factId: orphan!.factId, outcome: "verified", eventId: expect.any(String) }]);
+    expect(r.out.unlisted).toEqual(["kv"]);
+    expect([...listed.rows.values()].map((e) => e.factId)).toEqual([kept.factId]);
+    const history = value((await client.callTool({ name: "memory.history", arguments: { factId: orphan!.factId } })) as CallToolResult).events;
+    expect(history).toMatchObject([{ kind: "repair", store: "vec", externalId: orphan!.externalId, reason: "append failed" }]);
+    await client.close();
+  });
+
+  it("refuses at startup a store written for remove(externalId, fact), so its old check never certifies an erasure", () => {
+    const old = { name: "legacy", put: async () => "id", remove: async () => {}, verifyRemoved: async () => true } as unknown as Store;
+    expect(() => createMemoryServer(flakyLedger().ledger, { stores: [old] })).toThrow(/store legacy has no delete\(entry\)/);
+  });
+
+  it("refuses a write whose stores took more than five minutes, so repair never meets the entries of a write in progress", async () => {
+    const { ledger } = flakyLedger();
+    const slow = memoryStore("slow");
+    const put = slow.put;
+    // The clock jumps from inside the put, which is always after the write noted its start.
+    slow.put = async (f) => (vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5 * 60_000 + 1), put(f));
+    const client = await connect(ledger, [slow]);
+    try {
+      const r = (await client.callTool(write("acct:9"))) as CallToolResult;
+      expect(r.isError).toBe(true);
+      expect((r.content[0] as { text: string }).text).toMatch(/more than 5 minutes/);
+      expect(await ledger.count()).toBe(0);
+    } finally {
+      vi.restoreAllMocks();
+      await client.close();
+    }
+  });
+
+  it("leaves an entry that may be a write in progress: younger than ten minutes, or with a time missing or unreadable, whatever `before` says", async () => {
+    const store = memoryStore("vec");
+    const orphan = (id: string, storedAt?: string) => store.rows.set(id, { externalId: id, factId: `fact-${id}`, text: "t", ...(storedAt === undefined ? {} : { storedAt }) });
+    orphan("young", new Date(Date.now() - 60_000).toISOString());
+    orphan("missing");
+    orphan("unreadable", "yesterday");
+    const client = await connect(flakyLedger().ledger, [store]);
+    const r = await repair(client, { before: new Date(Date.now() + 60_000).toISOString() });
+    expect(r.out.repaired).toEqual([]);
+    expect(Date.parse(r.out.before)).toBeLessThanOrEqual(Date.now() - 10 * 60_000);
+    expect([...store.rows.keys()]).toEqual(["young", "missing", "unreadable"]);
+    await client.close();
+  });
+
+  it("reports a removal that failed, a store that cannot list, and a repair the ledger did not record, and goes on with the rest", async () => {
+    const { ledger, fail } = flakyLedger();
+    const stuck = { ...memoryStore("stuck"), delete: async (_e: StoreEntry): Promise<void> => Promise.reject(new Error("503")) };
+    const broken = { ...memoryStore("broken"), list: async () => Promise.reject(new Error("timeout")) };
+    const unlogged = memoryStore("unlogged");
+    for (const s of [stuck, unlogged]) s.rows.set("x", { externalId: "x", factId: `fact-${s.name}`, text: "t", storedAt: hourAgo() });
+    const client = await connect(ledger, [stuck, broken, unlogged]);
+    // The append of the stuck entry's repair event goes through; the next one, the unlogged entry's, fails.
+    const original = stuck.delete;
+    stuck.delete = async (e) => ((fail.next = true), original(e));
+    const r = await repair(client);
+    expect(r.isError).toBe(true);
+    expect(r.out.repaired).toMatchObject([{ store: "stuck", outcome: "failed" }]);
+    expect(r.out.stillHeld).toEqual(["stuck: 503", "broken: cannot list: timeout"]);
+    expect(r.out.unrecorded).toEqual([{ store: "unlogged", externalId: "x", factId: "fact-unlogged", error: "disk full" }]);
+    expect(unlogged.rows.size).toBe(1);
+    await client.close();
+  });
+
+  it("keeps the entry of a write whose ledger append is slow, for a repair that starts meanwhile, and the write lands", async () => {
+    const events = openStore(join(mkdtempSync(join(tmpdir(), "memory-repair-")), "ledger.jsonl"));
+    const gate = { release: () => {}, reached: () => {} };
+    const held = new Promise<void>((r) => (gate.release = r));
+    const reached = new Promise<void>((r) => (gate.reached = r));
+    const ledger = new Ledger(new Proxy(events, { get: (t, k) => (k === "append" ? async (e: any) => (e.kind === "assert" ? (gate.reached(), await held, t.append(e)) : t.append(e)) : Reflect.get(t, k)) }));
+    const vec = memoryStore("vec");
+    const client = await connect(ledger, [vec]);
+    const writing = client.callTool(write("acct:5")) as Promise<CallToolResult>;
+    await reached;
+    const repairing = repair(client);
+    // The repair gets time to finish, if nothing makes it wait for the append.
+    await new Promise((r) => setTimeout(r, 50));
+    gate.release();
+    const [w, r] = [await writing, await repairing];
+    expect(w.isError).not.toBe(true);
+    expect(r.out.repaired).toEqual([]);
+    expect(vec.rows.size).toBe(1);
+    expect((await ledger.asOf()).map((f) => f.subject)).toEqual(["acct:5"]);
+    expect((await ledger.export()).map((e) => e.kind)).toEqual(["assert"]);
+    await client.close();
+  });
+
+  it("fails a write whose entry a repair removed first, so the ledger never believes a fact that no store holds", async () => {
+    const { ledger } = flakyLedger();
+    const vec = memoryStore("vec");
+    const other = await connect(ledger, [vec]);
+    const put = vec.put;
+    // A repair in another server runs after the store took the write and before the ledger append.
+    vec.put = async (f) => {
+      const id = await put(f);
+      await repair(other);
+      return id;
+    };
+    const client = await connect(ledger, [vec]);
+    const r = (await client.callTool(write("acct:6"))) as CallToolResult;
+    expect(r.isError).toBe(true);
+    expect((r.content[0] as { text: string }).text).toMatch(/claimed by a repair/);
+    expect(vec.rows.size).toBe(0);
+    expect(await ledger.asOf()).toEqual([]);
+    expect((await ledger.export()).map((e) => e.kind)).toEqual(["repair"]);
+    await client.close();
+    await other.close();
+  });
+
+  it("records one repair event and no failure when two repairs start together, even if the store fails a delete of a missing entry", async () => {
+    const { ledger } = flakyLedger();
+    const vec = memoryStore("vec");
+    vec.rows.set("x", { externalId: "x", factId: "orphan-x", text: "t", storedAt: hourAgo() });
+    vec.delete = async (e) => {
+      if (!vec.rows.delete(e.externalId)) throw new Error("404");
+    };
+    const first = await connect(ledger, [vec]);
+    const second = await connect(ledger, [vec]);
+    const results = await Promise.all([repair(first), repair(second), repair(first)]);
+    expect(results.map((r) => r.isError)).toEqual([false, false, false]);
+    expect(results.flatMap((r) => r.out.stillHeld)).toEqual([]);
+    expect((await ledger.history("orphan-x")).map((e) => e.kind)).toEqual(["repair"]);
+    expect(vec.rows.size).toBe(0);
+    await first.close();
+    await second.close();
+  });
+
+  it("does not certify a delete the store refused because a similarity search misses the entry", async () => {
+    const { ledger } = flakyLedger();
+    const vec = memoryStore("vec");
+    vec.rows.set("x", { externalId: "x", factId: "orphan-x", text: "t", storedAt: hourAgo() });
+    vec.delete = async () => Promise.reject(new Error("503"));
+    vec.verifyDeleted = async () => true;
+    const client = await connect(ledger, [vec]);
+    const r = await repair(client);
+    expect(r.isError).toBe(true);
+    expect(r.out.stillHeld).toEqual(["vec: 503"]);
+    expect(r.out.repaired).toMatchObject([{ outcome: "failed" }]);
+    expect(vec.rows.size).toBe(1);
+    await client.close();
+  });
+
+  it("gives an entry that a failed delete left gone the same outcome as a delete that succeeded: unverified without a check, stillIndexed when search serves it, verified when the check finds it gone", async () => {
+    const { ledger } = flakyLedger();
+    const plain = { ...memoryStore("plain"), verifyDeleted: undefined };
+    const indexed = { ...memoryStore("indexed"), verifyDeleted: async () => false };
+    const checked = { ...memoryStore("checked"), verifyDeleted: async () => true };
+    for (const s of [plain, indexed, checked]) {
+      s.rows.set("x", { externalId: "x", factId: `fact-${s.name}`, text: "t", storedAt: hourAgo() });
+      // The row goes, and then the call times out: the server acted before the client gave up.
+      s.delete = async (e: StoreEntry) => (s.rows.delete(e.externalId), Promise.reject(new Error("timeout")));
+    }
+    const client = await connect(ledger, [plain, indexed, checked]);
+    const r = await repair(client);
+    expect(r.isError).toBe(false);
+    expect(r.out.repaired).toMatchObject([{ store: "plain", outcome: "unverified" }, { store: "indexed", outcome: "stillIndexed" }, { store: "checked", outcome: "verified" }]);
+    await client.close();
+  });
+
+  it("returns the outcomes of the entries it removed when the ledger cannot answer for a later one", async () => {
+    const events = openStore(join(mkdtempSync(join(tmpdir(), "memory-repair-")), "ledger.jsonl"));
+    const down = { on: false };
+    const ledger = new Ledger(new Proxy(events, { get: (t, k) => (k === "eventsFor" ? async (id: string) => (down.on ? Promise.reject(new Error("ledger down")) : t.eventsFor(id)) : Reflect.get(t, k)) }));
+    const vec = memoryStore("vec");
+    for (const id of ["o1", "o2"]) vec.rows.set(id, { externalId: id, factId: `fact-${id}`, text: "t", storedAt: hourAgo() });
+    const del = vec.delete;
+    vec.delete = async (e) => ((down.on = true), del(e));
+    const client = await connect(ledger, [vec]);
+    const r = await repair(client);
+    expect(r.isError).toBe(true);
+    expect(r.out.repaired).toMatchObject([{ externalId: "o1", outcome: "verified" }]);
+    expect(r.out.unrecorded).toMatchObject([{ externalId: "o2", error: "ledger down" }]);
+    expect([...vec.rows.keys()]).toEqual(["o2"]);
+    await client.close();
+  });
+
+  it("runs one sweep at a time in a process, so overlapping sweeps report an entry once", async () => {
+    const { ledger } = flakyLedger();
+    // A store that lists a snapshot, hands it over late, and accepts a delete of a missing entry, with no check of its own: only the queue
+    // keeps the second sweep from listing the entry before the first has removed it.
+    const vec = memoryStore("vec");
+    vec.rows.set("x", { externalId: "x", factId: "orphan-x", text: "t", storedAt: hourAgo() });
+    const list = vec.list!;
+    vec.list = async () => {
+      const listing = await list();
+      await new Promise((r) => setTimeout(r, 20));
+      return listing;
+    };
+    vec.verifyDeleted = undefined;
+    const client = await connect(ledger, [vec]);
+    const results = await Promise.all([repair(client), repair(client)]);
+    expect(results.flatMap((r) => r.out.repaired)).toHaveLength(1);
+    await client.close();
+  });
+
+  it("retries an entry whose removal failed, with the repair event it already has", async () => {
+    const { ledger } = flakyLedger();
+    const vec = memoryStore("vec");
+    vec.rows.set("x", { externalId: "x", factId: "orphan-x", text: "t", storedAt: hourAgo() });
+    const del = vec.delete;
+    vec.delete = async () => Promise.reject(new Error("503"));
+    const client = await connect(ledger, [vec]);
+    const failed = await repair(client);
+    expect(failed.isError).toBe(true);
+    vec.delete = del;
+    const retried = await repair(client);
+    expect(retried.isError).toBe(false);
+    expect(retried.out.repaired).toMatchObject([{ factId: "orphan-x", outcome: "verified", eventId: failed.out.repaired[0].eventId }]);
+    expect((await ledger.history("orphan-x")).map((e) => e.kind)).toEqual(["repair"]);
+    await client.close();
   });
 });

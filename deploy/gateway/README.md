@@ -20,7 +20,7 @@ agent C ─┘      (this image)             │          └─ another agent (
 
 Run a version, or better its digest, in production. `latest` moves on every release, and `edge` on every merge, so neither is a default anywhere in these files. The first release that carries the gateway image publishes its version tag; until then use `edge` to try it, not in production. Every build starts the image and runs [smoke.sh](smoke.sh) before it is pushed: healthy, a connection with no grant refused, a demo grant accepted, and `docker stop` closing the gateway cleanly. The first push creates the package as private; make it public once in the package's settings so `docker pull` needs no login.
 
-Every pushed image is signed by the workflow that built it (cosign, keyless) and carries a provenance attestation and an SBOM. Check one before you run it, and pin the digest in production:
+Every pushed image is signed by the workflow that built it (cosign, keyless) and carries a provenance attestation and an SBOM. Check one before you run it, and pin the digest in production. The signature is a Sigstore bundle that the registry keeps as an OCI 1.1 referrer of the image. Use cosign 3 or later to verify it: cosign 2 does not find it.
 
 ```bash
 cosign verify ghcr.io/svayatta/agent-custody-gateway:0.8.0 \

@@ -15,6 +15,7 @@ import { postgresCheckpoints, type CheckpointStore } from "./checkpoints.ts";
 import { welcomeSheet } from "./log-admin.ts";
 import { clientAddress } from "./log-sink.ts";
 import { PLAN_QUOTAS, RateLimiter, type Plan, type PostgresLike, type PostgresTenancy } from "./log-store.ts";
+import { oidcAuthorizeUrl, oidcExchange, pkce, samlAuthorizeUrl, samlValidate, type OidcConfig, type SamlConfig, type SsoIdentity } from "./sso.ts";
 
 export interface StripeOptions {
   secretKey: string;
@@ -59,6 +60,8 @@ export interface PortalOptions {
   stripe?: StripeOptions;
   mail?: MailOptions;
   oauth?: OAuthOptions;
+  /** the fetch for OIDC discovery, keys, and tokens; the global one by default */
+  ssoFetch?: typeof fetch;
   /** key throttles by X-Forwarded-For; only behind a proxy you run. Also marks cookies Secure. */
   trustProxy?: boolean;
   /** table prefix; default portal_ */
@@ -83,6 +86,19 @@ export class UnverifiedAccountError extends Error {
   }
 }
 
+/** A single sign-on identity that the tenant's rules refuse: another domain, or an account in another tenant. */
+export class SsoRefusedError extends Error {}
+
+/** One tenant's enterprise identity provider. Set by the operator only, because an IdP is trusted for the domains that the operator checked. */
+export interface SsoSetting {
+  tenant: string;
+  protocol: "oidc" | "saml";
+  config: OidcConfig | SamlConfig;
+  domains: string[];
+  defaultRole: Role;
+  enforced: boolean;
+}
+
 const ident = (s: string) => {
   if (!/^[a-z_][a-z0-9_]*$/.test(s)) throw new Error(`prefix must be a plain identifier; got "${s}"`);
   return s;
@@ -92,6 +108,34 @@ const ident = (s: string) => {
 /** What a registration says about the person and the organisation; every field optional in the store, the route decides what it requires. */
 export interface Profile { name?: string | null; company?: string | null; role?: string | null; phone?: string | null; telegram?: string | null }
 const PROFILE_COLUMNS = ["name", "company", "role", "phone", "telegram"] as const;
+
+/** Lowest first. */
+export const ROLES = ["readonly", "reviewer", "admin", "owner"] as const;
+export type Role = (typeof ROLES)[number];
+
+// ---- TOTP (RFC 6238) ----
+const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+export const base32 = (b: Buffer): string => {
+  const bits = [...b].map((x) => x.toString(2).padStart(8, "0")).join("");
+  return (bits.match(/.{1,5}/g) ?? []).map((c) => B32[parseInt(c.padEnd(5, "0"), 2)]).join("");
+};
+export function totp(key: Buffer, step: number): string {
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(step));
+  const mac = createHmac("sha1", key).update(counter).digest();
+  const at = mac[19]! & 15;
+  return String((mac.readUInt32BE(at) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+}
+/** The time step the code matches, one step either side of now allowed; null when none. */
+export function totpStep(key: Buffer, code: string, now = Date.now()): number | null {
+  const here = Math.floor(now / 30_000);
+  for (const step of [here - 1, here, here + 1]) {
+    const want = Buffer.from(totp(key, step));
+    const got = Buffer.from(code);
+    if (got.length === want.length && timingSafeEqual(got, want)) return step;
+  }
+  return null;
+}
 
 export class PortalStore {
   private readonly client: PostgresLike;
@@ -121,6 +165,15 @@ export class PortalStore {
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ`);
         // a provider identity linked to an account: GitHub or Google's stable subject, and the verified email it gave
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}identities (provider TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES ${p}users(id), email TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (provider, subject))`);
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS mfa_secret TEXT`);
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS mfa_enabled_at TIMESTAMPTZ`);
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS mfa_last_step BIGINT`);
+        await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}invites (tenant_id TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL, invited_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, email))`);
+        // who an admin removed from a tenant: single sign-on does not let them back in on its own
+        await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}removed (tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (tenant_id, user_id))`);
+        // the address too, so the removal holds after the account is made again under a new id
+        await this.client.query(`ALTER TABLE ${p}removed ADD COLUMN IF NOT EXISTS email TEXT`);
+        await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}sso (tenant_id TEXT PRIMARY KEY, protocol TEXT NOT NULL, config TEXT NOT NULL, domains TEXT[] NOT NULL, default_role TEXT NOT NULL, enforced BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
       })();
     }
     return this.ready;
@@ -226,9 +279,150 @@ export class PortalStore {
     const rows = (await this.client.query(`SELECT id, email, created_at, email_verified_at FROM ${this.p}users WHERE id = $1`, [id])).rows as Record<string, unknown>[];
     return rows[0] ? PortalStore.asUser(rows[0]) : null;
   }
-  async addMember(userId: string, tenantId: string): Promise<void> {
+  async addMember(userId: string, tenantId: string, role: Role = "owner"): Promise<void> {
     await this.init();
-    await this.client.query(`INSERT INTO ${this.p}members (user_id, tenant_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [userId, tenantId]);
+    await this.client.query(`INSERT INTO ${this.p}members (user_id, tenant_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [userId, tenantId, role]);
+  }
+  async roleOf(userId: string, tenantId: string): Promise<Role | null> {
+    await this.init();
+    const rows = (await this.client.query(`SELECT role FROM ${this.p}members WHERE user_id = $1 AND tenant_id = $2`, [userId, tenantId])).rows as { role: Role }[];
+    return rows[0]?.role ?? null;
+  }
+  async members(tenantId: string): Promise<{ id: string; email: string; role: Role; joinedAt: string; mfa: boolean }[]> {
+    await this.init();
+    const rows = (await this.client.query(`SELECT u.id, u.email, m.role, m.created_at, u.mfa_enabled_at FROM ${this.p}members m JOIN ${this.p}users u ON u.id = m.user_id WHERE m.tenant_id = $1 ORDER BY m.created_at, u.email`, [tenantId])).rows as Record<string, unknown>[];
+    return rows.map((r) => ({ id: String(r.id), email: String(r.email), role: r.role as Role, joinedAt: new Date(r.created_at as string).toISOString(), mfa: !!r.mfa_enabled_at }));
+  }
+  // Both statements skip the row of the last owner, and return false then.
+  async setRole(tenantId: string, userId: string, role: Role): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`UPDATE ${this.p}members SET role = $3 WHERE user_id = $1 AND tenant_id = $2 AND ($3 = 'owner' OR role <> 'owner' OR EXISTS (SELECT 1 FROM ${this.p}members o WHERE o.tenant_id = $2 AND o.role = 'owner' AND o.user_id <> $1)) RETURNING user_id`, [userId, tenantId, role])).rows.length > 0;
+  }
+  // The removal record stays after a rejoin by invite. It has no effect while the user is a member: only findOrCreateSsoUser reads it, and only when the home tenant differs.
+  async removeMember(tenantId: string, userId: string): Promise<boolean> {
+    await this.init();
+    const gone = (await this.client.query(`DELETE FROM ${this.p}members WHERE user_id = $1 AND tenant_id = $2 AND (role <> 'owner' OR EXISTS (SELECT 1 FROM ${this.p}members o WHERE o.tenant_id = $2 AND o.role = 'owner' AND o.user_id <> $1)) RETURNING user_id`, [userId, tenantId])).rows.length > 0;
+    if (gone) await this.client.query(`INSERT INTO ${this.p}removed (tenant_id, user_id, email) SELECT $1, id, email FROM ${this.p}users WHERE id = $2 ON CONFLICT DO NOTHING`, [tenantId, userId]);
+    return gone;
+  }
+  async invite(tenantId: string, email: string, role: Role, by: string): Promise<void> {
+    await this.init();
+    await this.client.query(`INSERT INTO ${this.p}invites (tenant_id, email, role, invited_by) VALUES ($1, $2, $3, $4) ON CONFLICT (tenant_id, email) DO UPDATE SET role = EXCLUDED.role, invited_by = EXCLUDED.invited_by, created_at = now()`, [tenantId, email, role, by]);
+  }
+  async invitesOf(tenantId: string): Promise<{ email: string; role: Role; invitedBy: string; createdAt: string }[]> {
+    await this.init();
+    const rows = (await this.client.query(`SELECT email, role, invited_by, created_at FROM ${this.p}invites WHERE tenant_id = $1 ORDER BY created_at`, [tenantId])).rows as Record<string, unknown>[];
+    return rows.map((r) => ({ email: String(r.email), role: r.role as Role, invitedBy: String(r.invited_by), createdAt: new Date(r.created_at as string).toISOString() }));
+  }
+  async invitesFor(email: string): Promise<{ tenant: string; role: Role }[]> {
+    await this.init();
+    const rows = (await this.client.query(`SELECT tenant_id, role FROM ${this.p}invites WHERE email = $1 AND created_at > now() - interval '7 days' ORDER BY created_at`, [email])).rows as { tenant_id: string; role: Role }[];
+    return rows.map((r) => ({ tenant: r.tenant_id, role: r.role }));
+  }
+  async removeInvite(tenantId: string, email: string): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`DELETE FROM ${this.p}invites WHERE tenant_id = $1 AND email = $2 RETURNING email`, [tenantId, email])).rows.length > 0;
+  }
+  async takeInvite(tenantId: string, email: string): Promise<Role | null> {
+    await this.init();
+    const rows = (await this.client.query(`DELETE FROM ${this.p}invites WHERE tenant_id = $1 AND email = $2 AND created_at > now() - interval '7 days' RETURNING role`, [tenantId, email])).rows as { role: Role }[];
+    return rows[0]?.role ?? null;
+  }
+  async mfa(userId: string): Promise<{ secret: string | null; enabled: boolean }> {
+    await this.init();
+    const rows = (await this.client.query(`SELECT mfa_secret, mfa_enabled_at FROM ${this.p}users WHERE id = $1`, [userId])).rows as Record<string, unknown>[];
+    return { secret: rows[0]?.mfa_secret ? String(rows[0].mfa_secret) : null, enabled: !!rows[0]?.mfa_enabled_at };
+  }
+  async setMfaSecret(userId: string, secretHex: string): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`UPDATE ${this.p}users SET mfa_secret = $2, mfa_last_step = NULL WHERE id = $1 AND mfa_enabled_at IS NULL RETURNING id`, [userId, secretHex])).rows.length > 0;
+  }
+  /** False when this step or a later one was used already. */
+  async takeMfaStep(userId: string, step: number): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`UPDATE ${this.p}users SET mfa_last_step = $2 WHERE id = $1 AND (mfa_last_step IS NULL OR mfa_last_step < $2) RETURNING id`, [userId, step])).rows.length > 0;
+  }
+  async enableMfa(userId: string): Promise<void> {
+    await this.init();
+    await this.client.query(`UPDATE ${this.p}users SET mfa_enabled_at = now() WHERE id = $1`, [userId]);
+  }
+  async resetMfa(email: string): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`UPDATE ${this.p}users SET mfa_secret = NULL, mfa_enabled_at = NULL, mfa_last_step = NULL WHERE email = $1 RETURNING id`, [email])).rows.length > 0;
+  }
+  /** Replaces the tenant's setting. A domain belongs to one tenant, so a domain that another tenant holds is refused. */
+  async setSso(s: SsoSetting): Promise<void> {
+    await this.init();
+    const domains = [...new Set(s.domains.map((d) => d.trim().toLowerCase()))];
+    if (!domains.length || domains.some((d) => !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$/.test(d))) throw new Error("SSO needs one or more email domains, such as acme.example");
+    if (!ROLES.includes(s.defaultRole) || s.defaultRole === "owner") throw new Error("the default role of an SSO member is readonly, reviewer, or admin");
+    const held = (await this.client.query(`SELECT tenant_id, domains FROM ${this.p}sso WHERE tenant_id <> $1 AND domains && $2::text[]`, [s.tenant, domains])).rows as { tenant_id: string; domains: string[] }[];
+    if (held[0]) throw new Error(`the domain ${domains.find((d) => held[0]!.domains.includes(d))} belongs to tenant ${held[0].tenant_id} already`);
+    await this.client.query(
+      `INSERT INTO ${this.p}sso (tenant_id, protocol, config, domains, default_role, enforced, updated_at) VALUES ($1, $2, $3, $4::text[], $5, $6, now())
+       ON CONFLICT (tenant_id) DO UPDATE SET protocol = EXCLUDED.protocol, config = EXCLUDED.config, domains = EXCLUDED.domains, default_role = EXCLUDED.default_role, enforced = EXCLUDED.enforced, updated_at = now()`,
+      [s.tenant, s.protocol, JSON.stringify(s.config), domains, s.defaultRole, s.enforced],
+    );
+  }
+  private async ssoWhere(where: string, param: string): Promise<SsoSetting | null> {
+    await this.init();
+    const r = ((await this.client.query(`SELECT tenant_id, protocol, config, domains, default_role, enforced FROM ${this.p}sso WHERE ${where}`, [param])).rows as Record<string, unknown>[])[0];
+    return r ? { tenant: String(r.tenant_id), protocol: r.protocol as "oidc" | "saml", config: JSON.parse(String(r.config)), domains: r.domains as string[], defaultRole: r.default_role as Role, enforced: !!r.enforced } : null;
+  }
+  ssoOf(tenant: string): Promise<SsoSetting | null> {
+    return this.ssoWhere("tenant_id = $1", tenant);
+  }
+  ssoByDomain(domain: string): Promise<SsoSetting | null> {
+    return this.ssoWhere("$1 = ANY(domains)", domain.toLowerCase());
+  }
+  async removeSso(tenant: string): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`DELETE FROM ${this.p}sso WHERE tenant_id = $1 RETURNING tenant_id`, [tenant])).rows.length > 0;
+  }
+  /**
+   * The account behind an identity that the tenant's IdP vouched for: the linked one; else the account with that
+   * email, linked from now on, if it verified its address; else a new verified account with a random password.
+   * The IdP proves the address, so an account that never verified it loses the address: the account goes, with its
+   * password, its sessions, and its links. A tenant that it owned stays for the operator. There are two exceptions: an
+   * unverified member of this same tenant, who verifies by password first (UnverifiedAccountError), and an
+   * unverified member of another tenant that has other members, who is refused. An account with
+   * no tenant joins with the default role. A member that an admin removed joins again only through a new invite,
+   * with the invited role.
+   */
+  async findOrCreateSsoUser(s: SsoSetting, id: SsoIdentity): Promise<PortalUser> {
+    await this.init();
+    const provider = `sso:${s.tenant}`;
+    const parts = id.email.split("@");
+    if (parts.length !== 2 || !s.domains.includes(parts[1]!)) throw new SsoRefusedError(`the address ${id.email} is not in a domain that signs in to ${s.tenant} through single sign-on`);
+    const linked = (await this.client.query(`SELECT user_id FROM ${this.p}identities WHERE provider = $1 AND subject = $2`, [provider, id.subject])).rows as { user_id: string }[];
+    let user = linked[0] ? await this.user(linked[0].user_id) : null;
+    const known = !!user;
+    user ??= await this.userByEmail(id.email);
+    const unverified = !!user && !known && !user.emailVerifiedAt;
+    let home = user ? await this.tenantOf(user.id) : null;
+    if (unverified && home === s.tenant) throw new UnverifiedAccountError(id.email);
+    // deleting an unverified account would strand the other members of the tenant that it belongs to
+    if (home && home !== s.tenant && (!unverified || (await this.client.query(`SELECT 1 FROM ${this.p}members WHERE tenant_id = $1 AND user_id <> $2 LIMIT 1`, [home, user!.id])).rows.length)) throw new SsoRefusedError(`the account ${id.email} belongs to another tenant`);
+    let role = s.defaultRole;
+    // the removal is looked up before an unverified account goes, or the person would rejoin as a new account; an account of another tenant is no way around it
+    if (home !== s.tenant && (await this.client.query(`SELECT 1 FROM ${this.p}removed WHERE tenant_id = $1 AND (email = $3 OR user_id = $2)`, [s.tenant, user?.id ?? "", id.email])).rows.length) {
+      const invited = await this.takeInvite(s.tenant, id.email);
+      if (!invited) throw new SsoRefusedError(`${id.email} was removed from ${s.tenant}; an admin must invite the address again`);
+      role = invited;
+    }
+    if (unverified) {
+      for (const t of ["members", "identities"]) await this.client.query(`DELETE FROM ${this.p}${t} WHERE user_id = $1`, [user!.id]);
+      await this.client.query(`DELETE FROM ${this.p}users WHERE id = $1`, [user!.id]);
+      user = null;
+      home = null;
+    }
+    if (!user) {
+      user = await this.createUser(id.email, randomBytes(32).toString("hex"));
+      await this.markEmailVerified(user.id);
+    }
+    if (!known) await this.linkIdentity(provider, id.subject, id.email, user.id);
+    if (!home) await this.addMember(user.id, s.tenant, role);
+    return user;
   }
   /** the user's tenant; one per account today */
   async tenantOf(userId: string): Promise<string | null> {
@@ -260,10 +454,10 @@ export class PortalStore {
     await this.init();
     await this.client.query(`INSERT INTO ${this.p}stripe_events (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, [id]);
   }
-  /** Every portal registration with its tenant and billing state, oldest first: what the operator's admin page lists. */
+  /** Every portal registration with its tenant and billing state, oldest first: what the operator's admin page lists. Owners only. */
   async registrations(): Promise<({ tenantId: string; email: string; registeredAt: string; billing: string | null } & Profile)[]> {
     await this.init();
-    const rows = (await this.client.query(`SELECT m.tenant_id, u.email, u.created_at, u.name, u.company, u.role, u.phone, u.telegram, b.status FROM ${this.p}members m JOIN ${this.p}users u ON u.id = m.user_id LEFT JOIN ${this.p}billing b ON b.tenant_id = m.tenant_id ORDER BY u.created_at, m.tenant_id`)).rows as Record<string, unknown>[];
+    const rows = (await this.client.query(`SELECT m.tenant_id, u.email, u.created_at, u.name, u.company, u.role, u.phone, u.telegram, b.status FROM ${this.p}members m JOIN ${this.p}users u ON u.id = m.user_id LEFT JOIN ${this.p}billing b ON b.tenant_id = m.tenant_id WHERE m.role = 'owner' ORDER BY u.created_at, m.tenant_id`)).rows as Record<string, unknown>[];
     const str = (v: unknown) => (v == null ? null : String(v));
     return rows.map((r) => ({ tenantId: String(r.tenant_id), email: String(r.email), registeredAt: new Date(r.created_at as string).toISOString(), billing: str(r.status), name: str(r.name), company: str(r.company), role: str(r.role), phone: str(r.phone), telegram: str(r.telegram) }));
   }
@@ -276,23 +470,27 @@ export class PortalStore {
 
 // ---- sessions ----
 const b64u = (b: Buffer) => b.toString("base64url");
-export function signSession(secret: string, userId: string, ttlMs = 14 * 86_400_000): string {
-  const body = b64u(Buffer.from(JSON.stringify({ u: userId, e: Date.now() + ttlMs })));
+/** `via` records how the user signed in, for example `sso:acme`. */
+export function signSession(secret: string, userId: string, ttlMs = 14 * 86_400_000, via?: string): string {
+  const body = b64u(Buffer.from(JSON.stringify({ u: userId, e: Date.now() + ttlMs, ...(via ? { a: via } : {}) })));
   return `${body}.${createHmac("sha256", secret).update(body).digest("base64url")}`;
 }
-export function readSession(secret: string, cookie: string | undefined): string | null {
+function readClaims(secret: string, cookie: string | undefined): { u: string; a?: string } | null {
   if (!cookie) return null;
   const [body, mac] = cookie.split(".");
   if (!body || !mac) return null;
   const expected = createHmac("sha256", secret).update(body).digest("base64url");
   if (expected.length !== mac.length || !timingSafeEqual(Buffer.from(expected), Buffer.from(mac))) return null;
   try {
-    const { u, e } = JSON.parse(Buffer.from(body, "base64url").toString()) as { u: string; e: number };
-    return typeof u === "string" && typeof e === "number" && e > Date.now() ? u : null;
+    const { u, e, a } = JSON.parse(Buffer.from(body, "base64url").toString()) as { u: string; e: number; a?: string };
+    return typeof u === "string" && typeof e === "number" && e > Date.now() ? { u, ...(typeof a === "string" ? { a } : {}) } : null;
   } catch {
     return null;
   }
 }
+export const readSession = (secret: string, cookie: string | undefined): string | null => readClaims(secret, cookie)?.u ?? null;
+/** The `via` of a valid session, or null. */
+export const readSessionVia = (secret: string, cookie: string | undefined): string | null => readClaims(secret, cookie)?.a ?? null;
 
 // ---- Stripe, over its REST API; no SDK ----
 const form = (o: Record<string, string>) => new URLSearchParams(o).toString();
@@ -326,6 +524,7 @@ export interface RunningPortal {
 
 const TENANT_ID = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ENFORCED = "Your organisation signs in through its identity provider. Use Sign in with single sign-on";
 const RESERVED = new Set(["default", "admin", "api", "www", "log", "checkpoints", "app", "portal", "stripe", "health", "t"]);
 
 /** One message through the provider. Best effort: a refusal or a failure is reported through `log`, never thrown. Returns whether it was accepted. */
@@ -398,6 +597,8 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   const log = o.log ?? ((m) => console.error(m));
   const loginFailures = new RateLimiter({ perSecond: 1 / 30, burst: 8 });
   const registrations = new RateLimiter({ perSecond: 1 / 600, burst: 5 });
+  // per account, whatever the address
+  const mfaFailures = new RateLimiter({ perSecond: 1 / 120, burst: 5 });
   const base = o.publicUrl.endsWith("/") ? o.publicUrl : `${o.publicUrl}/`;
   const cookieName = "custody_session";
 
@@ -441,7 +642,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   return async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const addr = clientAddress(req, o.trustProxy);
-    const json = (status: number, body: unknown, headers: Record<string, string> = {}) => {
+    const json = (status: number, body: unknown, headers: Record<string, string | string[]> = {}) => {
       res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
       res.end(JSON.stringify(body));
     };
@@ -451,8 +652,21 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
     };
     const esc = (v: string) => v.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
     const setCookie = (value: string | null) => `${cookieName}=${value ?? ""}; Path=/; HttpOnly; SameSite=Strict${o.trustProxy ? "; Secure" : ""}; Max-Age=${value ? 14 * 86_400 : 0}`;
+    // the state between the first step and the code; never a session
+    const mfaCookie = (id: string | null) => `custody_mfa=${id ? signSession(o.secret, `mfa:${id}`, 300_000) : ""}; Path=/api/login; HttpOnly; SameSite=Strict${o.trustProxy ? "; Secure" : ""}; Max-Age=${id ? 300 : 0}`;
     const cookies = Object.fromEntries((req.headers.cookie ?? "").split(";").map((c) => c.trim().split("=") as [string, string]).filter(([k]) => k));
     const userId = readSession(o.secret, cookies[cookieName]);
+    const via = readSessionVia(o.secret, cookies[cookieName]);
+    // A page, not a redirect: the session cookie is SameSite=Strict, and a redirect that started at the provider
+    // would not carry it. The page's own navigation to / does.
+    const signedInPage = (who: string, next: string, setCookies: string[], lead: string) => {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "set-cookie": setCookies, "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" });
+      res.end(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${next}"><title>Signed in</title><p style="font:15px system-ui;padding:2rem">${lead} ${esc(who)}. <a href="${next}">Continue</a>.</p>`);
+    };
+    const enforcedFor = async (id: string) => {
+      const t = await store.tenantOf(id);
+      return t && (await store.ssoOf(t))?.enforced;
+    };
     const rawBody = async (): Promise<string> => {
       let text = "";
       for await (const chunk of req) {
@@ -538,6 +752,16 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         void notifyMail({ ...profile, email: user.email, tenant: t.id });
         return { status: 200, body: { tenant: t.id, logId: t.logId, plan: t.plan, token: minted.token, tokenHash: minted.tokenHash.slice(0, 12), welcome: sheet(t.id, t.logId), setup: setupFor(t.id, t.logId), exportCommand: exportCommand(t.id) } };
       };
+      // `on` is the state the account must be in: true to sign in or turn MFA off, false to turn it on.
+      const checkCode = async (id: string, code: unknown, on: boolean): Promise<Refusal | null> => {
+        if (!mfaFailures.take(id)) return { status: 429, body: { error: "too many codes tried for this account; wait a few minutes" } };
+        const m = await store.mfa(id);
+        if (!m.secret || m.enabled !== on) return { status: 409, body: { error: on ? "MFA is not on for this account" : "start the MFA setup first" } };
+        const step = totpStep(Buffer.from(m.secret, "hex"), String(code ?? ""));
+        if (step === null || !(await store.takeMfaStep(id, step))) return { status: 401, body: { error: "that code is not valid, or was used already" } };
+        if (!on) await store.enableMfa(id);
+        return null;
+      };
       if (req.method === "POST" && url.pathname === "/api/register") {
         const b = await jsonBody();
         const email = String(b.email ?? "").trim().toLowerCase();
@@ -582,6 +806,82 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
   else m.textContent = b.error || "The address was not confirmed.";
 });
 </script>`);
+      }
+      // ---- enterprise sign-in through the tenant's own identity provider, which only the operator sets ----
+      const sso = /^\/auth\/sso(?:\/([a-z0-9-]+)(\/callback|\/saml|\/saml\/acs)?)?$/.exec(url.pathname);
+      if (sso && req.method === (sso[2] === "/saml/acs" ? "POST" : "GET")) {
+        const [, t, tail] = sso;
+        if (!t) {
+          const domain = (url.searchParams.get("email") ?? "").split("@")[1]?.trim().toLowerCase() ?? "";
+          const found = domain ? await store.ssoByDomain(domain) : null;
+          if (!found) return page(404, "No single sign-on", `No single sign-on is set up for ${esc(domain || "that address")}. <a href="/">Sign in another way</a>.`);
+          res.writeHead(302, { location: `/auth/sso/${found.tenant}`, "cache-control": "no-store" });
+          return void res.end();
+        }
+        const conf = await store.ssoOf(t);
+        const oidcCookie = (v: string | null) => `custody_sso=${v ?? ""}; Path=/auth; HttpOnly; SameSite=Lax${o.trustProxy ? "; Secure" : ""}; Max-Age=${v ? 600 : 0}`;
+        // the IdP posts to the ACS from another site, and only SameSite=None comes back with that post
+        const samlCookie = (v: string | null) => `custody_saml=${v ?? ""}; Path=/auth/sso; HttpOnly; SameSite=None; Secure; Max-Age=${v ? 600 : 0}`;
+        const flowCookie = conf?.protocol === "saml" ? samlCookie : oidcCookie;
+        const refuse = (status: number, text: string) => page(status, "Single sign-on", esc(text), { "set-cookie": flowCookie(null) });
+        if (!conf) return refuse(404, "No single sign-on is set up for that organisation.");
+        const at = `${portalBase}auth/sso/${t}`;
+        const sp = { spEntityId: `${at}/saml`, acsUrl: `${at}/saml/acs` };
+        const sayFailed = (what: string, e: unknown) => {
+          log(`agent-custody portal: ${what} for ${t} failed: ${e instanceof Error ? e.message : String(e)}`);
+          return `${what} failed. Ask your administrator to check the identity provider settings.`;
+        };
+        if (tail === "/saml") {
+          if (conf.protocol !== "saml") return refuse(404, "This organisation does not use SAML.");
+          res.writeHead(200, { "content-type": "application/samlmetadata+xml", "cache-control": "no-store" });
+          return void res.end(`<?xml version="1.0"?><EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="${esc(sp.spEntityId)}"><SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol" WantAssertionsSigned="true"><NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</NameIDFormat><AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="${esc(sp.acsUrl)}" index="0"/></SPSSODescriptor></EntityDescriptor>`);
+        }
+        const ssoFetch = o.ssoFetch ? { fetch: o.ssoFetch } : {};
+        if (!tail) {
+          try {
+            if (conf.protocol === "oidc") {
+              const { verifier, challenge } = pkce();
+              const state = randomBytes(16).toString("hex");
+              const nonce = randomBytes(16).toString("hex");
+              const to = await oidcAuthorizeUrl(conf.config as OidcConfig, { redirectUri: `${at}/callback`, state, nonce, codeChallenge: challenge, ...ssoFetch });
+              res.writeHead(302, { location: to, "set-cookie": oidcCookie(signSession(o.secret, `oidc:${t}:${state}:${verifier}:${nonce}`, 600_000)), "cache-control": "no-store" });
+            } else {
+              const { url: to, requestId } = await samlAuthorizeUrl(conf.config as SamlConfig, sp);
+              res.writeHead(302, { location: to, "set-cookie": samlCookie(signSession(o.secret, `saml:${t}:${requestId}`, 600_000)), "cache-control": "no-store" });
+            }
+            return void res.end();
+          } catch (e) {
+            return refuse(502, sayFailed("Single sign-on start", e));
+          }
+        }
+        let id: SsoIdentity;
+        try {
+          if (tail === "/callback" && conf.protocol === "oidc") {
+            const [kind, flowTenant, state, verifier, nonce] = (readSession(o.secret, cookies.custody_sso) ?? "").split(":");
+            const code = url.searchParams.get("code") ?? "";
+            if (kind !== "oidc" || flowTenant !== t || !code || !state || state !== url.searchParams.get("state")) return refuse(400, "The sign-in did not start here, or took too long. Go back and try again.");
+            id = await oidcExchange(conf.config as OidcConfig, { code, redirectUri: `${at}/callback`, codeVerifier: verifier!, nonce: nonce!, ...ssoFetch });
+          } else if (tail === "/saml/acs" && conf.protocol === "saml") {
+            const [kind, flowTenant, requestId] = (readSession(o.secret, cookies.custody_saml) ?? "").split(":");
+            const samlResponse = new URLSearchParams(await rawBody()).get("SAMLResponse") ?? "";
+            if (kind !== "saml" || flowTenant !== t || !samlResponse) return refuse(400, "The sign-in did not start here, or took too long. Go back and try again.");
+            id = await samlValidate(conf.config as SamlConfig, { ...sp, samlResponse, requestId: requestId! });
+          } else {
+            return refuse(404, "Not found.");
+          }
+        } catch (e) {
+          return refuse(401, sayFailed("Single sign-on", e));
+        }
+        let user: PortalUser;
+        try {
+          user = await store.findOrCreateSsoUser(conf, id);
+        } catch (e) {
+          if (e instanceof UnverifiedAccountError) return refuse(409, e.message);
+          if (e instanceof SsoRefusedError) return refuse(403, e.message);
+          throw e;
+        }
+        log(`agent-custody portal: ${id.email} signed in through single sign-on for ${t}`);
+        return signedInPage(id.email, "/", [setCookie(signSession(o.secret, user.id, undefined, `sso:${t}`)), flowCookie(null)], "Signed in as");
       }
       // ---- sign in through a provider: the OAuth web flow, state in a short-lived signed cookie ----
       const provider = /^\/auth\/(github|google)(\/callback)?$/.exec(url.pathname);
@@ -651,18 +951,29 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
           log(`agent-custody portal: ${name} sign-in for ${email} refused: the password account has not verified its address`);
           return page(409, "Sign in with your password", `An account with the address ${esc(email)} already exists. <a href="/">Sign in with its password</a>, then link ${name === "github" ? "GitHub" : "Google"} from the account page.`, { "set-cookie": stateCookie(null) });
         }
-        log(`agent-custody portal: ${email} signed in with ${name}`);
-        // A page, not a redirect: the session cookie is SameSite=Strict, and a redirect that started at the provider
-        // would not carry it. The page's own navigation to / does.
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "set-cookie": [setCookie(signSession(o.secret, user.id)), stateCookie(null)], "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" });
-        return void res.end(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/"><title>Signed in</title><p style="font:15px system-ui;padding:2rem">Signed in as ${email.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!)}. <a href="/">Continue</a>.</p>`);
+        if (await enforcedFor(user.id)) return page(403, "Single sign-on required", `${esc(ENFORCED)}.`, { "set-cookie": stateCookie(null) });
+        const mfa = (await store.mfa(user.id)).enabled;
+        log(`agent-custody portal: ${email} signed in with ${name}${mfa ? ", MFA code needed" : ""}`);
+        return signedInPage(email, mfa ? "/?mfa=1" : "/", [mfa ? mfaCookie(user.id) : setCookie(signSession(o.secret, user.id)), stateCookie(null)], mfa ? "One more step for" : "Signed in as");
       }
       if (req.method === "POST" && url.pathname === "/api/login") {
         if (!loginFailures.take(`login:${addr}`)) return json(429, { error: "too many attempts; wait a minute" });
         const b = await jsonBody();
         const user = await store.authenticate(String(b.email ?? "").trim().toLowerCase(), String(b.password ?? ""));
         if (!user) return json(401, { error: "email or password not recognised" });
+        if (await enforcedFor(user.id)) return json(403, { error: ENFORCED });
+        if ((await store.mfa(user.id)).enabled) return json(200, { mfa: true }, { "set-cookie": mfaCookie(user.id) });
         return json(200, { email: user.email }, { "set-cookie": setCookie(signSession(o.secret, user.id)) });
+      }
+      if (req.method === "POST" && url.pathname === "/api/login/mfa") {
+        if (!loginFailures.take(`login:${addr}`)) return json(429, { error: "too many attempts; wait a minute" });
+        const b = await jsonBody();
+        const who = readSession(o.secret, cookies.custody_mfa);
+        const half = who?.startsWith("mfa:") ? await store.user(who.slice(4)) : null;
+        if (!half) return json(401, { error: "the password step expired; sign in again" });
+        const refused = await checkCode(half.id, b.code, true);
+        if (refused) return json(refused.status, refused.body);
+        return json(200, { email: half.email }, { "set-cookie": [setCookie(signSession(o.secret, half.id)), mfaCookie(null)] });
       }
       if (req.method === "POST" && url.pathname === "/api/logout") return json(200, { ok: true }, { "set-cookie": setCookie(null) });
 
@@ -672,7 +983,9 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
       if (!user) return json(401, { error: "sign in first" });
       if (req.method !== "GET" && !(req.headers["content-type"] ?? "").startsWith("application/json")) return json(415, { error: "expected a JSON body" });
       const tenantId = await store.tenantOf(user.id);
-      const account = async () => ({ emailVerified: !!user.emailVerifiedAt, identities: await store.identities(user.id), providers: (["github", "google"] as const).filter((p) => !!o.oauth?.[p]), mail: !!o.mail });
+      const ssoConf = tenantId ? await store.ssoOf(tenantId) : null;
+      if (ssoConf?.enforced && via !== `sso:${tenantId}`) return json(401, { error: ENFORCED });
+      const account = async () => ({ emailVerified: !!user.emailVerifiedAt, identities: await store.identities(user.id), providers: (["github", "google"] as const).filter((p) => !!o.oauth?.[p]), mail: !!o.mail, mfa: (await store.mfa(user.id)).enabled });
       if (req.method === "POST" && url.pathname === "/api/verify-email") {
         const who = readSession(o.secret, String((await jsonBody()).token ?? ""));
         if (!who?.startsWith("verify:")) return json(400, { error: "this verification link is not valid or has expired" });
@@ -687,7 +1000,34 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         void send(verificationMail(user));
         return json(200, { ok: true, emailVerified: false });
       }
-      if (req.method === "GET" && url.pathname === "/api/me" && !tenantId) return json(200, { email: user.email, tenant: null, profile: await store.profile(user.id), billing: !!o.stripe, ...(await account()) });
+      if (req.method === "GET" && url.pathname === "/api/me" && !tenantId) return json(200, { email: user.email, tenant: null, profile: await store.profile(user.id), invites: await store.invitesFor(user.email), billing: !!o.stripe, ...(await account()) });
+      if (req.method === "POST" && url.pathname === "/api/mfa/setup") {
+        await jsonBody();
+        const secret = randomBytes(20);
+        if (!(await store.setMfaSecret(user.id, secret.toString("hex")))) return json(409, { error: "MFA is on already; turn it off first" });
+        const b32 = base32(secret);
+        return json(200, { secret: b32, uri: `otpauth://totp/agent-custody:${encodeURIComponent(user.email)}?secret=${b32}&issuer=agent-custody` });
+      }
+      if (req.method === "POST" && (url.pathname === "/api/mfa/enable" || url.pathname === "/api/mfa/disable")) {
+        const on = url.pathname.endsWith("/disable");
+        const refused = await checkCode(user.id, (await jsonBody()).code, on);
+        if (refused) return json(refused.status, refused.body);
+        if (on) await store.resetMfa(user.email);
+        log(`agent-custody portal: ${user.email} turned MFA ${on ? "off" : "on"}`);
+        return json(200, { mfa: !on });
+      }
+      // The address must be verified: otherwise anyone who registers the invited address with a password gets in.
+      if (req.method === "POST" && url.pathname === "/api/invites/accept") {
+        const tenant = String((await jsonBody()).tenant ?? "");
+        if (tenantId) return json(409, { error: "this account has a tenant already; one tenant per account" });
+        if (!user.emailVerifiedAt) return json(403, { error: "verify your email address first, then accept the invite" });
+        if ((await store.ssoOf(tenant))?.enforced) return json(409, { error: "members of this tenant join through its identity provider" });
+        const role = await store.takeInvite(tenant, user.email);
+        if (!role) return json(404, { error: "no invite to this address for that tenant, or it is older than seven days" });
+        await store.addMember(user.id, tenant, role);
+        log(`agent-custody portal: ${user.email} joined tenant ${tenant} as ${role}`);
+        return json(200, { tenant, role });
+      }
       if (req.method === "POST" && url.pathname === "/api/onboard") {
         const p = await parseOnboarding(await jsonBody());
         if ("status" in p) return json(p.status, p.body);
@@ -698,9 +1038,15 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
       const tenant = await o.tenancy.tenant(tenantId);
       if (!tenant) return json(409, { error: "the tenant no longer exists" });
 
+      // The lowest role a route needs; an unlisted write needs admin.
+      const myRole = (await store.roleOf(user.id, tenantId))!;
+      const needs: [RegExp, Role][] = [[/^\/api\/(checkout|billing-portal)$/, "owner"], [/^\/api\/policies(\/|$)/, "reviewer"]];
+      const least: Role = req.method === "GET" ? "readonly" : needs.find(([re]) => re.test(url.pathname))?.[1] ?? "admin";
+      if (ROLES.indexOf(myRole) < ROLES.indexOf(least)) return json(403, { error: `this needs the ${least} role or higher; you are ${myRole}` });
+
       if (req.method === "GET" && url.pathname === "/api/me") {
         const q = await o.tenancy.quota(tenantId);
-        return json(200, { email: user.email, tenant: tenantId, logId: tenant.logId, plan: q.plan, used: q.used, quota: q.quota, disabled: !!tenant.disabledAt, billing: !!o.stripe, ...(await account()) });
+        return json(200, { email: user.email, tenant: tenantId, role: myRole, logId: tenant.logId, plan: q.plan, used: q.used, quota: q.quota, disabled: !!tenant.disabledAt, billing: !!o.stripe, sso: ssoConf && { protocol: ssoConf.protocol, enforced: ssoConf.enforced }, ...(await account()) });
       }
       if (req.method === "GET" && url.pathname === "/api/overview") {
         const q = await o.tenancy.quota(tenantId);
@@ -718,6 +1064,47 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         const audit = await o.tenancy.audit({ tenant: tenantId, limit: 50 });
         const billing = await store.billing(tenantId);
         return json(200, { tenant: tenantId, logId: tenant.logId, plan: q.plan, used: q.used, quota: q.quota, treeSize: size, rootHash: size ? await backend.root(size) : null, latestCheckpoint: latest ? { treeSize: latest.treeSize, signedAt: latest.signedAt } : null, months, keys, audit, billing: billing ? { status: billing.status } : null, urls: { log: `${base}t/${tenantId}/`, keys: `${base}.well-known/agent-custody-log.json`, checkpoints: o.checkpointsUrl ? `${o.checkpointsUrl.replace(/\/?$/, "/")}${tenantId}/latest.json` : null }, exportCommand: exportCommand(tenantId), welcome: sheet(tenantId, tenant.logId), setup: setupFor(tenantId, tenant.logId), stripe: !!o.stripe });
+      }
+      if (req.method === "GET" && url.pathname === "/api/members") return json(200, { members: await store.members(tenantId), invites: await store.invitesOf(tenantId) });
+      const ownerOnly = (...roles: string[]) => myRole !== "owner" && roles.includes("owner");
+      const OWNER_ONLY = { error: "this needs the owner role: only an owner changes an owner or grants owner" };
+      if (req.method === "POST" && url.pathname === "/api/members") {
+        if (ssoConf?.enforced) return json(409, { error: "this tenant signs in through its identity provider: members join through it, not by invite" });
+        const b = await jsonBody();
+        const email = String(b.email ?? "").trim().toLowerCase();
+        const role = String(b.role ?? "");
+        if (!EMAIL.test(email)) return json(400, { error: "a valid email address is needed" });
+        if (!(ROLES as readonly string[]).includes(role)) return json(400, { error: `role must be one of ${ROLES.join(", ")}` });
+        if (ownerOnly(role, ...(await store.invitesOf(tenantId)).filter((i) => i.email === email).map((i) => i.role))) return json(403, OWNER_ONLY);
+        await store.invite(tenantId, email, role as Role, user.email);
+        log(`agent-custody portal: ${user.email} invited ${email} to tenant ${tenantId} as ${role}`);
+        void send({ to: email, subject: `You are invited to ${tenantId} on agent-custody`, text: [`${user.email} invited you to the agent-custody tenant "${tenantId}" as ${role}.`, "", `Create an account or sign in with this address at ${portalBase}, verify the address, and accept the invite. The invite is good for seven days.`, "", "agent-custody"].join("\n") });
+        return json(200, { invited: email, role });
+      }
+      if (req.method === "POST" && url.pathname === "/api/invites/remove") {
+        const email = String((await jsonBody()).email ?? "").trim().toLowerCase();
+        const invited = (await store.invitesOf(tenantId)).find((i) => i.email === email);
+        if (invited && ownerOnly(invited.role)) return json(403, OWNER_ONLY);
+        log(`agent-custody portal: ${user.email} cancelled the invite of ${email} to tenant ${tenantId}`);
+        return json(200, { removed: await store.removeInvite(tenantId, email) });
+      }
+      const member = /^\/api\/members\/([0-9a-f-]{36})\/(role|remove)$/.exec(url.pathname);
+      if (req.method === "POST" && member) {
+        const b = await jsonBody();
+        const target = await store.roleOf(member[1]!, tenantId);
+        if (!target) return json(404, { error: "no such member" });
+        if (member[2] === "role") {
+          const role = String(b.role ?? "");
+          if (!(ROLES as readonly string[]).includes(role)) return json(400, { error: `role must be one of ${ROLES.join(", ")}` });
+          if (ownerOnly(target, role)) return json(403, OWNER_ONLY);
+          if (!(await store.setRole(tenantId, member[1]!, role as Role))) return json(409, { error: "the last owner cannot be demoted; make another member an owner first" });
+          log(`agent-custody portal: ${user.email} made ${member[1]} ${role} in tenant ${tenantId}`);
+          return json(200, { role });
+        }
+        if (ownerOnly(target)) return json(403, OWNER_ONLY);
+        if (!(await store.removeMember(tenantId, member[1]!))) return json(409, { error: "the last owner cannot be removed; make another member an owner first" });
+        log(`agent-custody portal: ${user.email} removed ${member[1]} from tenant ${tenantId}`);
+        return json(200, { removed: true });
       }
       if (req.method === "GET" && url.pathname === "/api/keys") {
         return json(200, { keys: (await o.tenancy.listTokens(tenantId)).map((k) => ({ label: k.label, hash: k.tokenHash.slice(0, 12), createdAt: k.createdAt, revokedAt: k.revokedAt })) });
@@ -880,13 +1267,24 @@ const PORTAL_PAGE = `<!doctype html>
     <button id="authGo" type="submit">Sign in</button>
     <p class="msg" id="authMsg"></p>
   </form>
+  <form id="mfaForm" hidden>
+    <p class="muted">Your account has two-step sign-in. Enter the six-digit code from your authenticator app.</p>
+    <label>Code<input id="mfaCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+    <button type="submit">Verify</button>
+    <p class="msg" id="mfaMsg"></p>
+  </form>
   <p class="muted" id="authNote" hidden>Next you name your organisation and get your tenant and its first key. Two minutes.</p>
+  <form id="ssoForm" action="/auth/sso" method="get">
+    <label>Work email for single sign-on<input name="email" type="email" autocomplete="email" required></label>
+    <button class="quiet" type="submit">Sign in with single sign-on</button>
+  </form>
   <p class="muted"><button class="link" id="authSwap" type="button">Create an account instead</button></p>
   <p class="muted">The free plan is ten thousand appends a month, no card. Your gateway sends only hashes; nothing you log here can be read by us.</p>
 </section>
 <section id="onboard" class="auth" hidden>
   <h1>Set up your tenant</h1>
   <p class="muted">Signed in as <b id="onboardWho"></b>. A tenant is your own log on this service, with its own keys and its own path.</p>
+  <div id="invites" class="panel" hidden><p><b>You are invited to join a tenant.</b> Your email address must be verified first.</p><div id="inviteList"></div></div>
   <form id="onboardForm">
     <label>Your name<input id="name" autocomplete="name" maxlength="120" required></label>
     <label>Company or organisation<input id="company" autocomplete="organization" maxlength="160" required></label>
@@ -915,9 +1313,11 @@ const PORTAL_PAGE = `<!doctype html>
     <a href="#setup" data-view="setup">Setup</a>
     <a href="#keys" data-view="keys">API keys <span class="n" id="nKeys"></span></a>
     <a href="#policies" data-view="policies">Policies <span class="n" id="nPolicies"></span></a>
+    <a href="#members" data-view="members">Members <span class="n" id="nMembers"></span></a>
     <a href="#billing" data-view="billing">Billing</a>
     <a href="#export" data-view="export">Export</a>
     <div class="group">Account</div>
+    <a href="#account" data-view="account">Two-step sign-in</a>
     <a href="#" id="signout">Sign out</a>
   </nav>
   <main>
@@ -957,6 +1357,29 @@ const PORTAL_PAGE = `<!doctype html>
       <div class="panel" id="policyView" hidden><h2 id="policyViewName"></h2><pre id="policyViewText"></pre></div>
       <p class="msg" id="policiesMsg"></p>
     </div>
+    <div data-pane="members" hidden>
+      <h1>Members</h1>
+      <p class="muted">An owner manages everything, billing and owners included. An admin manages keys and members below owner. A reviewer publishes policy versions. A read-only member only looks. An invited person creates an account with the invited address, verifies it, and accepts on the first screen. An invite is good for seven days.</p>
+      <div class="panel" id="inviteBox" hidden><form id="inviteForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Email<input id="inviteEmail" type="email" required></label><label style="margin:0">Role<select id="inviteRole"></select></label><button type="submit">Invite</button></form></div>
+      <div class="panel"><table><thead><tr><th>member</th><th>role</th><th>joined</th><th>two-step</th><th></th></tr></thead><tbody id="members"></tbody></table></div>
+      <h2>Pending invites</h2>
+      <div class="panel"><table><thead><tr><th>email</th><th>role</th><th>invited by</th><th>sent</th><th></th></tr></thead><tbody id="inviteRows"></tbody></table></div>
+      <p class="msg" id="membersMsg"></p>
+    </div>
+    <div data-pane="account" hidden>
+      <h1>Two-step sign-in</h1>
+      <p class="muted">Two-step sign-in is <b id="mfaState">off</b>. With it on, a password or a GitHub or Google sign-in is followed by a six-digit code from an authenticator app (TOTP).</p>
+      <div class="panel">
+        <button id="mfaStart" type="button">Set up</button>
+        <div id="mfaSetupBox" hidden>
+          <p>Add this secret to your authenticator app (enter it by hand, or paste the address), then type a code from the app.</p>
+          <p class="tok" id="mfaSecret"></p><p class="tok" id="mfaUri"></p>
+          <form id="mfaOnForm"><label>Code<input id="mfaOnCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><button type="submit">Turn on</button></form>
+        </div>
+        <form id="mfaOffForm" hidden><label>Current code<input id="mfaOffCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><button type="submit" class="quiet">Turn off</button></form>
+      </div>
+      <p class="msg" id="accountMsg"></p>
+    </div>
     <div data-pane="billing" hidden>
       <h1>Billing</h1>
       <div class="panel" id="billingPanel"></div>
@@ -987,6 +1410,10 @@ const PORTAL_PAGE = `<!doctype html>
   const fmt = (n) => Number(n).toLocaleString();
   const ago = (iso) => { const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 60 ? m + " min ago" : m < 1440 ? Math.round(m / 60) + " h ago" : Math.round(m / 1440) + " d ago"; };
   let registering = false;
+  let myRole = "readonly";
+  const ROLES = ["readonly", "reviewer", "admin", "owner"];
+  const can = (least) => ROLES.indexOf(myRole) >= ROLES.indexOf(least);
+  const note = (id, text, ok) => { $(id).className = "msg " + (ok ? "ok" : "err"); $(id).textContent = text; };
   const show = (id) => { for (const s of ["auth", "onboard", "welcome", "app"]) $(s).hidden = s !== id; };
   const PROVIDERS = __PROVIDERS__;
   if (PROVIDERS.length) { $("providers").innerHTML = PROVIDERS.map((p) => "<a href='/auth/" + p + "'>Continue with " + (p === "github" ? "GitHub" : "Google") + "</a>").join("") + "<p class=or>or with email</p>"; $("providers").hidden = false; }
@@ -1005,9 +1432,16 @@ const PORTAL_PAGE = `<!doctype html>
   $("authForm").onsubmit = async (e) => {
     e.preventDefault(); $("authMsg").className = "msg"; $("authMsg").textContent = "";
     try {
-      await api("POST", registering ? "/api/register" : "/api/login", { email: $("email").value, password: $("password").value });
+      const r = await api("POST", registering ? "/api/register" : "/api/login", { email: $("email").value, password: $("password").value });
+      if (r.mfa) { askCode(); return; }
       await enter();
     } catch (err) { $("authMsg").className = "msg err"; $("authMsg").textContent = err.message; }
+  };
+  const askCode = () => { $("authForm").hidden = true; $("ssoForm").hidden = true; $("providers").hidden = true; $("authSwap").parentElement.hidden = true; $("authTitle").textContent = "Enter your code"; $("mfaForm").hidden = false; $("mfaCode").focus(); };
+  $("mfaForm").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("POST", "/api/login/mfa", { code: $("mfaCode").value }); location.href = "/"; }
+    catch (err) { note("mfaMsg", err.message, false); }
   };
   $("onboardForm").onsubmit = async (e) => {
     e.preventDefault(); $("onboardMsg").className = "msg"; $("onboardMsg").textContent = "";
@@ -1056,23 +1490,43 @@ const PORTAL_PAGE = `<!doctype html>
     const max = Math.max(1, ...o.months.map((m) => m.appends));
     $("bars").innerHTML = o.months.map((m) => "<div class=bar><span class=mono>" + fmt(m.appends) + "</span><i style=\\"height:" + Math.max(2, Math.round(100 * m.appends / max)) + "%\\"></i><b>" + esc(m.month.slice(2)) + "</b></div>").join("");
     $("usageNote").textContent = "Appends per calendar month, UTC. Your plan allows " + (o.quota === null ? "any number" : fmt(o.quota)) + " a month; the count resets on the first.";
-    $("keys").innerHTML = o.keys.map((k) => "<tr><td>" + esc(k.label) + "</td><td class=mono>" + esc(k.hash) + "</td><td>" + esc(k.createdAt.slice(0, 10)) + "</td><td>" + (k.revokedAt ? "revoked " + esc(k.revokedAt.slice(0, 10)) : "live") + "</td><td>" + (k.revokedAt ? "" : "<button class=quiet data-revoke=\\"" + esc(k.hash) + "\\">Revoke</button>") + "</td></tr>").join("");
+    $("keys").innerHTML = o.keys.map((k) => "<tr><td>" + esc(k.label) + "</td><td class=mono>" + esc(k.hash) + "</td><td>" + esc(k.createdAt.slice(0, 10)) + "</td><td>" + (k.revokedAt ? "revoked " + esc(k.revokedAt.slice(0, 10)) : "live") + "</td><td>" + (k.revokedAt || !can("admin") ? "" : "<button class=quiet data-revoke=\\"" + esc(k.hash) + "\\">Revoke</button>") + "</td></tr>").join("");
     $("billingPanel").innerHTML = o.plan === "free"
-      ? "<p>You are on the <b>free</b> plan: ten thousand appends a month, no card.</p><p>The <b>team</b> plan is <b>$50 a month</b>: a million appends, email support within two working days, the same export and audit trail. No availability commitment yet, and the design fails closed: when the log is unreachable your gateway withholds pre-committed calls.</p>" + (o.stripe ? "<button id=upgrade>Upgrade to team, $50/month</button>" : "<p class=muted>Card payments are not switched on for this portal yet; email us and we move the plan by hand.</p>")
-      : "<p>You are on the <b>" + esc(o.plan) + "</b> plan" + (o.billing ? " (subscription " + esc(o.billing.status) + ")" : "") + ".</p>" + (o.stripe && o.billing ? "<button class=quiet id=manage>Manage billing</button>" : "");
+      ? "<p>You are on the <b>free</b> plan: ten thousand appends a month, no card.</p><p>The <b>team</b> plan is <b>$50 a month</b>: a million appends, email support within two working days, the same export and audit trail. No availability commitment yet, and the design fails closed: when the log is unreachable your gateway withholds pre-committed calls.</p>" + (o.stripe ? (can("owner") ? "<button id=upgrade>Upgrade to team, $50/month</button>" : "<p class=muted>An owner upgrades the plan.</p>") : "<p class=muted>Card payments are not switched on for this portal yet; email us and we move the plan by hand.</p>")
+      : "<p>You are on the <b>" + esc(o.plan) + "</b> plan" + (o.billing ? " (subscription " + esc(o.billing.status) + ")" : "") + ".</p>" + (o.stripe && o.billing && can("owner") ? "<button class=quiet id=manage>Manage billing</button>" : "");
     $("exportCmd").textContent = o.exportCommand; renderSetup($("setupPane"), o.setup, false);
     const up = $("upgrade"); if (up) up.onclick = async () => { try { const r = await api("POST", "/api/checkout", {}); location.href = r.url; } catch (err) { $("billingMsg").className = "msg err"; $("billingMsg").textContent = err.message; } };
     const mg = $("manage"); if (mg) mg.onclick = async () => { try { const r = await api("POST", "/api/billing-portal", {}); location.href = r.url; } catch (err) { $("billingMsg").className = "msg err"; $("billingMsg").textContent = err.message; } };
   };
-  const load = async () => { render(await api("GET", "/api/overview")); await loadPolicies(); };
+  const load = async () => { render(await api("GET", "/api/overview")); await loadPolicies(); await loadMembers(); };
+  const mfaShow = (on) => { $("mfaState").textContent = on ? "on" : "off"; $("mfaStart").hidden = on; $("mfaOffForm").hidden = !on; $("mfaSetupBox").hidden = true; };
+  $("mfaStart").onclick = async () => { try { const r = await api("POST", "/api/mfa/setup", {}); $("mfaSecret").textContent = r.secret; $("mfaUri").textContent = r.uri; $("mfaSetupBox").hidden = false; $("accountMsg").textContent = ""; } catch (err) { note("accountMsg", err.message, false); } };
+  $("mfaOnForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/mfa/enable", { code: $("mfaOnCode").value }); $("mfaOnCode").value = ""; mfaShow(true); note("accountMsg", "Two-step sign-in is on.", true); } catch (err) { note("accountMsg", err.message, false); } };
+  $("mfaOffForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/mfa/disable", { code: $("mfaOffCode").value }); $("mfaOffCode").value = ""; mfaShow(false); note("accountMsg", "Two-step sign-in is off.", true); } catch (err) { note("accountMsg", err.message, false); } };
+  const roleOptions = (cur) => ROLES.filter((r) => r !== "owner" || can("owner")).map((r) => "<option" + (r === cur ? " selected" : "") + ">" + r + "</option>").join("");
+  const loadMembers = async () => {
+    const r = await api("GET", "/api/members");
+    $("nMembers").textContent = r.members.length;
+    $("inviteRole").innerHTML = roleOptions("readonly");
+    $("members").innerHTML = r.members.map((m) => "<tr><td>" + esc(m.email) + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<select data-setrole=" + m.id + ">" + roleOptions(m.role) + "</select>" : esc(m.role)) + "</td><td>" + esc(m.joinedAt.slice(0, 10)) + "</td><td>" + (m.mfa ? "on" : "off") + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<button class=link data-rmmember=" + m.id + ">Remove</button>" : "") + "</td></tr>").join("");
+    $("inviteRows").innerHTML = r.invites.map((i) => "<tr><td>" + esc(i.email) + "</td><td>" + esc(i.role) + "</td><td class=mono>" + esc(i.invitedBy) + "</td><td>" + esc(i.createdAt.slice(0, 10)) + "</td><td>" + (can("admin") ? "<button class=link data-rminvite=\\"" + esc(i.email) + "\\">Cancel</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>none</td></tr>";
+  };
+  const membersDo = async (path, body, done) => { try { await api("POST", path, body); note("membersMsg", done, true); await loadMembers(); } catch (err) { note("membersMsg", err.message, false); await loadMembers(); } };
+  $("inviteForm").onsubmit = (e) => { e.preventDefault(); membersDo("/api/members", { email: $("inviteEmail").value, role: $("inviteRole").value }, "Invite sent to " + $("inviteEmail").value + ".").then(() => { $("inviteEmail").value = ""; }); };
+  document.addEventListener("change", (e) => { const s = e.target.closest("select[data-setrole]"); if (s) membersDo("/api/members/" + s.dataset.setrole + "/role", { role: s.value }, "Role changed."); });
+  document.addEventListener("click", async (e) => {
+    const rm = e.target.closest("button[data-rmmember]"); if (rm && confirm("Remove this member? They lose access to the tenant at once.")) { membersDo("/api/members/" + rm.dataset.rmmember + "/remove", {}, "Member removed."); return; }
+    const ri = e.target.closest("button[data-rminvite]"); if (ri) { membersDo("/api/invites/remove", { email: ri.dataset.rminvite }, "Invite cancelled."); return; }
+    const ac = e.target.closest("button[data-accept]"); if (ac) { try { await api("POST", "/api/invites/accept", { tenant: ac.dataset.accept }); await enter(); } catch (err) { note("onboardMsg", err.message, false); } }
+  });
   const enter = async () => {
     try {
       const me = await api("GET", "/api/me");
       accountNotice(me);
-      if (me.tenant === null) { $("onboardWho").textContent = me.email; if (me.profile) { for (const k of ["name", "company", "role", "phone", "telegram"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
-      $("who").textContent = me.email; show("app"); await load(); view((location.hash || "#overview").slice(1) || "overview");
+      if (me.tenant === null) { $("onboardWho").textContent = me.email; $("invites").hidden = !(me.invites || []).length; $("inviteList").innerHTML = (me.invites || []).map((i) => "<p>Join <b>" + esc(i.tenant) + "</b> as " + esc(i.role) + " <button type=button data-accept=\\"" + esc(i.tenant) + "\\">Accept</button></p>").join(""); if (me.profile) { for (const k of ["name", "company", "role", "phone", "telegram"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
+      $("who").textContent = me.email; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyForm").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa); show("app"); await load(); view((location.hash || "#overview").slice(1) || "overview");
     }
-    catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) $("authSwap").click(); } else { show("app"); $("who").textContent = err.message; } }
+    catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) $("authSwap").click(); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { show("app"); $("who").textContent = err.message; } }
   };
   const accountNotice = (me) => {
     const parts = [];
@@ -1088,7 +1542,7 @@ const PORTAL_PAGE = `<!doctype html>
   const loadPolicies = async () => {
     const r = await api("GET", "/api/policies");
     $("nPolicies").textContent = r.policies.length || "";
-    $("policies").innerHTML = r.policies.map((p) => "<tr><td>" + esc(p.name) + "</td><td class=mono>" + esc(p.digest.slice(0, 16)) + "…</td><td>" + p.bytes + "</td><td>" + esc(p.createdAt.slice(0, 10)) + "</td><td class=mono>" + esc(p.createdBy.replace(/^portal:/, "")) + "</td><td><button class=link data-viewpol=\\"" + esc(p.id) + "\\">View</button> <button class=link data-rmpol=\\"" + esc(p.id) + "\\">Remove</button></td></tr>").join("") || "<tr><td colspan=6 class=muted>No versions published yet. Receipts keep their digests either way; a name is for the people reading them.</td></tr>";
+    $("policies").innerHTML = r.policies.map((p) => "<tr><td>" + esc(p.name) + "</td><td class=mono>" + esc(p.digest.slice(0, 16)) + "…</td><td>" + p.bytes + "</td><td>" + esc(p.createdAt.slice(0, 10)) + "</td><td class=mono>" + esc(p.createdBy.replace(/^portal:/, "")) + "</td><td><button class=link data-viewpol=\\"" + esc(p.id) + "\\">View</button>" + (can("reviewer") ? " <button class=link data-rmpol=\\"" + esc(p.id) + "\\">Remove</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=6 class=muted>No versions published yet. Receipts keep their digests either way; a name is for the people reading them.</td></tr>";
   };
   $("policyText").oninput = async () => { const t = $("policyText").value; $("policyDigestPreview").textContent = t ? "sha256 " + (await sha256hex(t)).slice(0, 16) + "…" : ""; };
   $("policyForm").onsubmit = async (e) => {

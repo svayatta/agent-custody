@@ -1,6 +1,6 @@
 {
   "name": "@agent-custody/receipts",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "mcpName": "io.github.svayatta/agent-custody",
   "description": "Chain of custody for AI agents: signed, independently verifiable receipts for tool calls. MCP gateway + Cedar policy + Merkle transparency log",
   "license": "Apache-2.0",
@@ -77,22 +77,28 @@
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",
     "@langchain/core": "^1.2.9",
+    "@node-saml/node-saml": "^5.1.0",
     "@openai/agents": "^0.18.0",
     "@types/node": "^26.4.1",
     "ai": "^7.0.92",
     "langchain": "1.5.15",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.0",
+    "xml-crypto": "^6.1.2"
   },
   "peerDependencies": {
     "@langchain/core": ">=1.0.0",
+    "@node-saml/node-saml": ">=5.1.0",
     "@openai/agents": ">=0.1.0",
     "ai": ">=5.0.0",
     "pg": ">=8"
   },
   "peerDependenciesMeta": {
     "@langchain/core": {
+      "optional": true
+    },
+    "@node-saml/node-saml": {
       "optional": true
     },
     "@openai/agents": {

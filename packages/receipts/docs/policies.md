@@ -114,6 +114,7 @@ The memory server in `@agent-custody/state` is an upstream like any other, so it
 | `memory.read` | the query, and `includeClaimed` or `requireVerified` when the caller asks for them | |
 | `memory.retract`, `memory.forget`, `memory.hold`, `memory.release` | `factId` and `reason` | `target`, the fact being changed |
 | `memory.sweep` | `before`, `space`, `reason` | |
+| `memory.repair` | `reason`, and optionally `before` (an earlier cutoff) | |
 | `memory.confirm` | `factId` | |
 
 A looked-up `target` has `space`, `actor`, `provenance` (`claimed`, `attested`, or `verified`), `subject`, `predicate`, `value`, and `retracted`. Fields that would be null are absent, so test with `has`. The lookup config that makes `target` available is in the [state package README](../../state/README.md#the-memory-server).
@@ -213,6 +214,8 @@ agent-custody policy simulate --policy proposed.cedar --receipts receipts \
 For SDK receipts, use the application's public key as `--issuer-key`; no principal key is needed. Add `--log-key keys/log.pub` when another key signed the log's tree heads. Add `--approval-key keys/approver.pub` when the history holds calls that a human approved: `verify` needs those keys for a forwarded call that carries an approval, and the command fails without them. Each key flag may be repeated when the history spans several keys. The directory is read in filename order, without recursion, one bundle at a time, so it never holds the tool results of the whole history in memory. A malformed or unverifiable bundle, or invalid Cedar syntax in the proposed policy, fails the command.
 
 A gateway that dies after it forwards a `precommit` call leaves `<id>.authorization.json` and no `<id>.json`. The command verifies each such file as an authorization statement (the issuer key, the tree head, and the inclusion proof) and lists the call under `skipped`, so the report is `INCOMPLETE`. An authorization that does not verify fails the command. An authorization that sits beside its receipt is not read twice.
+
+The command also checks that each `<id>.json` holds receipt `<id>`. A receipt under another file name fails the command, so a copy over the name of another receipt cannot hide that call.
 
 A receipt under a capture rule needs its withheld arguments and fact values to replay. Give `--capture-key-env NAME` to decrypt the values that mode `encrypted` withheld, as `verify` does. Give `--disclose <file>`, which you can repeat, for the values that mode `digest` withheld. Each file is a disclosure as `reveal` writes it, and it applies only to the receipt that its `receiptId` names. A key or a disclosure that does not match a commitment skips that receipt as malformed. The key comes from the environment, never from a flag value.
 
