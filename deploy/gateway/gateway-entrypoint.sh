@@ -88,7 +88,7 @@ gateway: wrote a starter config in $config_dir
 
   gateway.json         edit the upstream: your API's base URL and its tools. Add a credential with
                        "headerEnv": { "authorization": "MY_API_TOKEN" } and set MY_API_TOKEN in the gateway's environment
-  policy.cedar         the rules; edit, then restart the gateway
+  policy.cedar         the rules; applied from the next call when written by rename
   keys/principal.pub   the public key the gateway trusts to sign grants
   demo/                a DEMO principal key and a 24-hour grant. Delete this directory in production: the principal's
                        private key must never sit on the gateway host. Issue real grants with agent-custody grant.

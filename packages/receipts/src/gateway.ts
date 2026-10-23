@@ -20,7 +20,7 @@ import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
 import { captureKeyFrom, effectiveRule } from "./capture.ts";
-import { evaluate, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
+import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
 import type { ApprovalRecord, AuthorizationBundle, AuthorizationPredicate, FactRecord, OperationEvidence, ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "./receipt.ts";
 import { OPERATION_META_KEY, OperationStore, ownerAlive, type OperationRecord, type OperationStatus } from "./operations.ts";
 
@@ -151,23 +151,30 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   // parse is refused and the policy in force stays: never an allow, and never a fall back to no policy. Every change
   // and every refusal is printed and appended to receiptsDir/policy-reloads.jsonl with both digests and the time.
   // The bytes and the metadata come from one open file, so a rename between reading and stat'ing cannot pair them wrongly.
+  // ctime is in the key because a program can set mtime back but not ctime, and every write moves it. A file written in
+  // the last two seconds may still be being written within one timestamp tick, so its key is not kept: it is re-read on
+  // each call until it settles, and a half-written file read meanwhile is replaced by the finished one.
+  const keyOf = (st: { dev: number; ino: number; mtimeMs: number; ctimeMs: number; size: number }) => `${st.dev}:${st.ino}:${st.mtimeMs}:${st.ctimeMs}:${st.size}`;
+  const settled = (st: { mtimeMs: number; ctimeMs: number }) => Date.now() - Math.max(st.mtimeMs, st.ctimeMs) >= 2000;
   const readPolicy = () => {
     const fd = openSync(cfg.policyFile, "r");
     try {
       const st = fstatSync(fd);
       const text = readFileSync(fd, "utf8");
-      return { text, seen: `${st.ino}:${st.mtimeMs}:${st.size}` };
+      return { text, seen: settled(st) ? keyOf(st) : "" };
     } finally {
       closeSync(fd);
     }
   };
-  const policyStat = () => { const st = statSync(cfg.policyFile); return `${st.ino}:${st.mtimeMs}:${st.size}`; };
+  const policyStat = () => keyOf(statSync(cfg.policyFile));
   const initialPolicy = readPolicy();
   let policyNow = { text: initialPolicy.text, digest: policyDigest(initialPolicy.text) };
   let policySeen = initialPolicy.seen;
   // A file that cannot be read is retried on every call, since restoring access changes none of its metadata; this
   // keeps the refusal from being printed and recorded on each of those calls.
   let unreadableSeen = "";
+  // A file still settling is re-read on each call; a refusal is recorded once for the same bytes.
+  let refusedDigest = "";
   const policyReloads = join(cfg.receiptsDir, "policy-reloads.jsonl");
   const recordReload = (entry: Record<string, unknown>) => {
     try {
@@ -205,13 +212,18 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     const text = read.text;
     const digest = policyDigest(text);
     if (digest === policyNow.digest) return policyNow;
+    if (digest === refusedDigest) return policyNow;
     const errors = policyParseErrors(text);
     if (errors.length > 0) {
+      refusedDigest = digest;
       refuseReload(digest, [`does not parse: ${errors.join("; ")}`]);
       return policyNow;
     }
-    console.error(`agent-custody gateway: policy reloaded from ${cfg.policyFile}: ${policyNow.digest} -> ${digest}`);
-    recordReload({ event: "reloaded", from: policyNow.digest, to: digest });
+    refusedDigest = "";
+    // a policy with no permit rule parses and denies every call: fail-closed, but never a reload to pass over quietly
+    const warnings = hasPermitRule(text) ? [] : ["no permit rule: every call is denied"];
+    console.error(`agent-custody gateway: policy reloaded from ${cfg.policyFile}: ${policyNow.digest} -> ${digest}${warnings.length ? `; WARNING: ${warnings.join("; ")}` : ""}`);
+    recordReload({ event: "reloaded", from: policyNow.digest, to: digest, ...(warnings.length ? { warnings } : {}) });
     policyNow = { text, digest };
     return policyNow;
   };

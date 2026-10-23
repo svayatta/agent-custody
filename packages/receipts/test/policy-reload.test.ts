@@ -1,10 +1,10 @@
 // The Cedar policy is re-read whenever its file changes and applies from the next call, with no restart and no dropped
 // session. A policy that does not parse, or a file that cannot be read, is refused and the policy in force stays. Every
 // change and every refusal is recorded with both digests.
-import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { loadConfig } from "../src/config.ts";
@@ -128,6 +128,70 @@ describe("policy reload", () => {
       expect(reloads(fx).map((r) => r.event)).toEqual(["refused", "reloaded"]);
     } finally {
       await session.close();
+      await host.close();
+    }
+  });
+
+  it("a call already under way finishes under the policy it started with; the next call takes the new one", async () => {
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "policy-reload-inflight-")));
+    const gw = await createGateway(loadConfig(fx.configFile));
+    try {
+      // the policy is taken before the first await of the call, so writing a new one while it runs cannot change it
+      const running = quietly(() => gw.handleCall(refund));
+      await quietly(async () => writePolicy(fx, TIGHT));
+      const first = await running;
+      expect(first.isError).toBeFalsy();
+      const p = await receiptOf(fx, first);
+      expect(p.policy!.decision).toBe("allow");
+      expect(p.policy!.policyDigest).toBe(policyDigest(POLICY));
+      const next = await quietly(() => gw.handleCall(refund));
+      expect((await receiptOf(fx, next)).policy!.policyDigest).toBe(policyDigest(TIGHT));
+      expect(next.isError).toBe(true);
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("an edit in place that keeps the size and the modification time is still applied", async () => {
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "policy-reload-inplace-")));
+    const path = join(fx.dir, "policy.cedar");
+    // the same length as the policy it replaces, so only the bytes, the change time, and nothing a program can set differ
+    const same = POLICY.replace("context.args.amount <= 100000", "context.args.amount <= 1000  ");
+    expect(same.length).toBe(POLICY.length);
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(path, past, past);
+    // every file counts as settled, so the edit is caught by its key alone and not by the re-read of a recent file
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now + 10_000);
+    const host = await createGatewayHost(loadConfig(fx.configFile));
+    try {
+      expect(host.policyDigest()).toBe(policyDigest(POLICY));
+      writeFileSync(path, same);
+      utimesSync(path, past, past);
+      expect(await quietly(async () => host.policyDigest())).toBe(policyDigest(same));
+    } finally {
+      clock.mockRestore();
+      await host.close();
+    }
+  });
+
+  it("a reloaded policy with no permit rule is applied, since it denies every call, and the record says so", async () => {
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "policy-reload-nopermit-")));
+    const host = await createGatewayHost(loadConfig(fx.configFile));
+    try {
+      const deny = "// nothing is permitted\n";
+      const errors: string[] = [];
+      const error = console.error;
+      console.error = (...a: unknown[]) => { errors.push(a.join(" ")); };
+      try {
+        writePolicy(fx, deny);
+        expect(host.policyDigest()).toBe(policyDigest(deny));
+      } finally {
+        console.error = error;
+      }
+      expect(errors.join("\n")).toMatch(/WARNING: no permit rule/);
+      expect(reloads(fx).at(-1)).toEqual(expect.objectContaining({ event: "reloaded", to: policyDigest(deny), warnings: ["no permit rule: every call is denied"] }));
+    } finally {
       await host.close();
     }
   });

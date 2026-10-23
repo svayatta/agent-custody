@@ -4,7 +4,7 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
-- **Gateway: reload the Cedar policy without a restart (issue #145).** The gateway re-reads `policyFile` whenever it changes (inode, mtime, or size), as it does `revokedGrants`, and evaluates the next call under the new policy, for stdio, HTTP, A2A, and observe mode, with no dropped session. A call already evaluating finishes under the policy it started with, and its receipt carries that digest. A changed file that does not parse, or cannot be read, is refused: the policy in force stays, never an allow, and `POLICY NOT RELOADED` goes to stderr. Each change and refusal is appended to `receipts/policy-reloads.jsonl` with the time and both digests. `GatewayHost.policyDigest()` returns the digest in force. The console no longer tells the operator to restart after a save.
+- **Gateway: reload the Cedar policy without a restart (issue #145).** The gateway re-reads `policyFile` whenever it changes (device, inode, mtime, ctime, or size, and on each call while the file is under two seconds old), as it does `revokedGrants`, and evaluates the next call under the new policy, for stdio, HTTP, A2A, and observe mode, with no dropped session. A call already evaluating finishes under the policy it started with, and its receipt carries that digest. A changed file that does not parse, or cannot be read, is refused: the policy in force stays, never an allow, and `POLICY NOT RELOADED` goes to stderr. Each change and refusal is appended to `receipts/policy-reloads.jsonl` with the time and both digests. `GatewayHost.policyDigest()` returns the digest in force. The console no longer tells the operator to restart after a save.
 
 ## 0.9.0 — 2026-10-21
 
