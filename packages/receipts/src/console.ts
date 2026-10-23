@@ -341,6 +341,7 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
           total: report.total,
           evaluated: report.evaluated,
           unchanged: report.unchanged,
+          reconciliations: report.reconciliations,
           complete: report.complete,
           changes: report.changes.slice(0, 200).map((c) => ({ receiptId: c.receiptId, tool: c.tool, from: c.previous.decision, to: c.proposed.decision })),
           changeCount: report.changes.length,

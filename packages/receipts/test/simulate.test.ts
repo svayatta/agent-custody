@@ -120,7 +120,9 @@ describe("offline policy simulation", () => {
     expect(simulatePolicy(ALLOW, [observedFailure])).toMatchObject({ evaluated: 0, complete: false, changes: [] });
   });
 
-  it("counts a real reconciliation receipt apart and does not replay it as a second call", async () => {
+  const TIGHTER = 'permit(principal, action == Action::"stripe.refund", resource) when { context.args.amount <= 10 };';
+  /** A failed refund through the gateway, then its reconciliation. Calls `use` with both predicates and the receipts directory. */
+  async function withReconciliation(use: (original: ReceiptPredicate, reconciliation: ReceiptPredicate, receiptsDir: string) => void | Promise<void>) {
     const fx = await financialFixture(temp());
     const host = await createGatewayHost(loadConfig(fx.configFile));
     try {
@@ -131,13 +133,44 @@ describe("offline policy simulation", () => {
       fx.records.get([...fx.records.keys()][0]!)!.status = "succeeded";
       const original = decode(JSON.parse(readFileSync(join(fx.receiptsDir, `${String(first._meta?.[RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle);
       const reconciliation = decode(await host.reconcile(id));
+      await use(original, reconciliation, fx.receiptsDir);
+    } finally { await host.close(); await fx.close(); }
+  }
+
+  it("counts a real reconciliation receipt apart and does not replay it as a second call", async () => {
+    await withReconciliation((original, reconciliation) => {
       expect(reconciliation.reconciliation).toBeDefined();
-      const tighter = 'permit(principal, action == Action::"stripe.refund", resource) when { context.args.amount <= 10 };';
-      const report = simulatePolicy(tighter, [original, reconciliation]);
+      const report = simulatePolicy(TIGHTER, [original, reconciliation]);
       expect(report).toMatchObject({ total: 2, evaluated: 1, unchanged: 0, reconciliations: 1, complete: true, skipped: [] });
       expect(report.changes.map((c) => c.receiptId)).toEqual([original.receiptId]);
       expect(formatSimulation(report)).toContain("reconciliations: 1");
-    } finally { await host.close(); await fx.close(); }
+    });
+  });
+
+  it("reports INCOMPLETE when only the reconciliation survives and its original receipt is gone", async () => {
+    await withReconciliation((original, reconciliation, receiptsDir) => {
+      for (const name of [`${original.receiptId}.json`, `${original.receiptId}.authorization.json`]) rmSync(join(receiptsDir, name), { force: true });
+      const report = simulatePolicy(TIGHTER, [reconciliation]);
+      expect(report).toMatchObject({ total: 1, evaluated: 0, reconciliations: 0, complete: false });
+      expect(report.skipped).toEqual([{ receiptId: original.receiptId, tool: "stripe.refund", reason: expect.stringContaining("the original receipt is missing") }]);
+      expect(formatSimulation(report)).toContain("RESULT: INCOMPLETE");
+      // an original that exists only as an orphan authorization is already a skip, so the reconciliation adds none
+      const orphan = { receiptId: original.receiptId, tool: "stripe.refund", reason: "only the authorization survives" };
+      expect(simulatePolicy(TIGHTER, [reconciliation], { unreplayable: [orphan] })).toMatchObject({ total: 2, reconciliations: 1, skipped: [orphan] });
+    });
+  });
+
+  it("skips a predicate whose reconciliation field is only the right shape", async () => {
+    await withReconciliation((original, reconciliation) => {
+      // a plain call whose own operation names itself, with a reconciliation field of the right shape and nothing behind it
+      const forged = (change: Partial<ReceiptPredicate>) => ({ ...original, reconciliation: reconciliation.reconciliation, ...change }) as ReceiptPredicate;
+      const selfLinked = simulatePolicy(DENY, [forged({})]);
+      expect(selfLinked).toMatchObject({ total: 1, evaluated: 0, reconciliations: 0, complete: false });
+      expect(selfLinked.skipped[0]!.reason).toContain("a reconciliation needs a gateway issuer and an operation that names another receipt");
+      for (const change of [{ issuer: { ...original.issuer, kind: "sdk" as const } }, { operation: undefined }]) {
+        expect(simulatePolicy(DENY, [forged(change)])).toMatchObject({ evaluated: 0, reconciliations: 0, complete: false });
+      }
+    });
   });
 
   it("fails closed on evaluation errors and refuses malformed proposed policy text", async () => {
