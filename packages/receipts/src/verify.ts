@@ -549,7 +549,8 @@ export function formatReport(r: VerifyResult): string {
   row("tool", p.tool.provenance, p.tool.name);
   row("args", p.request.provenance, p.request.args);
   for (const [k, f] of Object.entries(p.facts)) row(`fact.${k}`, f.provenance, f.value);
-  if (p.policy) row("policy", p.policy.provenance, `${p.policy.decision}${p.policy.enforced === false ? " (observe mode, not enforced)" : ""} [${p.policy.reasons.join(",")}] policy ${short(p.policy.policyDigest)}`);
+  if (p.reconciliation) row("policy", "-", "(none evaluated: a provider read, not a call)");
+  else if (p.policy) row("policy", p.policy.provenance, `${p.policy.decision}${p.policy.enforced === false ? " (observe mode, not enforced)" : ""} [${p.policy.reasons.join(",")}] policy ${short(p.policy.policyDigest)}`);
   else row("policy", "-", "(none evaluated)");
   if (p.consumed) row("consumed", p.consumed.provenance, !Array.isArray(p.consumed.factIds) ? "(withheld under the capture rule)" : p.consumed.factIds.length === 0 ? "(no facts shown before this call)" : p.consumed.factIds);
   if (p.authorization) {
@@ -565,6 +566,6 @@ export function formatReport(r: VerifyResult): string {
   // a refusal says why, as the receipt records it; under a capture rule the reason is a commitment, and the report says so rather than printing it
   const reason = "reason" in p.execution ? p.execution.reason : undefined;
   const why = reason === undefined ? "" : typeof reason === "string" ? `: ${reason}` : ": (reason withheld under the capture rule)";
-  row("execution", attestedAs, `${p.execution.status}${why}${note}`);
+  row("execution", attestedAs, `${p.reconciliation ? "provider read, " : ""}${p.execution.status}${why}${note}`);
   return lines.join("\n");
 }

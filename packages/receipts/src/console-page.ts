@@ -174,7 +174,7 @@ const SCRIPT = String.raw`
               var r = s.report;
               out.appendChild(h('div', { class: 'card' }, h('h3', { text: 'Replay of recorded calls' }),
                 h('p', { class: 'muted', text: 'A replay re-decides calls that already happened. A limit that no recorded call reached, and an argument value that was never sent, are not covered, so a change that widens what is allowed can show no change here.' }),
-                h('p', { text: s.replayed + ' verified receipts replayed (' + s.unverified + ' skipped because they did not verify). ' + r.evaluated + ' evaluated, ' + r.unchanged + ' unchanged, ' + r.changeCount + ' would change.' + (r.complete ? '' : ' The replay is incomplete: ' + r.skipped.length + ' calls could not be replayed.') }),
+                h('p', { text: s.replayed + ' verified receipts replayed (' + s.unverified + ' skipped because they did not verify). ' + r.evaluated + ' evaluated, ' + r.unchanged + ' unchanged, ' + r.reconciliations + ' reconciliations (provider reads with no policy decision), ' + r.changeCount + ' would change.' + (r.complete ? '' : ' The replay is incomplete: ' + r.skipped.length + ' calls could not be replayed.') }),
                 r.changes.length ? (function () {
                   var t = h('table', null, h('tr', null, h('th', { text: 'receipt' }), h('th', { text: 'tool' }), h('th', { text: 'was' }), h('th', { text: 'would be' })));
                   r.changes.forEach(function (c) { t.appendChild(h('tr', null, h('td', { text: short(c.receiptId) }), h('td', { text: c.tool }), h('td', { text: c.from }), h('td', { class: c.to === 'deny' ? 'bad' : 'warn', text: c.to }))); });

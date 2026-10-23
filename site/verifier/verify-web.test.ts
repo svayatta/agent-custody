@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { auditExtends, canonicalize, digestOf, dsseVerify, publicKeyFromPem, verifyBundle, verifyConsistency } from "./verify-web.ts";
+import { auditExtends, canonicalize, digestOf, dsseVerify, formatReport, publicKeyFromPem, verifyBundle, verifyConsistency } from "./verify-web.ts";
 
 const dir = join(import.meta.dirname, "..", "..", "packages", "receipts", "vectors");
 const load = (f: string) => JSON.parse(readFileSync(join(dir, f), "utf8"));
@@ -36,5 +36,14 @@ describe("browser verifier against the conformance vectors", () => {
     for (const v of canonical.values) { expect(canonicalize(v.value)).toBe(v.canonical); expect(await digestOf(v.value)).toBe(v.digest); }
     expect((await publicKeyFromPem(canonical.keyid.publicKeyPem)).keyid).toBe(canonical.keyid.keyid);
     expect((await dsseVerify(canonical.dsse.envelope, [await publicKeyFromPem(canonical.dsse.publicKeyPem)])).ok).toBe(canonical.dsse.expected);
+  });
+  it("reports a reconciliation receipt as a provider read", async () => {
+    const c = receipts.cases.find((x: any) => x.expected.ok && x.bundle.envelope);
+    const r = await verifyBundle(c.bundle, { issuerKeys: await all(c.issuerKeys), principalKeys: await all(c.principalKeys), logKeys: await all(c.logKeys) });
+    expect(formatReport(r)).toMatch(/policy\s+\S+\s+(allow|deny)/);
+    const predicate = { ...r.statement!.predicate, reconciliation: {} };
+    const text = formatReport({ ...r, statement: { ...r.statement!, predicate } as any });
+    expect(text).toMatch(/policy\s+-\s+\(none evaluated: a provider read, not a call\)/);
+    expect(text).toMatch(/execution\s+\S+\s+provider read, executed/);
   });
 });
