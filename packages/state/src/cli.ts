@@ -114,6 +114,15 @@ const USAGE = `agent-custody-memory <command>
                                                    everything that relied on a fact: later calls, derived beliefs, and whether it was retracted
 `;
 
+/**
+ * Resolves on SIGINT or SIGTERM: a container runtime and systemd stop a service with SIGTERM, which PID 1 ignores unless
+ * it is handled. Call it before the service starts, so a signal that arrives while it starts up is kept.
+ */
+const untilStopped = () => new Promise<void>((resolve) => {
+  process.once("SIGINT", resolve);
+  process.once("SIGTERM", resolve);
+});
+
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
@@ -133,11 +142,13 @@ async function main(argv: string[]): Promise<number> {
         const directToken = values["direct-token-env"] ? process.env[values["direct-token-env"]] : undefined;
         if (values["direct-token-env"] && !directToken) throw new Error(`serve: environment variable ${values["direct-token-env"]} is not set`);
         if (values["allow-direct"] && !directToken) throw new Error("serve --http --allow-direct needs --direct-token-env: direct writers present their own token, never the gateways'");
+        const stopped = untilStopped();
         const running = await serveMemoryHttp(ledger, { port: Number(values.port), host: values.host, ...common, tokens: [token], ...(directToken ? { directTokens: [directToken] } : {}) });
         console.error(`agent-custody-memory: ${running.url} ledger=${values.ledger} events=${await ledger.count()} gateway token required ${values["allow-direct"] ? "direct writers with their own token" : "gateway calls only"}`);
         if (digestWarning) console.error(digestWarning);
-        await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+        await stopped;
         await running.close();
+        await ledger.close();
         return 0;
       }
       console.error(`agent-custody-memory: ledger=${values.ledger} events=${await ledger.count()} ${values["allow-direct"] ? "direct calls allowed" : "gateway calls only"}`);
@@ -288,9 +299,10 @@ async function main(argv: string[]): Promise<number> {
         await ledger?.close();
         return 0;
       }
+      const stopped = untilStopped();
       const running = await serveReview(o, { port: Number(values.port), host: values.host });
       console.error(`agent-custody-memory review: ${running.url} receipts=${values.receipts}${ledger ? ` ledger=${values.ledger}` : ""}${keys ? " verifying" : " not verifying (no keys given)"}`);
-      await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+      await stopped;
       await running.close();
       await ledger?.close();
       return 0;
