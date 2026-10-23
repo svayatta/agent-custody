@@ -1,6 +1,6 @@
 // Signing, logging and writing a receipt. Shared by every producer: the gateway and the SDK.
-import { chmodSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
-import { SALTS_DIR, saltsFileFor } from "./retention.ts";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { RECEIPT_ID, SALTS_DIR, saltsFileFor } from "./retention.ts";
 import { join } from "node:path";
 import { effectiveRule, getAt, privateView, type CaptureConfig, type CaptureContext, type PrivateView } from "./capture.ts";
 import { canonicalize, dsseSign, dsseVerify, type Envelope, type KeyPair } from "./crypto.ts";
@@ -14,6 +14,22 @@ export interface PreparedReceipt {
   view: PrivateView<ReceiptPredicate>;
 }
 
+/** The receipts whose log append failed wait here, signed, until `flushOutbox` appends them. */
+export const OUTBOX_DIR = "outbox";
+
+/**
+ * Thrown by `issue` with `deferLog` when the log did not take the receipt. The signed receipt is kept in the outbox and
+ * no bundle is written yet: `flushOutbox` appends it later and then writes the bundle.
+ */
+export class ReceiptPending extends Error {
+  readonly receiptId: string;
+  constructor(receiptId: string, cause: unknown) {
+    super(`receipt ${receiptId} is kept in the outbox; its log append is pending: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = "ReceiptPending";
+    this.receiptId = receiptId;
+  }
+}
+
 export interface Issuer {
   keyid: string;
   log: LogSink;
@@ -22,9 +38,16 @@ export interface Issuer {
    * bundle. Rejects if the log refuses the leaf; no bundle is written then. The predicate is the call in full; what
    * is signed, written, and exported is the view.
    */
-  issue(predicate: ReceiptPredicate, ctx?: CaptureContext, retainPrepared?: (prepared: PreparedReceipt) => PreparedReceipt): Promise<ReceiptBundle>;
+  issue(predicate: ReceiptPredicate, ctx?: CaptureContext, retainPrepared?: (prepared: PreparedReceipt) => PreparedReceipt, opts?: { deferLog?: boolean }): Promise<ReceiptBundle>;
   /** The same for an authorization, signed and committed before a consequential call is forwarded. Rejects if the log refuses; the caller must then not forward. */
   authorize(predicate: AuthorizationPredicate, ctx?: CaptureContext): Promise<AuthorizationBundle>;
+  /**
+   * Appends each receipt in the outbox and writes its bundle. Stops at the first failure. One flush runs at a time. An
+   * entry that is not this issuer's receipt under its own id is renamed to `<name>.bad` and counted in `setAside`.
+   */
+  flushOutbox(): Promise<{ sent: number; pending: number; setAside: number; error?: string }>;
+  /** the receipts in the outbox */
+  pending(): number;
 }
 
 export interface IssuerOptions {
@@ -58,6 +81,18 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
   /** an authorization whose receipt has not followed within this long is a call that died; its view is let go */
   const COMMITTED_FOR_MS = 60 * 60 * 1000;
   const COMMITTED_AT_MOST = 100_000;
+  const outboxDir = join(receiptsDir, OUTBOX_DIR);
+  const outboxed = () => existsSync(outboxDir) ? readdirSync(outboxDir).filter((f) => f.endsWith(".json") && RECEIPT_ID.test(f.slice(0, -".json".length))).sort() : [];
+  const writeBundle = async (receiptId: string, v: ReceiptPredicate, bundle: ReceiptBundle) => {
+    const file = join(receiptsDir, `${receiptId}.json`);
+    // whole or absent: a flush takes a bundle that is there as proof that the outbox entry is done
+    writeFileSync(`${file}.tmp`, JSON.stringify(bundle, null, 2));
+    renameSync(`${file}.tmp`, file);
+    // After the evidence, not before, and awaited so a process that exits right after issuing still exports. The
+    // exporter sees the view, never the full call.
+    if (opts.exporter) await opts.exporter.exported(v, bundle).catch(() => {});
+  };
+  let flushing: Promise<{ sent: number; pending: number; setAside: number; error?: string }> | undefined;
   /**
    * The salts behind a statement's digest-only commitments, kept beside the receipts and never in them:
    * `receipts/salts/<id>.json`, the owner's alone. They are what makes a disclosure possible for a value withheld
@@ -72,7 +107,7 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
   return {
     keyid: key.keyid,
     log: sink,
-    async issue(predicate, ctx, retainPrepared) {
+    async issue(predicate, ctx, retainPrepared, issueOpts) {
       ensureSaltsDir();
       // the authorization's view stays until the log has taken the receipt: a producer that retries after a refusal gets the same commitments and salts
       const prior = committed.get(predicate.receiptId)?.view;
@@ -87,15 +122,30 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
         const checked = dsseVerify(envelope, [key]);
         if (!checked.ok || envelope.payloadType !== RECEIPT_TYPE || v.receiptId !== predicate.receiptId || canonicalize(checked.payload) !== canonicalize(buildStatement(v))) throw new Error("prepared receipt does not match this issuer, predicate, or receipt id");
       }
-      const entry = await sink.append(canonicalize(envelope));
+      let entry: Awaited<ReturnType<LogSink["append"]>>;
+      try {
+        entry = await sink.append(canonicalize(envelope));
+      } catch (e) {
+        if (!issueOpts?.deferLog) throw e;
+        // The call has happened, so its receipt is kept: signed, with its salts, and appended later. The salts go
+        // first, so an outbox entry never lacks them; the rename makes the entry whole or absent.
+        try {
+          keepSalts(pv);
+          mkdirSync(outboxDir, { recursive: true });
+          const file = join(outboxDir, `${predicate.receiptId}.json`);
+          writeFileSync(`${file}.tmp`, JSON.stringify({ envelope }));
+          renameSync(`${file}.tmp`, file);
+        } catch (w) {
+          throw new Error(`${e instanceof Error ? e.message : String(e)}; the receipt could not be kept in the outbox either: ${w instanceof Error ? w.message : String(w)}`, { cause: e });
+        }
+        committed.delete(predicate.receiptId);
+        throw new ReceiptPending(predicate.receiptId, e);
+      }
       committed.delete(predicate.receiptId);
       // the salts once the log has taken the leaf: a receipt the log refused leaves nothing behind
       keepSalts(pv);
       const bundle: ReceiptBundle = { envelope, treeHead: entry.treeHead, inclusion: entry.inclusion };
-      writeFileSync(join(receiptsDir, `${predicate.receiptId}.json`), JSON.stringify(bundle, null, 2));
-      // After the evidence, not before, and awaited so a process that exits right after issuing still exports. The
-      // exporter sees the view, never the full call.
-      if (opts.exporter) await opts.exporter.exported(v, bundle).catch(() => {});
+      await writeBundle(predicate.receiptId, v, bundle);
       return bundle;
     },
     async authorize(predicate, ctx) {
@@ -117,6 +167,45 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
       // On disk in its own right: if the process dies between forwarding and the receipt, this is the evidence that the call was authorized and sent.
       writeFileSync(join(receiptsDir, `${predicate.receiptId}.authorization.json`), JSON.stringify(bundle, null, 2));
       return bundle;
+    },
+    pending: () => outboxed().length,
+    flushOutbox() {
+      flushing ??= (async () => {
+        const files = outboxed();
+        let sent = 0;
+        let setAside = 0;
+        for (const f of files) {
+          const receiptId = f.slice(0, -".json".length);
+          const file = join(outboxDir, f);
+          // a bundle already there means the append and the write happened and only the removal did not
+          if (existsSync(join(receiptsDir, f))) { rmSync(file); sent++; continue; }
+          // only this issuer's own receipt, under its own id, goes to the log; anything else is set aside, not retried
+          let envelope: Envelope;
+          let statement: { predicate: ReceiptPredicate };
+          try {
+            envelope = (JSON.parse(readFileSync(file, "utf8")) as { envelope: Envelope }).envelope;
+            const checked = dsseVerify(envelope, [key]);
+            statement = (checked.ok ? checked.payload : undefined) as { predicate: ReceiptPredicate };
+            if (envelope.payloadType !== RECEIPT_TYPE || statement?.predicate?.receiptId !== receiptId) throw new Error("not a receipt this issuer signed under this id");
+          } catch {
+            renameSync(file, `${file}.bad`);
+            setAside++;
+            continue;
+          }
+          let entry: Awaited<ReturnType<LogSink["append"]>>;
+          // ponytail: a process that dies between this append and the rmSync appends the leaf again on the next flush; the log then holds it twice, and either copy proves it
+          try {
+            entry = await sink.append(canonicalize(envelope));
+          } catch (e) {
+            return { sent, pending: outboxed().length, setAside, error: e instanceof Error ? e.message : String(e) };
+          }
+          await writeBundle(receiptId, statement.predicate, { envelope, treeHead: entry.treeHead, inclusion: entry.inclusion });
+          rmSync(file);
+          sent++;
+        }
+        return { sent, pending: outboxed().length, setAside };
+      })().finally(() => { flushing = undefined; });
+      return flushing;
     },
   };
 }

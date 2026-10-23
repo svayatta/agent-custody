@@ -12,7 +12,7 @@ import type { FactConfig, GatewayConfig, UpstreamConfig } from "./config.ts";
 import { digestOf, dsseVerifiers, dsseVerify, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
 import { delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { APPROVAL_META_KEY, DEFAULT_APPROVAL_LIFETIME_SECONDS, consumeApproval, verifyApproval, verifyApprovalStatement } from "./approval.ts";
-import { createIssuer, type PreparedReceipt } from "./issue.ts";
+import { createIssuer, ReceiptPending, type PreparedReceipt } from "./issue.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { upstreamEvidenceOf } from "./upstream.ts";
@@ -26,6 +26,8 @@ import { OPERATION_META_KEY, OperationStore, ownerAlive, type OperationRecord, t
 export const GATEWAY_VERSION = "0.1.0";
 export const RECEIPT_META_KEY = "agent-custody/receipt";
 export const MODEL_META_KEY = "agent-custody/model";
+/** true on a result whose receipt is signed and kept in the outbox, and not yet in the log */
+export const LOG_PENDING_META_KEY = "agent-custody/log-pending";
 /** Set by the gateway on the answer to a retry of a financial operation: the receipt of the retry itself. `agent-custody/receipt` stays the receipt that holds the operation's outcome. */
 export const RETRY_RECEIPT_META_KEY = "agent-custody/retry-receipt";
 /** Set by the gateway on the call it forwards upstream: the receipt id, and the agent and principal from the attested grant. */
@@ -127,6 +129,10 @@ export interface GatewayHost {
   tools(): string[];
   /** Operator-only provider lookup. Never exposed as an agent tool. Unknown/pending reservations remain held until a terminal reconciliation receipt is committed. */
   reconcile(operationId: string): Promise<ReceiptBundle>;
+  /** Appends the receipts in the outbox, whose log append failed. The host also runs it at startup and every 30 seconds. */
+  flushOutbox(): Promise<{ sent: number; pending: number; setAside: number; error?: string }>;
+  /** the receipts in the outbox */
+  pendingReceipts(): number;
   /** closes the upstreams; every session opened from this host is finished with */
   close(): Promise<void>;
 }
@@ -558,7 +564,12 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       // Only a call known never to have been forwarded may release a reservation without a provider record.
       if (operation && createdOperation && !attemptedOperation) operation = operations!.update(operation.id, { status: "failed", unsent: undefined });
       if (operation) head.operation = operationEvidence(operation, operation.status === "submitted" && !createdOperation ? "unknown" : operation.status);
-      const issued = await issuer.issue({
+      // The call is done, so a log outage now must not tell the agent it failed: the receipt waits in the outbox. An
+      // operation keeps the old order, because its record holds the bundle and its retry is idempotent.
+      let issued: ReceiptBundle | undefined;
+      let logPending = false;
+      try {
+        issued = await issuer.issue({
         ...head,
         ...(approval ? { approval } : {}),
         session: { id: null, toolUseId: null, provenance: "claimed" },
@@ -566,10 +577,15 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         policy: { ...policy, provenance: "observed" },
         ...(authorization ? { authorization } : {}),
         execution,
-      }, captureCtx);
-      if (operation && createdOperation && attemptedOperation) operations!.update(operation.id, { original: issued });
+      }, captureCtx, undefined, { deferLog: !operation });
+      } catch (e) {
+        if (!(e instanceof ReceiptPending)) throw e;
+        console.error(`agent-custody gateway: ${e.message}`);
+        logPending = true;
+      }
+      if (operation && createdOperation && attemptedOperation) operations!.update(operation.id, { original: issued! });
 
-      const meta = { [RECEIPT_META_KEY]: receiptId, ...(head.operation ? { [OPERATION_META_KEY]: head.operation } : {}) };
+      const meta = { [RECEIPT_META_KEY]: receiptId, ...(head.operation ? { [OPERATION_META_KEY]: head.operation } : {}), ...(logPending ? { [LOG_PENDING_META_KEY]: true } : {}) };
       const refuse = (text: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: `${text} (receipt ${receiptId})` }], _meta: meta });
       switch (execution.status) {
         // the agent gets the real result, the real reason, and the real error: what is withheld is withheld from the receipt
@@ -601,6 +617,16 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       },
     };
   }
+
+  if (cfg.log && !cfg.precommit.length) console.error("agent-custody gateway: a remote log is set and precommit is empty: every call is forwarded before its receipt is logged. Name the consequential tools in precommit, or [\"*\"]; requirePrecommit makes this an error");
+  const flushOutbox = async () => {
+    const r = await issuer.flushOutbox();
+    if (r.setAside) console.error(`agent-custody gateway: ${r.setAside} outbox entr${r.setAside === 1 ? "y is" : "ies are"} not a receipt this gateway signed under its file name; renamed to .bad and not appended`);
+    if (r.error) console.error(`agent-custody gateway: ${r.pending} receipt(s) wait in the outbox for the log: ${r.error}`);
+    return r;
+  };
+  const outboxTimer = setInterval(() => void flushOutbox().catch(() => {}), 30_000).unref();
+  void flushOutbox().catch(() => {});
 
   return {
     keyid: issuer.keyid,
@@ -672,7 +698,10 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       operations.update(op.id, { status: intent.predicate.operation!.status, reconciliation: { ...retained, bundle }, result: (intent.predicate.execution as { result?: unknown }).result, unsent: undefined });
       return bundle;
     },
+    flushOutbox,
+    pendingReceipts: () => issuer.pending(),
     async close() {
+      clearInterval(outboxTimer);
       for (const c of upstreams.values()) await c.close();
       operations?.close();
     },
