@@ -119,7 +119,7 @@ export async function serveHttp(host: GatewayHost, opts: HttpGatewayOptions): Pr
 
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true, sessions: sessions.size, keyid: host.keyid });
+    if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true, sessions: sessions.size, keyid: host.keyid, pendingReceipts: host.pendingReceipts() });
     if (url.pathname !== path) return json(res, 404, { error: "not found" });
     try {
       const sid = req.headers["mcp-session-id"];

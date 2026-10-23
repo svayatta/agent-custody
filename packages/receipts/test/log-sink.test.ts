@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadSdkConfig } from "../src/config.ts";
 import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair, dsseSign, dsseVerify, publicKeyFromPem, publicKeyToPem } from "../src/crypto.ts";
 import { MerkleLog } from "../src/log.ts";
-import { createGateway } from "../src/gateway.ts";
+import { createGateway, LOG_PENDING_META_KEY, RECEIPT_META_KEY } from "../src/gateway.ts";
 import { loadConfig } from "../src/config.ts";
 import { buildFixture } from "../scripts/fixture.ts";
 import { TREEHEAD_TYPE } from "../src/receipt.ts";
@@ -141,10 +141,14 @@ describe("HTTP log sink", () => {
     writeFileSync(fx.configFile, JSON.stringify(cfg));
     const gw = await createGateway(loadConfig(fx.configFile));
     try {
-      // the authorization is withheld, and the receipt that would record the withholding cannot be logged either: the
-      // call fails loudly, nothing was forwarded, and nothing was written as if the log had accepted it
-      await expect(gw.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500 } })).rejects.toThrow(/does not verify against its keys/);
-      expect(existsSync(fx.receiptsDir) ? readdirSync(fx.receiptsDir) : []).toEqual([]);
+      // the authorization is withheld, and the receipt that records the withholding cannot be logged either: nothing
+      // was forwarded, no bundle was written as if the log had accepted it, and the receipt waits in the outbox
+      const res = await gw.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 2500 } });
+      expect(res.isError).toBe(true);
+      expect((res.content[0] as { text: string }).text).toMatch(/^Not executed: .*does not verify against its keys/);
+      expect(res._meta?.[LOG_PENDING_META_KEY]).toBe(true);
+      expect(readdirSync(fx.receiptsDir)).toEqual(["outbox"]);
+      expect(readdirSync(join(fx.receiptsDir, "outbox"))).toEqual([`${String(res._meta?.[RECEIPT_META_KEY])}.json`]);
       // the stand-in took both leaves, the authorization and then the receipt; the gateway believed neither answer
       expect(mlog.size).toBe(2);
     } finally {

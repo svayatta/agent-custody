@@ -119,6 +119,7 @@ What each part does:
 | `trustedPrincipalKeys` | the public keys whose grants this gateway accepts. Only public keys go here. |
 | `facts` | before a refund, the gateway calls `customer.lookup` itself with the customer id from the call, and the policy reads the answer as `context.facts.customer`. |
 | `precommit` | the consequential tools: the gateway commits the authorization to the log before it forwards, and withholds the call if the log will not take it. |
+| `requirePrecommit` | with a remote log, the gateway does not start when `precommit` is empty. Without it, the gateway prints a warning. |
 | `revokedGrants` | the file `agent-custody revoke` appends to; the gateway re-reads it on every call. |
 | `receiptsDir`, `log` | full receipts stay on the gateway's disk. The hosted log receives only their hashes (`hashOnly`), and its public key is pinned (`keys`), which `precommit` with a remote log requires. |
 
@@ -201,7 +202,7 @@ docker run --rm -v "$PWD/config:/config:ro" -v gateway-data:/data --env-file .en
 | a stdio `command` exists, and a script argument exists | error, and a warning |
 | the receipts, log, revocation, operations database, and approvals paths can be written, and the revocation file is a JSON array | error |
 | the grant the config names verifies, and is inside its window | error, and a warning near expiry |
-| a remote log with an empty `precommit` | warning: a log outage after a call leaves its side effect without evidence |
+| a remote log with an empty `precommit` | warning: a log outage after a call puts its receipt in the outbox, so the side effect is in the log only after the outbox is appended |
 
 With **`--connect`** it also starts the upstreams, which is where an unreachable server or **two upstreams offering the same tool** shows up, prints the tools they offer, and compares every tool name in `precommit`, `facts`, `approvals`, `operations`, and the grant's scopes with that list. A name in `precommit`, `facts`, `approvals`, or `operations` that no upstream offers is an **error** (for `precommit` it means the tool you meant is forwarded before it is logged); a grant scope that names nothing is a warning. `--connect` starts your stdio upstreams and may create the receipts directory. It exits 1 on any error, so it can gate a deploy.
 
@@ -216,6 +217,7 @@ With **`--connect`** it also starts the upstreams, which is where an unreachable
 | `exactly one of upstream or upstreams is required` | both, or neither | use `upstream` for one source and `upstreams` for several |
 | `exactly one of logFile or log is required` | both, or neither | a local file, or a remote log |
 | `precommit with a remote log needs log.keys` | a remote log gating consequential calls without a pinned key | add the log's public key file to `log.keys` |
+| `requirePrecommit is set and precommit is empty` | a remote log with no consequential tools named | name them in `precommit`, or `["*"]` |
 | `fact "f" uses tool t, which precommit names as consequential` | a fact lookup must be a read | use a read tool for the fact |
 | `ENOENT … gateway.key` | the key file does not exist | `agent-custody keygen`, or let the container create it |
 | `EROFS` or a permission error on `receipts` | a writable path points into the read-only `/config` | use an absolute path under `/data` |
