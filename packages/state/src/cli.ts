@@ -148,6 +148,7 @@ async function main(argv: string[]): Promise<number> {
         if (digestWarning) console.error(digestWarning);
         await stopped;
         await running.close();
+        await ledger.close();
         return 0;
       }
       console.error(`agent-custody-memory: ledger=${values.ledger} events=${await ledger.count()} ${values["allow-direct"] ? "direct calls allowed" : "gateway calls only"}`);
