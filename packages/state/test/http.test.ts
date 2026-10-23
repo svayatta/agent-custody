@@ -91,6 +91,14 @@ describe("memory server over HTTP", () => {
     await expect(intruder.connect(new StreamableHTTPClientTransport(new URL(running.url), { requestInit: { headers: { authorization: "Bearer nope" } } }))).rejects.toThrow(/401|Unauthorized/i);
   });
 
+  it("opens no GET stream: a stateless server answers 405, and a wrong token still answers 401", async () => {
+    const get = (token: string) => fetch(running.url, { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" }, signal: AbortSignal.timeout(5000) });
+    const refused = await get("gateway-secret");
+    expect(refused.status).toBe(405);
+    expect(refused.headers.get("allow")).toBe("POST");
+    expect((await get("nope")).status).toBe(401);
+  });
+
   it("with gateway calls required, a direct writer is refused even with the token", async () => {
     const strict = await serveMemoryHttp(new Ledger(join(dir, "strict.jsonl")), { port: 0, tokens: ["gateway-secret"], directTokens: ["direct-secret"], requireGateway: true });
     const c = new Client({ name: "x", version: "0" });

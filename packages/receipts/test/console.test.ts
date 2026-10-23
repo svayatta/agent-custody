@@ -134,6 +134,8 @@ describe("the console", () => {
     expect(body.replayed).toBeGreaterThanOrEqual(3);
     expect(body.report.changes.some((c: { receiptId: string; from: string; to: string }) => c.receiptId === ids.allowed && c.from === "allow" && c.to === "deny")).toBe(true);
     expect(body.report.changes.some((c: { receiptId: string }) => c.receiptId === ids.denied)).toBe(false);
+    expect(body.report.reconciliations).toBe(0);
+    expect(body.report.total).toBe(body.report.evaluated + body.report.skipped.length + body.report.reconciliations);
   });
 
   it("saving a policy keeps the previous version, records who changed what, and refuses a stale edit", async () => {
