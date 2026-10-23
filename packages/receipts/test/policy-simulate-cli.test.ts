@@ -128,7 +128,7 @@ describe("policy simulate CLI on plain Node", () => {
     const bundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${ids[0]}.json`), "utf8")) as ReceiptBundle;
     const treeHead = JSON.parse(Buffer.from(bundle.treeHead.payload, "base64").toString("utf8"));
     bundle.treeHead = dsseSign(TREEHEAD_TYPE, treeHead, logKey);
-    writeFileSync(join(receipts, "receipt.json"), JSON.stringify(bundle));
+    writeFileSync(join(receipts, `${ids[0]}.json`), JSON.stringify(bundle));
     expect(simulate("--receipts", receipts).status).toBe(1);
     const trusted = simulate("--receipts", receipts, "--log-key", fx.appPub, "--log-key", logFiles.pubFile, "--json");
     expect(trusted.status, trusted.stderr).toBe(0);
@@ -157,6 +157,18 @@ describe("policy simulate CLI on plain Node", () => {
     const result = simulate("--receipts", receipts);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(join(receipts, "a.json"));
+    expect(result.stdout).toBe("");
+  });
+
+  it("refuses a receipt copied over the file name of another receipt", () => {
+    const receipts = join(dir, "copied");
+    mkdirSync(receipts);
+    copyFileSync(join(fx.receiptsDir, `${ids[0]}.json`), join(receipts, `${ids[0]}.json`));
+    copyFileSync(join(fx.receiptsDir, `${ids[0]}.json`), join(receipts, `${ids[1]}.json`));
+    const result = simulate("--receipts", receipts);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(join(receipts, `${ids[1]}.json`));
+    expect(result.stderr).toContain("does not match the receipt id");
     expect(result.stdout).toBe("");
   });
 
