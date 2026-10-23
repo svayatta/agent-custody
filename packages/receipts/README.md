@@ -288,6 +288,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Done**
 
+- Policy reload: the gateway re-reads `policy.cedar` whenever it changes and applies it from the next call, with no restart and no dropped session; a policy that does not parse is refused and the one in force stays, and every change or refusal is recorded in `receipts/policy-reloads.jsonl` ([usage](docs/usage.md)).
 - Live Codex support recovery demo: model-selected MCP calls, incorrect CRM memory, a reviewed recovery plan, simulated credit compensation, and verified evidence; [guide](docs/codex-recovery.md), with offline regression coverage.
 - Payload-bound human approvals: short-lived signatures over the principal, agent, tool, full arguments, amount, currency, and beneficiary; configurable one- or two-key thresholds, enforced even in observe mode, a configurable lifetime cap, persistent atomic single-use consumption before forwarding, and independent approval-key verification. [Guide](docs/approvals.md), tutorial 30.
 - Gateway: MCP proxy, signed delegation, gateway-fetched facts, Cedar policy, denial receipts, Merkle log, offline verifier.
