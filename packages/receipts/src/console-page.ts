@@ -186,7 +186,7 @@ const SCRIPT = String.raw`
         function save() {
           return validate().then(function (v) {
             if (!v.ok) return;
-            var ask = 'Save this policy?\n\nThe gateway reads the policy when it starts, so restart it to apply the change.';
+            var ask = 'Save this policy?\n\nA running gateway applies it from its next call.';
             if (v.issues.length) ask = 'Confirm before saving:\n\n' + v.issues.join('\n\n') + '\n\nSave this policy anyway?';
             if (!window.confirm(ask)) return;
             return api('PUT', '/api/policy', { text: area.value, expectDigest: policyDigest, confirm: v.issues.length > 0 }).then(function (r) {
@@ -196,7 +196,7 @@ const SCRIPT = String.raw`
           });
         }
         return h('div', null, h('h2', { text: 'Policy' }),
-          h('div', { class: 'banner' }, 'The gateway reads the policy when it starts. A saved change applies after the gateway restarts; every save is recorded in the audit trail, and the previous version is kept.'),
+          h('div', { class: 'banner' }, 'A running gateway applies a saved change from its next call; every save is recorded in the audit trail, and the previous version is kept.'),
           h('p', { class: 'muted' }, p.path + ' · ' + short(p.digest)),
           area, h('div', { class: 'row' },
             h('button', { class: 'secondary', onclick: function () { validate().catch(fail); } }, 'Validate'),

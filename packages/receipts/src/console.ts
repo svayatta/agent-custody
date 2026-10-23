@@ -370,7 +370,7 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
           throw new HttpError(500, `the policy file cannot be written (${e instanceof Error ? e.message : String(e)}); mount the config directory read-write for the console`);
         }
         audit("policy.save", { file: cfg.policyFile, from: policyDigest(current), to: policyDigest(text), bytes: text.length, confirmed: issues }, by);
-        return { digest: policyDigest(text), note: "saved; the gateway reads the policy when it starts, so restart it to apply the change" };
+        return { digest: policyDigest(text), note: "saved; a running gateway applies it from its next call" };
       });
     },
 

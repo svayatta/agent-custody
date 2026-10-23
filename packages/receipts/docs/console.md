@@ -37,7 +37,7 @@ It listens on `127.0.0.1:8795` and prints the URL. Open it and sign in with the 
 
 ## What a saved policy does
 
-The gateway reads `policy.cedar` when it starts, so **a saved policy applies after the gateway restarts**, and the console says so each time. Reloading a policy without a restart is a separate change. The save is guarded: Cedar must parse the text; and the operator must confirm a policy that has no `permit` rule (a `permit(` in a comment does not count), because every call would be denied, or a `permit` rule with **no action and no condition**, which allows every tool in a grant's scopes and which a replay cannot show. A save made from a copy that is no longer the file on disk is refused with `409`. The digest check, the history copy, and the write happen under one lock, in this process and, through a lock file in the state directory, across consoles that share it, so two administrators cannot overwrite each other. The previous version is kept under `console/policy-history/` and the change goes in the audit trail.
+A running gateway re-reads `policy.cedar` when it changes, so **a saved policy applies from the gateway's next call**, with no restart, and the gateway records the change in `receipts/policy-reloads.jsonl`. The save is guarded: Cedar must parse the text; and the operator must confirm a policy that has no `permit` rule (a `permit(` in a comment does not count), because every call would be denied, or a `permit` rule with **no action and no condition**, which allows every tool in a grant's scopes and which a replay cannot show. A save made from a copy that is no longer the file on disk is refused with `409`. The digest check, the history copy, and the write happen under one lock, in this process and, through a lock file in the state directory, across consoles that share it, so two administrators cannot overwrite each other. The previous version is kept under `console/policy-history/` and the change goes in the audit trail.
 
 ## How it is protected
 
@@ -52,7 +52,6 @@ The gateway reads `policy.cedar` when it starts, so **a saved policy applies aft
 
 - It does not issue grants. A grant is signed by a principal's key, which belongs where grants are issued ([configuration.md](configuration.md#the-principals-key)).
 - It does not edit `gateway.json`: upstreams, facts, and `precommit` are changed in the file, and the gateway restarted. The Overview and Check tabs show them.
-- A policy change needs a gateway restart.
 - The credential variables are not checked in the console, and an upstream that needs one is not started there.
 - One token, no per-user accounts, and the audit records the address and not a person.
 - It reads the local receipts directory. With a remote log it verifies receipts against the keys but not the log's inclusion proofs.
