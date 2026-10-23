@@ -142,7 +142,7 @@ describe("the console", () => {
     const saved = await call("/api/policy", { method: "PUT", body: { text: next, expectDigest: before.body.digest } });
     expect(saved.status).toBe(200);
     expect(readFileSync(join(fx.dir, "policy.cedar"), "utf8")).toBe(next);
-    expect(saved.body.note).toContain("restart");
+    expect(saved.body.note).toContain("next call");
     const history = readdirSync(join(fx.dir, "console", "policy-history"));
     expect(history).toHaveLength(1);
     expect(readFileSync(join(fx.dir, "console", "policy-history", history[0]!), "utf8")).toBe(before.body.text);
