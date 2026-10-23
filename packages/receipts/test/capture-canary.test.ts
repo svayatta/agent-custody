@@ -369,7 +369,7 @@ describe("the canary", () => {
         expect(host.pendingReceipts()).toBe(calls.length);
         expect(exports.seen).toEqual([]);
         down = false;
-        expect(await host.flushOutbox()).toEqual({ sent: calls.length, pending: 0, setAside: 0 });
+        expect(await host.flushOutbox()).toEqual({ sent: calls.length, pending: 0, setAside: 0, foreign: 0 });
         const bundles = calls.map((c) => JSON.parse(readFileSync(join(fx.receiptsDir, `${String(c.result._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle);
         return { calls, whileDown, bundles, disk: onDisk(fx.receiptsDir, fx.logFile), exported: exports.seen.join("\n"), exportCount: exports.seen.length, keys: { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], upstreamKeys: [loadPublicKey(fx.upstreamPub)], providerSecrets: { stripe: "whsec_canary" }, logFile: fx.logFile } };
       } finally {

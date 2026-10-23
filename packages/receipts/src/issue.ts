@@ -1,10 +1,13 @@
 // Signing, logging and writing a receipt. Shared by every producer: the gateway and the SDK.
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { RECEIPT_ID, SALTS_DIR, saltsFileFor } from "./retention.ts";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { effectiveRule, getAt, privateView, type CaptureConfig, type CaptureContext, type PrivateView } from "./capture.ts";
 import { canonicalize, dsseSign, dsseVerify, type Envelope, type KeyPair } from "./crypto.ts";
 import { fileLog, type LogSink } from "./log-sink.ts";
+import { ownerAlive, processStamp } from "./operations.ts";
 import type { ReceiptExporter } from "./otel.ts";
 import { buildAuthorizationStatement, buildStatement, RECEIPT_TYPE, type AuthorizationBundle, type AuthorizationPredicate, type ReceiptBundle, type ReceiptPredicate } from "./receipt.ts";
 
@@ -16,6 +19,15 @@ export interface PreparedReceipt {
 
 /** The receipts whose log append failed wait here, signed, until `flushOutbox` appends them. */
 export const OUTBOX_DIR = "outbox";
+
+/** What one `flushOutbox` did. `foreign` entries are signed by another key and stay in the outbox. */
+export interface FlushResult {
+  sent: number;
+  pending: number;
+  setAside: number;
+  foreign: number;
+  error?: string;
+}
 
 /**
  * Thrown by `issue` with `deferLog` when the log did not take the receipt. The signed receipt is kept in the outbox and
@@ -42,10 +54,13 @@ export interface Issuer {
   /** The same for an authorization, signed and committed before a consequential call is forwarded. Rejects if the log refuses; the caller must then not forward. */
   authorize(predicate: AuthorizationPredicate, ctx?: CaptureContext): Promise<AuthorizationBundle>;
   /**
-   * Appends each receipt in the outbox and writes its bundle. Stops at the first failure. One flush runs at a time. An
-   * entry that is not this issuer's receipt under its own id is renamed to `<name>.bad` and counted in `setAside`.
+   * Appends each receipt in the outbox, oldest statement first, and writes its bundle. A log refusal stops the flush;
+   * another failure is reported in `error` and the flush goes on. One flush runs at a time in a process, and a lock
+   * file in the outbox keeps other processes out: when another process holds it, nothing is done. An entry that is
+   * damaged, or that this issuer's key signed under another receipt id, is renamed to `<name>.bad` and counted in
+   * `setAside`. An entry signed by another key stays in the outbox and is counted in `foreign`.
    */
-  flushOutbox(): Promise<{ sent: number; pending: number; setAside: number; error?: string }>;
+  flushOutbox(): Promise<FlushResult>;
   /** the receipts in the outbox */
   pending(): number;
 }
@@ -81,8 +96,85 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
   /** an authorization whose receipt has not followed within this long is a call that died; its view is let go */
   const COMMITTED_FOR_MS = 60 * 60 * 1000;
   const COMMITTED_AT_MOST = 100_000;
+  /** a lock that its owner has not touched for this long is broken, whatever machine the owner is on */
+  const LOCK_STALE_MS = 15 * 60 * 1000;
   const outboxDir = join(receiptsDir, OUTBOX_DIR);
-  const outboxed = () => existsSync(outboxDir) ? readdirSync(outboxDir).filter((f) => f.endsWith(".json") && RECEIPT_ID.test(f.slice(0, -".json".length))).sort() : [];
+  const outboxed = () => existsSync(outboxDir) ? readdirSync(outboxDir).filter((f) => f.endsWith(".json") && RECEIPT_ID.test(f.slice(0, -".json".length))) : [];
+  /** the outbox in the order of the signed statements' timestamps; an entry that cannot be read sorts first and is dealt with when its turn comes */
+  const outboxOrdered = () => outboxed().map((f) => {
+    let at = 0;
+    try {
+      const env = (JSON.parse(readFileSync(join(outboxDir, f), "utf8")) as { envelope: Envelope }).envelope;
+      at = Date.parse((JSON.parse(Buffer.from(env.payload, "base64").toString("utf8")) as { predicate: { timestamp: string } }).predicate.timestamp) || 0;
+    } catch { /* unreadable: at stays 0 */ }
+    return { f, at };
+  }).sort((a, b) => a.at - b.at || (a.f < b.f ? -1 : 1)).map((e) => e.f);
+  /** the file is whole or absent, and on disk before the caller goes on: it can be the only copy of the evidence */
+  const writeDurable = (file: string, text: string) => {
+    const fd = openSync(`${file}.tmp`, "w");
+    try {
+      writeFileSync(fd, text);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(`${file}.tmp`, file);
+    syncDir(dirname(file));
+  };
+  const syncDir = (dir: string) => {
+    const fd = openSync(dir, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  };
+  const lockFile = join(outboxDir, ".lock");
+  /** Takes the outbox lock with an exclusive create. A lock whose owner is gone, or that no one has touched for a long time, is broken. Returns its release, or undefined when another flusher holds it. */
+  const takeLock = (): (() => void) | undefined => {
+    const token = randomUUID();
+    const body = JSON.stringify({ token, pid: process.pid, start: processStamp(process.pid), host: hostname() });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const fd = openSync(lockFile, "wx", 0o600);
+        try {
+          writeFileSync(fd, body);
+        } finally {
+          closeSync(fd);
+        }
+        return () => {
+          try {
+            if ((JSON.parse(readFileSync(lockFile, "utf8")) as { token: string }).token === token) rmSync(lockFile, { force: true });
+          } catch { /* already broken by another flusher */ }
+        };
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      }
+      if (!lockIsStale()) return undefined;
+      // two flushers may both judge it stale; the rename lets one of them move it, the other gets ENOENT and tries again
+      try {
+        const gone = `${lockFile}.stale-${randomUUID()}`;
+        renameSync(lockFile, gone);
+        rmSync(gone, { force: true });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      }
+    }
+    return undefined;
+  };
+  const lockIsStale = (): boolean => {
+    try {
+      const age = Date.now() - statSync(lockFile).mtimeMs;
+      let owner: { pid: number; start?: string; host: string } | undefined;
+      try { owner = JSON.parse(readFileSync(lockFile, "utf8")); } catch { /* a lock being written */ }
+      if (!owner) return age > 60_000;
+      if (owner.host === hostname() && !ownerAlive({ ownerPid: owner.pid, ...(owner.start ? { ownerStart: owner.start } : {}) })) return true;
+      return age > LOCK_STALE_MS;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+      throw e;
+    }
+  };
   const writeBundle = async (receiptId: string, v: ReceiptPredicate, bundle: ReceiptBundle) => {
     const file = join(receiptsDir, `${receiptId}.json`);
     // whole or absent: a flush takes a bundle that is there as proof that the outbox entry is done
@@ -92,7 +184,9 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
     // exporter sees the view, never the full call.
     if (opts.exporter) await opts.exporter.exported(v, bundle).catch(() => {});
   };
-  let flushing: Promise<{ sent: number; pending: number; setAside: number; error?: string }> | undefined;
+  let flushing: Promise<FlushResult> | undefined;
+  /** the log's answer for a receipt whose bundle could not be written yet: a retry in this process writes the bundle and does not append again */
+  const appended = new Map<string, Awaited<ReturnType<LogSink["append"]>>>();
   /**
    * The salts behind a statement's digest-only commitments, kept beside the receipts and never in them:
    * `receipts/salts/<id>.json`, the owner's alone. They are what makes a disclosure possible for a value withheld
@@ -132,9 +226,8 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
         try {
           keepSalts(pv);
           mkdirSync(outboxDir, { recursive: true });
-          const file = join(outboxDir, `${predicate.receiptId}.json`);
-          writeFileSync(`${file}.tmp`, JSON.stringify({ envelope }));
-          renameSync(`${file}.tmp`, file);
+          writeDurable(join(outboxDir, `${predicate.receiptId}.json`), JSON.stringify({ envelope }));
+          syncDir(receiptsDir);
         } catch (w) {
           throw new Error(`${e instanceof Error ? e.message : String(e)}; the receipt could not be kept in the outbox either: ${w instanceof Error ? w.message : String(w)}`, { cause: e });
         }
@@ -170,40 +263,80 @@ export function createIssuer(key: KeyPair, receiptsDir: string, log: string | Lo
     },
     pending: () => outboxed().length,
     flushOutbox() {
-      flushing ??= (async () => {
-        const files = outboxed();
-        let sent = 0;
-        let setAside = 0;
-        for (const f of files) {
-          const receiptId = f.slice(0, -".json".length);
-          const file = join(outboxDir, f);
-          // a bundle already there means the append and the write happened and only the removal did not
-          if (existsSync(join(receiptsDir, f))) { rmSync(file); sent++; continue; }
-          // only this issuer's own receipt, under its own id, goes to the log; anything else is set aside, not retried
-          let envelope: Envelope;
-          let statement: { predicate: ReceiptPredicate };
-          try {
-            envelope = (JSON.parse(readFileSync(file, "utf8")) as { envelope: Envelope }).envelope;
-            const checked = dsseVerify(envelope, [key]);
-            statement = (checked.ok ? checked.payload : undefined) as { predicate: ReceiptPredicate };
-            if (envelope.payloadType !== RECEIPT_TYPE || statement?.predicate?.receiptId !== receiptId) throw new Error("not a receipt this issuer signed under this id");
-          } catch {
-            renameSync(file, `${file}.bad`);
-            setAside++;
-            continue;
+      flushing ??= (async (): Promise<FlushResult> => {
+        const idle = (): FlushResult => ({ sent: 0, pending: outboxed().length, setAside: 0, foreign: 0 });
+        if (!outboxed().length) return idle();
+        const release = takeLock();
+        if (!release) return idle();
+        try {
+          let sent = 0;
+          let setAside = 0;
+          let foreign = 0;
+          const errors: string[] = [];
+          const done = () => ({ sent, pending: outboxed().length, setAside, foreign, ...(errors.length ? { error: errors.length === 1 ? errors[0]! : `${errors[0]} (and ${errors.length - 1} more)` } : {}) });
+          const setAsideFile = (file: string) => {
+            try {
+              renameSync(file, `${file}.bad`);
+              setAside++;
+            } catch (e) {
+              if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+            }
+          };
+          for (const f of outboxOrdered()) {
+            const receiptId = f.slice(0, -".json".length);
+            const file = join(outboxDir, f);
+            try {
+              // a bundle already there means the append and the write happened and only the removal did not
+              if (existsSync(join(receiptsDir, f))) { rmSync(file, { force: true }); appended.delete(receiptId); sent++; continue; }
+              let record: { envelope: Envelope; appended?: Awaited<ReturnType<LogSink["append"]>> };
+              try {
+                record = JSON.parse(readFileSync(file, "utf8")) as typeof record;
+              } catch (e) {
+                // gone: another flusher took it; anything else that is not readable JSON is damaged
+                if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+                if (!(e instanceof SyntaxError)) throw e;
+                setAsideFile(file);
+                continue;
+              }
+              const envelope = record?.envelope;
+              if (typeof envelope?.payload !== "string" || !Array.isArray(envelope.signatures) || envelope.signatures.length === 0) { setAsideFile(file); continue; }
+              // a signature by another key proves nothing about this entry (a rotated key, a restored backup): it stays, and is reported
+              if (!envelope.signatures.some((sig) => sig?.keyid === key.keyid)) { foreign++; continue; }
+              // only this issuer's own receipt, under its own id, goes to the log; anything else is set aside, not retried
+              const checked = dsseVerify(envelope, [key]);
+              const statement = (checked.ok ? checked.payload : undefined) as { predicate: ReceiptPredicate } | undefined;
+              if (!statement || envelope.payloadType !== RECEIPT_TYPE || statement.predicate?.receiptId !== receiptId) { setAsideFile(file); continue; }
+              let entry = record.appended ?? appended.get(receiptId);
+              if (!entry) {
+                try {
+                  entry = await sink.append(canonicalize(envelope));
+                } catch (e) {
+                  errors.push(e instanceof Error ? e.message : String(e));
+                  return done();
+                }
+                // Until the bundle is written, the answer is the only proof that the log has the leaf. It is kept in
+                // memory and in the entry, so that a failure now does not make the next flush append the leaf again.
+                appended.set(receiptId, entry);
+                try {
+                  writeDurable(file, JSON.stringify({ envelope, appended: entry }));
+                } catch (e) {
+                  errors.push(`receipt ${receiptId} is in the log, but its outbox entry could not record that: ${e instanceof Error ? e.message : String(e)}`);
+                }
+              }
+              await writeBundle(receiptId, statement.predicate, { envelope, treeHead: entry.treeHead, inclusion: entry.inclusion });
+              rmSync(file, { force: true });
+              appended.delete(receiptId);
+              sent++;
+              try { utimesSync(lockFile, new Date(), new Date()); } catch { /* the lock is only a hint */ }
+            } catch (e) {
+              if ((e as NodeJS.ErrnoException).code === "ENOENT" && !existsSync(file)) continue;
+              errors.push(`outbox entry ${f}: ${e instanceof Error ? e.message : String(e)}`);
+            }
           }
-          let entry: Awaited<ReturnType<LogSink["append"]>>;
-          // ponytail: a process that dies between this append and the rmSync appends the leaf again on the next flush; the log then holds it twice, and either copy proves it
-          try {
-            entry = await sink.append(canonicalize(envelope));
-          } catch (e) {
-            return { sent, pending: outboxed().length, setAside, error: e instanceof Error ? e.message : String(e) };
-          }
-          await writeBundle(receiptId, statement.predicate, { envelope, treeHead: entry.treeHead, inclusion: entry.inclusion });
-          rmSync(file);
-          sent++;
+          return done();
+        } finally {
+          release();
         }
-        return { sent, pending: outboxed().length, setAside };
       })().finally(() => { flushing = undefined; });
       return flushing;
     },

@@ -12,7 +12,7 @@ import type { FactConfig, GatewayConfig, UpstreamConfig } from "./config.ts";
 import { digestOf, dsseVerifiers, dsseVerify, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
 import { delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { APPROVAL_META_KEY, DEFAULT_APPROVAL_LIFETIME_SECONDS, consumeApproval, verifyApproval, verifyApprovalStatement } from "./approval.ts";
-import { createIssuer, ReceiptPending, type PreparedReceipt } from "./issue.ts";
+import { createIssuer, ReceiptPending, type FlushResult, type PreparedReceipt } from "./issue.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { upstreamEvidenceOf } from "./upstream.ts";
@@ -111,6 +111,11 @@ export interface GatewayOptions {
   exporter?: ReceiptExporter;
   /** cancels the start while it is connecting to the upstreams: every upstream already started is closed and the call rejects */
   signal?: AbortSignal;
+  /**
+   * Appends the outbox at start and every 30 seconds. Only a gateway that serves sets it: `check` and `reconcile` open
+   * a host too, and must not append to the log or touch the outbox of a gateway that runs.
+   */
+  autoFlush?: boolean;
 }
 
 /**
@@ -129,8 +134,8 @@ export interface GatewayHost {
   tools(): string[];
   /** Operator-only provider lookup. Never exposed as an agent tool. Unknown/pending reservations remain held until a terminal reconciliation receipt is committed. */
   reconcile(operationId: string): Promise<ReceiptBundle>;
-  /** Appends the receipts in the outbox, whose log append failed. The host also runs it at startup and every 30 seconds. */
-  flushOutbox(): Promise<{ sent: number; pending: number; setAside: number; error?: string }>;
+  /** Appends the receipts in the outbox, whose log append failed. A host opened with `autoFlush` also runs it at start and every 30 seconds; `close()` waits for a flush that runs. */
+  flushOutbox(): Promise<FlushResult>;
   /** the receipts in the outbox */
   pendingReceipts(): number;
   /** closes the upstreams; every session opened from this host is finished with */
@@ -619,14 +624,17 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   }
 
   if (cfg.log && !cfg.precommit.length) console.error("agent-custody gateway: a remote log is set and precommit is empty: every call is forwarded before its receipt is logged. Name the consequential tools in precommit, or [\"*\"]; requirePrecommit makes this an error");
-  const flushOutbox = async () => {
+  let flushing: Promise<FlushResult> | undefined;
+  const flushOutbox = () => flushing ??= (async () => {
     const r = await issuer.flushOutbox();
-    if (r.setAside) console.error(`agent-custody gateway: ${r.setAside} outbox entr${r.setAside === 1 ? "y is" : "ies are"} not a receipt this gateway signed under its file name; renamed to .bad and not appended`);
-    if (r.error) console.error(`agent-custody gateway: ${r.pending} receipt(s) wait in the outbox for the log: ${r.error}`);
+    if (r.setAside) console.error(`agent-custody gateway: ${r.setAside} outbox entr${r.setAside === 1 ? "y is" : "ies are"} damaged, or not signed under its file name; renamed to .bad and not appended`);
+    if (r.foreign) console.error(`agent-custody gateway: ${r.foreign} outbox entr${r.foreign === 1 ? "y is" : "ies are"} signed by a key other than ${issuer.keyid.slice(0, 12)}; left in the outbox and not appended. Restore the key that signed them, or move them away`);
+    if (r.error) console.error(`agent-custody gateway: ${r.pending} receipt(s) wait in the outbox: ${r.error}`);
     return r;
-  };
-  const outboxTimer = setInterval(() => void flushOutbox().catch(() => {}), 30_000).unref();
-  void flushOutbox().catch(() => {});
+  })().finally(() => { flushing = undefined; });
+  const autoFlush = () => void flushOutbox().catch((e) => console.error(`agent-custody gateway: the outbox flush failed: ${e instanceof Error ? e.message : String(e)}`));
+  const outboxTimer = options.autoFlush ? setInterval(autoFlush, 30_000).unref() : undefined;
+  if (options.autoFlush) autoFlush();
 
   return {
     keyid: issuer.keyid,
@@ -701,7 +709,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     flushOutbox,
     pendingReceipts: () => issuer.pending(),
     async close() {
-      clearInterval(outboxTimer);
+      if (outboxTimer) clearInterval(outboxTimer);
+      await flushing?.catch(() => {});
       for (const c of upstreams.values()) await c.close();
       operations?.close();
     },

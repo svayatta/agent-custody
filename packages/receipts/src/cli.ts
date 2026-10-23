@@ -280,7 +280,7 @@ async function main(argv: string[]): Promise<number> {
         const candidates = (cfg.upstreams ?? (cfg.upstream ? [cfg.upstream] : [])).filter((u) => "a2a" in u);
         if (candidates.length !== 1) throw new Error("gateway --a2a needs exactly one { a2a: ... } upstream in the config");
         const a2a = (candidates[0] as { a2a: A2aUpstreamConfig }).a2a;
-        const host = await createGatewayHost(cfg);
+        const host = await createGatewayHost(cfg, { autoFlush: true });
         const grant = cfg.grantFile ? (JSON.parse(readFileSync(cfg.grantFile, "utf8")) as Envelope) : undefined;
         const running = await serveA2a(host, a2a, { port: Number(values.port), host: values.host, ...(grant ? { grant } : {}) });
         console.error(`agent-custody gateway (a2a): ${running.url} keyid=${host.keyid} fronting ${a2a.url} as ${a2a.prefix}.send; card at ${running.url}/.well-known/agent-card.json`);
@@ -290,7 +290,7 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       if (values.http) {
-        const host = await createGatewayHost(loadConfig(values.config));
+        const host = await createGatewayHost(loadConfig(values.config), { autoFlush: true });
         const running = await serveHttp(host, { port: Number(values.port), host: values.host, idleMs: Number(values["idle-minutes"]) * 60_000 });
         console.error(`agent-custody gateway: ${running.url} keyid=${host.keyid} one session per grant; GET /health`);
         await untilStopped();
@@ -298,7 +298,7 @@ async function main(argv: string[]): Promise<number> {
         await host.close();
         return 0;
       }
-      const gw = await createGateway(loadConfig(values.config));
+      const gw = await createGateway(loadConfig(values.config), { autoFlush: true });
       console.error(`agent-custody gateway: agent=${gw.agentId} principal=${gw.delegation.principal} scopes=[${gw.delegation.scopes.join(", ")}]`);
       await serveStdio(gw);
       await gw.close();
