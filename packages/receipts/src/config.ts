@@ -154,6 +154,8 @@ export const GatewayConfigSchema = z.object({
    * authorization to the log and refuses the call if the log will not take it. Evidence then precedes the side effect.
    */
   precommit: z.array(z.string().min(1)).default([]),
+  /** with a remote log, refuse to start when precommit is empty; without it the gateway only warns */
+  requirePrecommit: z.boolean().optional(),
   /** Tools that require a signed, unexpired, single-use approval, in every mode; "*" covers all agent calls. */
   approvals: ApprovalsSchema.optional(),
   /** Durable idempotency, daily budget reservations, and provider reconciliation for financial operations. */
@@ -180,6 +182,7 @@ export const GatewayConfigSchema = z.object({
   // a key fetched from the log itself proves nothing about a log that is dishonest from the start, so a remote log that
   // gates consequential calls must have its keys pinned in the config (issue #99)
   .refine((c) => !c.log || (!c.precommit.length && !c.operations) || !!c.log.keys?.length, { message: "precommit with a remote log needs log.keys: the log's public key files, pinned, to check its answer before a consequential call is forwarded" })
+  .refine((c) => !c.requirePrecommit || !c.log || c.precommit.length > 0, { message: "requirePrecommit is set and precommit is empty: name the consequential tools in precommit, or [\"*\"]" })
   .refine((c) => !c.operations || !c.facts.some((fact) => c.operations!.tools.some((tool) => tool.tool === fact.tool)), { message: "a fact lookup cannot invoke a financial operation tool" });
 export type GatewayConfig = z.infer<typeof GatewayConfigSchema>;
 export type FactConfig = z.infer<typeof FactSchema>;

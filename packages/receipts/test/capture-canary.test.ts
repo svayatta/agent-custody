@@ -12,7 +12,7 @@ import { APPROVAL_META_KEY, APPROVAL_TYPE, createApproval } from "../src/approva
 import { isCommitment, pathKey } from "../src/capture.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { digestOf, dsseCountersign, dsseSign, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair, type Envelope } from "../src/crypto.ts";
-import { createGateway, createGatewayHost, RECEIPT_META_KEY, RETRY_RECEIPT_META_KEY, type Gateway } from "../src/gateway.ts";
+import { createGateway, createGatewayHost, LOG_PENDING_META_KEY, RECEIPT_META_KEY, RETRY_RECEIPT_META_KEY, type Gateway } from "../src/gateway.ts";
 import { OPERATION_META_KEY } from "../src/operations.ts";
 import { financialFixture } from "../scripts/financial-fixture.ts";
 import { fileLog, type LogSink } from "../src/log-sink.ts";
@@ -342,6 +342,55 @@ describe("the canary", () => {
       if (before === undefined) delete process.env.TEST_CAPTURE_KEY;
       else process.env.TEST_CAPTURE_KEY = before;
     }
+  });
+
+  it("under one private rule, a receipt that waits in the outbox while the log is down carries no secret in the outbox, the log, the exports, or the flushed bundles", async () => {
+    // one host per rule: the control has no rule, so the scan of the outbox can fail
+    const run = async (rule: object | undefined) => {
+      const fx = buildFixture(mkdtempSync(join(tmpdir(), "canary-outbox-")));
+      const cfg = JSON.parse(readFileSync(fx.configFile, "utf8"));
+      cfg.upstream.args[2] = resolve(import.meta.dirname, "..", "scripts", "fake-canary.ts");
+      cfg.upstream.args.push("--webhook-secret", "whsec_canary");
+      cfg.facts = [{ name: "customer", tool: "customer.lookup", args: { customer_id: "$args.account_ref" }, forTools: ["stripe.refund"] }];
+      if (rule) cfg.capture = rule;
+      writeFileSync(fx.configFile, JSON.stringify(cfg));
+      const inner = fileLog(fx.logFile, loadPrivateKey(join(fx.dir, "keys", "gateway.key")));
+      let down = true;
+      const log: LogSink = { kind: inner.kind, where: inner.where, append: (leaf) => down ? Promise.reject(new Error("log unreachable")) : inner.append(leaf) };
+      const exports = keepExports();
+      const host = await createGatewayHost(loadConfig(fx.configFile), { exporter: exports.exporter, log });
+      const gw = host.open(JSON.parse(readFileSync(loadConfig(fx.configFile).grantFile!, "utf8")) as Envelope);
+      try {
+        const calls = await everyGatewayPath(gw, gw);
+        const outbox = join(fx.receiptsDir, "outbox");
+        const waiting = readdirSync(outbox).map((f) => readFileSync(join(outbox, f), "utf8")).join("\n");
+        const whileDown = decodeAll(waiting);
+        expect(calls.every((c) => c.result._meta![LOG_PENDING_META_KEY] === true), "every receipt waits in the outbox").toBe(true);
+        expect(host.pendingReceipts()).toBe(calls.length);
+        expect(exports.seen).toEqual([]);
+        down = false;
+        expect(await host.flushOutbox()).toEqual({ sent: calls.length, pending: 0, setAside: 0, foreign: 0 });
+        const bundles = calls.map((c) => JSON.parse(readFileSync(join(fx.receiptsDir, `${String(c.result._meta![RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle);
+        return { calls, whileDown, bundles, disk: onDisk(fx.receiptsDir, fx.logFile), exported: exports.seen.join("\n"), exportCount: exports.seen.length, keys: { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], upstreamKeys: [loadPublicKey(fx.upstreamPub)], providerSecrets: { stripe: "whsec_canary" }, logFile: fx.logFile } };
+      } finally {
+        await host.close();
+      }
+    };
+    const kept = await run({ "*": { args: { mode: "digest", clear: ["amount"] } } });
+    expect(kept.whileDown, "the outbox carries the canary").not.toContain(CANARY);
+    for (const b of kept.bundles) {
+      expect(bundleText(b), "a flushed receipt carries the canary").not.toContain(CANARY);
+      const v = verifyBundle(b, kept.keys);
+      expect(v.ok, formatReport(v)).toBe(true);
+      expect(formatReport(v), "the report carries the canary").not.toContain(CANARY);
+    }
+    expect(kept.disk, "a file on disk carries the canary").not.toContain(CANARY);
+    expect(kept.exported, "an export carries the canary").not.toContain(CANARY);
+    expect(kept.exportCount).toBe(kept.calls.length * 3);
+    // the agent still gets the real answers; the pending flag is the only key the outbox adds to what a call returns
+    for (const { name, result } of kept.calls) expect(Object.keys(result._meta!).filter((k) => k.startsWith("agent-custody/") && k !== LOG_PENDING_META_KEY).every((k) => ["agent-custody/receipt", "agent-custody/facts", "agent-custody/upstream-signature"].includes(k)), name).toBe(true);
+    // the control: with no rule the same outbox carries the canary
+    expect((await run(undefined)).whileDown).toContain(CANARY);
   });
 
   it("the control: the same calls with no rule carry the canary in the statement, the files, the log, and the exports", async () => {

@@ -213,7 +213,7 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   }
 
   // what a log outage costs
-  if (cfg.log && !cfg.precommit.length) add("warn", "precommit", "a remote log is set and precommit is empty: every call is forwarded before its receipt is logged, so a log outage after a call leaves its side effect without evidence. Name the consequential tools in precommit, or [\"*\"]");
+  if (cfg.log && !cfg.precommit.length) add("warn", "precommit", "a remote log is set and precommit is empty: every call is forwarded before its receipt is logged, so a log outage after a call puts its receipt in the outbox and the side effect is in the log only later. Name the consequential tools in precommit, or [\"*\"]; requirePrecommit makes this an error");
 
   // tool names the config mentions, against the tools the upstreams offer
   const mentioned = (): [string, string][] => [
