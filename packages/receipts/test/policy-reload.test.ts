@@ -1,7 +1,7 @@
 // The Cedar policy is re-read whenever its file changes and applies from the next call, with no restart and no dropped
 // session. A policy that does not parse, or a file that cannot be read, is refused and the policy in force stays. Every
 // change and every refusal is recorded with both digests.
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -102,6 +102,30 @@ describe("policy reload", () => {
       });
       expect(reloads(fx).map((r) => r.event)).toEqual(["reloaded", "refused", "refused", "reloaded"]);
       expect((await receiptOf(fx, await session.handleCall(refund))).policy!.decision).toBe("allow");
+    } finally {
+      await session.close();
+      await host.close();
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)("a tightened policy that was unreadable is applied once it can be read, though its metadata did not change", async () => {
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "policy-reload-mode-")));
+    const host = await createGatewayHost(loadConfig(fx.configFile));
+    const session = host.open(JSON.parse(readFileSync(join(fx.dir, "grant.json"), "utf8")) as Envelope);
+    const path = join(fx.dir, "policy.cedar");
+    try {
+      await quietly(async () => {
+        writeFileSync(`${path}.tmp`, TIGHT);
+        chmodSync(`${path}.tmp`, 0o000);
+        renameSync(`${path}.tmp`, path);
+        expect(host.policyDigest()).toBe(policyDigest(POLICY));
+        expect(host.policyDigest()).toBe(policyDigest(POLICY));
+        chmodSync(path, 0o644);
+      });
+      const result = await quietly(() => session.handleCall(refund));
+      expect(result.isError).toBe(true);
+      expect((await receiptOf(fx, result)).policy!.policyDigest).toBe(policyDigest(TIGHT));
+      expect(reloads(fx).map((r) => r.event)).toEqual(["refused", "reloaded"]);
     } finally {
       await session.close();
       await host.close();

@@ -1,7 +1,7 @@
 // The MCP gateway: sits between an agent and its upstreams, MCP servers or REST APIs, enforces scope + Cedar policy,
 // and emits a signed, logged receipt for every tool call, allowed or denied.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -150,9 +150,24 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   // in force when it starts, and its receipt names that policy's digest. A changed file that cannot be read or does not
   // parse is refused and the policy in force stays: never an allow, and never a fall back to no policy. Every change
   // and every refusal is printed and appended to receiptsDir/policy-reloads.jsonl with both digests and the time.
-  let policyNow = (() => { const text = readFileSync(cfg.policyFile, "utf8"); return { text, digest: policyDigest(text) }; })();
+  // The bytes and the metadata come from one open file, so a rename between reading and stat'ing cannot pair them wrongly.
+  const readPolicy = () => {
+    const fd = openSync(cfg.policyFile, "r");
+    try {
+      const st = fstatSync(fd);
+      const text = readFileSync(fd, "utf8");
+      return { text, seen: `${st.ino}:${st.mtimeMs}:${st.size}` };
+    } finally {
+      closeSync(fd);
+    }
+  };
   const policyStat = () => { const st = statSync(cfg.policyFile); return `${st.ino}:${st.mtimeMs}:${st.size}`; };
-  let policySeen = policyStat();
+  const initialPolicy = readPolicy();
+  let policyNow = { text: initialPolicy.text, digest: policyDigest(initialPolicy.text) };
+  let policySeen = initialPolicy.seen;
+  // A file that cannot be read is retried on every call, since restoring access changes none of its metadata; this
+  // keeps the refusal from being printed and recorded on each of those calls.
+  let unreadableSeen = "";
   const policyReloads = join(cfg.receiptsDir, "policy-reloads.jsonl");
   const recordReload = (entry: Record<string, unknown>) => {
     try {
@@ -167,23 +182,27 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     recordReload({ event: "refused", from: policyNow.digest, to, errors });
   };
   const currentPolicy = (): { text: string; digest: string } => {
+    const unreadable = (seen: string, e: unknown) => {
+      if (unreadableSeen !== seen) refuseReload(null, [`cannot be read (${e instanceof Error ? e.message : String(e)})`]);
+      unreadableSeen = seen;
+      return policyNow;
+    };
     let seen: string;
     try {
       seen = policyStat();
     } catch (e) {
-      if (policySeen !== "unreadable") refuseReload(null, [`cannot be read (${e instanceof Error ? e.message : String(e)})`]);
-      policySeen = "unreadable";
-      return policyNow;
+      return unreadable("missing", e);
     }
     if (seen === policySeen) return policyNow;
-    policySeen = seen;
-    let text: string;
+    let read: { text: string; seen: string };
     try {
-      text = readFileSync(cfg.policyFile, "utf8");
+      read = readPolicy();
     } catch (e) {
-      refuseReload(null, [`cannot be read (${e instanceof Error ? e.message : String(e)})`]);
-      return policyNow;
+      return unreadable(seen, e);
     }
+    unreadableSeen = "";
+    policySeen = read.seen;
+    const text = read.text;
     const digest = policyDigest(text);
     if (digest === policyNow.digest) return policyNow;
     const errors = policyParseErrors(text);
