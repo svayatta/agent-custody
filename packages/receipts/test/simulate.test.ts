@@ -219,6 +219,18 @@ describe("offline policy simulation", () => {
     expect(formatSimulation(report)).toContain("SKIPPED orphan-1 (refund)");
   });
 
+  it("evaluates each receipt before it pulls the next, so a caller can stream a large history", async () => {
+    const sdk = issuer();
+    const first = await record(sdk, 10);
+    const second = await record(sdk, 150);
+    const order: string[] = [];
+    const watched = { ...first, request: { ...first.request, get args() { order.push("evaluate first"); return first.request.args; } } } as ReceiptPredicate;
+    function* source() { yield watched; order.push("pull second"); yield second; }
+    simulatePolicy(ALLOW, source());
+    expect(order).toContain("evaluate first");
+    expect(order.indexOf("evaluate first")).toBeLessThan(order.indexOf("pull second"));
+  });
+
   it("replays withheld inputs with the capture key or a matching disclosure, and no other", async () => {
     const receipt = await record(issuer(ALLOW), 10);
     const key = randomBytes(32);

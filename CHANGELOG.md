@@ -6,6 +6,7 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 - **Fix: `policy simulate` skips a reconciliation receipt.** A reconciliation receipt is a provider read, and no policy ran for it. A replay evaluated it as a second `stripe.refund` call, so a tighter refund policy reported a false `allow -> deny` change and counted the refund two times. The replay now counts such a receipt in the new report field `reconciliations`. It does not count it in `evaluated` or `skipped`, so the report stays complete. `formatSimulation` prints the count.
 - **Fix: the `verify` text report shows a reconciliation receipt as a provider read.** The `policy` row says that no policy was evaluated, and the `execution` row starts with `provider read`. Before, the report printed `policy observed allow` for a receipt whose reasons say that no policy ran. No check changes.
+- **Fix: `policy simulate` checks the receipt id against the file name.** A receipt copied over the file name of another receipt hid that call, counted the copy two times, and the report still said `COMPLETE`. The command now fails when `<id>.json` holds a receipt with another id, as it already does for an authorization file. A test also checks that `simulatePolicy` evaluates each receipt before it pulls the next.
 
 ## 0.9.0 — 2026-10-21
 
