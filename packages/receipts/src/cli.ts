@@ -674,6 +674,7 @@ async function main(argv: string[]): Promise<number> {
               const failures = result.checks.filter((check) => !check.ok).map((check) => `${check.name}${check.detail ? ` (${check.detail})` : ""}`);
               throw new Error(`receipt verification failed: ${failures.join("; ")}`);
             }
+            if (`${result.statement.predicate.receiptId}.json` !== name) throw new Error("the file name does not match the receipt id");
             yield result.statement.predicate;
           } catch (error) {
             fail(file, error);

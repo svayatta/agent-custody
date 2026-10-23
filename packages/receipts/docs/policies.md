@@ -215,6 +215,8 @@ For SDK receipts, use the application's public key as `--issuer-key`; no princip
 
 A gateway that dies after it forwards a `precommit` call leaves `<id>.authorization.json` and no `<id>.json`. The command verifies each such file as an authorization statement (the issuer key, the tree head, and the inclusion proof) and lists the call under `skipped`, so the report is `INCOMPLETE`. An authorization that does not verify fails the command. An authorization that sits beside its receipt is not read twice.
 
+The command also checks that each `<id>.json` holds receipt `<id>`. A receipt under another file name fails the command, so a copy over the name of another receipt cannot hide that call.
+
 A receipt under a capture rule needs its withheld arguments and fact values to replay. Give `--capture-key-env NAME` to decrypt the values that mode `encrypted` withheld, as `verify` does. Give `--disclose <file>`, which you can repeat, for the values that mode `digest` withheld. Each file is a disclosure as `reveal` writes it, and it applies only to the receipt that its `receiptId` names. A key or a disclosure that does not match a commitment skips that receipt as malformed. The key comes from the environment, never from a flag value.
 
 The report lists every call whose `allow` or `deny` decision changes, grouped by tool and the proposed decision's policy ids or evaluation errors, with the receipt ids and both decisions. A call executed in observe mode may already have a recorded deny: replay compares that recorded decision, not whether the tool ran. Calls with the same decision stay unchanged even when different policy ids match. Cedar evaluation errors remain denials.
