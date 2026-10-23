@@ -38,6 +38,8 @@ export interface SimulationReport {
   total: number;
   evaluated: number;
   unchanged: number;
+  /** Reconciliation receipts. Each is a provider read with no policy decision, so a replay counts it here and not in `evaluated` or `skipped`. */
+  reconciliations: number;
   complete: boolean;
   changes: SimulationChange[];
   skipped: SimulationSkip[];
@@ -100,7 +102,11 @@ export function verifyOrphanAuthorization(bundle: AuthorizationBundle, issuerKey
 /**
  * Compare a proposed Cedar policy with recorded policy decisions, using each receipt's original arguments, fact
  * values, agent, and (for gateways) grant context. Observe-mode decisions are the baseline even when the call ran.
- * Receipts are not signature-verified here; verify their bundles separately when their authenticity matters.
+ * Receipts are not signature-verified here; verify their bundles separately when their authenticity matters. A
+ * reconciliation receipt is trusted as a provider read only after `verifyBundle` accepts it: the library checks no more
+ * than its shape and its link to an original receipt id.
+ * A reconciliation whose original receipt is not among the supplied receipts or `unreplayable` is reported as skipped,
+ * because the call it settles cannot be replayed.
  * Missing inputs and non-Cedar gate failures are reported as skipped, never guessed or fetched again.
  * The receipts are read once, one at a time, so a caller can verify and parse a large history lazily.
  */
@@ -116,19 +122,32 @@ export function simulatePolicy(policyText: string, receipts: Iterable<ReceiptPre
     total: unreplayable.length,
     evaluated: 0,
     unchanged: 0,
+    reconciliations: 0,
     complete: true,
     changes: [],
     skipped: [...unreplayable],
     groups: [],
   };
   const digests = new Set<string>();
+  const seen = new Set(unreplayable.map((u) => u.receiptId));
+  const reconciled: SimulationSkip[] = [];
   for (const original of receipts) {
     report.total++;
     const receiptId = typeof original?.receiptId === "string" ? original.receiptId : "(unknown receipt)";
     const tool = typeof original?.tool?.name === "string" ? original.tool.name : "(unknown tool)";
     const skip = (reason: string) => { report.skipped.push({ receiptId, tool, reason }); };
+    if (original?.reconciliation === undefined) seen.add(receiptId);
     const broken = structuralProblem(original);
     if (broken) { skip(`malformed receipt: ${broken}`); continue; }
+    if (original.reconciliation !== undefined) {
+      const link = original.operation?.originalReceiptId;
+      if (original.issuer.kind !== "gateway" || typeof link !== "string" || link === receiptId) {
+        skip("malformed receipt: a reconciliation needs a gateway issuer and an operation that names another receipt"); continue;
+      }
+      report.reconciliations++;
+      reconciled.push({ receiptId: link, tool, reason: `only the reconciliation ${receiptId} survives; the original receipt is missing, so the call cannot be replayed` });
+      continue;
+    }
     if (original.policy === null) { skip("no recorded policy decision (record-only receipt)"); continue; }
     const previous = original.policy;
     if (typeof previous.policyDigest !== "string" || !previous.policyDigest || !strings(previous.reasons)
@@ -181,6 +200,11 @@ export function simulatePolicy(policyText: string, receipts: Iterable<ReceiptPre
     if (proposed.decision === previous.decision) report.unchanged++;
     else report.changes.push({ receiptId, tool, previous, proposed });
   }
+  for (const lost of reconciled) {
+    if (seen.has(lost.receiptId)) continue;
+    report.reconciliations--;
+    report.skipped.push(lost);
+  }
   report.previousPolicyDigests = [...digests].sort(order);
   report.complete = report.skipped.length === 0;
   const groups = new Map<string, SimulationGroup>();
@@ -203,7 +227,7 @@ export function formatSimulation(report: SimulationReport): string {
     `Timestamp: ${report.timestamp}`,
     `Proposed policy: ${report.policyDigest}`,
     `Previous policies: ${report.previousPolicyDigests.join(", ") || "none"}`,
-    `Receipts: ${report.total}; evaluated: ${report.evaluated}; unchanged: ${report.unchanged}; changed: ${report.changes.length}; skipped: ${report.skipped.length}`,
+    `Receipts: ${report.total}; evaluated: ${report.evaluated}; unchanged: ${report.unchanged}; reconciliations: ${report.reconciliations}; changed: ${report.changes.length}; skipped: ${report.skipped.length}`,
   ];
   for (const group of report.groups) {
     lines.push("", `${group.tool}: ${group.reason}`);

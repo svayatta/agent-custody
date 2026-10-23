@@ -84,6 +84,10 @@ describe("financial operations through the gateway", () => {
       const reconciled = await host.reconcile(params._meta[OPERATION_META_KEY]);
       expect(decode(reconciled).predicate.operation?.status).toBe("confirmed");
       check(fx, reconciled);
+      const text = formatReport(verifyBundle(reconciled, { issuerKeys: [loadPublicKey(fx.gatewayPub)], principalKeys: [loadPublicKey(fx.principalPub)], logFile: fx.logFile }));
+      expect(text).toMatch(/policy\s+-\s+\(none evaluated: a provider read/);
+      expect(text).toMatch(/execution\s+observed\s+provider read, executed/);
+      expect(text).not.toMatch(/policy\s+observed\s+allow/);
       expect(await host.reconcile(params._meta[OPERATION_META_KEY])).toEqual(reconciled);
       const after = await host.open(grant(fx)).handleCall(params);
       expect(after._meta?.[RECEIPT_META_KEY]).toBe(decode(reconciled).predicate.receiptId);

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { pathKey, privateView, setAt, withhold } from "../src/capture.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { digestOf } from "../src/crypto.ts";
@@ -12,6 +12,9 @@ import type { ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "../src/r
 import { createSdkIssuer, type SdkIssuer } from "../src/sdk/index.ts";
 import { formatSimulation, simulatePolicy } from "../src/simulate.ts";
 import { buildFixture, buildSdkFixture } from "../scripts/fixture.ts";
+import { financialFixture } from "../scripts/financial-fixture.ts";
+import { createGatewayHost } from "../src/gateway.ts";
+import { OPERATION_META_KEY } from "../src/operations.ts";
 
 const ALLOW = "permit(principal, action, resource);";
 const DENY = "forbid(principal, action, resource);";
@@ -115,6 +118,59 @@ describe("offline policy simulation", () => {
     expect(simulatePolicy(ALLOW, [hiddenFailure])).toMatchObject({ evaluated: 0, complete: false, changes: [], skipped: [{ reason: expect.stringContaining("cannot establish complete Cedar inputs") }] });
     const observedFailure = { ...hiddenFailure, policy: { ...hiddenFailure.policy!, enforced: false }, execution: { status: "executed" as const, result: {}, resultDigest: digestOf({}), provenance: "observed" as const } };
     expect(simulatePolicy(ALLOW, [observedFailure])).toMatchObject({ evaluated: 0, complete: false, changes: [] });
+  });
+
+  const TIGHTER = 'permit(principal, action == Action::"stripe.refund", resource) when { context.args.amount <= 10 };';
+  /** A failed refund through the gateway, then its reconciliation. Calls `use` with both predicates and the receipts directory. */
+  async function withReconciliation(use: (original: ReceiptPredicate, reconciliation: ReceiptPredicate, receiptsDir: string) => void | Promise<void>) {
+    const fx = await financialFixture(temp());
+    const host = await createGatewayHost(loadConfig(fx.configFile));
+    try {
+      const id = randomUUID();
+      const grant = JSON.parse(readFileSync(join(fx.dir, "grant.json"), "utf8"));
+      fx.api.drop = true;
+      const first = await host.open(grant).handleCall({ name: "stripe.refund", arguments: { amount: 60, currency: "GBP" }, _meta: { [OPERATION_META_KEY]: id } });
+      fx.records.get([...fx.records.keys()][0]!)!.status = "succeeded";
+      const original = decode(JSON.parse(readFileSync(join(fx.receiptsDir, `${String(first._meta?.[RECEIPT_META_KEY])}.json`), "utf8")) as ReceiptBundle);
+      const reconciliation = decode(await host.reconcile(id));
+      await use(original, reconciliation, fx.receiptsDir);
+    } finally { await host.close(); await fx.close(); }
+  }
+
+  it("counts a real reconciliation receipt apart and does not replay it as a second call", async () => {
+    await withReconciliation((original, reconciliation) => {
+      expect(reconciliation.reconciliation).toBeDefined();
+      const report = simulatePolicy(TIGHTER, [original, reconciliation]);
+      expect(report).toMatchObject({ total: 2, evaluated: 1, unchanged: 0, reconciliations: 1, complete: true, skipped: [] });
+      expect(report.changes.map((c) => c.receiptId)).toEqual([original.receiptId]);
+      expect(formatSimulation(report)).toContain("reconciliations: 1");
+    });
+  });
+
+  it("reports INCOMPLETE when only the reconciliation survives and its original receipt is gone", async () => {
+    await withReconciliation((original, reconciliation, receiptsDir) => {
+      for (const name of [`${original.receiptId}.json`, `${original.receiptId}.authorization.json`]) rmSync(join(receiptsDir, name), { force: true });
+      const report = simulatePolicy(TIGHTER, [reconciliation]);
+      expect(report).toMatchObject({ total: 1, evaluated: 0, reconciliations: 0, complete: false });
+      expect(report.skipped).toEqual([{ receiptId: original.receiptId, tool: "stripe.refund", reason: expect.stringContaining("the original receipt is missing") }]);
+      expect(formatSimulation(report)).toContain("RESULT: INCOMPLETE");
+      // an original that exists only as an orphan authorization is already a skip, so the reconciliation adds none
+      const orphan = { receiptId: original.receiptId, tool: "stripe.refund", reason: "only the authorization survives" };
+      expect(simulatePolicy(TIGHTER, [reconciliation], { unreplayable: [orphan] })).toMatchObject({ total: 2, reconciliations: 1, skipped: [orphan] });
+    });
+  });
+
+  it("skips a predicate whose reconciliation field is only the right shape", async () => {
+    await withReconciliation((original, reconciliation) => {
+      // a plain call whose own operation names itself, with a reconciliation field of the right shape and nothing behind it
+      const forged = (change: Partial<ReceiptPredicate>) => ({ ...original, reconciliation: reconciliation.reconciliation, ...change }) as ReceiptPredicate;
+      const selfLinked = simulatePolicy(DENY, [forged({})]);
+      expect(selfLinked).toMatchObject({ total: 1, evaluated: 0, reconciliations: 0, complete: false });
+      expect(selfLinked.skipped[0]!.reason).toContain("a reconciliation needs a gateway issuer and an operation that names another receipt");
+      for (const change of [{ issuer: { ...original.issuer, kind: "sdk" as const } }, { operation: undefined }]) {
+        expect(simulatePolicy(DENY, [forged(change)])).toMatchObject({ evaluated: 0, reconciliations: 0, complete: false });
+      }
+    });
   });
 
   it("fails closed on evaluation errors and refuses malformed proposed policy text", async () => {

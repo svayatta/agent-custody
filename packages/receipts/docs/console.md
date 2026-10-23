@@ -67,7 +67,7 @@ Every route except `GET /` (the page) and `GET /healthz` needs `Authorization: B
 | `POST /api/check` `{ connect? }` | the check; `connect` starts the upstreams |
 | `GET /api/policy` | the policy text, its digest, and the earlier versions kept |
 | `POST /api/policy/validate` `{ text }` | does Cedar parse it, and which things need confirming (`issues`) |
-| `POST /api/policy/simulate` `{ text }` | replay up to 1,000 verified receipts against it |
+| `POST /api/policy/simulate` `{ text }` | replay up to 1,000 verified receipts against it; the report counts reconciliation receipts (provider reads, no policy decision) in `reconciliations`, apart from `evaluated` |
 | `PUT /api/policy` `{ text, expectDigest, confirm? }` | save it; `400` unless `confirm` is true when the policy has an issue the validate route reported; `409` if the file changed |
 | `POST /api/grants/inspect` `{ grant }` | status, agent, scopes, window, digest |
 | `POST /api/grants/revoke` `{ grant }` | add its digest to the revocation file |
