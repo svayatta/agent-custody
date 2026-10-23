@@ -30,6 +30,12 @@ export function hasPermitRule(policyText: string): boolean {
   });
 }
 
+/** Why Cedar cannot parse the policy set, or an empty list when it can. */
+export function policyParseErrors(policyText: string): string[] {
+  const parsed = cedar.checkParsePolicySet({ staticPolicies: policyText });
+  return parsed.type === "success" ? [] : parsed.errors.map((e) => e.message);
+}
+
 export function policyDigest(policyText: string): string {
   return sha256Hex(policyText);
 }

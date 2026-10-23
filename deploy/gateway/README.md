@@ -41,7 +41,7 @@ docker compose up -d        # or: docker run -d -v "$PWD/config:/config:ro" -v g
 curl http://127.0.0.1:8790/health
 ```
 
-`init` writes a starter `gateway.json`, an example `policy.cedar`, the public half of a demo principal key, and a demo 24-hour grant under `config/demo/`. Edit the upstream and the policy, then restart. **Delete `config/demo/` before production:** the principal's private key must never sit on the gateway host. Issue real grants on the principal's own machine with `agent-custody grant --key principal.key ...`, and put only `principal.pub` in the config.
+`init` writes a starter `gateway.json`, an example `policy.cedar`, the public half of a demo principal key, and a demo 24-hour grant under `config/demo/`. Edit the upstream, then restart; a policy edit applies from the next call. **Delete `config/demo/` before production:** the principal's private key must never sit on the gateway host. Issue real grants on the principal's own machine with `agent-custody grant --key principal.key ...`, and put only `principal.pub` in the config.
 
 An agent connects to `http://<gateway>:8790/mcp` and presents its grant as the base64url of the grant file, in `Authorization: Bearer <value>` or `X-Agent-Custody-Grant`. `base64 < grant.json | tr -d '\n=' | tr '+/' '-_'` makes the value. From JavaScript, `grantHeader(envelope)` does. One gateway serves every grant that is signed by a key in `trustedPrincipalKeys`.
 
@@ -70,7 +70,7 @@ For evidence a customer or auditor will accept, point `log` in `gateway.json` at
 | task | how |
 | --- | --- |
 | revoke a grant | `docker compose exec gateway agent-custody revoke --config /config/gateway.json --grant /path/in/container/grant.json`. The next call of every session under that grant, and every grant delegated from it, is refused; no restart. |
-| change the policy | edit `config/policy.cedar` and `docker compose restart gateway`. The policy is read at start; every open session ends. |
+| change the policy | save it through `agent-custody console`, or write `config/policy.cedar` by rename (write a temporary file, then `mv` it over). The gateway applies it from the next call with no restart, and records the change in `receipts/policy-reloads.jsonl`. A file that does not parse is refused and the old policy stays. |
 | upgrade | set `AGENT_CUSTODY_GATEWAY_VERSION` and `docker compose pull && docker compose up -d`. |
 | stop | `docker compose stop`. The gateway closes on SIGTERM; `stop_grace_period` is 30 s. |
 | other commands | anything after the image name runs through the `agent-custody` CLI: `docker compose run --rm gateway verify ...`. |
@@ -86,7 +86,7 @@ For evidence a customer or auditor will accept, point `log` in `gateway.json` at
 - **One process holds every agent's tool credentials.** That is the point, and also the blast radius. One policy and one gateway key apply to all agents on it; run one gateway per team where that is not acceptable.
 - **One replica.** Sessions live in memory and the local log has one writer, so run a single instance (the Kubernetes manifest uses `Recreate`). A second replica needs sticky routing and shared state that is not built.
 - **Availability.** A stopped gateway is every agent stopped, and a log that is down withholds the `precommit` calls of every agent.
-- **Policy edits need a restart.** Grants and revocations are picked up on the next call.
+- **Policy edits apply from the next call,** like grants and revocations, with no restart. Write the policy by rename: an editor saving in place can be read half-written.
 - **Stdio upstreams need their tool inside the image.** REST and A2A upstreams work out of the box. For an MCP server that is a command, build on this image (`FROM ghcr.io/svayatta/agent-custody-gateway`, then install the tool) or reach it over HTTP.
 
 ## Building it yourself
