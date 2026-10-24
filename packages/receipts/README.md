@@ -229,7 +229,7 @@ const refund = issuer.wrap("stripe.refund", async (args: { amount: number }) => 
 | facts the policy relied on were not asserted by the agent | anyone reading the receipt | agent | facts fetched by the gateway, recorded with their own digests, labelled `observed` | done |
 | the side effect was committed to the log before it happened | anyone with a log copy | operator, log outage | for tools in `precommit`, a signed authorization logged first, embedded in the receipt with its leaf position, checked to precede the receipt | done |
 | the upstream system actually executed the action | anyone with the upstream's key or the provider's secret | operator | the upstream signs its result for the receipt, or the provider's own delivery signature (Stripe, GitHub) is embedded and checked | done, for upstreams that sign |
-| the operator itself cannot mint a false receipt | regulator, counterparty | operator | needs a TEE-hosted signer or a federated log | **not done** |
+| the operator itself cannot mint a false receipt | regulator, counterparty | operator | needs a TEE gateway with an attested build ([#179](https://github.com/svayatta/agent-custody/issues/179)), and the provider's own records to catch actions outside the gateway ([#178](https://github.com/svayatta/agent-custody/issues/178)) | **not done** |
 | which model produced the call | anyone | operator | no hosted provider signs model identity | **not possible today**, labelled `claimed` |
 | an SDK receipt reflects what the tool really did | anyone | agent's own process | none; the SDK shares a process with the agent | **by design not claimed**; issuer kind `sdk` says so |
 
@@ -334,9 +334,15 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Next, in the order it pays off**
 
-1. Run the witness for log.agent-custody.dev on a machine and under an account that is not ours, and require it in the welcome sheet. The code is done; what it needs is a second operator. [Issue #6](https://github.com/svayatta/agent-custody/issues/6).
-2. Post-quantum signatures: ML-DSA beside Ed25519 in the same DSSE envelope, hybrid by default when a PQ key is present, in every signed artefact and in the browser verifier. [Issue #11](https://github.com/svayatta/agent-custody/issues/11).
-3. Receiver attestation for agent-to-agent calls: the delegate signs its answer for the receipt, as a signing upstream does today.
-4. A TEE-hosted signer, then SD-JWT redaction, then ZK proofs of policy compliance. Not before.
+The first four close the gap between a log the operator cannot rewrite and a record the operator cannot shape.
+
+1. Anchor the log's checkpoints on Ethereum mainnet. An anchor service checks that each checkpoint extends the last one anchored, then sends one transaction with a Merkle root over every tenant's latest checkpoint, and publishes each tenant's inclusion proof. `log-check` then catches a rewritten tree from the chain alone, without trusting us or waiting for a second witness operator. [Issue #176](https://github.com/svayatta/agent-custody/issues/176).
+2. Strict mode: the gateway refuses a local log, pre-commits every tool, and turns the outbox off. No call is then forwarded before its authorization is in a log the operator does not run, and receipts say strict mode was in force. [Issue #177](https://github.com/svayatta/agent-custody/issues/177).
+3. Completeness from the provider's side: an auditor's read-only key lists Stripe's refunds, then GitHub's actions, and matches each one to a receipt. That catches what no gateway can see, an action taken outside it. [Issue #178](https://github.com/svayatta/agent-custody/issues/178).
+4. A TEE gateway: a confidential container with a reproducible, attested build, the signing key generated and kept in the enclave, TLS ending inside it, and both verifiers checking the path from the receipt key, through the attestation, to the release. It replaces the TEE-hosted signer planned before. [Issue #179](https://github.com/svayatta/agent-custody/issues/179).
+5. Run the witness for log.agent-custody.dev on a machine and under an account that is not ours, and require it in the welcome sheet. The code is done; what it needs is a second operator. [Issue #116](https://github.com/svayatta/agent-custody/issues/116).
+6. Post-quantum signatures: ML-DSA beside Ed25519 in the same DSSE envelope, hybrid by default when a PQ key is present, in every signed artefact and in the browser verifier. [Issue #11](https://github.com/svayatta/agent-custody/issues/11).
+7. Receiver attestation for agent-to-agent calls: the delegate signs its answer for the receipt, as a signing upstream does today.
+8. SD-JWT redaction, then ZK proofs of policy compliance. Not before.
 
 A Python SDK follows the same shape once the TypeScript adapters have settled.
