@@ -6,7 +6,7 @@ import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
-import { GatewayConfigSchema, loadConfig, type GatewayConfig } from "./config.ts";
+import { GatewayConfigSchema, loadConfig, strictRefusals, type GatewayConfig } from "./config.ts";
 import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair, type Envelope, type PublicKeyRef } from "./crypto.ts";
 import { delegationValidAt, verifyDelegation } from "./delegation.ts";
 import { hasPermitRule } from "./policy.ts";
@@ -213,7 +213,12 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   }
 
   // what a log outage costs
-  if (cfg.log && !cfg.precommit.length) add("warn", "precommit", "a remote log is set and precommit is empty: every call is forwarded before its receipt is logged, so a log outage after a call puts its receipt in the outbox and the side effect is in the log only later. Name the consequential tools in precommit, or [\"*\"]; requirePrecommit makes this an error");
+  if (cfg.strict) add("ok", "strict", "strict mode: every call is precommitted to a remote, hash-only log with pinned keys, and no receipt goes to the outbox");
+  else {
+    const refused = strictRefusals(cfg);
+    add("ok", "strict", refused.length ? `strict mode is off; turned on, it would refuse: ${refused.join("; ")}` : "strict mode is off; this config would also run strict");
+  }
+  if (cfg.log && !cfg.precommit.length && !cfg.strict) add("warn", "precommit", "a remote log is set and precommit is empty: every call is forwarded before its receipt is logged, so a log outage after a call puts its receipt in the outbox and the side effect is in the log only later. Name the consequential tools in precommit, or [\"*\"]; requirePrecommit makes this an error");
 
   // tool names the config mentions, against the tools the upstreams offer
   const mentioned = (): [string, string][] => [

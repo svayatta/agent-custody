@@ -202,7 +202,8 @@ docker run --rm -v "$PWD/config:/config:ro" -v gateway-data:/data --env-file .en
 | a stdio `command` exists, and a script argument exists | error, and a warning |
 | the receipts, log, revocation, operations database, and approvals paths can be written, and the revocation file is a JSON array | error |
 | the grant the config names verifies, and is inside its window | error, and a warning near expiry |
-| a remote log with an empty `precommit` | warning: a log outage after a call puts its receipt in the outbox, so the side effect is in the log only after the outbox is appended |
+| a remote log with an empty `precommit` | warning: a log outage after a call puts its receipt in the outbox, so the side effect is in the log only after the outbox is appended. Not reported under `strict`, which precommits every tool |
+| what [strict mode](usage.md#strict-mode) would refuse: a local log, a remote log that is not `hashOnly`, one without `keys` | with `"strict": true`, **error**: the gateway does not start; without it, listed under `strict` as what turning it on would refuse |
 
 With **`--connect`** it also starts the upstreams, which is where an unreachable server or **two upstreams offering the same tool** shows up, prints the tools they offer, and compares every tool name in `precommit`, `facts`, `approvals`, `operations`, and the grant's scopes with that list. A name in `precommit`, `facts`, `approvals`, or `operations` that no upstream offers is an **error** (for `precommit` it means the tool you meant is forwarded before it is logged); a grant scope that names nothing is a warning. `--connect` starts your stdio upstreams and may create the receipts directory. It exits 1 on any error, so it can gate a deploy.
 
@@ -218,6 +219,9 @@ With **`--connect`** it also starts the upstreams, which is where an unreachable
 | `exactly one of logFile or log is required` | both, or neither | a local file, or a remote log |
 | `precommit with a remote log needs log.keys` | a remote log gating consequential calls without a pinned key | add the log's public key file to `log.keys` |
 | `requirePrecommit is set and precommit is empty` | a remote log with no consequential tools named | name them in `precommit`, or `["*"]` |
+| `strict mode needs a remote log` | `"strict": true` with `logFile`, a log the operator can rewrite | set `log.url` to a log someone else runs |
+| `strict mode needs log.hashOnly` | `"strict": true` with a log that would receive whole receipts | add `"hashOnly": true` to `log` |
+| `strict mode needs log.keys` | `"strict": true` with the log's key not pinned | add the log's public key file to `log.keys` |
 | `fact "f" uses tool t, which precommit names as consequential` | a fact lookup must be a read | use a read tool for the fact |
 | `ENOENT … gateway.key` | the key file does not exist | `agent-custody keygen`, or let the container create it |
 | `EROFS` or a permission error on `receipts` | a writable path points into the read-only `/config` | use an absolute path under `/data` |

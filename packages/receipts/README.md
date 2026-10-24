@@ -227,7 +227,7 @@ const refund = issuer.wrap("stripe.refund", async (args: { amount: number }) => 
 | the principal really delegated this scope to this agent | anyone with the principal's key | operator, agent | grant signed by principal key, checked for scope and validity window | done |
 | the policy decision was made against this exact policy | anyone | operator swapping policies | sha256 of policy text in the receipt | done |
 | facts the policy relied on were not asserted by the agent | anyone reading the receipt | agent | facts fetched by the gateway, recorded with their own digests, labelled `observed` | done |
-| the side effect was committed to the log before it happened | anyone with a log copy | operator, log outage | for tools in `precommit`, a signed authorization logged first, embedded in the receipt with its leaf position, checked to precede the receipt | done |
+| the side effect was committed to the log before it happened | anyone with a log copy | operator, log outage | for tools in `precommit`, or every tool under `strict`, a signed authorization logged first, embedded in the receipt with its leaf position, checked to precede the receipt | done |
 | the upstream system actually executed the action | anyone with the upstream's key or the provider's secret | operator | the upstream signs its result for the receipt, or the provider's own delivery signature (Stripe, GitHub) is embedded and checked | done, for upstreams that sign |
 | the operator itself cannot mint a false receipt | regulator, counterparty | operator | needs a TEE-hosted signer or a federated log | **not done** |
 | which model produced the call | anyone | operator | no hosted provider signs model identity | **not possible today**, labelled `claimed` |
@@ -288,6 +288,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Done**
 
+- Strict mode: `"strict": true` refuses a local log, a log that is not hash-only, and a log without pinned keys; precommits every tool, in observe mode too; and turns the outbox off. No call the agent makes is forwarded before its authorization is in a log the operator does not run, every receipt says `issuer.strict`, and `verify --require-strict` requires it ([usage](docs/usage.md#strict-mode), tutorial 34). [Issue #177](https://github.com/svayatta/agent-custody/issues/177).
 - Policy reload: the gateway re-reads `policy.cedar` whenever it changes and applies it from the next call, with no restart and no dropped session; a policy that does not parse is refused and the one in force stays, and every change or refusal is recorded in `receipts/policy-reloads.jsonl` ([usage](docs/usage.md)).
 - Live Codex support recovery demo: model-selected MCP calls, incorrect CRM memory, a reviewed recovery plan, simulated credit compensation, and verified evidence; [guide](docs/codex-recovery.md), with offline regression coverage.
 - Payload-bound human approvals: short-lived signatures over the principal, agent, tool, full arguments, amount, currency, and beneficiary; configurable one- or two-key thresholds, enforced even in observe mode, a configurable lifetime cap, persistent atomic single-use consumption before forwarding, and independent approval-key verification. [Guide](docs/approvals.md), tutorial 30.

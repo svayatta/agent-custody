@@ -60,7 +60,8 @@ export interface ReconciliationEvidence {
 export interface ReceiptPredicate {
   receiptId: string;
   timestamp: string;
-  issuer: { kind: IssuerKind; keyid: string; version: string; framework?: string };
+  /** `strict` is the gateway's own statement that it ran in strict mode: every call precommitted to a remote, hash-only log, and no outbox */
+  issuer: { kind: IssuerKind; keyid: string; version: string; framework?: string; strict?: boolean };
   principal: { id: string; keyid: string; provenance: "attested" } | { id: string | null; provenance: "claimed" };
   agent: { id: string; provenance: Provenance };
   /** Present on gateway receipts. Absent when the issuer had no signed grant to check against. */

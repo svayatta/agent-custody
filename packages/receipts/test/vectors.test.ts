@@ -25,7 +25,7 @@ describe("conformance vectors", () => {
     it(`receipts: ${c.name}`, () => {
       const logFile = c.log ? join(mkdtempSync(join(tmpdir(), "vec-")), "log.jsonl") : undefined;
       if (logFile) writeFileSync(logFile, (c.log as string[]).map((l) => JSON.stringify(l)).join("\n") + "\n");
-      const r = verifyBundle(c.bundle, { issuerKeys: c.issuerKeys.map(keyOf), principalKeys: c.principalKeys.map(keyOf), logKeys: c.logKeys.map(keyOf), ...(c.approvalKeys ? { approvalKeys: c.approvalKeys.map(keyOf) } : {}), ...(c.upstreamKeys ? { upstreamKeys: c.upstreamKeys.map(keyOf) } : {}), ...(c.providerSecrets ? { providerSecrets: c.providerSecrets } : {}), ...(c.logId ? { logId: c.logId } : {}), ...(logFile ? { logFile } : {}) });
+      const r = verifyBundle(c.bundle, { issuerKeys: c.issuerKeys.map(keyOf), principalKeys: c.principalKeys.map(keyOf), logKeys: c.logKeys.map(keyOf), ...(c.approvalKeys ? { approvalKeys: c.approvalKeys.map(keyOf) } : {}), ...(c.upstreamKeys ? { upstreamKeys: c.upstreamKeys.map(keyOf) } : {}), ...(c.providerSecrets ? { providerSecrets: c.providerSecrets } : {}), ...(c.logId ? { logId: c.logId } : {}), ...(c.requireStrict ? { requireStrict: true } : {}), ...(logFile ? { logFile } : {}) });
       expect({ ok: r.ok, failing: r.checks.filter((x) => !x.ok).map((x) => x.name) }).toEqual(c.expected);
     });
   }

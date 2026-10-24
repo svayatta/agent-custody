@@ -141,7 +141,7 @@ const ISSUER_NOTE: Record<string, string> = {
 };
 const short = (s: string) => s.slice(0, 12);
 
-export interface Options { issuerKeys: PublicKey[]; principalKeys: PublicKey[]; approvalKeys?: PublicKey[]; logKeys?: PublicKey[]; upstreamKeys?: PublicKey[]; providerSecrets?: { stripe?: string; github?: string }; logId?: string; logLeaves?: (string | { pruned?: string; hash?: string })[] }
+export interface Options { issuerKeys: PublicKey[]; principalKeys: PublicKey[]; approvalKeys?: PublicKey[]; logKeys?: PublicKey[]; upstreamKeys?: PublicKey[]; providerSecrets?: { stripe?: string; github?: string }; logId?: string; requireStrict?: boolean; logLeaves?: (string | { pruned?: string; hash?: string })[] }
 
 async function hmacHex(secret: string, data: string): Promise<string> {
   const key = await subtle().importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -338,6 +338,12 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   const p = st.predicate;
   add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
   add("issuer keyid matches signer", p.issuer.keyid === sig.keyid);
+  if (opts.requireStrict) {
+    add("strict mode in force", p.issuer.kind === "gateway" && p.issuer.strict === true, p.issuer.strict === true ? undefined : "the issuer does not say it ran in strict mode");
+    // under strict mode every call is precommitted; a provider read the operator ran is a lookup, not a call
+    const forwarded = p.execution.status === "executed" || p.execution.status === "failed" || p.execution.status === "error";
+    add("strict: call precommitted before forwarding", !forwarded || !!p.reconciliation || !!p.authorization, forwarded && !p.reconciliation && !p.authorization ? `the call was ${p.execution.status} with no authorization committed first` : undefined);
+  }
   if (p.operation) {
     add("operation observed by gateway", p.issuer.kind === "gateway" && p.operation.provenance === "observed");
     if (!p.reconciliation) {
@@ -666,7 +672,7 @@ export function formatReport(r: Result): string {
   lines.push("", r.ok ? "RESULT: VERIFIED" : "RESULT: NOT VERIFIED");
   if (!r.statement) return lines.join("\n");
   const p = r.statement.predicate;
-  lines.push("", `ISSUER: ${p.issuer.kind}${p.issuer.framework ? ` (${p.issuer.framework})` : ""}, ${r.issuerNote}`, "", "field           provenance  value");
+  lines.push("", `ISSUER: ${p.issuer.kind}${p.issuer.framework ? ` (${p.issuer.framework})` : ""}${p.issuer.strict ? ", strict mode" : ""}, ${r.issuerNote}`, "", "field           provenance  value");
   const row = (f: string, prov: string, v: unknown) => lines.push(`${f.padEnd(15)} ${prov.padEnd(11)} ${typeof v === "string" ? v : JSON.stringify(v)}`);
   row("principal", p.principal.provenance, p.principal.id ?? "(none)");
   row("agent", p.agent.provenance, p.agent.id);
