@@ -21,7 +21,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples, and replaying history against a proposed policy with `policy simulate`
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
 - [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, the EU AI Act, and UK GDPR, with what none of them claims
-- [Anchoring the log on Ethereum](docs/anchoring.md): the log's checkpoints committed to mainnet from a published address, what that proves and what it does not, running the anchor, and `log-check` against the chain
+- [Anchoring the log on a chain](docs/anchoring.md): the log's checkpoints committed to Ethereum mainnet, or another EVM chain the installation picks, from a published address, what that proves and what it does not, running the anchor, and `log-check` against the chain
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
 
 ## Getting started
@@ -248,7 +248,7 @@ src/sso.ts         enterprise sign-in for the portal: OIDC (code and PKCE, id_to
 src/log-export.ts  a tenant's export of their own log, self-checked, as a log file the verifier reads
 src/witness.ts     the witness: countersigns the log's checkpoints from another operator's machine, or refuses with an alarm
 src/anchor.ts      the anchor: commits a Merkle root over new checkpoints to a chain, or refuses with an alarm; checks a record against JSON-RPC
-src/anchor-ethereum.ts  the anchor's Ethereum transactions, through the optional dependency viem
+src/anchor-evm.ts  the anchor's transactions on Ethereum or another EVM chain, through the optional dependency viem
 src/signer.ts      the signer: the log's key in its own process, the key document verifiers fetch
 src/checkpoints.ts signed heads published on a schedule, to files and to Postgres
 src/log-store.ts   the log server's backends: the file, and Postgres with tenants, hashed tokens, one writer per tenant, rate limits
@@ -334,7 +334,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 - Enterprise identity for the hosted portal: member roles (`owner`, `admin`, `reviewer`, `readonly`) with invites, TOTP MFA with single-use codes and an operator reset (`log-admin user mfa-reset`), and single sign-on per tenant through the tenant's own IdP, OIDC or SAML 2.0, set by the operator (`log-admin sso set`), with an enforce mode that closes the password, GitHub, and Google paths to members. Revoking an agent's authority mid-session already shipped (`agent-custody revoke`, example 27); example 31 shows the enterprise sign-in and the roles.
 - The [state review console](../state/README.md#explain-one-action): search receipts by transaction, customer, agent or time, read the ten answers, and hand over a portable HTML/JSON case whose signatures, authorizations and inclusion proofs can be verified offline.
 - A log outage after an ordinary call (issue #149): the signed receipt waits in `receipts/outbox/` and the gateway appends it when the log is back, the agent gets the real outcome marked `log-pending`, `GET /health` counts the pending receipts, and `requirePrecommit` refuses a remote log with an empty `precommit`. The [failure table](docs/usage.md#when-the-log-fails) gives each case.
-- The anchor (issue #176): `agent-custody anchor` proves each new checkpoint extends the last one it anchored, then commits a Merkle root over them in one Ethereum transaction from its address to itself. It publishes each log's record and inclusion proof, sends nothing for an idle log, skips a run above a fee cap, and never has two transactions in flight. `log-check --anchor-url` checks the record against one or more JSON-RPC endpoints and the log's head against the anchored checkpoint, so a rewritten or rolled-back tree is caught from the chain alone ([anchoring](docs/anchoring.md), example 33).
+- The anchor (issue #176): `agent-custody anchor` proves each new checkpoint extends the last one it anchored, then commits a Merkle root over them in one transaction from its address to itself, on Ethereum by default or on Base, Arbitrum, Optimism, Polygon, or any EVM chain by id (`--chain`), with a fee cap sized per chain. It publishes each log's record and inclusion proof, sends nothing for an idle log, skips a run above a fee cap, and never has two transactions in flight. `log-check --anchor-url` checks the record against one or more JSON-RPC endpoints and the log's head against the anchored checkpoint, so a rewritten or rolled-back tree is caught from the chain alone ([anchoring](docs/anchoring.md), example 33).
 
 **Next, in the order it pays off**
 

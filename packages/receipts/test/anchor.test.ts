@@ -2,6 +2,7 @@
 // anchor's own host: a rewritten tree is caught from the chain alone. These tests run a real log with published
 // checkpoints, a static host for them, and an in-process chain that signs-and-recovers real Ethereum transactions,
 // so the sender a verifier checks is the one that signed. Nothing reaches the network.
+import { spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,8 +10,8 @@ import { extname, join } from "node:path";
 import { keccak256, parseTransaction, recoverTransactionAddress, toHex } from "viem";
 import { generatePrivateKey } from "viem/accounts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Anchor, anchorCalldata, checkAnchorRecord, type AnchorChain, type AnchorRecord } from "../src/anchor.ts";
-import { ethereumChain } from "../src/anchor-ethereum.ts";
+import { Anchor, ANCHOR_CHAINS, anchorCalldata, checkAnchorRecord, resolveAnchorChain, type AnchorChain, type AnchorRecord } from "../src/anchor.ts";
+import { evmChain } from "../src/anchor-evm.ts";
 import { dirCheckpoints } from "../src/checkpoints.ts";
 import { dsseSign, generateKeyPair, loadPrivateKey, writeKeyPair, type PublicKeyRef } from "../src/crypto.ts";
 import { checkLog } from "../src/log-check.ts";
@@ -196,7 +197,7 @@ describe("anchoring the log's checkpoints on a chain", () => {
     publisher = new CheckpointPublisher(resolver, signer, store, 60_000);
     host = await staticHost(cpDir());
     net = devnet();
-    chain = await ethereumChain({ rpcUrl: RPC, privateKey: generatePrivateKey(), maxFeeGwei: 20, provider: net });
+    chain = await evmChain({ rpcUrl: RPC, privateKey: generatePrivateKey(), maxFeeGwei: 20, provider: net });
     anchor = new Anchor({ logUrl: log.url, checkpointsUrl: host.url, tenants: ["default"], chain, outDir: outDir(), waitMs: 0, warn: () => {} });
     anchorHost = await staticHost(outDir());
     logKeys = (await fetchLogKeys(log.url)).keys;
@@ -424,9 +425,63 @@ describe("anchoring the log's checkpoints on a chain", () => {
     expect(await check({ ...d, anchor: { ...d.anchor, proof: a.anchor.proof } })).toMatchObject({ ok: false, error: expect.stringMatching(/not under the anchored root/) });
   });
 
+  it("an installation can anchor on another EVM chain, and a record is checked against the chain it names", async () => {
+    // Base is an OP Stack chain: viem's own definition, with its formatters, signs and reads the transactions
+    const base = devnet(8453);
+    const onBase = await evmChain({ rpcUrl: RPC, privateKey: generatePrivateKey(), chainId: 8453, maxFeeGwei: ANCHOR_CHAINS.base!.maxFeeGwei, provider: base });
+    expect(onBase.chainId).toBe(8453);
+    base.baseFeeGwei = 0n;
+    const a = new Anchor({ logUrl: log.url, checkpointsUrl: host.url, tenants: ["default"], chain: onBase, outDir: join(dir, "anchor-base"), waitMs: 0, warn: () => {} });
+    expect((await a.runOnce()).tx.outcome).toBe("pending");
+    // the transaction was signed for Base: a replay on another chain would not verify
+    expect(base.sent[0]!.from).toBe(onBase.address);
+    base.mine();
+    expect((await a.runOnce()).tx.outcome).toBe("anchored");
+    const r = JSON.parse(readFileSync(join(dir, "anchor-base", "default", "latest.json"), "utf8")) as AnchorRecord;
+    expect(r.anchor.chainId).toBe(8453);
+    const via = { rpcUrls: [RPC], address: onBase.address, logKeys, fetch: rpcFetch({ [RPC]: base }) };
+    expect(await checkAnchorRecord(r, { ...via, chainId: 8453 })).toMatchObject({ ok: true });
+    // a verifier pinned to Ethereum refuses a Base record, and a Base record checked through an Ethereum endpoint fails
+    expect(await checkAnchorRecord(r, { ...via, chainId: 1 })).toMatchObject({ ok: false, error: "anchored on chain 8453, expected 1" });
+    expect(await checkAnchorRecord(r, { ...via, chainId: 8453, fetch: rpcFetch({ [RPC]: net }) })).toMatchObject({ ok: false, error: expect.stringMatching(/is chain 1, expected 8453/) });
+    // the Base default cap is 1 gwei, so fees that Ethereum's cap of 20 would allow are refused there
+    await post("i");
+    await publisher.publishOnce();
+    base.baseFeeGwei = 5n;
+    expect((await a.runOnce()).tx).toMatchObject({ outcome: "failed", reason: expect.stringMatching(/above the cap of 1$/) });
+  });
+
   it("an anchor URL without a pinned address or an endpoint is a failure, not a silent skip", async () => {
     const r = await checkLog({ logUrl: log.url, anchorUrl: anchorHost.url });
     expect(r.ok).toBe(false);
     expect(r.checks.find((c) => c.name === "anchor verifies on chain")).toMatchObject({ ok: false, detail: expect.stringMatching(/pinned anchor address/) });
+  });
+});
+
+describe("choosing the anchor's chain", () => {
+  it("names the common EVM chains, defaulting to Ethereum, and takes any other chain by its id", () => {
+    expect(resolveAnchorChain("ethereum")).toEqual({ name: "ethereum", chainId: 1, maxFeeGwei: 20 });
+    expect(resolveAnchorChain("base")).toMatchObject({ chainId: 8453 });
+    expect(resolveAnchorChain("arbitrum")).toMatchObject({ chainId: 42161 });
+    expect(resolveAnchorChain("optimism")).toMatchObject({ chainId: 10 });
+    expect(resolveAnchorChain("polygon")).toMatchObject({ chainId: 137 });
+    // a named chain's id gets that chain's defaults
+    expect(resolveAnchorChain("8453")).toEqual(resolveAnchorChain("base"));
+    // any other chain id has no default cap: whoever picks the chain picks what an anchor may cost there
+    expect(resolveAnchorChain("11155111")).toEqual({ name: undefined, chainId: 11155111, maxFeeGwei: undefined });
+    expect(() => resolveAnchorChain("solana")).toThrow(/unknown chain "solana"/);
+    expect(() => resolveAnchorChain("constructor")).toThrow(/unknown chain/);
+    expect(() => resolveAnchorChain("0x1")).toThrow(/unknown chain/);
+  });
+
+  it("the anchor command refuses a chain id with no default cap unless --max-fee-gwei is given", () => {
+    const cli = join(import.meta.dirname, "..", "src", "cli.ts");
+    const args = ["--import", "tsx", cli, "anchor", "--log-url", "http://127.0.0.1:9/", "--checkpoints-url", "http://127.0.0.1:9/", "--out", mkdtempSync(join(tmpdir(), "anchor-cli-")), "--rpc-url-env", "ANCHOR_TEST_RPC", "--key-env", "ANCHOR_TEST_KEY", "--once"];
+    const env = { ...process.env, ANCHOR_TEST_RPC: "http://127.0.0.1:9/", ANCHOR_TEST_KEY: generatePrivateKey() };
+    const r = spawnSync(process.execPath, [...args, "--chain", "11155111"], { encoding: "utf8", timeout: 30_000, env });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/chain 11155111 has no default fee cap; give --max-fee-gwei/);
+    const bad = spawnSync(process.execPath, [...args, "--chain", "solana"], { encoding: "utf8", timeout: 30_000, env });
+    expect(bad.stderr).toMatch(/unknown chain "solana"/);
   });
 });

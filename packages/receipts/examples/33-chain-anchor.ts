@@ -4,7 +4,7 @@
 // The log's operator holds the log's key, so a signed checkpoint alone cannot show that the operator never rewrote
 // a tenant's tree. The anchor commits each new checkpoint to a public chain from a published address; a monitor then
 // checks the log against the chain alone. Here the chain is a small in-memory stand-in that answers the same JSON-RPC
-// calls Ethereum does (the tests drive real signed transactions; on mainnet, `ethereumChain` sends them).
+// calls Ethereum does (the tests drive real signed transactions; on Ethereum or another EVM chain, `evmChain` sends them).
 import { createServer } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";

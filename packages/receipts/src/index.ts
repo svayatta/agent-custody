@@ -26,10 +26,10 @@ export type { KeyDocument, RemoteSignerOptions, RetiredKey, RunningSigner, Signe
 export { bothCheckpoints, dirCheckpoints, postgresCheckpoints } from "./checkpoints.ts";
 export { adminRoutes, welcomeSheet } from "./log-admin.ts";
 export { fetchWitnessKeys, Witness } from "./witness.ts";
-export { Anchor, anchorCalldata, anchorLeaf, checkAnchorRecord } from "./anchor.ts";
+export { Anchor, ANCHOR_CHAINS, anchorCalldata, anchorLeaf, checkAnchorRecord, resolveAnchorChain } from "./anchor.ts";
 export type { AnchorChain, AnchorCheck, AnchorCheckOptions, AnchorHeartbeat, AnchorOptions, AnchorRecord, AnchorRun, AnchorTenantOutcome, AnchorTxOutcome } from "./anchor.ts";
-export { ethereumChain } from "./anchor-ethereum.ts";
-export type { EthereumChainOptions } from "./anchor-ethereum.ts";
+export { evmChain } from "./anchor-evm.ts";
+export type { EvmChainOptions } from "./anchor-evm.ts";
 export { checkLog, formatLogCheck } from "./log-check.ts";
 export type { LogCheck, LogCheckOptions, LogCheckResult } from "./log-check.ts";
 export type { WitnessOptions, WitnessOutcome, WitnessedCheckpoint } from "./witness.ts";

@@ -26,7 +26,7 @@ export interface LogCheckOptions {
   anchorAddress?: string;
   /** JSON-RPC endpoints of the anchor's chain; with more than one, they must agree */
   anchorRpcUrls?: string[];
-  /** default 1, Ethereum mainnet */
+  /** the anchor's chain id; default 1, Ethereum mainnet (`resolveAnchorChain` maps a name to its id) */
   anchorChainId?: number;
   /** how long the anchor may go without a run, or stay behind a log that grew; default thirteen hours */
   maxAnchorLagMs?: number;

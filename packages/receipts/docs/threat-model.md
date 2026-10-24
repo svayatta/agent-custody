@@ -98,6 +98,7 @@ Each row names the attacker, the move, the defence, and whether the defence is a
 | Anchor a rewritten history | The anchor proves each checkpoint extends the last one it anchored, and refuses with an alarm otherwise. An anchor that skipped the proof would still leave two anchored roots that cannot both extend the earlier one, in public. | evidence |
 | Stop anchoring | `checked.json` is written every run; `log-check` fails when the last run is older than `--max-anchor-lag` or the log has stayed ahead of its last anchor for longer. Between anchors, a rewrite is caught only once a later anchor or another holder of a head disagrees. | detection |
 | Leak its key | Someone else can spend the funds and post transactions from the address. A root that no checkpoint leads to proves nothing, so a leaked key cannot make a false record check out. | evidence |
+| Anchor on a chain a few parties control | The installation chooses the chain, and the record names it. On an L2 a sequencer can delay or refuse an anchor, which shows as an anchor that does not keep up. A finalized block is as hard to rewrite as that chain makes it, which differs by chain (`docs/anchoring.md` lists what each rests on). | assumption: the chain's own guarantees |
 | Lie through a JSON-RPC endpoint | Give `log-check` several endpoints from different providers: they must agree on the transaction and its block, and a block counts as finalized only when every endpoint says so. | assumption: not every endpoint lies the same way |
 
 ### On the network

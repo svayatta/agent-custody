@@ -12,7 +12,29 @@ import { inclusionProof, leafHash, rootOf, verifyConsistency, verifyInclusion, t
 import { TREEHEAD_TYPE, type TreeHead } from "./receipt.ts";
 import { fetchLogKeys } from "./signer.ts";
 
-/** The chain the anchor writes to. `ethereumChain` in `anchor-ethereum.ts` is the one this package ships. */
+/**
+ * EVM chains known by name, with the chain id and a default fee cap in gwei per gas, sized to what one anchor costs
+ * there. Any other EVM chain is named by its chain id and needs an explicit cap.
+ */
+export const ANCHOR_CHAINS: Record<string, { chainId: number; maxFeeGwei: number }> = {
+  ethereum: { chainId: 1, maxFeeGwei: 20 },
+  base: { chainId: 8453, maxFeeGwei: 1 },
+  arbitrum: { chainId: 42161, maxFeeGwei: 1 },
+  optimism: { chainId: 10, maxFeeGwei: 1 },
+  polygon: { chainId: 137, maxFeeGwei: 1000 },
+};
+
+/** A chain name from `ANCHOR_CHAINS`, or a decimal chain id; `maxFeeGwei` is undefined for an id with no known default. */
+export function resolveAnchorChain(chain: string): { name: string | undefined; chainId: number; maxFeeGwei: number | undefined } {
+  const known = Object.hasOwn(ANCHOR_CHAINS, chain) ? ANCHOR_CHAINS[chain] : undefined;
+  if (known) return { name: chain, ...known };
+  if (!/^[1-9][0-9]{0,15}$/.test(chain)) throw new Error(`unknown chain "${chain}": use ${Object.keys(ANCHOR_CHAINS).join(", ")}, or a chain id`);
+  const chainId = Number(chain);
+  const named = Object.entries(ANCHOR_CHAINS).find(([, c]) => c.chainId === chainId);
+  return named ? { name: named[0], ...named[1] } : { name: undefined, chainId, maxFeeGwei: undefined };
+}
+
+/** The chain the anchor writes to. `evmChain` in `anchor-evm.ts` is the one this package ships. */
 export interface AnchorChain {
   chainId: number;
   /** the anchor's address, lowercase hex; every anchor is a zero-value transaction from it to itself */
