@@ -17,6 +17,8 @@ import { bothCheckpoints, dirCheckpoints, postgresCheckpoints, type CheckpointSt
 import { connectSigner, fetchLogKeys, localSigner, serveSigner, type RetiredKey, type Signer } from "./signer.ts";
 import { fetchWitnessKeys, Witness } from "./witness.ts";
 import { checkLog, formatLogCheck } from "./log-check.ts";
+import { Anchor } from "./anchor.ts";
+import { ethereumChain } from "./anchor-ethereum.ts";
 import { serveHttp } from "./gateway-http.ts";
 import { serveA2a } from "./a2a.ts";
 import { PortalStore, sendFollowUps, servePortal, type MailOptions, type OAuthOptions, type Role, type StripeOptions } from "./portal.ts";
@@ -110,7 +112,8 @@ const USAGE = `agent-custody <command>
   log     ... --db-env NAME --admin-token-env NAME [--public-url <https://log.example.com/>] [--checkpoints-url <https://checkpoints.example.com/>]
                                                  the operator's admin page at /admin and its API, behind the admin token: tenants, tokens shown once,
                                                  the welcome sheet; the public URLs fill the sheet in
-  log-check --log-url <url> [--checkpoints-url <url>] [--witness-url <url>] [--tenant <name>]... [--max-lag <seconds>] [--json]
+  log-check --log-url <url> [--checkpoints-url <url>] [--witness-url <url>] [--tenant <name>]... [--max-lag <seconds>]
+            [--anchor-url <url> --anchor-address <0x...> --anchor-rpc-env NAME... [--anchor-chain-id 1] [--max-anchor-lag <seconds>]] [--json]
   log-export --log-url <url> [--tenant <name>] --token-env NAME --out <dir> [--month YYYY-MM]... [--json]
                                                    a tenant's own log, with their token: every leaf hash as a log file the verifier
                                                    reads, the signed head, the published keys, the checkpoints, and their usage
@@ -121,6 +124,12 @@ const USAGE = `agent-custody <command>
                                                  a second signer, run by someone who is not the log's operator: fetches the log's latest
                                                  checkpoint per watched log, proves it extends the last one it signed, and countersigns it
                                                  into <dir>; refuses and writes an alarm otherwise. Serve <dir> from a host of your own.
+  anchor  --log-url <url> --checkpoints-url <url> --out <dir> --rpc-url-env NAME --key-env NAME [--tenant <name>]...
+          [--chain-id 1] [--max-fee-gwei 20] [--every <seconds>] [--once]
+                                                 anchors the log's checkpoints on Ethereum: proves each new one extends the last one
+                                                 anchored, sends one transaction with a Merkle root over them from the key's address,
+                                                 and writes each log's record and inclusion proof into <dir>; refuses and writes an alarm
+                                                 otherwise. Needs the optional package viem. Serve <dir> read-only.
   signer  --key <log.key> --port 8790 [--host 127.0.0.1] [--token-env NAME] [--retired-key <pub>]...
                                                  the one process that holds the log's key: POST /sign, GET /keys
   log-admin --db-env NAME tenant add <id> [--log-id <id>] | tenant list | tenant disable <id> | tenant plan <id> <free|team|enterprise>
@@ -324,9 +333,19 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "log-check": {
-      const { values } = parseArgs({ args: rest, options: { "log-url": { type: "string" }, "checkpoints-url": { type: "string" }, "witness-url": { type: "string" }, tenant: { type: "string", multiple: true }, "max-lag": { type: "string", default: "900" }, json: { type: "boolean", default: false } } });
+      const { values } = parseArgs({ args: rest, options: { "log-url": { type: "string" }, "checkpoints-url": { type: "string" }, "witness-url": { type: "string" }, tenant: { type: "string", multiple: true }, "max-lag": { type: "string", default: "900" }, "anchor-url": { type: "string" }, "anchor-address": { type: "string" }, "anchor-rpc-env": { type: "string", multiple: true }, "anchor-chain-id": { type: "string", default: "1" }, "max-anchor-lag": { type: "string", default: "46800" }, json: { type: "boolean", default: false } } });
       if (!values["log-url"]) throw new Error("log-check needs --log-url");
-      const r = await checkLog({ logUrl: values["log-url"], ...(values["checkpoints-url"] ? { checkpointsUrl: values["checkpoints-url"] } : {}), ...(values["witness-url"] ? { witnessUrl: values["witness-url"] } : {}), tenants: values.tenant?.length ? values.tenant : ["default"], maxLagMs: Number(values["max-lag"]) * 1000 });
+      let anchor = {};
+      if (values["anchor-url"]) {
+        if (!values["anchor-address"] || !values["anchor-rpc-env"]?.length) throw new Error("--anchor-url needs --anchor-address and at least one --anchor-rpc-env");
+        const rpcUrls = values["anchor-rpc-env"].map((name) => {
+          const url = process.env[name];
+          if (!url) throw new Error(`environment variable ${name} is not set`);
+          return url;
+        });
+        anchor = { anchorUrl: values["anchor-url"], anchorAddress: values["anchor-address"], anchorRpcUrls: rpcUrls, anchorChainId: Number(values["anchor-chain-id"]), maxAnchorLagMs: Number(values["max-anchor-lag"]) * 1000 };
+      }
+      const r = await checkLog({ logUrl: values["log-url"], ...(values["checkpoints-url"] ? { checkpointsUrl: values["checkpoints-url"] } : {}), ...(values["witness-url"] ? { witnessUrl: values["witness-url"] } : {}), tenants: values.tenant?.length ? values.tenant : ["default"], maxLagMs: Number(values["max-lag"]) * 1000, ...anchor });
       console.log(values.json ? JSON.stringify(r, null, 2) : formatLogCheck(r));
       return r.ok ? 0 : 1;
     }
@@ -354,6 +373,30 @@ async function main(argv: string[]): Promise<number> {
       w.start(everyMs);
       await untilStopped();
       w.stop();
+      return 0;
+    }
+    case "anchor": {
+      const { values } = parseArgs({ args: rest, options: { "log-url": { type: "string" }, "checkpoints-url": { type: "string" }, out: { type: "string" }, tenant: { type: "string", multiple: true }, "rpc-url-env": { type: "string" }, "key-env": { type: "string" }, "chain-id": { type: "string", default: "1" }, "max-fee-gwei": { type: "string", default: "20" }, every: { type: "string", default: "21600" }, once: { type: "boolean", default: false } } });
+      if (!values["log-url"] || !values["checkpoints-url"] || !values.out || !values["rpc-url-env"] || !values["key-env"]) throw new Error("anchor needs --log-url, --checkpoints-url, --out, --rpc-url-env, and --key-env");
+      const rpcUrl = process.env[values["rpc-url-env"]];
+      if (!rpcUrl) throw new Error(`environment variable ${values["rpc-url-env"]} is not set`);
+      const privateKey = process.env[values["key-env"]];
+      if (!privateKey) throw new Error(`environment variable ${values["key-env"]} is not set`);
+      const everyMs = Number(values.every) * 1000;
+      if (!(everyMs > 0)) throw new Error("--every must be a positive number of seconds");
+      const chain = await ethereumChain({ rpcUrl, privateKey, chainId: Number(values["chain-id"]), maxFeeGwei: Number(values["max-fee-gwei"]) });
+      const a = new Anchor({ logUrl: values["log-url"], checkpointsUrl: values["checkpoints-url"], tenants: values.tenant?.length ? values.tenant : ["default"], chain, outDir: values.out });
+      if (values.once) {
+        const run = await a.runOnce();
+        for (const t of run.tenants) console.log(`${t.tenant.padEnd(20)} ${t.outcome}${"treeSize" in t ? ` at ${t.treeSize}` : ""}${"reason" in t ? `: ${t.reason}` : ""}`);
+        const tx = run.tx;
+        console.log(`transaction: ${tx.outcome}${"txHash" in tx ? ` ${tx.txHash}` : ""}${"blockNumber" in tx ? ` in block ${tx.blockNumber}` : ""}${"reason" in tx ? `: ${tx.reason}` : ""}`);
+        return run.tenants.some((t) => t.outcome === "refused") ? 1 : 0;
+      }
+      console.error(`agent-custody anchor: ${a.address} on chain ${chain.chainId}, watching ${values["log-url"]} via ${values["checkpoints-url"]} every ${values.every}s, writing to ${values.out}`);
+      a.start(everyMs);
+      await untilStopped();
+      await a.stop();
       return 0;
     }
     case "signer": {

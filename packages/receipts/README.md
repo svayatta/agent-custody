@@ -10,7 +10,7 @@ Two producers, one receipt format, one verifier.
 Anyone holding the public keys can verify a receipt offline. The agent is not trusted. The layer around it is, and the receipt says exactly how far that trust extends, starting with who issued it. What the receipt file carries of a call is a choice per tool: a field can be withheld as a commitment or encrypted under your key, and the verifier recomputes the digests when it is shown the values.
 
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
-- [Tutorials](docs/tutorials.md): thirty-two runnable examples, one per aspect of the code, all executed by the test suite
+- [Tutorials](docs/tutorials.md): thirty-three runnable examples, one per aspect of the code, all executed by the test suite
 - [Financial operations](docs/financial-operations.md): durable operation ids, provider idempotency keys, atomic daily budget reservations, and reconciliation receipts for uncertain outcomes
 - [The gateway console](docs/console.md): an admin service for the person who runs a gateway: config, tools, receipts with a verdict each, a policy editor that replays recorded calls before it saves, grant revocation, and an audit trail
 - [Configuring the gateway](docs/configuration.md): who may use which tools and where the tools live, a worked example with two agents, the Docker image, and `agent-custody check` to validate a config before it starts
@@ -21,6 +21,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples, and replaying history against a proposed policy with `policy simulate`
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
 - [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, the EU AI Act, and UK GDPR, with what none of them claims
+- [Anchoring the log on Ethereum](docs/anchoring.md): the log's checkpoints committed to mainnet from a published address, what that proves and what it does not, running the anchor, and `log-check` against the chain
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
 
 ## Getting started
@@ -241,11 +242,13 @@ If a vendor tells you their receipts prove more than the first five rows, ask th
 src/config.ts      gateway and SDK config schemas, path resolution
 src/crypto.ts      canonical JSON, sha256, Ed25519 keys, DSSE sign/verify
 src/log.ts         Merkle log: append, root, inclusion and consistency proofs, verify, JSONL persistence
-src/log-check.ts   the outside monitor: verifies the head, checkpoints, and witness of a running log
+src/log-check.ts   the outside monitor: verifies the head, checkpoints, witness, and anchor of a running log
 src/portal.ts      the tenant portal: register, first key, usage against plan, keys, Stripe billing, export, member roles, TOTP MFA, single sign-on, on the log's Postgres
 src/sso.ts         enterprise sign-in for the portal: OIDC (code and PKCE, id_token checked against the IdP's key set) and SAML 2.0 (signed assertions only, through @node-saml/node-saml)
 src/log-export.ts  a tenant's export of their own log, self-checked, as a log file the verifier reads
 src/witness.ts     the witness: countersigns the log's checkpoints from another operator's machine, or refuses with an alarm
+src/anchor.ts      the anchor: commits a Merkle root over new checkpoints to a chain, or refuses with an alarm; checks a record against JSON-RPC
+src/anchor-ethereum.ts  the anchor's Ethereum transactions, through the optional dependency viem
 src/signer.ts      the signer: the log's key in its own process, the key document verifiers fetch
 src/checkpoints.ts signed heads published on a schedule, to files and to Postgres
 src/log-store.ts   the log server's backends: the file, and Postgres with tenants, hashed tokens, one writer per tenant, rate limits
@@ -331,12 +334,13 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 - Enterprise identity for the hosted portal: member roles (`owner`, `admin`, `reviewer`, `readonly`) with invites, TOTP MFA with single-use codes and an operator reset (`log-admin user mfa-reset`), and single sign-on per tenant through the tenant's own IdP, OIDC or SAML 2.0, set by the operator (`log-admin sso set`), with an enforce mode that closes the password, GitHub, and Google paths to members. Revoking an agent's authority mid-session already shipped (`agent-custody revoke`, example 27); example 31 shows the enterprise sign-in and the roles.
 - The [state review console](../state/README.md#explain-one-action): search receipts by transaction, customer, agent or time, read the ten answers, and hand over a portable HTML/JSON case whose signatures, authorizations and inclusion proofs can be verified offline.
 - A log outage after an ordinary call (issue #149): the signed receipt waits in `receipts/outbox/` and the gateway appends it when the log is back, the agent gets the real outcome marked `log-pending`, `GET /health` counts the pending receipts, and `requirePrecommit` refuses a remote log with an empty `precommit`. The [failure table](docs/usage.md#when-the-log-fails) gives each case.
+- The anchor (issue #176): `agent-custody anchor` proves each new checkpoint extends the last one it anchored, then commits a Merkle root over them in one Ethereum transaction from its address to itself. It publishes each log's record and inclusion proof, sends nothing for an idle log, skips a run above a fee cap, and never has two transactions in flight. `log-check --anchor-url` checks the record against one or more JSON-RPC endpoints and the log's head against the anchored checkpoint, so a rewritten or rolled-back tree is caught from the chain alone ([anchoring](docs/anchoring.md), example 33).
 
 **Next, in the order it pays off**
 
 The first four close the gap between a log the operator cannot rewrite and a record the operator cannot shape.
 
-1. Anchor the log's checkpoints on Ethereum mainnet. An anchor service checks that each checkpoint extends the last one anchored, then sends one transaction with a Merkle root over every tenant's latest checkpoint, and publishes each tenant's inclusion proof. `log-check` then catches a rewritten tree from the chain alone, without trusting us or waiting for a second witness operator. [Issue #176](https://github.com/svayatta/agent-custody/issues/176).
+1. Run the anchor for log.agent-custody.dev on mainnet: a funded key held only by the anchor service on the host, its records served beside the checkpoints, its address published in the welcome sheet and on the security page, and the monitor checking it. The code is done. [Issue #176](https://github.com/svayatta/agent-custody/issues/176).
 2. Strict mode: the gateway refuses a local log, pre-commits every tool, and turns the outbox off. No call is then forwarded before its authorization is in a log the operator does not run, and receipts say strict mode was in force. [Issue #177](https://github.com/svayatta/agent-custody/issues/177).
 3. Completeness from the provider's side: an auditor's read-only key lists Stripe's refunds, then GitHub's actions, and matches each one to a receipt. That catches what no gateway can see, an action taken outside it. [Issue #178](https://github.com/svayatta/agent-custody/issues/178).
 4. A TEE gateway: a confidential container with a reproducible, attested build, the signing key generated and kept in the enclave, TLS ending inside it, and both verifiers checking the path from the receipt key, through the attestation, to the release. It replaces the TEE-hosted signer planned before. [Issue #179](https://github.com/svayatta/agent-custody/issues/179).

@@ -2,6 +2,10 @@
 
 All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agent-custody` on PyPI, move in lockstep. The receipt format has stayed at v0.2 throughout; every addition to it is an optional field, so earlier receipts and the published conformance vectors remain valid.
 
+## Unreleased
+
+- **The anchor: the log's checkpoints on Ethereum (issue #176).** `agent-custody anchor` watches a log's published checkpoints and proves that each new one extends the last one it anchored, refusing with an alarm when it does not. It then commits a Merkle root over the checkpoints that moved in one zero-value transaction from its address to itself, and writes each log's record (its own checkpoint, the transaction, and its inclusion proof) to a directory to serve read-only. It sends nothing when no log has grown, skips a run whose fee per gas is above `--max-fee-gwei` (default 20), and holds a transaction in flight before sending another. `log-check --anchor-url --anchor-address --anchor-rpc-env` checks the record against one or more JSON-RPC endpoints, which must agree: the sender, the calldata, the inclusion proof, success, and finality. It also checks that the log's head extends the anchored checkpoint and that the anchor is still running, so a rewritten or rolled-back tree is caught from the chain alone. The key and endpoint come from the environment; signing needs the optional package `viem`, and checking needs no Ethereum library. `docs/anchoring.md`, example 33.
+
 ## 0.10.0 — 2026-10-23
 
 - **Fix: the memory server and the review console stop on SIGTERM (issue #148).** `agent-custody-memory serve --http` and `agent-custody-memory review` waited for SIGINT only, so a container runtime, systemd or Kubernetes stopped them with SIGKILL after the grace period. They now close and exit 0 on SIGTERM. The memory server over HTTP answers GET with 405, because its held SSE stream kept a connected gateway from letting the stop finish, and it cuts the connections that remain 3 seconds after the stop starts. It closes the ledger before it exits.

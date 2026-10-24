@@ -10,5 +10,6 @@
 | gateway, local log | observed outside the agent, tamper-evident to anyone holding a copy | the operator, who holds the key and the file |
 | gateway, log run by someone else | tree heads signed by a key the operator does not hold | the log's operator, with yours |
 | the same, with a witness | checkpoints countersigned by a second signer nobody in the chain controls | both operators and the witness, together |
+| the same, anchored on Ethereum | checkpoints committed to a public chain from a published address | the log's operator, only for what no anchor covers yet |
 
 The full list of claims, who can check each, and against whom, is the [proof table](/receipts/#what-a-receipt-proves-and-what-it-does-not). What the gateway does not cover is on the [deployment page](/guide/deployment#what-the-gateway-does-not-cover). A hosted log is [running and taking tenants](/early-access).
