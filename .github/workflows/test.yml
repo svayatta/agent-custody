@@ -33,5 +33,8 @@ jobs:
         run: .github/scripts/check-deploy-versions.sh "$(node -p "require('./packages/receipts/package.json').version")"
       - run: bun run typecheck
       - run: bun run test
+      # crewai's chromadb runs pydantic v1, which does not support the runner's Python 3.14
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.12"
       - run: bun run test:python
