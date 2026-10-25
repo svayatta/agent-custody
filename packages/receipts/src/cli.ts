@@ -95,7 +95,7 @@ const USAGE = `agent-custody <command>
   prune   --log <log.jsonl> --before <ISO instant> [--receipts <dir>]
           retention on the receipt log: replaces older leaves with their hashes, so proofs still verify and the content is gone
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
-  verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]
+  verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--require-strict] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]
   policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
                                                    replay verified local receipts against a proposed policy using their recorded inputs;
                                                    --out saves the full JSON report. Exits 1 when any call could not be evaluated.
@@ -574,6 +574,7 @@ async function main(argv: string[]): Promise<number> {
           "log-key": { type: "string", multiple: true },
           "log-url": { type: "string" },
           "log-id": { type: "string" },
+          "require-strict": { type: "boolean", default: false },
           "upstream-key": { type: "string", multiple: true },
           "stripe-secret-env": { type: "string" },
           "github-secret-env": { type: "string" },
@@ -597,6 +598,7 @@ async function main(argv: string[]): Promise<number> {
         ...(values["approval-key"] ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}),
         ...(logKeys.length ? { logKeys } : {}),
         ...(values["log-id"] ? { logId: values["log-id"] } : {}),
+        ...(values["require-strict"] ? { requireStrict: true } : {}),
         ...(values["upstream-key"] ? { upstreamKeys: values["upstream-key"].map(loadPublicKey) } : {}),
         ...(values["stripe-secret-env"] || values["github-secret-env"] ? { providerSecrets: { ...(values["stripe-secret-env"] ? { stripe: secretFrom(values["stripe-secret-env"]) } : {}), ...(values["github-secret-env"] ? { github: secretFrom(values["github-secret-env"]) } : {}) } } : {}),
         ...(values.log ? { logFile: values.log } : {}),

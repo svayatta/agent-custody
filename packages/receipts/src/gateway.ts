@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
-import type { FactConfig, GatewayConfig, UpstreamConfig } from "./config.ts";
+import { strictRefusals, type FactConfig, type GatewayConfig, type UpstreamConfig } from "./config.ts";
 import { digestOf, dsseVerifiers, dsseVerify, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
 import { delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { APPROVAL_META_KEY, DEFAULT_APPROVAL_LIFETIME_SECONDS, consumeApproval, verifyApproval, verifyApprovalStatement } from "./approval.ts";
@@ -244,10 +244,17 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     for (const side of [rule.args, rule.result, rule.facts]) if (side?.mode === "encrypted" && !captureKey) throw new Error(`capture for ${tool} uses mode encrypted, which needs captureKeyEnv`);
   }
   // The rules are applied by the issuer to every statement it signs, the authorization included: the gateway hands it the call in full.
-  const issuer = createIssuer(gatewayKey, cfg.receiptsDir, options.log ?? openLog(cfg, gatewayKey), { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
+  if (cfg.strict) {
+    const refused = strictRefusals(cfg);
+    if (refused.length) throw new Error(`agent-custody gateway: ${refused.join("; ")}`);
+  }
+  const sink = options.log ?? openLog(cfg, gatewayKey);
+  if (cfg.strict && sink.kind !== "http") throw new Error(`agent-custody gateway: strict mode needs a remote log, and ${sink.where} is a file`);
+  const issuer = createIssuer(gatewayKey, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
+  const issuedBy = { kind: "gateway" as const, keyid: issuer.keyid, version: GATEWAY_VERSION, ...(cfg.strict ? { strict: true } : {}) };
   const precommit = new Set(cfg.precommit);
   const operationRule = (tool: string) => cfg.operations?.tools.find((rule) => rule.tool === tool);
-  const consequential = (tool: string) => !!operationRule(tool) || precommit.has("*") || precommit.has(tool);
+  const consequential = (tool: string) => !!cfg.strict || !!operationRule(tool) || precommit.has("*") || precommit.has(tool);
   // A fact lookup runs before the policy can decide, because the policy decides on it. It is therefore a read the
   // gateway makes on the agent's request, never a consequential call: a fact tool named in precommit is a config error.
   // "*" covers the tools the agent calls; a lookup is the gateway's own read, so only an explicit name makes it consequential.
@@ -520,7 +527,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       const head = {
         receiptId,
         timestamp,
-        issuer: { kind: "gateway" as const, keyid: issuer.keyid, version: GATEWAY_VERSION },
+        issuer: issuedBy,
         principal: { id: delegation.principal, keyid: principalKeyid, provenance: "attested" as const },
         agent: { id: delegation.agent, provenance: "attested" as const },
         delegation: { envelope: grantEnvelope, provenance: "attested" as const },
@@ -562,14 +569,14 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         execution = { status: "withheld", reason: `existing operation: not forwarded again; the stored outcome is ${head.operation!.status}`, provenance: "observed" };
       }
 
-      if (!execution && (policy.decision === "allow" || financial && forward) && consequential(tool)) {
+      if (!execution && (policy.decision === "allow" || (financial || cfg.strict) && forward) && consequential(tool)) {
         // A consequential call is committed to the log before it goes out, so that evidence of the side effect exists
         // before the side effect does. If the log will not take the authorization, the call is not forwarded; in
-        // observe mode nothing is withheld, and the missing authorization is printed instead.
+        // observe mode nothing is withheld, and the missing authorization is printed instead, unless the mode is strict.
         try {
           authorization = await issuer.authorize({ ...head, policy: { ...policy, provenance: "observed" } }, captureCtx);
         } catch (e) {
-          if (cfg.mode === "observe" && !financial) console.error(`agent-custody gateway (observe mode): the log did not commit the authorization for ${tool}, receipt ${receiptId}; the call was forwarded without it: ${String(e instanceof Error ? e.message : e)}`);
+          if (cfg.mode === "observe" && !financial && !cfg.strict) console.error(`agent-custody gateway (observe mode): the log did not commit the authorization for ${tool}, receipt ${receiptId}; the call was forwarded without it: ${String(e instanceof Error ? e.message : e)}`);
           else execution = { status: "withheld", reason: `the log did not commit the authorization, so the call was not forwarded: ${String(e instanceof Error ? e.message : e)}`, provenance: "observed" };
         }
         if (authorization && operation) {
@@ -653,7 +660,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       if (operation && createdOperation && !attemptedOperation) operation = operations!.update(operation.id, { status: "failed", unsent: undefined });
       if (operation) head.operation = operationEvidence(operation, operation.status === "submitted" && !createdOperation ? "unknown" : operation.status);
       // The call is done, so a log outage now must not tell the agent it failed: the receipt waits in the outbox. An
-      // operation keeps the old order, because its record holds the bundle and its retry is idempotent.
+      // operation keeps the old order, because its record holds the bundle and its retry is idempotent. Strict mode
+      // keeps no outbox: the authorization is in the log, and a receipt the log refuses leaves the call incomplete.
       let issued: ReceiptBundle | undefined;
       let logPending = false;
       try {
@@ -665,7 +673,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         policy: { ...policy, provenance: "observed" },
         ...(authorization ? { authorization } : {}),
         execution,
-      }, captureCtx, undefined, { deferLog: !operation });
+      }, captureCtx, undefined, { deferLog: !operation && !cfg.strict });
       } catch (e) {
         if (!(e instanceof ReceiptPending)) throw e;
         console.error(`agent-custody gateway: ${e.message}`);
@@ -706,7 +714,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     };
   }
 
-  if (cfg.log && !cfg.precommit.length) console.error("agent-custody gateway: a remote log is set and precommit is empty: every call is forwarded before its receipt is logged. Name the consequential tools in precommit, or [\"*\"]; requirePrecommit makes this an error");
+  if (cfg.log && !cfg.precommit.length && !cfg.strict) console.error("agent-custody gateway: a remote log is set and precommit is empty: every call is forwarded before its receipt is logged. Name the consequential tools in precommit, or [\"*\"]; requirePrecommit makes this an error");
   let flushing: Promise<FlushResult> | undefined;
   const flushOutbox = () => flushing ??= (async () => {
     const r = await issuer.flushOutbox();
@@ -716,7 +724,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     return r;
   })().finally(() => { flushing = undefined; });
   const autoFlush = () => void flushOutbox().catch((e) => console.error(`agent-custody gateway: the outbox flush failed: ${e instanceof Error ? e.message : String(e)}`));
-  const outboxTimer = options.autoFlush ? setInterval(autoFlush, 30_000).unref() : undefined;
+  // strict mode never adds to the outbox; receipts left there from before it was turned on are appended once, at start
+  const outboxTimer = options.autoFlush && !cfg.strict ? setInterval(autoFlush, 30_000).unref() : undefined;
   if (options.autoFlush) autoFlush();
 
   return {
@@ -771,7 +780,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         if (!status) throw new Error("provider outcome remains pending or unknown; the reservation is retained");
         const predicate: ReceiptPredicate = {
           receiptId: randomUUID(), timestamp: new Date().toISOString(),
-          issuer: { kind: "gateway", keyid: issuer.keyid, version: GATEWAY_VERSION },
+          issuer: issuedBy,
           principal: initial.principal, agent: initial.agent, delegation: initial.delegation,
           session: { id: null, toolUseId: null, provenance: "claimed" }, model: { id: null, provenance: "claimed" },
           tool: initial.tool, request: { args: lookup.args, argsDigest: digestOf(lookup.args), provenance: "claimed" },
