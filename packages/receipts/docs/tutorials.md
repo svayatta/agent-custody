@@ -42,6 +42,7 @@ Suggested reading order is the numbering. Output lands in `examples-out/`, which
 | 30 | payload-bound human approvals | [30-payload-bound-approvals.ts](../examples/30-payload-bound-approvals.ts) | two people sign the exact refund; missing approval, one signer, changed amount or beneficiary, extra arguments, and expiry are refused; the approved call executes once, its replay is refused, and every receipt verifies with separately trusted approval keys | `src/approval.ts`, `src/gateway.ts`, `src/verify.ts` |
 | 31 | enterprise sign-in and roles | [31-enterprise-sign-in.ts](../examples/31-enterprise-sign-in.ts) | an enterprise tenant signs in through its own identity provider, a stand-in OIDC IdP: the operator sets single sign-on, a member joins as readonly and is refused a policy write, an owner promotes them to reviewer, and enforcement turns password sign-in off | `src/sso.ts`, `src/portal.ts` |
 | 32 | the gateway console | [32-console.ts](../examples/32-console.ts) | a gateway that has made two receipts, and its operator's console: a token on every route, the receipts with a verdict each, a stricter policy replayed against the recorded calls before it is saved, the save recorded with the old version kept and a stale edit refused, and a grant inspected, revoked, and then refused by the gateway | `src/console.ts`, `src/console-page.ts` |
+| 33 | anchoring the log on a chain | [33-chain-anchor.ts](../examples/33-chain-anchor.ts) | a log publishes a checkpoint, the anchor commits it to a stand-in chain in one transaction, and `log-check` passes against the chain; the operator swaps in a rewritten log under the same key and log id, and `log-check` fails it from the chain alone |
 | 34 | strict mode | [34-strict-mode.ts](../examples/34-strict-mode.ts) | `check` lists what strict mode would refuse; a local log and a log that is not hash-only are refused at startup; behind a hash-only log with a pinned key, a read is precommitted and its receipt says `issuer.strict`; `requireStrict` accepts it and refuses an ordinary receipt; with the log down the call is not forwarded and the outbox stays empty | `src/config.ts`, `src/gateway.ts`, `src/check.ts`, `src/verify.ts` |
 
 ## How policies are defined, in one paragraph
@@ -54,6 +55,7 @@ A policy is a Cedar file. The gateway turns each tool call into a Cedar request:
 - [codex-recovery.md](codex-recovery.md): the opt-in live Codex support incident, operator-reviewed recovery, and its offline state example
 - [approvals.md](approvals.md): exact-action signatures, two-person thresholds, consumption, and privacy limits
 - [console.md](console.md): the admin console: run it, what each tab does, how it is protected, and its limits
+- [anchoring.md](anchoring.md): the log's checkpoints on Ethereum: what an anchor proves, running it, and checking a log against the chain
 - [financial-operations.md](financial-operations.md): payment retries, budget reservations, provider contract, and operator reconciliation
 - [sdk.md](sdk.md): the interceptor and every adapter
 - [policies.md](policies.md): the Cedar mapping, evaluation rules, tested examples, gotchas

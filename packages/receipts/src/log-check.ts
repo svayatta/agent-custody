@@ -3,6 +3,7 @@
 // log is down, its head does not verify, its checkpoints have fallen behind its head, or its witness has stopped
 // countersigning. Run it from cron on a machine that is not the log's, or from a scheduled workflow; the exit code
 // is the alert.
+import { checkAnchorRecord, type AnchorRecord } from "./anchor.ts";
 import { dsseVerify, dsseVerifiers, type Envelope, type PublicKeyRef } from "./crypto.ts";
 import { verifyConsistency } from "./log.ts";
 import { TREEHEAD_TYPE, type TreeHead } from "./receipt.ts";
@@ -19,6 +20,21 @@ export interface LogCheckOptions {
   maxLagMs?: number;
   /** how old a checkpoint may be while the head has not moved; default a day, since an idle log is not a broken one */
   maxIdleMs?: number;
+  /** where the anchor publishes its records; with it, `anchorAddress` and `anchorRpcUrls` are required */
+  anchorUrl?: string;
+  /** the anchor's address, pinned from a source other than the anchor's host */
+  anchorAddress?: string;
+  /** JSON-RPC endpoints of the anchor's chain; with more than one, they must agree */
+  anchorRpcUrls?: string[];
+  /** the anchor's chain id; default 1, Ethereum mainnet (`resolveAnchorChain` maps a name to its id) */
+  anchorChainId?: number;
+  /**
+   * each anchored log's id, pinned by the verifier: tenant logs share the log's keys and the anchor's address, so only
+   * the id tells one log's anchored checkpoint from another's
+   */
+  anchorLogIds?: Record<string, string>;
+  /** how long the log may stay ahead of its newest anchor, counted from that anchor's block time; default thirteen hours */
+  maxAnchorLagMs?: number;
   fetch?: typeof fetch;
   now?: () => number;
 }
@@ -54,6 +70,49 @@ export async function checkLog(o: LogCheckOptions): Promise<LogCheckResult> {
     return res.json();
   };
 
+  const anchorChecks = async (tenant: string, head: TreeHead) => {
+    if (!o.anchorAddress || !o.anchorRpcUrls?.length) {
+      add(tenant, "anchor verifies on chain", false, "an anchor URL needs the pinned anchor address and at least one JSON-RPC endpoint");
+      return;
+    }
+    const logId = o.anchorLogIds && Object.hasOwn(o.anchorLogIds, tenant) ? o.anchorLogIds[tenant] : undefined;
+    if (logId === undefined) {
+      add(tenant, "anchor verifies on chain", false, `checking an anchor needs the log id of ${tenant} pinned (--anchor-log-id ${tenant}=<id>)`);
+      return;
+    }
+    const aBase = o.anchorUrl!.endsWith("/") ? o.anchorUrl! : `${o.anchorUrl!}/`;
+    let record: AnchorRecord;
+    try {
+      record = (await get(new URL(`${tenant}/latest.json`, aBase))) as AnchorRecord;
+    } catch (e) {
+      add(tenant, "anchor verifies on chain", false, e instanceof Error ? e.message : String(e));
+      return;
+    }
+    const r = await checkAnchorRecord(record, { rpcUrls: o.anchorRpcUrls, address: o.anchorAddress, chainId: o.anchorChainId ?? 1, logKeys: keys, fetch: f });
+    if (!add(tenant, "anchor verifies on chain", r.ok, r.ok ? `size ${record.treeSize} in block ${r.blockNumber} at ${r.blockTime}${r.finalized ? ", finalized" : ", not yet finalized"}` : r.error)) return;
+    if (!r.ok) return;
+    // the record's id is its signed checkpoint's (checked above); both it and the head must be the pinned log's
+    if (!add(tenant, "anchor and head name the pinned log", record.logId === logId && head.log === logId, `pinned ${logId}, anchored ${record.logId ?? "none"}, head ${head.log ?? "none"}`)) return;
+    add(tenant, "anchor is the newest from its address", r.newer === 0, r.newer === 0 ? undefined : `the address has sent ${r.newer} transaction(s) since this one: the record is not the current anchor`);
+    if (record.treeSize > head.treeSize) {
+      add(tenant, "head extends the anchored checkpoint", false, `the head at ${head.treeSize} is behind the anchored size ${record.treeSize}: the log was rolled back`);
+    } else if (record.treeSize === head.treeSize) {
+      add(tenant, "head extends the anchored checkpoint", record.rootHash === head.rootHash, record.rootHash === head.rootHash ? `at the anchored size ${head.treeSize}` : `a different root at the anchored size ${head.treeSize}: history was rewritten`);
+    } else {
+      try {
+        const proof = (await get(new URL(tenant === "default" ? `consistency?old=${record.treeSize}&new=${head.treeSize}` : `t/${tenant}/consistency?old=${record.treeSize}&new=${head.treeSize}`, base))) as { hashes: string[] };
+        const ok = verifyConsistency(record.treeSize, record.rootHash, head.treeSize, head.rootHash, proof.hashes);
+        add(tenant, "head extends the anchored checkpoint", ok, ok ? `${record.treeSize} -> ${head.treeSize}` : `the head at ${head.treeSize} does not extend the anchored ${record.treeSize}: history was rewritten`);
+      } catch (e) {
+        add(tenant, "head extends the anchored checkpoint", false, e instanceof Error ? e.message : String(e));
+      }
+    }
+    // the block's time is the chain's, so a host that stopped anchoring cannot make a log look covered
+    const age = now() - Date.parse(r.blockTime);
+    const ahead = head.treeSize > record.treeSize;
+    add(tenant, "anchor keeps up with the log", !ahead || age <= (o.maxAnchorLagMs ?? 13 * 3_600_000), ahead ? `the head at ${head.treeSize} is ahead of an anchor ${Math.round(age / 60_000)} min old` : `the anchor covers the head; anchored ${Math.round(age / 60_000)} min ago`);
+  };
+
   let keys: PublicKeyRef[] = [];
   try {
     keys = (await fetchLogKeys(base, f)).keys;
@@ -85,6 +144,7 @@ export async function checkLog(o: LogCheckOptions): Promise<LogCheckResult> {
       continue;
     }
     if (!head) continue;
+    if (o.anchorUrl) await anchorChecks(tenant, head);
     if (!o.checkpointsUrl) continue;
     const cpBase = o.checkpointsUrl.endsWith("/") ? o.checkpointsUrl : `${o.checkpointsUrl}/`;
     interface Cp {

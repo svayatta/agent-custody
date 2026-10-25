@@ -76,7 +76,7 @@ Each row names the attacker, the move, the defence, and whether the defence is a
 | attack | defence | kind |
 | --- | --- | --- |
 | Read receipt contents | The hosted log runs with `--hash-only` and refuses a full leaf at append, so no receipt reaches the log process even from a misconfigured gateway or a stolen token; the tenant's `hashOnly` setting keeps the receipt from ever leaving their machine. A log an operator runs for themselves may accept full leaves. | evidence: the server refuses; deployment on the tenant's side |
-| Rewrite a tenant's tree | Every head is signed and published as a checkpoint on a second host; a rewrite means two signed heads at one size with different roots, or a later head that does not extend an earlier one. Anyone holding an earlier head detects it with `audit`; the monitor does it every ten minutes; the witness countersigns only heads that extend the last it signed. | evidence, given a witness or an earlier head held elsewhere |
+| Rewrite a tenant's tree | Every head is signed and published as a checkpoint on a second host; a rewrite means two signed heads at one size with different roots, or a later head that does not extend an earlier one. Anyone holding an earlier head detects it with `audit`; the monitor does it every ten minutes; the witness countersigns only heads that extend the last it signed; the anchor commits each checkpoint to Ethereum, and `log-check --anchor-url` fails a head that does not extend the anchored one. | evidence, given a witness or an earlier head held elsewhere |
 | Show different histories to different verifiers | Same: checkpoints are public and the witness sees one history. Without a witness, two verifiers who compare heads detect it, and nobody else does. | evidence with a witness; otherwise detection needs comparison |
 | Mint a token for a tenant and append noise | Appends are hashes with no content; the tenant's export and usage show leaves and live tokens they did not make, and the audit trail, which the tenant's export carries, records who minted what and from where. | deployment |
 | Sign with a key not in the key document | Verifiers pin by keyid from the published document; a head signed by an unpublished key fails. Retired keys stay published so old heads keep verifying, and a rotation is announced with its date. | evidence |
@@ -89,6 +89,20 @@ Each row names the attacker, the move, the defence, and whether the defence is a
 | Countersign a rewritten history | It cannot without also holding the log's key; a countersignature is over the log's own signed head. A witness that countersigns two heads at one size has published its own dishonesty. | evidence |
 | Refuse a true history | An alarm with no consistency failure behind it is a false alarm; the log's consistency proof settles it in public. Verifiers who require a witness signature see a gap, which is the correct outcome for a disputed period. | evidence |
 | Collude with the log operator | Two independent operators are the assumption. A witness on the log operator's machine proves nothing, and the deployment guide says so. | assumption |
+
+### By the anchor
+
+| attack | defence | kind |
+| --- | --- | --- |
+| Publish a record for a checkpoint it never anchored | The record is checked against the chain: the transaction must come from the pinned address to itself, succeed, and carry exactly the root the record's inclusion proof leads to, from a checkpoint the log's keys signed. | evidence |
+| Anchor a rewritten history | The anchor proves each checkpoint extends the last one it anchored, and refuses with an alarm otherwise. An anchor that skipped the proof would still leave two anchored roots that cannot both extend the earlier one, in public. | evidence |
+| Serve an older, genuine record as the current one | Every anchor transaction covers every watched log, and the verifier requires the record's transaction to be the newest from the address, by the address's transaction count on the chain. | evidence |
+| Serve another tenant's record for this log | Tenant logs share the log's keys and the anchor's address, so the verifier pins each log's id; the anchored checkpoint and the current head must both name it. | evidence, given the pinned id |
+| Stop anchoring | A head ahead of its newest anchor fails once that anchor's block, timed by the chain, is older than `--max-anchor-lag`. Between anchors, a rewrite is caught only once a later anchor or another holder of a head disagrees. | detection |
+| Count an anchor a reorg removed | The anchor holds a transaction until its block is finalized, writes its records again if a reorg moves it, and sends the same root again if a reorg drops it. A verifier reports whether the record's block is finalized. | evidence once finalized |
+| Leak its key | Someone else can spend the funds and post transactions from the address. A root that no checkpoint leads to proves nothing, so a leaked key cannot make a false record check out. | evidence |
+| Anchor on a chain a few parties control | The installation chooses the chain, and the record names it. On an L2 a sequencer can delay or refuse an anchor, which shows as an anchor that does not keep up. A finalized block is as hard to rewrite as that chain makes it, which differs by chain (`docs/anchoring.md` lists what each rests on). | assumption: the chain's own guarantees |
+| Lie through a JSON-RPC endpoint | Give `log-check` several endpoints from different providers: they must agree on the transaction and its block, and a block counts as finalized only when every endpoint says so. | assumption: not every endpoint lies the same way |
 
 ### On the network
 
