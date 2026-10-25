@@ -12,7 +12,7 @@ import { canonicalize, digestOf, dsseCountersign, dsseSign, generateKeyPair, loa
 import { createGateway, RECEIPT_META_KEY, createGatewayHost } from "../src/gateway.ts";
 import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { consistencyProof, inclusionProof, leafHash, rootOf } from "../src/log.ts";
-import { serveLog } from "../src/log-sink.ts";
+import { fileLog, serveLog, type LogSink } from "../src/log-sink.ts";
 import { RECEIPT_TYPE, type ReceiptBundle, type ReceiptStatement } from "../src/receipt.ts";
 import { createSdkIssuer } from "../src/sdk/index.ts";
 import { verifyBundle, type VerifyOptions } from "../src/verify.ts";
@@ -39,6 +39,8 @@ interface Case {
   providerSecrets?: { stripe?: string; github?: string };
   /** the log id the verifier is told to expect on the tree head */
   logId?: string;
+  /** the verifier is told to require a strict gateway receipt */
+  requireStrict?: boolean;
   log: string[] | null;
   expected: { ok: boolean; failing: string[] };
 }
@@ -71,6 +73,7 @@ function addCase(c: Omit<Case, "expected">, opts?: Partial<VerifyOptions>) {
     ...(c.approvalKeys ? { approvalKeys: c.approvalKeys.map((k) => keyFrom(k)) } : {}),
     ...(c.providerSecrets ? { providerSecrets: c.providerSecrets } : {}),
     ...(c.logId ? { logId: c.logId } : {}),
+    ...(c.requireStrict ? { requireStrict: true } : {}),
     ...(logFile ? { logFile } : {}),
     ...opts,
   });
@@ -95,6 +98,28 @@ const glog = logLines(gfx.logFile);
 const G = { issuerKeys: ["gateway"], principalKeys: ["principal"], logKeys: [] as string[] };
 
 addCase({ name: "gateway-executed", description: "An in-policy refund through the gateway: delegation attested, facts observed, executed. Every check passes with the log.", bundle: executed, ...G, log: glog });
+
+// ---- strict mode: every call precommitted to a remote hash-only log, and the receipt says so ----
+const strictFx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-strict-")));
+key("strict-gateway", strictFx.gatewayPub);
+key("strict-principal", strictFx.principalPub);
+const strictRaw = JSON.parse(readFileSync(strictFx.configFile, "utf8"));
+delete strictRaw.logFile;
+writeFileSync(strictFx.configFile, JSON.stringify({ ...strictRaw, strict: true, log: { url: "https://log.invalid", hashOnly: true, keys: [strictFx.gatewayPub] } }));
+const strictKey = loadPrivateKey(join(strictFx.dir, "keys", "gateway.key"));
+// the log is reached as if over HTTP; behind it is a file, so the case carries its leaves
+const strictFile = fileLog(strictFx.logFile, strictKey);
+const strictSink: LogSink = { kind: "http", where: "https://log.invalid", append: (leaf) => strictFile.append(leaf) };
+const strictCfg = loadConfig(strictFx.configFile);
+const strictHost = await createGatewayHost(strictCfg, { log: strictSink });
+const strictCall = await strictHost.open(JSON.parse(readFileSync(strictCfg.grantFile!, "utf8")) as Envelope).handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 50000 } });
+await strictHost.close();
+const strictBundle = bundleFile(strictFx.receiptsDir, String(strictCall._meta?.[RECEIPT_META_KEY]));
+const S = { issuerKeys: ["strict-gateway"], principalKeys: ["strict-principal"], logKeys: [] as string[], requireStrict: true };
+addCase({ name: "gateway-strict", description: "A refund through a strict gateway, verified with strict required. The issuer says `strict: true`, and the authorization was committed to the log before the call was forwarded.", bundle: strictBundle, ...S, log: logLines(strictFx.logFile) });
+addCase({ name: "gateway-executed-strict-required", description: "The ordinary executed refund, verified with strict required. Its issuer does not say strict, and the call went out with no authorization committed first: both strict checks fail.", bundle: executed, ...G, requireStrict: true, log: glog });
+addCase({ name: "resigned-strict-authorization-removed", description: "The strict receipt with its authorization removed, re-signed. The issuer still says strict, but the executed call carries no precommit, so `strict: call precommitted before forwarding` fails.", bundle: resigned(strictBundle, strictKey, (st) => { delete st.predicate.authorization; }), ...S, log: logLines(strictFx.logFile) });
+addCase({ name: "resigned-strict-claimed-without-precommit", description: "The ordinary executed refund re-signed with `issuer.strict: true` added. Claiming strict does not make a call precommitted: `strict: call precommitted before forwarding` fails.", bundle: resigned(executed, gatewayKey, (st) => { st.predicate.issuer.strict = true; }), ...G, requireStrict: true, log: glog });
 
 // ---- human approvals: exact payload, distinct signers, single use, and expiry ----
 const afx = buildFixture(mkdtempSync(join(tmpdir(), "vectors-approvals-")));

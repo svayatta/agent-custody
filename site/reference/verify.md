@@ -5,7 +5,7 @@ A receipt is verified with public keys alone: no server, no account, no trust in
 ## `verify`
 
 ```bash
-agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub [--approval-key approver.pub] [--log-key log.pub | --log-url https://log.example.com/] [--log-id acme] [--upstream-key upstream.pub] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log log.jsonl] [--disclose disclosure.json] [--capture-key-env NAME] [--json]
+agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub [--approval-key approver.pub] [--log-key log.pub | --log-url https://log.example.com/] [--log-id acme] [--require-strict] [--upstream-key upstream.pub] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log log.jsonl] [--disclose disclosure.json] [--capture-key-env NAME] [--json]
 ```
 
 | option | meaning |
@@ -15,6 +15,7 @@ agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principa
 | `--approval-key` (repeatable) | human keys trusted to sign exact-action approvals; required to validate a forwarded call carrying approval evidence; a refusal needs none. Never falls back to issuer or principal keys |
 | `--log-key` / `--log-url` | the key of a log run by someone else, given as a file or fetched from the log's key document and pinned by keyid |
 | `--log-id` | every tree head must name this log |
+| `--require-strict` | the receipt must come from a gateway in strict mode (`issuer.strict: true`), and a call it forwarded must carry the authorization committed before it: the checks `strict mode in force` and `strict: call precommitted before forwarding` |
 | `--upstream-key` | an upstream that signs its results; the execution then verifies as attested |
 | `--stripe-secret-env`, `--github-secret-env` | shared secrets for provider deliveries carried in the receipt |
 | `--log` | a copy of the log file; the root is recomputed at the receipt's tree size and compared |
@@ -28,7 +29,7 @@ Exit 0 when every check passes, 1 otherwise. The text report is one line per che
 { "ok": true, "checks": [{ "name": "receipt signature (issuer key)", "ok": true, "detail": "keyid 9d442884f3d4" }, { "name": "delegation signature (principal key)", "ok": true, "detail": "signed by 19b2d2a2a213" }, …], "statement": { "…": "the decoded statement" } }
 ```
 
-In code: `verifyBundle(bundle, { issuerKeys, principalKeys, approvalKeys?, logKeys?, upstreamKeys?, providerSecrets?, logFile?, logId?, disclosed?, captureKey? }): { ok, checks, statement }` and `formatReport(result): string`. Keys are `PublicKeyRef`s from `loadPublicKey(path)` or `publicKeyFromPem(pem)`; `fetchLogKeys(url)` returns `{ doc, keys }` from a key document.
+In code: `verifyBundle(bundle, { issuerKeys, principalKeys, approvalKeys?, logKeys?, upstreamKeys?, providerSecrets?, logFile?, logId?, requireStrict?, disclosed?, captureKey? }): { ok, checks, statement }` and `formatReport(result): string`. Keys are `PublicKeyRef`s from `loadPublicKey(path)` or `publicKeyFromPem(pem)`; `fetchLogKeys(url)` returns `{ doc, keys }` from a key document.
 
 An approval record makes its checks mandatory for a forwarded call, even when `approvalKeys` is empty. A refusal receipt, such as a Cedar denial after a valid approval, runs only `approval consistent with execution` and verifies without approval keys. The browser verifier takes a separate human approval key input and cannot restore hidden values; use the Node verifier with `--disclose` or `--capture-key-env` for those. Under a private capture rule the receipt withholds the signed envelope, which contains action fields plus an unsalted argument digest, so the approval checks pass as committed until it is restored. See [human approvals](/receipts/approvals). Offline verification cannot prove that the approval was never used elsewhere; single use relies on the gateway's persistent shared consumption store.
 
@@ -40,6 +41,7 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 | receipt payload type | it is an in-toto statement with the receipt predicate type |
 | structural parts in clear | the capture note, if any, is well formed and names no structural part (ids, the tool, the grant, the status, the decision, the digests, a fact's tool, a provider's name), and those parts are present and of the right type: an attested principal's key id, the status, the decision and the policy digest, an authorization's tree head and proof, and an approval record; nothing else is decided if this fails |
 | issuer kind is known, issuer keyid matches signer | the receipt says who issued it and the signature agrees |
+| strict mode in force, strict: call precommitted before forwarding | only with `--require-strict`: a gateway receipt that says `issuer.strict: true`, and, for a call that was executed, failed, or errored, an embedded authorization; a reconciliation receipt is a provider read and needs none |
 | gateway receipt carries a delegation, carries a policy decision | gateway receipts embed both |
 | delegation signature (principal key) | the grant was signed by a trusted principal key |
 | delegation chain to the principal | only for chained grants: every link signed by the key its parent names, no scope escalation, nested windows, one principal |

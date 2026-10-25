@@ -138,6 +138,17 @@ const OperationsSchema = z.object({
 export type OperationsConfig = z.infer<typeof OperationsSchema>;
 export type OperationToolConfig = z.infer<typeof OperationToolSchema>;
 
+/** What strict mode refuses in a config, whether or not it is on: an empty list means the config can run strict. */
+export function strictRefusals(c: { logFile?: string | undefined; log?: { hashOnly?: boolean | undefined; keys?: string[] | undefined } | undefined }): string[] {
+  const out: string[] = [];
+  if (c.logFile || !c.log) out.push("strict mode needs a remote log: logFile is a log the operator can rewrite; set log.url to a log someone else runs");
+  else {
+    if (!c.log.hashOnly) out.push("strict mode needs log.hashOnly: the log is run by someone else, so send it leaf hashes, not receipts");
+    if (!c.log.keys?.length) out.push("strict mode needs log.keys: the log's public key files, pinned, to check its answer before any call is forwarded");
+  }
+  return out;
+}
+
 export const GatewayConfigSchema = z.object({
   identity: z.object({ keyFile: z.string() }),
   /** the upstream: an MCP server to spawn over stdio, an MCP URL to reach over Streamable HTTP with an optional bearer token from the environment, or a REST API described as tools */
@@ -156,6 +167,12 @@ export const GatewayConfigSchema = z.object({
   precommit: z.array(z.string().min(1)).default([]),
   /** with a remote log, refuse to start when precommit is empty; without it the gateway only warns */
   requirePrecommit: z.boolean().optional(),
+  /**
+   * Strict mode: every tool is precommitted, the log must be remote, hash-only, and pinned, and no receipt goes to the
+   * outbox. A call is forwarded only once its authorization is in a log the operator does not run, and every receipt says
+   * `issuer.strict`, so a verifier can require it.
+   */
+  strict: z.boolean().optional(),
   /** Tools that require a signed, unexpired, single-use approval, in every mode; "*" covers all agent calls. */
   approvals: ApprovalsSchema.optional(),
   /** Durable idempotency, daily budget reservations, and provider reconciliation for financial operations. */
@@ -182,7 +199,8 @@ export const GatewayConfigSchema = z.object({
   // a key fetched from the log itself proves nothing about a log that is dishonest from the start, so a remote log that
   // gates consequential calls must have its keys pinned in the config (issue #99)
   .refine((c) => !c.log || (!c.precommit.length && !c.operations) || !!c.log.keys?.length, { message: "precommit with a remote log needs log.keys: the log's public key files, pinned, to check its answer before a consequential call is forwarded" })
-  .refine((c) => !c.requirePrecommit || !c.log || c.precommit.length > 0, { message: "requirePrecommit is set and precommit is empty: name the consequential tools in precommit, or [\"*\"]" })
+  .superRefine((c, ctx) => { if (c.strict) for (const message of strictRefusals(c)) ctx.addIssue({ code: "custom", path: ["strict"], message }); })
+  .refine((c) => !c.requirePrecommit || !c.log || c.precommit.length > 0 || !!c.strict, { message: "requirePrecommit is set and precommit is empty: name the consequential tools in precommit, or [\"*\"]" })
   .refine((c) => !c.operations || !c.facts.some((fact) => c.operations!.tools.some((tool) => tool.tool === fact.tool)), { message: "a fact lookup cannot invoke a financial operation tool" });
 export type GatewayConfig = z.infer<typeof GatewayConfigSchema>;
 export type FactConfig = z.infer<typeof FactSchema>;

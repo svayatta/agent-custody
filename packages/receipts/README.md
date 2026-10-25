@@ -10,7 +10,7 @@ Two producers, one receipt format, one verifier.
 Anyone holding the public keys can verify a receipt offline. The agent is not trusted. The layer around it is, and the receipt says exactly how far that trust extends, starting with who issued it. What the receipt file carries of a call is a choice per tool: a field can be withheld as a commitment or encrypted under your key, and the verifier recomputes the digests when it is shown the values.
 
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
-- [Tutorials](docs/tutorials.md): thirty-three runnable examples, one per aspect of the code, all executed by the test suite
+- [Tutorials](docs/tutorials.md): thirty-four runnable examples, one per aspect of the code, all executed by the test suite
 - [Financial operations](docs/financial-operations.md): durable operation ids, provider idempotency keys, atomic daily budget reservations, and reconciliation receipts for uncertain outcomes
 - [The gateway console](docs/console.md): an admin service for the person who runs a gateway: config, tools, receipts with a verdict each, a policy editor that replays recorded calls before it saves, grant revocation, and an audit trail
 - [Configuring the gateway](docs/configuration.md): who may use which tools and where the tools live, a worked example with two agents, the Docker image, and `agent-custody check` to validate a config before it starts
@@ -190,7 +190,7 @@ Every field carries a provenance label. This is the design decision that matters
 bun install                              # from the repository root, once for the workspace
 cd packages/receipts
 node scripts/demo.ts                     # gateway: keys, grant, policy, four tool calls, verification, a tampering attempt; then the SDK wrapping the same tool
-node examples/01-keys-and-signing.ts     # first of thirty-two step-by-step examples, see docs/tutorials.md
+node examples/01-keys-and-signing.ts     # first of thirty-four step-by-step examples, see docs/tutorials.md
 bun run test                             # this package; `bun run test` at the root runs every package
 ```
 
@@ -228,7 +228,7 @@ const refund = issuer.wrap("stripe.refund", async (args: { amount: number }) => 
 | the principal really delegated this scope to this agent | anyone with the principal's key | operator, agent | grant signed by principal key, checked for scope and validity window | done |
 | the policy decision was made against this exact policy | anyone | operator swapping policies | sha256 of policy text in the receipt | done |
 | facts the policy relied on were not asserted by the agent | anyone reading the receipt | agent | facts fetched by the gateway, recorded with their own digests, labelled `observed` | done |
-| the side effect was committed to the log before it happened | anyone with a log copy | operator, log outage | for tools in `precommit`, a signed authorization logged first, embedded in the receipt with its leaf position, checked to precede the receipt | done |
+| the side effect was committed to the log before it happened | anyone with a log copy | operator, log outage | for tools in `precommit`, or every tool under `strict`, a signed authorization logged first, embedded in the receipt with its leaf position, checked to precede the receipt | done |
 | the upstream system actually executed the action | anyone with the upstream's key or the provider's secret | operator | the upstream signs its result for the receipt, or the provider's own delivery signature (Stripe, GitHub) is embedded and checked | done, for upstreams that sign |
 | the operator itself cannot mint a false receipt | regulator, counterparty | operator | needs a TEE gateway with an attested build ([#179](https://github.com/svayatta/agent-custody/issues/179)), and the provider's own records to catch actions outside the gateway ([#178](https://github.com/svayatta/agent-custody/issues/178)) | **not done** |
 | which model produced the call | anyone | operator | no hosted provider signs model identity | **not possible today**, labelled `claimed` |
@@ -279,7 +279,7 @@ src/retention.ts   pruning the log: leaves become their hashes, bundles are remo
 src/index.ts       the package's public surface; adapters are exported on ./sdk/<framework> subpaths
 tsconfig.build.json  emits dist/ (JavaScript plus declarations) for consumers; the repo itself runs the .ts directly
 scripts/           fake Stripe upstream (signs its results with --key), a second fake upstream, fixture builders for gateway and SDK, the replay builder (`replay.ts`: example 27 and state example 07 as a folder of receipts and public keys anyone can verify with the published packages), demo
-examples/          thirty-two runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
+examples/          thirty-four runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
 test/              unit tests per module, end-to-end gateway test, SDK and hook tests,
                    adapter tests against the real packages, and a test that runs every policy in docs/policies.md
 docs/              tutorials, usage (gateway), codex-recovery (live demo), approvals, sdk, policies, verification
@@ -291,6 +291,7 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Done**
 
+- Strict mode: `"strict": true` refuses a local log, a log that is not hash-only, and a log without pinned keys; precommits every tool, in observe mode too; and turns the outbox off. No call the agent makes is forwarded before its authorization is in a log the operator does not run, every receipt says `issuer.strict`, and `verify --require-strict` requires it ([usage](docs/usage.md#strict-mode), tutorial 34). [Issue #177](https://github.com/svayatta/agent-custody/issues/177).
 - Policy reload: the gateway re-reads `policy.cedar` whenever it changes and applies it from the next call, with no restart and no dropped session; a policy that does not parse is refused and the one in force stays, and every change or refusal is recorded in `receipts/policy-reloads.jsonl` ([usage](docs/usage.md)).
 - Live Codex support recovery demo: model-selected MCP calls, incorrect CRM memory, a reviewed recovery plan, simulated credit compensation, and verified evidence; [guide](docs/codex-recovery.md), with offline regression coverage.
 - Payload-bound human approvals: short-lived signatures over the principal, agent, tool, full arguments, amount, currency, and beneficiary; configurable one- or two-key thresholds, enforced even in observe mode, a configurable lifetime cap, persistent atomic single-use consumption before forwarding, and independent approval-key verification. [Guide](docs/approvals.md), tutorial 30.
@@ -338,15 +339,14 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Next, in the order it pays off**
 
-The first four close the gap between a log the operator cannot rewrite and a record the operator cannot shape.
+The first three close the gap between a log the operator cannot rewrite and a record the operator cannot shape.
 
 1. Run the anchor for log.agent-custody.dev on mainnet: a funded key held only by the anchor service on the host, its records served beside the checkpoints, its address and each tenant's log id published in the welcome sheet and on the security page, and the monitor checking it. The code is done. [Issue #176](https://github.com/svayatta/agent-custody/issues/176).
-2. Strict mode: the gateway refuses a local log, pre-commits every tool, and turns the outbox off. No call is then forwarded before its authorization is in a log the operator does not run, and receipts say strict mode was in force. [Issue #177](https://github.com/svayatta/agent-custody/issues/177).
-3. Completeness from the provider's side: an auditor's read-only key lists Stripe's refunds, then GitHub's actions, and matches each one to a receipt. That catches what no gateway can see, an action taken outside it. [Issue #178](https://github.com/svayatta/agent-custody/issues/178).
-4. A TEE gateway: a confidential container with a reproducible, attested build, the signing key generated and kept in the enclave, TLS ending inside it, and both verifiers checking the path from the receipt key, through the attestation, to the release. It replaces the TEE-hosted signer planned before. [Issue #179](https://github.com/svayatta/agent-custody/issues/179).
-5. Run the witness for log.agent-custody.dev on a machine and under an account that is not ours, and require it in the welcome sheet. The code is done; what it needs is a second operator. [Issue #116](https://github.com/svayatta/agent-custody/issues/116).
-6. Post-quantum signatures: ML-DSA beside Ed25519 in the same DSSE envelope, hybrid by default when a PQ key is present, in every signed artefact and in the browser verifier. [Issue #11](https://github.com/svayatta/agent-custody/issues/11).
-7. Receiver attestation for agent-to-agent calls: the delegate signs its answer for the receipt, as a signing upstream does today.
-8. SD-JWT redaction, then ZK proofs of policy compliance. Not before.
+2. Completeness from the provider's side: an auditor's read-only key lists Stripe's refunds, then GitHub's actions, and matches each one to a receipt. That catches what no gateway can see, an action taken outside it. [Issue #178](https://github.com/svayatta/agent-custody/issues/178).
+3. A TEE gateway: a confidential container with a reproducible, attested build, the signing key generated and kept in the enclave, TLS ending inside it, and both verifiers checking the path from the receipt key, through the attestation, to the release. It replaces the TEE-hosted signer planned before. [Issue #179](https://github.com/svayatta/agent-custody/issues/179).
+4. Run the witness for log.agent-custody.dev on a machine and under an account that is not ours, and require it in the welcome sheet. The code is done; what it needs is a second operator. [Issue #116](https://github.com/svayatta/agent-custody/issues/116).
+5. Post-quantum signatures: ML-DSA beside Ed25519 in the same DSSE envelope, hybrid by default when a PQ key is present, in every signed artefact and in the browser verifier. [Issue #11](https://github.com/svayatta/agent-custody/issues/11).
+6. Receiver attestation for agent-to-agent calls: the delegate signs its answer for the receipt, as a signing upstream does today.
+7. SD-JWT redaction, then ZK proofs of policy compliance. Not before.
 
 A Python SDK follows the same shape once the TypeScript adapters have settled.

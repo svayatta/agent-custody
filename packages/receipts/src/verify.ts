@@ -29,6 +29,8 @@ export interface VerifyOptions {
   logFile?: string;
   /** If given, every tree head in the bundle must name this log, so a head from another tenant's log cannot be presented as this one's. */
   logId?: string;
+  /** Require a strict gateway receipt: one whose issuer says it ran in strict mode, and whose call, if forwarded, carries the authorization committed before it. */
+  requireStrict?: boolean;
   /**
    * The withheld values, as `agent-custody reveal` writes them or the party that holds them hands them over: a partial
    * predicate with `{ $custody: "disclosed", salt, value }` at each withheld path (`{ receiptId, request: { args: { reason: {...} } }, execution: { result: { content: {...} }, error, upstream: { rawBody } }, policy: { errors }, facts: { <name>: { value, args } } }`).
@@ -189,6 +191,12 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
 
   add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
   add("issuer keyid matches signer", p.issuer.keyid === sig.keyid);
+  if (opts.requireStrict) {
+    add("strict mode in force", p.issuer.kind === "gateway" && p.issuer.strict === true, p.issuer.strict === true ? undefined : "the issuer does not say it ran in strict mode");
+    // under strict mode every call is precommitted; a provider read the operator ran is a lookup, not a call
+    const forwarded = p.execution.status === "executed" || p.execution.status === "failed" || p.execution.status === "error";
+    add("strict: call precommitted before forwarding", !forwarded || !!p.reconciliation || !!p.authorization, forwarded && !p.reconciliation && !p.authorization ? `the call was ${p.execution.status} with no authorization committed first` : undefined);
+  }
   if (p.operation) {
     add("operation observed by gateway", p.issuer.kind === "gateway" && p.operation.provenance === "observed");
     if (!p.reconciliation) {
@@ -537,7 +545,7 @@ export function formatReport(r: VerifyResult): string {
   if (!r.statement) return lines.join("\n");
   const p = r.statement.predicate;
   lines.push("");
-  lines.push(`ISSUER: ${p.issuer.kind}${p.issuer.framework ? ` (${p.issuer.framework})` : ""}, ${ISSUER_NOTE[p.issuer.kind] ?? "unknown issuer kind"}`);
+  lines.push(`ISSUER: ${p.issuer.kind}${p.issuer.framework ? ` (${p.issuer.framework})` : ""}${p.issuer.strict ? ", strict mode" : ""}, ${ISSUER_NOTE[p.issuer.kind] ?? "unknown issuer kind"}`);
   lines.push("");
   lines.push("field           provenance  value");
   const row = (f: string, prov: string, v: unknown) => lines.push(`${f.padEnd(15)} ${prov.padEnd(11)} ${typeof v === "string" ? v : JSON.stringify(v)}`);
