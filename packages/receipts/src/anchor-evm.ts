@@ -49,7 +49,8 @@ export async function evmChain(o: EvmChainOptions): Promise<AnchorChain> {
     async included(txHash) {
       try {
         const r = await client.getTransactionReceipt({ hash: txHash as `0x${string}` });
-        return { blockNumber: Number(r.blockNumber), ok: r.status === "success" };
+        const finalized = await client.getBlock({ blockTag: "finalized" });
+        return { blockNumber: Number(r.blockNumber), ok: r.status === "success", finalized: finalized.number >= r.blockNumber };
       } catch (e) {
         if (e instanceof viem.TransactionReceiptNotFoundError) return null;
         throw e;

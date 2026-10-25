@@ -3,6 +3,7 @@
 // checkpoints, a static host for them, and an in-process chain that signs-and-recovers real Ethereum transactions,
 // so the sender a verifier checks is the one that signed. Nothing reaches the network.
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,21 +52,29 @@ interface Tx {
 /** A chain in a Map: transactions are parsed and their sender recovered from the signature, blocks are mined on demand. */
 function devnet(chainId = 1) {
   const txs = new Map<string, Tx>();
-  const blocks: { number: number; hash: string; timestamp: number }[] = [{ number: 0, hash: keccak256(toHex("genesis")), timestamp: 1_700_000_000 }];
+  const blocks: { number: number; hash: string; timestamp: number }[] = [{ number: 0, hash: keccak256(toHex(`genesis ${chainId}`)), timestamp: Math.floor(Date.now() / 1000) - 3600 }];
+  let forks = 0;
   const net = {
     baseFeeGwei: 2n,
-    finalizedLag: 2,
+    finalizedLag: 0,
     revertNext: false,
     sent: [] as Tx[],
-    mine() {
+    mine(include = true) {
       const prev = blocks[blocks.length - 1]!;
-      const b = { number: prev.number + 1, hash: keccak256(toHex(`block ${prev.number + 1}`)), timestamp: prev.timestamp + 12 };
+      const b = { number: prev.number + 1, hash: keccak256(toHex(`block ${prev.number + 1} fork ${forks}`)), timestamp: prev.timestamp + 12 };
       blocks.push(b);
-      for (const tx of txs.values()) if (tx.blockNumber === null) tx.blockNumber = b.number;
+      if (include) for (const tx of txs.values()) if (tx.blockNumber === null) tx.blockNumber = b.number;
       return b.number;
     },
-    finalizeAll() {
-      net.finalizedLag = 0;
+    /** drops every block from `n` on; their transactions go back to the mempool, or are lost with `drop` */
+    reorg(n: number, drop = false) {
+      forks++;
+      blocks.length = n;
+      for (const [hash, tx] of txs) {
+        if (tx.blockNumber === null || tx.blockNumber < n) continue;
+        if (drop) txs.delete(hash);
+        else tx.blockNumber = null;
+      }
     },
     /** another sender's transaction, e.g. someone else posting a root that looks like ours */
     inject(tx: Omit<Tx, "blockNumber">) {
@@ -95,7 +104,8 @@ function devnet(chainId = 1) {
           return toHex(1_000_000_000n);
         case "eth_getTransactionCount": {
           const who = String(p[0]).toLowerCase();
-          return toHex([...txs.values()].filter((t) => t.from === who).length);
+          // "latest" counts mined transactions; "pending" (what a signer asks for its next nonce) counts the mempool too
+          return toHex([...txs.values()].filter((t) => t.from === who && (p[1] !== "latest" || t.blockNumber !== null)).length);
         }
         case "eth_estimateGas":
           return toHex(22_000);
@@ -183,9 +193,18 @@ describe("anchoring the log's checkpoints on a chain", () => {
   const RPC = "http://rpc.devnet.test/";
   const cpDir = () => join(dir, "checkpoints");
   const outDir = () => join(dir, "anchor");
-  const post = (leaf: string) => fetch(new URL("append", log.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ leaf }) });
-  const record = (name = "latest.json") => JSON.parse(readFileSync(join(outDir(), "default", name), "utf8")) as AnchorRecord;
+  const appendTo = (url: string, leaf: string) => fetch(new URL("append", url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ leaf }) });
+  const post = (leaf: string) => appendTo(log.url, leaf);
+  const record = (name = "latest.json", tenant = "default", out = outDir()) => JSON.parse(readFileSync(join(out, tenant, name), "utf8")) as AnchorRecord;
   const check = (r: AnchorRecord, extra: Partial<Parameters<typeof checkAnchorRecord>[1]> = {}) => checkAnchorRecord(r, { rpcUrls: [RPC], address: chain.address, chainId: 1, logKeys, fetch: rpcFetch({ [RPC]: net }), ...extra });
+  const watch = (extra: Partial<Parameters<typeof checkLog>[0]> = {}) => checkLog({ logUrl: log.url, anchorUrl: anchorHost.url, anchorAddress: chain.address, anchorRpcUrls: [RPC], anchorLogIds: { default: "anchored-log" }, fetch: rpcFetch({ [RPC]: net }), ...extra });
+  const named = (r: { checks: { name: string }[] }, name: string) => r.checks.find((c) => c.name === name);
+  /** a log under the same key and log id with another history: what an operator rewriting the log would serve */
+  const forgedLog = async (leaves: string[]) => {
+    const forged = await serveLog(fileResolver(join(dir, `forged-${leaves.join("")}.jsonl`), { logId: "anchored-log" }), localSigner(loadPrivateKey(logKp.keyFile)), { port: 0 });
+    for (const leaf of leaves) await appendTo(forged.url, leaf);
+    return forged;
+  };
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "anchor-"));
@@ -208,7 +227,7 @@ describe("anchoring the log's checkpoints on a chain", () => {
     anchorHost.server.close();
   });
 
-  it("sends nothing until there is a checkpoint, then one transaction from its own address to itself carrying the root", async () => {
+  it("sends nothing until there is a checkpoint, then one transaction from its own address to itself, settled only once finalized", async () => {
     expect(await anchor.runOnce()).toEqual({ tenants: [{ tenant: "default", outcome: "unavailable", reason: "no checkpoint published yet" }], tx: { outcome: "none" } });
     expect(net.sent).toHaveLength(0);
     await post("a");
@@ -223,29 +242,27 @@ describe("anchoring the log's checkpoints on a chain", () => {
     expect(tx.from).toBe(chain.address);
     expect(tx.to).toBe(chain.address);
     expect(tx.input).toMatch(new RegExp(`^${anchorCalldata("00".repeat(32)).slice(0, -64)}[0-9a-f]{64}$`));
-    // no record exists until the transaction is in a block
     expect(existsSync(join(outDir(), "default", "latest.json"))).toBe(false);
+    // in a block but not finalized: the record is published, and the anchor keeps the transaction pending
+    net.finalizedLag = 2;
     net.mine();
-    const landed = await anchor.runOnce();
-    expect(landed.tx).toMatchObject({ outcome: "anchored", txHash: tx.hash, tenants: ["default"] });
-    const r = record();
-    expect(r.treeSize).toBe(2);
-    expect(anchorCalldata(r.anchor.root)).toBe(tx.input);
+    expect((await anchor.runOnce()).tx).toMatchObject({ outcome: "included", txHash: tx.hash });
+    expect(anchorCalldata(record().anchor.root)).toBe(tx.input);
+    expect(await check(record())).toMatchObject({ ok: true, finalized: false, newer: 0 });
+    expect(anchor.pending).toBe(true);
+    net.mine();
+    net.mine();
+    expect((await anchor.runOnce()).tx).toMatchObject({ outcome: "anchored", txHash: tx.hash, tenants: ["default"] });
+    expect(anchor.pending).toBe(false);
+    expect(await check(record())).toMatchObject({ ok: true, finalized: true, blockNumber: record().anchor.blockNumber });
     expect(JSON.parse(readFileSync(join(outDir(), ".well-known", "agent-custody-anchor.json"), "utf8"))).toEqual({ chainId: 1, address: chain.address });
+    net.finalizedLag = 0;
   });
 
-  it("a record checks out against the chain, and is reported finalized only once the chain says so", async () => {
-    const early = await check(record());
-    expect(early).toMatchObject({ ok: true, finalized: false });
-    net.mine();
-    net.mine();
-    const later = await check(record());
-    expect(later).toMatchObject({ ok: true, finalized: true, blockNumber: record().anchor.blockNumber });
-    // two endpoints that agree pass; finality is the least-finalized endpoint's
+  it("finality is the least-finalized endpoint's, and endpoints on two sides of a fork do not agree", async () => {
     const RPC2 = "http://rpc2.devnet.test/";
     expect(await check(record(), { rpcUrls: [RPC, RPC2], fetch: rpcFetch({ [RPC]: net, [RPC2]: net }) })).toMatchObject({ ok: true, finalized: true });
     expect(await check(record(), { rpcUrls: [RPC, RPC2], fetch: rpcFetch({ [RPC]: net, [RPC2]: notFinalized(net) }) })).toMatchObject({ ok: true, finalized: false });
-    // an endpoint on the other side of a fork does not agree that the transaction is in this block
     expect(await check(record(), { rpcUrls: [RPC, RPC2], fetch: rpcFetch({ [RPC]: net, [RPC2]: forkedAt(net, record().anchor.blockNumber) }) })).toMatchObject({ ok: false, error: expect.stringMatching(/disagree on block/) });
   });
 
@@ -281,14 +298,13 @@ describe("anchoring the log's checkpoints on a chain", () => {
     expect(net.sent.length).toBe(before);
     expect(readdirSync(join(outDir(), "default")).filter((n) => n.startsWith("ALARM-"))).toHaveLength(3);
     expect(record().treeSize).toBe(3);
-    // the honest log carries on and is anchored again
     await publisher.publishOnce();
     expect((await anchor.runOnce()).tenants).toEqual([{ tenant: "default", outcome: "moved", treeSize: 4 }]);
     net.mine();
     expect((await anchor.runOnce()).tx.outcome).toBe("anchored");
   });
 
-  it("holds a transaction in flight: overlapping runs share one pass, and nothing new is sent until it lands", async () => {
+  it("holds a transaction in flight: overlapping runs share one pass, and nothing new is sent until it is finalized", async () => {
     await post("e");
     await publisher.publishOnce();
     const before = net.sent.length;
@@ -297,10 +313,13 @@ describe("anchoring the log's checkpoints on a chain", () => {
     expect(net.sent.length).toBe(before + 1);
     await post("f");
     await publisher.publishOnce();
-    // still pending: the new checkpoint waits, so one nonce is never used twice
     expect((await anchor.runOnce()).tx.outcome).toBe("pending");
-    expect(net.sent.length).toBe(before + 1);
+    // in a block, not yet finalized: still held, so one nonce is never used twice
+    net.finalizedLag = 1;
     net.mine();
+    expect((await anchor.runOnce()).tx.outcome).toBe("included");
+    expect(net.sent.length).toBe(before + 1);
+    net.finalizedLag = 0;
     expect((await anchor.runOnce()).tx).toMatchObject({ outcome: "anchored" });
     expect(record().treeSize).toBe(5);
     expect((await anchor.runOnce()).tenants).toEqual([{ tenant: "default", outcome: "moved", treeSize: 6 }]);
@@ -313,116 +332,204 @@ describe("anchoring the log's checkpoints on a chain", () => {
     await publisher.publishOnce();
     net.baseFeeGwei = 50n;
     const before = net.sent.length;
-    const costly = await anchor.runOnce();
-    expect(costly.tx).toMatchObject({ outcome: "failed", reason: expect.stringMatching(/above the cap of 20/) });
+    expect((await anchor.runOnce()).tx).toMatchObject({ outcome: "failed", reason: expect.stringMatching(/above the cap of 20/) });
     expect(net.sent.length).toBe(before);
     net.baseFeeGwei = 2n;
     net.revertNext = true;
     expect((await anchor.runOnce()).tx.outcome).toBe("pending");
     net.mine();
     expect((await anchor.runOnce()).tx).toMatchObject({ outcome: "failed", reason: expect.stringMatching(/failed in block/) });
-    expect(record().treeSize).toBe(6);
-    // the failed transaction is not a record; the next run sends the same checkpoint again
     expect((await anchor.runOnce()).tenants).toEqual([{ tenant: "default", outcome: "moved", treeSize: 7 }]);
     net.mine();
     expect((await anchor.runOnce()).tx.outcome).toBe("anchored");
     expect(record().treeSize).toBe(7);
   });
 
+  it("follows a transaction that a reorg moves to another block, and resends one that a reorg drops", async () => {
+    await post("h");
+    await publisher.publishOnce();
+    net.finalizedLag = 3;
+    await anchor.runOnce();
+    const first = net.mine();
+    expect((await anchor.runOnce()).tx).toMatchObject({ outcome: "included", blockNumber: first });
+    // the block is reorged away before it is finalized; the transaction goes back to the mempool
+    net.reorg(first);
+    expect((await anchor.runOnce()).tx.outcome).toBe("pending");
+    expect(await check(record())).toMatchObject({ ok: false });
+    // the new branch's first block leaves it out; the next one takes it
+    net.mine(false);
+    net.mine();
+    // the record follows the transaction to the block it is in now
+    expect((await anchor.runOnce()).tx).toMatchObject({ outcome: "included" });
+    expect(record().anchor.blockNumber).not.toBe(first);
+    expect(await check(record())).toMatchObject({ ok: true, finalized: false });
+    net.finalizedLag = 0;
+    expect((await anchor.runOnce()).tx.outcome).toBe("anchored");
+    expect(record().treeSize).toBe(8);
+
+    // this time the reorg drops the transaction for good: after resendAfterMs the same root goes out again
+    const resending = new Anchor({ logUrl: log.url, checkpointsUrl: host.url, tenants: ["default"], chain, outDir: outDir(), waitMs: 0, resendAfterMs: 0, warn: () => {} });
+    await post("i");
+    await publisher.publishOnce();
+    net.finalizedLag = 3;
+    await resending.runOnce();
+    const lost = net.sent[net.sent.length - 1]!;
+    const n = net.mine();
+    expect((await resending.runOnce()).tx.outcome).toBe("included");
+    net.reorg(n, true);
+    const before = net.sent.length;
+    expect((await resending.runOnce()).tx.outcome).toBe("pending");
+    expect((await resending.runOnce()).tx.outcome).toBe("pending");
+    expect(net.sent.length).toBe(before + 1);
+    // the same root, sent again: with the dropped transaction's nonce free, it may even be the same signed transaction
+    const resent = net.sent[net.sent.length - 1]!;
+    expect(resent.input).toBe(lost.input);
+    net.finalizedLag = 0;
+    net.mine();
+    expect((await resending.runOnce()).tx).toMatchObject({ outcome: "anchored", txHash: resent.hash });
+    expect(await check(record())).toMatchObject({ ok: true, newer: 0 });
+  });
+
   it("a verifier refuses a record that does not match the chain, whoever edited it", async () => {
     const good = record();
     expect((await check(good)).ok).toBe(true);
-    // the pinned address is not the one that sent it
     expect(await check(good, { address: `0x${"11".repeat(20)}` })).toMatchObject({ ok: false, error: expect.stringMatching(/pinned anchor/) });
-    // a checkpoint swapped for another one, signed by the log, of a different size
     const other = record("2.json");
     expect(await check({ ...good, checkpoint: other.checkpoint })).toMatchObject({ ok: false, error: expect.stringMatching(/not the checkpoint's/) });
-    // a proof that does not lead from this checkpoint to the root the transaction carries
     expect(await check({ ...good, anchor: { ...good.anchor, proof: { leafIndex: 0, treeSize: 2, hashes: ["ab".repeat(32)] } } })).toMatchObject({ ok: false, error: expect.stringMatching(/not under the anchored root/) });
-    // the record's root changed to match a different checkpoint: the transaction does not carry it
     expect(await check({ ...other, anchor: { ...other.anchor, txHash: good.anchor.txHash, blockNumber: good.anchor.blockNumber } })).toMatchObject({ ok: false, error: expect.stringMatching(/does not carry the anchored root/) });
-    // someone else posts our root from their own address, and the record points at that transaction
     const fake = { hash: keccak256(toHex("someone else")), from: `0x${"22".repeat(20)}`, to: chain.address, input: anchorCalldata(good.anchor.root), nonce: 0, status: "0x1" as const };
     net.inject(fake);
     const n = net.mine();
     expect(await check({ ...good, anchor: { ...good.anchor, txHash: fake.hash, blockNumber: n } })).toMatchObject({ ok: false, error: expect.stringMatching(/not from the anchor to itself/) });
-    // an endpoint on another chain, and two endpoints that disagree about the block
     const testnet = devnet(11155111);
     expect(await check(good, { fetch: rpcFetch({ [RPC]: testnet }) })).toMatchObject({ ok: false, error: expect.stringMatching(/chain 11155111/) });
-    const fork = devnet();
-    expect(await check(good, { rpcUrls: [RPC, "http://fork.devnet.test/"], fetch: rpcFetch({ [RPC]: net, "http://fork.devnet.test/": fork }) })).toMatchObject({ ok: false });
+    // an older record is still a genuine anchor, but the chain says the address has sent anchors since
+    expect(await check(other)).toMatchObject({ ok: true, newer: expect.any(Number) });
+    expect(((await check(other)) as { newer: number }).newer).toBeGreaterThan(0);
   });
 
   it("log-check catches a rewritten tree from the chain alone, with the log's checkpoints host out of the picture", async () => {
-    const opts = { logUrl: log.url, anchorUrl: anchorHost.url, anchorAddress: chain.address, anchorRpcUrls: [RPC], fetch: rpcFetch({ [RPC]: net }) };
-    const honest = await checkLog(opts);
+    const honest = await watch();
     expect(honest.ok).toBe(true);
-    expect(honest.checks.map((c) => c.name)).toEqual(["key document served", "head verifies against the published keys", "anchor is running and keeps up", "anchor verifies on chain", "head extends the anchored checkpoint"]);
-    // the operator replaces the whole log with another history under the same key and log id
-    const forged = await serveLog(fileResolver(join(dir, "forged.jsonl"), { logId: "anchored-log" }), localSigner(loadPrivateKey(logKp.keyFile)), { port: 0 });
+    expect(honest.checks.map((c) => c.name)).toEqual(["key document served", "head verifies against the published keys", "anchor verifies on chain", "anchor and head name the pinned log", "anchor is the newest from its address", "head extends the anchored checkpoint", "anchor keeps up with the log"]);
+    const forged = await forgedLog(["a", "b", "x", "y", "z", "w", "v", "u", "t", "s"]);
     try {
-      for (const leaf of ["a", "b", "x", "y", "z", "w", "v", "u"]) await fetch(new URL("append", forged.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ leaf }) });
-      const caught = await checkLog({ ...opts, logUrl: forged.url });
-      expect(caught.ok).toBe(false);
-      expect(caught.checks.find((c) => c.name === "head extends the anchored checkpoint")).toMatchObject({ ok: false, detail: expect.stringMatching(/history was rewritten/) });
-      // a log rolled back below its anchor is caught too
-      const short = await serveLog(fileResolver(join(dir, "short.jsonl"), { logId: "anchored-log" }), localSigner(loadPrivateKey(logKp.keyFile)), { port: 0 });
-      try {
-        await fetch(new URL("append", short.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ leaf: "a" }) });
-        expect((await checkLog({ ...opts, logUrl: short.url })).checks.find((c) => c.name === "head extends the anchored checkpoint")).toMatchObject({ ok: false, detail: expect.stringMatching(/rolled back/) });
-      } finally {
-        await short.close();
-      }
+      expect(named(await watch({ logUrl: forged.url }), "head extends the anchored checkpoint")).toMatchObject({ ok: false, detail: expect.stringMatching(/history was rewritten/) });
     } finally {
       await forged.close();
     }
+    const short = await forgedLog(["a"]);
+    try {
+      expect(named(await watch({ logUrl: short.url }), "head extends the anchored checkpoint")).toMatchObject({ ok: false, detail: expect.stringMatching(/rolled back/) });
+    } finally {
+      await short.close();
+    }
   });
 
-  it("log-check fails an anchor that has stopped running or stays behind a log that grew", async () => {
-    const opts = { logUrl: log.url, anchorUrl: anchorHost.url, anchorAddress: chain.address, anchorRpcUrls: [RPC], fetch: rpcFetch({ [RPC]: net }) };
+  it("log-check refuses an older genuine anchor passed off as the current one, so a rewrite after it is not hidden", async () => {
+    // the anchor host serves the size-2 record as latest, and the operator rewrites the log after leaf 2: from the
+    // older record alone the forged log extends it, but the chain shows the address has sent anchors since
+    const replay = join(dir, "replayed-anchor");
+    const { cpSync } = await import("node:fs");
+    cpSync(outDir(), replay, { recursive: true });
+    writeFileSync(join(replay, "default", "latest.json"), readFileSync(join(outDir(), "default", "2.json")));
+    const replayHost = await staticHost(replay);
+    const forged = await forgedLog(["a", "b", "x"]);
+    try {
+      const r = await watch({ logUrl: forged.url, anchorUrl: replayHost.url });
+      expect(named(r, "head extends the anchored checkpoint")).toMatchObject({ ok: true });
+      expect(named(r, "anchor is the newest from its address")).toMatchObject({ ok: false, detail: expect.stringMatching(/not the current anchor/) });
+      expect(r.ok).toBe(false);
+    } finally {
+      await forged.close();
+      replayHost.server.close();
+    }
+  });
+
+  it("log-check refuses another log's anchor served for this log, and will not check an anchor without a pinned log id", async () => {
+    // a second tenant under the same log key and anchor address, anchored at size 0
+    const logKey = loadPrivateKey(logKp.keyFile);
+    const empty = { treeSize: 0, rootHash: createHash("sha256").update("").digest("hex"), timestamp: new Date().toISOString(), log: "other-tenant" };
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(cpDir(), "other"), { recursive: true });
+    writeFileSync(join(cpDir(), "other", "latest.json"), JSON.stringify({ tenant: "other", logId: "other-tenant", ...empty, signedAt: empty.timestamp, envelope: dsseSign(TREEHEAD_TYPE, empty, logKey) }));
+    const both = new Anchor({ logUrl: log.url, checkpointsUrl: host.url, tenants: ["default", "other"], chain, outDir: join(dir, "anchor-other"), waitMs: 0, warn: () => {} });
+    await both.runOnce();
+    net.mine();
+    expect((await both.runOnce()).tx.outcome).toBe("anchored");
+    // the other tenant's genuine record, served where this log's should be, beside a rewritten history of this log
+    const swapped = join(dir, "swapped-anchor");
+    const { cpSync } = await import("node:fs");
+    cpSync(join(dir, "anchor-other"), swapped, { recursive: true });
+    writeFileSync(join(swapped, "default", "latest.json"), readFileSync(join(dir, "anchor-other", "other", "latest.json")));
+    const swappedHost = await staticHost(swapped);
+    const forged = await forgedLog(["p", "q", "r"]);
+    try {
+      const r = await watch({ logUrl: forged.url, anchorUrl: swappedHost.url });
+      expect(named(r, "anchor and head name the pinned log")).toMatchObject({ ok: false, detail: expect.stringMatching(/pinned anchored-log, anchored other-tenant/) });
+      expect(r.ok).toBe(false);
+      // and this log's own record beside a head that names another log is refused too
+      const imposter = await serveLog(fileResolver(join(dir, "imposter.jsonl"), { logId: "other-tenant" }), localSigner(logKey), { port: 0 });
+      try {
+        for (const leaf of ["a", "b", "c", "d"]) await appendTo(imposter.url, leaf);
+        expect(named(await watch({ logUrl: imposter.url }), "anchor and head name the pinned log")).toMatchObject({ ok: false, detail: expect.stringMatching(/head other-tenant/) });
+      } finally {
+        await imposter.close();
+      }
+      const unpinned = await watch({ anchorLogIds: {} });
+      expect(unpinned.ok).toBe(false);
+      expect(named(unpinned, "anchor verifies on chain")).toMatchObject({ ok: false, detail: expect.stringMatching(/log id of default pinned/) });
+    } finally {
+      await forged.close();
+      swappedHost.server.close();
+    }
+  });
+
+  it("log-check fails a log that stays ahead of its newest anchor, timed by the anchor's block, not by the anchor's host", async () => {
+    // the anchor in this directory is at the head; a log that grows past it is fine until the anchor is older than the lag
+    await post("j");
+    const ahead = await watch();
+    expect(named(ahead, "anchor keeps up with the log")).toMatchObject({ ok: true, detail: expect.stringMatching(/ahead of an anchor/) });
     const later = Date.now() + 14 * 3_600_000;
-    expect((await checkLog({ ...opts, now: () => later })).checks.find((c) => c.name === "anchor is running and keeps up")).toMatchObject({ ok: false });
-    await post("h");
+    expect(named(await watch({ now: () => later }), "anchor keeps up with the log")).toMatchObject({ ok: false });
+    // an anchor at the head is never behind, however old
     await publisher.publishOnce();
-    net.baseFeeGwei = 50n;
-    await anchor.runOnce();
-    net.baseFeeGwei = 2n;
-    const beat = JSON.parse(readFileSync(join(outDir(), "default", "checked.json"), "utf8")) as { behindSince: string | null };
-    expect(beat.behindSince).not.toBeNull();
-    const behind = Date.parse(beat.behindSince!) + 14 * 3_600_000;
-    // a fresh heartbeat does not hide a log that has stayed ahead of its anchor
-    writeFileSync(join(outDir(), "default", "checked.json"), JSON.stringify({ ...beat, at: new Date(behind).toISOString() }));
-    expect((await checkLog({ ...opts, now: () => behind })).checks.find((c) => c.name === "anchor is running and keeps up")).toMatchObject({ ok: false, detail: expect.stringMatching(/behind the log/) });
-    // once anchored, it is clear again
     await anchor.runOnce();
     net.mine();
-    await anchor.runOnce();
-    expect((JSON.parse(readFileSync(join(outDir(), "default", "checked.json"), "utf8")) as { behindSince: string | null }).behindSince).toBeNull();
-    expect((await checkLog(opts)).ok).toBe(true);
+    expect((await anchor.runOnce()).tx.outcome).toBe("anchored");
+    expect(named(await watch({ now: () => later }), "anchor keeps up with the log")).toMatchObject({ ok: true });
   });
 
-  it("one transaction anchors several logs, and each log's record proves only its own checkpoint", async () => {
+  it("one transaction covers every log, unchanged ones at their last checkpoint, and each record proves only its own", async () => {
     const logKey = loadPrivateKey(logKp.keyFile);
     const acme = { treeSize: 9, rootHash: "cd".repeat(32), timestamp: new Date().toISOString(), log: "acme-log" };
     const { mkdirSync } = await import("node:fs");
     mkdirSync(join(cpDir(), "acme"), { recursive: true });
     writeFileSync(join(cpDir(), "acme", "latest.json"), JSON.stringify({ tenant: "acme", logId: "acme-log", ...acme, signedAt: acme.timestamp, envelope: dsseSign(TREEHEAD_TYPE, acme, logKey) }));
-    const both = new Anchor({ logUrl: log.url, checkpointsUrl: host.url, tenants: ["default", "acme"], chain, outDir: join(dir, "anchor-both"), waitMs: 0, warn: () => {} });
+    const out = join(dir, "anchor-both");
+    const both = new Anchor({ logUrl: log.url, checkpointsUrl: host.url, tenants: ["default", "acme"], chain, outDir: out, waitMs: 0, warn: () => {} });
     const before = net.sent.length;
     expect((await both.runOnce()).tenants.map((t) => t.outcome)).toEqual(["moved", "moved"]);
     expect(net.sent.length).toBe(before + 1);
     net.mine();
     expect((await both.runOnce()).tx).toMatchObject({ outcome: "anchored", tenants: ["default", "acme"] });
-    const read = (t: string) => JSON.parse(readFileSync(join(dir, "anchor-both", t, "latest.json"), "utf8")) as AnchorRecord;
-    const [d, a] = [read("default"), read("acme")];
+    const [d, a] = [record("latest.json", "default", out), record("latest.json", "acme", out)];
     expect(d.anchor.txHash).toBe(a.anchor.txHash);
-    expect(d.anchor.proof.treeSize).toBe(2);
-    // a record holds its own checkpoint and a proof, never the other log's checkpoint
     expect(JSON.stringify(d)).not.toContain("acme");
     expect((await check(d)).ok).toBe(true);
     expect((await check(a)).ok).toBe(true);
-    // the other log's proof does not prove this log's checkpoint
     expect(await check({ ...d, anchor: { ...d.anchor, proof: a.anchor.proof } })).toMatchObject({ ok: false, error: expect.stringMatching(/not under the anchored root/) });
+    // only the default log grows; acme is anchored again at its last checkpoint, in the newest transaction
+    await post("k");
+    await publisher.publishOnce();
+    expect((await both.runOnce()).tenants).toEqual([{ tenant: "default", outcome: "moved", treeSize: 11 }, { tenant: "acme", outcome: "unchanged", treeSize: 9 }]);
+    net.mine();
+    expect((await both.runOnce()).tx).toMatchObject({ outcome: "anchored", tenants: ["default", "acme"] });
+    const acmeNow = record("latest.json", "acme", out);
+    expect(acmeNow.treeSize).toBe(9);
+    expect(acmeNow.anchor.txHash).not.toBe(a.anchor.txHash);
+    expect(await check(acmeNow)).toMatchObject({ ok: true, newer: 0 });
   });
 
   it("an installation can anchor on another EVM chain, and a record is checked against the chain it names", async () => {
@@ -433,19 +540,16 @@ describe("anchoring the log's checkpoints on a chain", () => {
     base.baseFeeGwei = 0n;
     const a = new Anchor({ logUrl: log.url, checkpointsUrl: host.url, tenants: ["default"], chain: onBase, outDir: join(dir, "anchor-base"), waitMs: 0, warn: () => {} });
     expect((await a.runOnce()).tx.outcome).toBe("pending");
-    // the transaction was signed for Base: a replay on another chain would not verify
     expect(base.sent[0]!.from).toBe(onBase.address);
     base.mine();
     expect((await a.runOnce()).tx.outcome).toBe("anchored");
-    const r = JSON.parse(readFileSync(join(dir, "anchor-base", "default", "latest.json"), "utf8")) as AnchorRecord;
+    const r = record("latest.json", "default", join(dir, "anchor-base"));
     expect(r.anchor.chainId).toBe(8453);
     const via = { rpcUrls: [RPC], address: onBase.address, logKeys, fetch: rpcFetch({ [RPC]: base }) };
     expect(await checkAnchorRecord(r, { ...via, chainId: 8453 })).toMatchObject({ ok: true });
-    // a verifier pinned to Ethereum refuses a Base record, and a Base record checked through an Ethereum endpoint fails
     expect(await checkAnchorRecord(r, { ...via, chainId: 1 })).toMatchObject({ ok: false, error: "anchored on chain 8453, expected 1" });
     expect(await checkAnchorRecord(r, { ...via, chainId: 8453, fetch: rpcFetch({ [RPC]: net }) })).toMatchObject({ ok: false, error: expect.stringMatching(/is chain 1, expected 8453/) });
-    // the Base default cap is 1 gwei, so fees that Ethereum's cap of 20 would allow are refused there
-    await post("i");
+    await post("l");
     await publisher.publishOnce();
     base.baseFeeGwei = 5n;
     expect((await a.runOnce()).tx).toMatchObject({ outcome: "failed", reason: expect.stringMatching(/above the cap of 1$/) });

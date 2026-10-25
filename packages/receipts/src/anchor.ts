@@ -41,8 +41,8 @@ export interface AnchorChain {
   address: string;
   /** sends `data` as calldata and resolves to the transaction hash; throws when fees are above the cap */
   send(data: string): Promise<string>;
-  /** null while the transaction is not in a block */
-  included(txHash: string): Promise<{ blockNumber: number; ok: boolean } | null>;
+  /** null while the transaction is not in a block; `finalized` once that block is finalized */
+  included(txHash: string): Promise<{ blockNumber: number; ok: boolean; finalized: boolean } | null>;
 }
 
 export interface AnchorOptions {
@@ -55,9 +55,11 @@ export interface AnchorOptions {
   chain: AnchorChain;
   /** where anchor records, alarms, the anchor's document, and its state go; serve it read-only */
   outDir: string;
-  /** how long a run waits for its transaction to land before leaving it for the next run; default ten minutes */
+  /** how long a run waits for its transaction to be finalized before leaving it to later runs; default ten minutes */
   waitMs?: number;
   pollMs?: number;
+  /** how long a transaction a reorg removed may stay out of every block before it is sent again; default thirty minutes */
+  resendAfterMs?: number;
   fetch?: typeof fetch;
   warn?: (message: string) => void;
 }
@@ -80,6 +82,7 @@ export type AnchorTenantOutcome =
 
 export type AnchorTxOutcome =
   | { outcome: "anchored"; txHash: string; blockNumber: number; tenants: string[] }
+  | { outcome: "included"; txHash: string; blockNumber: number }
   | { outcome: "pending"; txHash: string; sentAt: string }
   | { outcome: "none" }
   | { outcome: "failed"; reason: string };
@@ -98,18 +101,10 @@ interface Entry {
 }
 
 interface State {
-  /** the last checkpoint anchored for each log */
-  anchored: Record<string, { treeSize: number; rootHash: string; logId: string | undefined }>;
-  pending?: { txHash: string; root: string; sentAt: string; entries: Entry[] };
-  /** when each log was first seen ahead of its last anchor, until that is anchored */
-  behind?: Record<string, string>;
-}
-
-/** Written for each log on every run, so a monitor can tell a stopped or stuck anchor from a quiet log. */
-export interface AnchorHeartbeat {
-  at: string;
-  anchoredSize: number | null;
-  behindSince: string | null;
+  /** the last checkpoint anchored in a finalized block, for each log */
+  anchored: Record<string, Entry>;
+  /** sent and not yet finalized; `blockNumber` once it is in a block, `lostAt` once a reorg took it out again */
+  pending?: { txHash: string; root: string; sentAt: string; entries: Entry[]; blockNumber?: number; lostAt?: string };
 }
 
 const safe = (s: string) => s.replace(/[^A-Za-z0-9_.-]/g, "_");
@@ -129,7 +124,7 @@ export class Anchor {
   private readonly o: AnchorOptions;
   private readonly f: typeof fetch;
   private readonly warn: (m: string) => void;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timers: ReturnType<typeof setInterval>[] = [];
   private running: Promise<AnchorRun> | null = null;
   constructor(opts: AnchorOptions) {
     this.o = opts;
@@ -176,6 +171,11 @@ export class Anchor {
     return ((await res.json()) as { hashes: string[] }).hashes;
   }
 
+  /** True while a transaction is sent and not yet finalized. */
+  get pending(): boolean {
+    return this.load().pending !== undefined;
+  }
+
   /** One pass. Never throws; runs that overlap share one pass, so two transactions are never in flight at once. */
   runOnce(): Promise<AnchorRun> {
     this.running ??= this.pass().finally(() => {
@@ -186,28 +186,7 @@ export class Anchor {
 
   private async pass(): Promise<AnchorRun> {
     const state = this.load();
-    const run = await this.passOn(state);
-    this.beat(state, run);
-    return run;
-  }
-
-  private beat(state: State, run: AnchorRun): void {
-    const behind = (state.behind ??= {});
-    for (const t of run.tenants) if (t.outcome === "moved") behind[t.tenant] ??= new Date().toISOString();
-    if (run.tx.outcome === "anchored") for (const t of run.tx.tenants) delete behind[t];
-    for (const t of run.tenants) if (t.outcome === "unchanged") delete behind[t.tenant];
-    this.save(state);
-    const at = new Date().toISOString();
-    for (const tenant of this.o.tenants) {
-      const dir = join(this.o.outDir, safe(tenant));
-      mkdirSync(dir, { recursive: true });
-      const beat: AnchorHeartbeat = { at, anchoredSize: state.anchored[tenant]?.treeSize ?? null, behindSince: behind[tenant] ?? null };
-      writeFileSync(join(dir, "checked.json"), JSON.stringify(beat, null, 2));
-    }
-  }
-
-  private async passOn(state: State): Promise<AnchorRun> {
-    // a transaction in flight holds the address's nonce: nothing new is sent until it lands, or fails and the next run resends
+    // a transaction in flight holds the address's nonce: nothing new is sent until it is finalized, or fails and the next run resends
     if (state.pending) return { tenants: [], tx: await this.settle(state) };
     let keys: PublicKeyRef[];
     try {
@@ -220,17 +199,21 @@ export class Anchor {
     const tenants: AnchorTenantOutcome[] = [];
     const entries: Entry[] = [];
     for (const tenant of this.o.tenants) {
+      let r: { outcome: AnchorTenantOutcome; entry?: Entry };
       try {
-        const r = await this.check(tenant, keys, state);
-        tenants.push(r.outcome);
-        if (r.entry) entries.push(r.entry);
+        r = await this.check(tenant, keys, state);
       } catch (e) {
         const reason = e instanceof Error ? e.message : String(e);
         this.warn(`agent-custody anchor: ${tenant}: ${reason}`);
-        tenants.push({ tenant, outcome: "unavailable", reason });
+        r = { outcome: { tenant, outcome: "unavailable", reason } };
       }
+      tenants.push(r.outcome);
+      // Every transaction covers every log anchored before, at its new checkpoint or its last good one. A verifier
+      // then requires a record from the address's newest transaction, so an older record cannot be passed off as current.
+      const entry = r.entry ?? state.anchored[tenant];
+      if (entry) entries.push(entry);
     }
-    if (entries.length === 0) return { tenants, tx: { outcome: "none" } };
+    if (!tenants.some((t) => t.outcome === "moved")) return { tenants, tx: { outcome: "none" } };
     const root = rootOf(entries.map((e) => anchorLeaf(e.checkpoint)));
     let txHash: string;
     try {
@@ -245,7 +228,7 @@ export class Anchor {
     const deadline = Date.now() + (this.o.waitMs ?? 600_000);
     for (;;) {
       const tx = await this.settle(state);
-      if (tx.outcome !== "pending" || Date.now() >= deadline) return { tenants, tx };
+      if ((tx.outcome !== "pending" && tx.outcome !== "included") || Date.now() >= deadline) return { tenants, tx };
       await new Promise((r) => setTimeout(r, this.o.pollMs ?? 12_000));
     }
   }
@@ -270,36 +253,68 @@ export class Anchor {
     return { outcome: { tenant, outcome: "moved", treeSize: head.treeSize }, entry: { tenant, logId: head.log, treeSize: head.treeSize, rootHash: head.rootHash, checkpoint: cp.envelope } };
   }
 
-  /** Looks the pending transaction up once; writes the records and clears it when it has landed. */
+  /**
+   * Looks the pending transaction up once. Records are written as soon as it is in a block, and written again if a
+   * reorg moves it to another one; only a finalized block makes its checkpoints the ones later checkpoints must extend.
+   */
   private async settle(state: State): Promise<AnchorTxOutcome> {
     const p = state.pending!;
-    let inc: { blockNumber: number; ok: boolean } | null;
+    let inc: { blockNumber: number; ok: boolean; finalized: boolean } | null;
     try {
       inc = await this.o.chain.included(p.txHash);
     } catch (e) {
       this.warn(`agent-custody anchor: looking up ${p.txHash}: ${e instanceof Error ? e.message : String(e)}`);
       return { outcome: "pending", txHash: p.txHash, sentAt: p.sentAt };
     }
-    if (inc === null) return { outcome: "pending", txHash: p.txHash, sentAt: p.sentAt };
-    delete state.pending;
+    if (inc === null) {
+      if (p.blockNumber !== undefined) {
+        this.warn(`agent-custody anchor: transaction ${p.txHash} left block ${p.blockNumber} in a reorg; waiting for it to land again`);
+        delete p.blockNumber;
+        p.lostAt = new Date().toISOString();
+        this.save(state);
+      } else if (p.lostAt && Date.now() - Date.parse(p.lostAt) >= (this.o.resendAfterMs ?? 1_800_000)) {
+        try {
+          p.txHash = await this.o.chain.send(anchorCalldata(p.root));
+          p.sentAt = new Date().toISOString();
+          delete p.lostAt;
+          this.save(state);
+          this.warn(`agent-custody anchor: the reorged transaction did not land again; sent the same root as ${p.txHash}`);
+        } catch (e) {
+          this.warn(`agent-custody anchor: resending after a reorg: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      return { outcome: "pending", txHash: p.txHash, sentAt: p.sentAt };
+    }
     if (!inc.ok) {
+      delete state.pending;
       this.save(state);
       const reason = `transaction ${p.txHash} failed in block ${inc.blockNumber}`;
       this.warn(`agent-custody anchor: ${reason}; the checkpoints go in the next run`);
       return { outcome: "failed", reason };
     }
+    if (p.blockNumber !== inc.blockNumber) {
+      this.write(p, inc.blockNumber);
+      p.blockNumber = inc.blockNumber;
+      delete p.lostAt;
+      this.save(state);
+    }
+    if (!inc.finalized) return { outcome: "included", txHash: p.txHash, blockNumber: inc.blockNumber };
+    for (const e of p.entries) state.anchored[e.tenant] = e;
+    delete state.pending;
+    this.save(state);
+    return { outcome: "anchored", txHash: p.txHash, blockNumber: inc.blockNumber, tenants: p.entries.map((e) => e.tenant) };
+  }
+
+  private write(p: NonNullable<State["pending"]>, blockNumber: number): void {
     const leaves = p.entries.map((e) => anchorLeaf(e.checkpoint));
     p.entries.forEach((e, i) => {
-      const record: AnchorRecord = { tenant: e.tenant, logId: e.logId, treeSize: e.treeSize, rootHash: e.rootHash, checkpoint: e.checkpoint, anchor: { chainId: this.o.chain.chainId, address: this.o.chain.address, txHash: p.txHash, blockNumber: inc.blockNumber, root: p.root, proof: inclusionProof(leaves, i), sentAt: p.sentAt } };
+      const record: AnchorRecord = { tenant: e.tenant, logId: e.logId, treeSize: e.treeSize, rootHash: e.rootHash, checkpoint: e.checkpoint, anchor: { chainId: this.o.chain.chainId, address: this.o.chain.address, txHash: p.txHash, blockNumber, root: p.root, proof: inclusionProof(leaves, i), sentAt: p.sentAt } };
       const dir = join(this.o.outDir, safe(e.tenant));
       mkdirSync(dir, { recursive: true });
       const text = JSON.stringify(record, null, 2);
       writeFileSync(join(dir, `${e.treeSize}.json`), text);
       writeFileSync(join(dir, "latest.json"), text);
-      state.anchored[e.tenant] = { treeSize: e.treeSize, rootHash: e.rootHash, logId: e.logId };
     });
-    this.save(state);
-    return { outcome: "anchored", txHash: p.txHash, blockNumber: inc.blockNumber, tenants: p.entries.map((e) => e.tenant) };
   }
 
   /** An alarm is written where the records would have gone, so whoever reads the anchor's host sees it. */
@@ -316,16 +331,20 @@ export class Anchor {
     return { tenant, outcome: "refused", reason };
   }
 
-  start(everyMs = 21_600_000): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => void this.runOnce(), everyMs);
-    this.timer.unref?.();
+  /** Runs every `everyMs`, and every `settleMs` while a transaction is pending, so a record is published soon after it lands. */
+  start(everyMs = 21_600_000, settleMs = 60_000): void {
+    if (this.timers.length) return;
+    this.timers.push(setInterval(() => void this.runOnce(), everyMs));
+    this.timers.push(setInterval(() => {
+      if (this.pending) void this.runOnce();
+    }, settleMs));
+    for (const t of this.timers) t.unref?.();
     void this.runOnce();
   }
 
   async stop(): Promise<void> {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+    for (const t of this.timers) clearInterval(t);
+    this.timers = [];
     await this.running;
   }
 }
@@ -342,7 +361,8 @@ export interface AnchorCheckOptions {
 }
 
 export type AnchorCheck =
-  | { ok: true; blockNumber: number; blockTime: string; finalized: boolean }
+  /** `newer`: transactions the address has sent since this one; 0 means this record is from its newest */
+  | { ok: true; blockNumber: number; blockTime: string; finalized: boolean; newer: number }
   | { ok: false; error: string };
 
 async function rpc(f: typeof fetch, url: string, method: string, params: unknown[]): Promise<unknown> {
@@ -381,6 +401,7 @@ export async function checkAnchorRecord(record: AnchorRecord, o: AnchorCheckOpti
   }
   if (o.rpcUrls.length === 0) return { ok: false, error: "no JSON-RPC endpoint to check the chain with" };
   let seen: { blockHash: string; blockNumber: number; blockTime: string; finalized: boolean } | undefined;
+  let newer = 0;
   for (const url of o.rpcUrls) {
     try {
       const chainId = Number(await rpc(f, url, "eth_chainId", []));
@@ -390,6 +411,9 @@ export async function checkAnchorRecord(record: AnchorRecord, o: AnchorCheckOpti
       if (lower(tx.from) !== address || lower(tx.to) !== address) return { ok: false, error: `transaction ${a.txHash} is not from the anchor to itself` };
       if (lower(tx.input) !== data) return { ok: false, error: `transaction ${a.txHash} does not carry the anchored root` };
       if (tx.blockNumber == null || Number(tx.blockNumber) !== a.blockNumber) return { ok: false, error: `transaction ${a.txHash} is not in block ${a.blockNumber}` };
+      // the address's count of mined transactions says, from the chain, whether a later anchor exists
+      const sent = Number(await rpc(f, url, "eth_getTransactionCount", [address, "latest"]));
+      newer = Math.max(newer, sent - 1 - Number(tx.nonce));
       const receipt = (await rpc(f, url, "eth_getTransactionReceipt", [a.txHash])) as Record<string, unknown> | null;
       if (!receipt || receipt.status !== "0x1") return { ok: false, error: `transaction ${a.txHash} did not succeed` };
       const block = (await rpc(f, url, "eth_getBlockByNumber", [`0x${a.blockNumber.toString(16)}`, false])) as Record<string, unknown> | null;
@@ -403,5 +427,5 @@ export async function checkAnchorRecord(record: AnchorRecord, o: AnchorCheckOpti
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   }
-  return { ok: true, blockNumber: seen!.blockNumber, blockTime: seen!.blockTime, finalized: seen!.finalized };
+  return { ok: true, blockNumber: seen!.blockNumber, blockTime: seen!.blockTime, finalized: seen!.finalized, newer };
 }

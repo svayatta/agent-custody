@@ -113,7 +113,8 @@ const USAGE = `agent-custody <command>
                                                  the operator's admin page at /admin and its API, behind the admin token: tenants, tokens shown once,
                                                  the welcome sheet; the public URLs fill the sheet in
   log-check --log-url <url> [--checkpoints-url <url>] [--witness-url <url>] [--tenant <name>]... [--max-lag <seconds>]
-            [--anchor-url <url> --anchor-address <0x...> --anchor-rpc-env NAME... [--anchor-chain ethereum] [--max-anchor-lag <seconds>]] [--json]
+            [--anchor-url <url> --anchor-address <0x...> --anchor-rpc-env NAME... --anchor-log-id <tenant>=<log id>...
+             [--anchor-chain ethereum] [--max-anchor-lag <seconds>]] [--json]
   log-export --log-url <url> [--tenant <name>] --token-env NAME --out <dir> [--month YYYY-MM]... [--json]
                                                    a tenant's own log, with their token: every leaf hash as a log file the verifier
                                                    reads, the signed head, the published keys, the checkpoints, and their usage
@@ -333,7 +334,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "log-check": {
-      const { values } = parseArgs({ args: rest, options: { "log-url": { type: "string" }, "checkpoints-url": { type: "string" }, "witness-url": { type: "string" }, tenant: { type: "string", multiple: true }, "max-lag": { type: "string", default: "900" }, "anchor-url": { type: "string" }, "anchor-address": { type: "string" }, "anchor-rpc-env": { type: "string", multiple: true }, "anchor-chain": { type: "string", default: "ethereum" }, "max-anchor-lag": { type: "string", default: "46800" }, json: { type: "boolean", default: false } } });
+      const { values } = parseArgs({ args: rest, options: { "log-url": { type: "string" }, "checkpoints-url": { type: "string" }, "witness-url": { type: "string" }, tenant: { type: "string", multiple: true }, "max-lag": { type: "string", default: "900" }, "anchor-url": { type: "string" }, "anchor-address": { type: "string" }, "anchor-rpc-env": { type: "string", multiple: true }, "anchor-log-id": { type: "string", multiple: true }, "anchor-chain": { type: "string", default: "ethereum" }, "max-anchor-lag": { type: "string", default: "46800" }, json: { type: "boolean", default: false } } });
       if (!values["log-url"]) throw new Error("log-check needs --log-url");
       let anchor = {};
       if (values["anchor-url"]) {
@@ -343,7 +344,13 @@ async function main(argv: string[]): Promise<number> {
           if (!url) throw new Error(`environment variable ${name} is not set`);
           return url;
         });
-        anchor = { anchorUrl: values["anchor-url"], anchorAddress: values["anchor-address"], anchorRpcUrls: rpcUrls, anchorChainId: resolveAnchorChain(values["anchor-chain"]).chainId, maxAnchorLagMs: Number(values["max-anchor-lag"]) * 1000 };
+        const anchorLogIds: Record<string, string> = {};
+        for (const pin of values["anchor-log-id"] ?? []) {
+          const at = pin.indexOf("=");
+          if (at < 1 || at === pin.length - 1) throw new Error(`--anchor-log-id takes <tenant>=<log id>, got "${pin}"`);
+          anchorLogIds[pin.slice(0, at)] = pin.slice(at + 1);
+        }
+        anchor = { anchorUrl: values["anchor-url"], anchorAddress: values["anchor-address"], anchorRpcUrls: rpcUrls, anchorLogIds, anchorChainId: resolveAnchorChain(values["anchor-chain"]).chainId, maxAnchorLagMs: Number(values["max-anchor-lag"]) * 1000 };
       }
       const r = await checkLog({ logUrl: values["log-url"], ...(values["checkpoints-url"] ? { checkpointsUrl: values["checkpoints-url"] } : {}), ...(values["witness-url"] ? { witnessUrl: values["witness-url"] } : {}), tenants: values.tenant?.length ? values.tenant : ["default"], maxLagMs: Number(values["max-lag"]) * 1000, ...anchor });
       console.log(values.json ? JSON.stringify(r, null, 2) : formatLogCheck(r));

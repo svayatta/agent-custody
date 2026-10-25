@@ -22,27 +22,29 @@ const hex = (n: number) => `0x${n.toString(16)}`;
 
 // the stand-in chain: transactions go into a block on the next lookup
 const ADDRESS = "0x5afe00000000000000000000000000000000a11c";
-const txs = new Map<string, { input: string; block: number | null }>();
+const txs = new Map<string, { input: string; block: number | null; nonce: number }>();
 let height = 1;
+const GENESIS = Math.floor(Date.now() / 1000) - 600;
 const chain: AnchorChain = {
   chainId: 1,
   address: ADDRESS,
   async send(data) {
     const hash = `0x${createHash("sha256").update(`${txs.size}:${data}`).digest("hex")}`;
-    txs.set(hash, { input: data, block: null });
+    txs.set(hash, { input: data, block: null, nonce: txs.size });
     return hash;
   },
   async included(hash) {
     const t = txs.get(hash)!;
     t.block ??= ++height;
-    return { blockNumber: t.block, ok: true };
+    return { blockNumber: t.block, ok: true, finalized: true };
   },
 };
 const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
   const t = txs.get(String(params[0]));
-  const block = (n: number) => ({ number: hex(n), hash: `0x${createHash("sha256").update(`block ${n}`).digest("hex")}`, timestamp: hex(1_760_000_000 + n * 12) });
+  const block = (n: number) => ({ number: hex(n), hash: `0x${createHash("sha256").update(`block ${n}`).digest("hex")}`, timestamp: hex(GENESIS + n * 12) });
   if (method === "eth_chainId") return "0x1";
-  if (method === "eth_getTransactionByHash") return t && { from: ADDRESS, to: ADDRESS, input: t.input, blockNumber: t.block === null ? null : hex(t.block) };
+  if (method === "eth_getTransactionByHash") return t && { from: ADDRESS, to: ADDRESS, input: t.input, nonce: hex(t.nonce), blockNumber: t.block === null ? null : hex(t.block) };
+  if (method === "eth_getTransactionCount") return hex([...txs.values()].filter((x) => x.block !== null).length);
   if (method === "eth_getTransactionReceipt") return t?.block && { status: "0x1", blockHash: block(t.block).hash };
   if (method === "eth_getBlockByNumber") return params[0] === "finalized" ? block(height) : block(Number(params[0]));
   return null;
@@ -82,7 +84,8 @@ console.log(`   ${run.tenants.map((t) => `${t.tenant}: ${t.outcome}`).join(", ")
 const anchorHost = await serveDir(join(dir, "anchor"));
 
 step(3, "a monitor checks the log against the chain, pinning the anchor's address");
-const opts = { logUrl: log.url, anchorUrl: anchorHost.url, anchorAddress: ADDRESS, anchorRpcUrls: [RPC], fetch: viaRpc };
+// the address and the log id are pinned from what the verifier already knows, never from the anchor's host
+const opts = { logUrl: log.url, anchorUrl: anchorHost.url, anchorAddress: ADDRESS, anchorRpcUrls: [RPC], anchorLogIds: { default: "example-log" }, fetch: viaRpc };
 const honest = await checkLog(opts);
 console.log(formatLogCheck(honest).replace(/^/gm, "   "));
 

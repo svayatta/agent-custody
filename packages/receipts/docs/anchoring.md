@@ -6,15 +6,25 @@ The log's operator holds the key that signs the log's tree heads. A signed check
 
 | claim | who can check it | holds against |
 | --- | --- | --- |
-| this signed checkpoint existed no later than this block's time | anyone with a JSON-RPC endpoint and the pinned anchor address | the log's operator, the checkpoints host, the anchor's own host |
+| this signed checkpoint existed no later than this block's time | anyone with a JSON-RPC endpoint, the pinned anchor address, and the log's pinned id | the log's operator, the checkpoints host, the anchor's own host |
+| this is the newest anchor, so no later one says something else | the same: the address's transaction count is on the chain | the anchor's own host |
 | the log today extends what was anchored, so nothing before it was removed or changed | the same, plus the log's consistency proof | the log's operator |
 | the receipts under the checkpoint are true | nobody, from the chain | nothing: a chain commits to existence, not truth |
 
 What an anchor rests on depends on the chain; see [choosing the chain](#choosing-the-chain).
 
-A rewritten tree is caught between anchors as well as at them: once a checkpoint is anchored, every later head must extend it. What the anchor does not catch is a rewrite inside the window before the first anchor that covers it. That window is at most the anchor's interval, six hours by default.
+A rewritten tree is caught between anchors as well as at them: once a checkpoint is anchored, every later head must extend it. What the anchor does not catch is a rewrite inside the window before the first anchor that covers it. That window is at most the anchor's interval, six hours by default, plus the time to finality.
 
-The anchor host is not trusted. A record it publishes is checked against the chain: the checkpoint must verify against the log's published keys, its leaf must be under the anchored Merkle root, and a successful transaction from the pinned address to itself must carry exactly that root. Pin the address, and the chain, from a source other than the anchor's host, such as the welcome sheet or the security page. The anchor's `/.well-known/agent-custody-anchor.json` is for discovery only.
+The anchor host is not trusted. A record it publishes is checked against the chain:
+- the checkpoint must verify against the log's published keys;
+- it must name the log the verifier pinned;
+- its leaf must be under the anchored Merkle root;
+- a successful transaction from the pinned address to itself must carry exactly that root;
+- that transaction must be the newest the address has sent.
+
+The last point is why every anchor transaction covers every watched log. A log that did not move goes in again at its last checkpoint, so the newest transaction always holds each log's current anchor, and a host that serves an older, genuine record is caught by the address's transaction count. The address must therefore send nothing but anchors.
+
+Pin the address, the chain, and each log's id from a source other than the anchor's host, such as the welcome sheet, the security page, or the log id in your own receipts' tree heads. Tenant logs share the log's keys and the anchor's address, so only the id tells one tenant's checkpoint from another's. The anchor's `/.well-known/agent-custody-anchor.json` is for discovery only.
 
 JSON-RPC endpoints are trusted to report the chain. With several `--anchor-rpc-env` endpoints from different providers, each one must agree on the transaction and its block. A block counts as finalized only when every endpoint says so.
 
@@ -26,9 +36,18 @@ Each run, for each watched log, the anchor:
 2. proves, with the log's `GET /consistency`, that it extends the last checkpoint this anchor committed;
 3. refuses, and writes `<dir>/<tenant>/ALARM.json` and `ALARM-<time>.json`, when it does not, when a second root appears at the same size, or when an unpublished key signed it.
 
-The checkpoints that moved become the leaves of one Merkle tree, each leaf the RFC 9162 leaf hash of the checkpoint's canonical envelope. The anchor sends one zero-value transaction from its address to itself, with calldata `0x` + hex(`agent-custody/anchor/1:`) + the 32-byte root. Once the transaction is in a block, each log gets `<dir>/<tenant>/<treeSize>.json` and `latest.json`: its own checkpoint, the transaction, the block, the root, and its inclusion proof. A log's record names no other log.
+When any log has moved, every watched log's checkpoint becomes a leaf of one Merkle tree: the new one for a log that moved, the last one anchored for the rest. Each leaf is the RFC 9162 leaf hash of the checkpoint's canonical envelope. The anchor sends one zero-value transaction from its address to itself, with calldata `0x` + hex(`agent-custody/anchor/1:`) + the 32-byte root. Once the transaction is in a block, each log gets `<dir>/<tenant>/<treeSize>.json` and `latest.json`: its own checkpoint, the transaction, the block, the root, and its inclusion proof. A log's record names no other log.
 
-Nothing is sent when no checkpoint has moved, so an idle log costs nothing. A transaction in flight holds the address's nonce: no new one is sent until it lands. One that fails is reported, and the next run sends the same checkpoints again. Each run also writes `<dir>/<tenant>/checked.json` (`at`, `anchoredSize`, `behindSince`), so a monitor can tell a quiet log from a stopped or stuck anchor.
+Nothing is sent when no checkpoint has moved, so an idle log costs nothing.
+
+A transaction in flight holds the address's nonce, and no new one is sent until its block is finalized:
+- **In a block:** the records are published at once, and the run reports `included`.
+- **Moved by a reorg:** if the transaction lands in another block, the records are written again with that block.
+- **Dropped by a reorg:** if it stays out of every block for 30 minutes (`resendAfterMs`), the same root is sent again.
+- **Finalized:** only now do its checkpoints become the ones that later checkpoints must extend.
+- **Failed:** it is reported, and the next run sends the same checkpoints again.
+
+While a transaction is pending, the service checks it every minute, so a record is published soon after it lands.
 
 ## Running it
 
@@ -78,15 +97,19 @@ The fee caps are in gwei per gas of the chain's own gas token: ETH on Ethereum a
 export ETH_RPC_A=https://...  ETH_RPC_B=https://...
 agent-custody log-check --log-url https://log.example.com/ --tenant acme \
   --anchor-url https://anchors.example.com/ --anchor-address 0x... --anchor-rpc-env ETH_RPC_A --anchor-rpc-env ETH_RPC_B \
-  --anchor-chain ethereum
+  --anchor-chain ethereum --anchor-log-id acme=acme
 ```
 
-Three checks are added per log:
+Each log being checked needs its id pinned with `--anchor-log-id <tenant>=<log id>` (repeatable). Five checks are added per log:
 
-- **`anchor is running and keeps up`**: the last run is no older than `--max-anchor-lag` (default 46800 s, thirteen hours), and the log has not stayed ahead of its last anchor for longer than that.
 - **`anchor verifies on chain`**: the record checks out against the chain as described above. The detail says whether the block is finalized yet.
+- **`anchor and head name the pinned log`**: the anchored checkpoint and the log's current head both carry the pinned id, so another tenant's record cannot stand in for this log's.
+- **`anchor is the newest from its address`**: the chain's count of transactions from the address shows that none came after this record's.
 - **`head extends the anchored checkpoint`**: the log's head is at or beyond the anchored size, and the log's consistency proof shows that it extends the anchored root. A head below the anchored size is a rolled-back log. A head that does not extend the anchored root is a rewritten one.
+- **`anchor keeps up with the log`**: a head ahead of its newest anchor fails once that anchor's block is older than `--max-anchor-lag` (default 46800 s, thirteen hours). The block's time is the chain's, so an anchor that stopped cannot be hidden by its host.
 
-An `--anchor-url` without `--anchor-address` and at least one `--anchor-rpc-env` is a failure, never a skipped check.
+  Anchors are sent only when a log grows. A log that has been quiet for longer than the lag therefore shows this failure after it grows, until the anchor's next run covers it. Keep the anchor's interval well under the lag.
 
-In code, `checkAnchorRecord(record, { rpcUrls, address, chainId, logKeys })` checks one record and needs no Ethereum library. `new Anchor({ logUrl, checkpointsUrl, tenants, chain, outDir })` runs the anchor with any `AnchorChain`, and `evmChain({ rpcUrl, privateKey, chainId, maxFeeGwei })` is the EVM one. `resolveAnchorChain("base")` gives a named chain's id and default cap, and `ANCHOR_CHAINS` lists them. Example 33 runs the whole loop against an in-memory chain; the tests drive real signed transactions.
+An `--anchor-url` without `--anchor-address`, at least one `--anchor-rpc-env`, and a pinned log id for each log is a failure, never a skipped check.
+
+In code, `checkAnchorRecord(record, { rpcUrls, address, chainId, logKeys })` checks one record and needs no Ethereum library. Its `newer` is the number of transactions the address has sent since the record's, so 0 means this is the current anchor. `new Anchor({ logUrl, checkpointsUrl, tenants, chain, outDir })` runs the anchor with any `AnchorChain`, and `evmChain({ rpcUrl, privateKey, chainId, maxFeeGwei })` is the EVM one. `resolveAnchorChain("base")` gives a named chain's id and default cap, and `ANCHOR_CHAINS` lists them. Example 33 runs the whole loop against an in-memory chain; the tests drive real signed transactions.

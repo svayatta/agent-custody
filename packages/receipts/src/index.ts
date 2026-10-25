@@ -27,7 +27,7 @@ export { bothCheckpoints, dirCheckpoints, postgresCheckpoints } from "./checkpoi
 export { adminRoutes, welcomeSheet } from "./log-admin.ts";
 export { fetchWitnessKeys, Witness } from "./witness.ts";
 export { Anchor, ANCHOR_CHAINS, anchorCalldata, anchorLeaf, checkAnchorRecord, resolveAnchorChain } from "./anchor.ts";
-export type { AnchorChain, AnchorCheck, AnchorCheckOptions, AnchorHeartbeat, AnchorOptions, AnchorRecord, AnchorRun, AnchorTenantOutcome, AnchorTxOutcome } from "./anchor.ts";
+export type { AnchorChain, AnchorCheck, AnchorCheckOptions, AnchorOptions, AnchorRecord, AnchorRun, AnchorTenantOutcome, AnchorTxOutcome } from "./anchor.ts";
 export { evmChain } from "./anchor-evm.ts";
 export type { EvmChainOptions } from "./anchor-evm.ts";
 export { checkLog, formatLogCheck } from "./log-check.ts";
