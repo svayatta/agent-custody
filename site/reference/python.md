@@ -44,7 +44,7 @@ except PolicyDeniedError as e:
 
 ## `agent_custody.verify`
 
-An independent verifier, written from the [receipt specification](/receipt/v0.2) and checked against every [conformance vector](/receipt/vectors). It needs the extra `verify` (`cryptography`, for Ed25519) and no sidecar.
+An independent verifier, written from the [receipt specification](/receipt/v0.2) and checked against every [conformance vector](/receipt/vectors). Its canonical JSON matches the producer's: array-index keys first in numeric order, then the other keys by UTF-16 code unit. It needs the extra `verify` (`cryptography`, for Ed25519) and no sidecar.
 
 ```bash
 agent-custody-verify receipts/<id>.json --issuer-key gateway.pub --principal-key principal.pub --log log.jsonl

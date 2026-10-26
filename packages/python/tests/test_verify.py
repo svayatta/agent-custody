@@ -163,3 +163,47 @@ def test_a_fresh_sidecar_receipt_gets_the_reference_verdict(client, sidecar):
     edited = json.loads(path.read_text())
     edited["inclusion"]["leafIndex"] += 1
     assert v.verify_bundle(edited, trust, log=log).failing == ["log inclusion proof"]
+
+
+# Inputs the published vectors do not cover, issued and verified by the TypeScript code in cross_language.mts. Each
+# names what the TypeScript verifier must reject, so a change on either side that stops rejecting it fails here too.
+CROSS_LANGUAGE = {
+    "approval-only-in-precommit": ["authorization carries this approval", "authorization approval was valid"],
+    "upstream-evidence-missing": ["upstream signature (upstream key)"],
+    "operation-confirmed-without-evidence": ["operation awaits provider reconciliation", "operation carries committed authorization"],
+    "numeric-keys": [],
+    "astral-key": [],
+}
+
+
+@pytest.fixture(scope="module")
+def cross_language(tmp_path_factory):
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    assert node, "node is required: these bundles are issued by the TypeScript code"
+    d = tmp_path_factory.mktemp("cross-language")
+    out = subprocess.run([node, str(Path(__file__).with_name("cross_language.mts")), str(d)], check=True, capture_output=True, text=True)
+    data = json.loads(out.stdout)
+    data["keys"] = {name: v.load_public_key(pem) for name, pem in data["keys"].items()}
+    data["cases"] = {c["name"]: c for c in data["cases"]}
+    return data
+
+
+@pytest.mark.parametrize("name", CROSS_LANGUAGE)
+def test_cross_language_verdicts(cross_language, name):
+    case, k = cross_language["cases"][name], cross_language["keys"]
+    assert sorted(case["tsFailing"]) == sorted(CROSS_LANGUAGE[name]), "the TypeScript verifier changed its verdict"
+    trust = v.Trust(issuer=[k["issuer"]], principal=[k["principal"]], approval=[k[n] for n in case["trust"]["approval"]], upstream=[k[n] for n in case["trust"]["upstream"]])
+    report = v.verify_bundle(case["bundle"], trust, log=v.read_log(cross_language["log"]))
+    assert sorted(report.failing) == sorted(case["tsFailing"]), [(c.name, c.ok, c.detail) for c in report.checks]
+
+
+def test_array_index_keys_come_first_in_numeric_order():
+    # The producer sorts keys, then JSON.stringify emits array-index keys (canonical integers below 2^32 - 1) first.
+    assert v.canonical_json({"a": 1, "10": "ten", "2": "two", "01": 0, "4294967295": 0, "4294967294": 0}) == '{"2":"two","10":"ten","4294967294":0,"01":0,"4294967295":0,"a":1}'
+
+
+def test_integers_beyond_2_53_print_as_the_double_javascript_reads():
+    assert v.canonical_json(12345678901234567890) == "12345678901234567000"

@@ -51,8 +51,19 @@ INSTANT = re.compile(
 # Canonical JSON and digests
 
 
-def _sort_key(key: str) -> bytes:
-    return key.encode("utf-16-be", "surrogatepass")
+ARRAY_INDEX = re.compile(r"^(0|[1-9][0-9]*)$")
+
+
+def _is_index(key: str) -> bool:
+    return bool(ARRAY_INDEX.match(key)) and int(key) < 2**32 - 1
+
+
+def _key_order(keys: Iterable[str]) -> list[str]:
+    """Array-index keys first in numeric order, then the rest by UTF-16 code unit: the order JSON.stringify emits
+    for keys inserted sorted, which is what the v0.2 producer hashes."""
+    indexes = sorted((k for k in keys if _is_index(k)), key=int)
+    rest = sorted((k for k in keys if not _is_index(k)), key=lambda k: k.encode("utf-16-be", "surrogatepass"))
+    return indexes + rest
 
 
 def _number(value: float) -> str:
@@ -86,7 +97,8 @@ def _string(value: str) -> str:
 
 
 def canonical_json(value: Any) -> str:
-    """Keys sorted, no whitespace, numbers as ECMAScript prints them."""
+    """No whitespace, keys in the producer's order, numbers as ECMAScript prints them (integers beyond 2^53 as the
+    double a JavaScript parser reads)."""
     if value is None:
         return "null"
     if value is True:
@@ -94,7 +106,7 @@ def canonical_json(value: Any) -> str:
     if value is False:
         return "false"
     if isinstance(value, int):
-        return str(value)
+        return str(value) if abs(value) <= MAX_SAFE_INTEGER else _number(float(value))
     if isinstance(value, float):
         return _number(value)
     if isinstance(value, str):
@@ -102,8 +114,7 @@ def canonical_json(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(canonical_json(v) for v in value) + "]"
     if isinstance(value, dict):
-        keys = sorted(value, key=_sort_key)
-        return "{" + ",".join(_string(k) + ":" + canonical_json(value[k]) for k in keys) + "}"
+        return "{" + ",".join(_string(k) + ":" + canonical_json(value[k]) for k in _key_order(value)) + "}"
     raise TypeError(f"not a JSON value: {type(value).__name__}")
 
 
@@ -543,9 +554,9 @@ def _structural(statement: Any) -> str:
         if fault:
             return fault
     if "operation" in p:
-        op = p["operation"]
-        if not isinstance(op, dict) or not _is_str(op.get("idempotencyKey")) or not _is_str(op.get("status")):
-            return "operation has no idempotencyKey and status"
+        fault = _operation_fault(p["operation"])
+        if fault:
+            return fault
     if "reconciliation" in p:
         r = p["reconciliation"]
         if not (isinstance(r, dict) and isinstance(r.get("original"), dict) and isinstance(r.get("lookup"), dict)):
@@ -567,7 +578,9 @@ def _approval_record_fault(a: Any) -> str:
         return "approval checkedAt is not a time with an offset"
     if "consumedAt" in a and parse_instant(a["consumedAt"]) is None:
         return "approval consumedAt is not a time with an offset"
-    if "fields" in a and not (isinstance(a["fields"], dict) and all(_is_str(v) for v in a["fields"].values())):
+    if a.get("provenance") != "observed":
+        return "approval provenance is not observed"
+    if "fields" in a and not (isinstance(a["fields"], dict) and all(k in ACTION_FIELDS and _is_str(v) and v for k, v in a["fields"].items())):
         return "approval fields is not a map of names"
     return ""
 
@@ -754,11 +767,10 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
         add("policy decision consistent with execution", consistent, f"{detail}, {status}")
         add("no policy errors on an allow", decision != "allow" or not policy.get("errors"))
 
+    if "operation" in p:
+        _operation_checks(p, kind, status, reconciliation, add)
     if "authorization" in p:
         _authorization_checks(statement, bundle, trust, add, forwarded)
-    if "operation" in p and "authorization" in p:
-        auth = dsse_payload(p["authorization"]["envelope"]) or {}
-        add("authorization names this operation", _same_operation(p["operation"], _at(auth, ("predicate", "operation")), paths))
     if reconciliation and not nested:
         _reconciliation_checks(p, bundle, trust, report, add, prefix)
 
@@ -926,11 +938,11 @@ def _result_withheld(paths: list) -> bool:
 
 def _upstream_checks(p: dict, paths: list, trust: Trust, add) -> None:
     execution = p["execution"]
-    upstream = execution.get("upstream")
-    if execution["status"] not in ("executed", "failed") or not isinstance(upstream, dict):
+    if execution["status"] not in ("executed", "failed") or "upstream" not in execution:
         return
+    upstream = execution["upstream"]
     result = execution["result"]
-    if "provider" in upstream:
+    if isinstance(upstream, dict) and "provider" in upstream:
         secret = trust.provider_secrets.get(str(upstream["provider"]).split("-")[0])
         if secret is None:
             return
@@ -940,17 +952,22 @@ def _upstream_checks(p: dict, paths: list, trust: Trust, add) -> None:
         ok, detail = _provider_delivery(upstream, result, secret, parse_instant(p.get("timestamp")))
         add("upstream signature (provider secret)", ok, detail)
         return
-    if not trust.upstream or "envelope" not in upstream:
+    if not trust.upstream:
         return
     if _result_withheld(paths):
         add("upstream signature not checked", True, "the result is withheld")
         return
-    env = upstream["envelope"]
+    if ["execution", "upstream", "envelope"] in paths:
+        add("upstream signature (upstream key)", False, "the result is in clear but the upstream's signature is withheld")
+        return
+    env = upstream.get("envelope") if isinstance(upstream, dict) else None
+    if not _is_envelope(env):
+        add("upstream signature (upstream key)", False, "the receipt carries no upstream envelope, and the capture note does not say it is withheld")
+        return
     payload = dsse_payload(env)
     content = {"content": result.get("content"), "isError": result.get("isError", False)} if isinstance(result, dict) else None
     ok = (
-        _is_envelope(env)
-        and env["payloadType"] == UPSTREAM
+        env["payloadType"] == UPSTREAM
         and bool(dsse_signers(env, trust.upstream))
         and isinstance(payload, dict)
         and payload.get("receiptId") == p["receiptId"]
@@ -1020,16 +1037,18 @@ def _authorization_checks(statement: dict, bundle: dict, trust: Trust, add, forw
     if not isinstance(q, dict):
         q = {}
 
-    if "approval" in p:
-        pre = q.get("approval")
-        final = p["approval"]
-        carries = isinstance(pre, dict) and all(pre.get(k, _MISSING) == final.get(k, _MISSING) for k in ("envelope", "requiredApprovers", "fields"))
-        add("authorization carries this approval", carries)
+    if "approval" in p or "approval" in q:
+        pre, final = q.get("approval"), p.get("approval")
+        carries = isinstance(pre, dict) and isinstance(final, dict) and all(pre.get(k, _MISSING) == final.get(k, _MISSING) for k in ("envelope", "requiredApprovers", "fields"))
+        add("authorization carries this approval", carries, "" if carries else "the approval in the precommit and in the receipt differ, or only one of them has one")
         if forwarded:
             paths = _note_paths(q)[0] or []
             withheld = ["approval", "envelope"] in paths
             args_withheld = any(_under(path, ("request", "args")) for path in paths)
-            add("authorization approval was valid", _precommit_approval_valid(pre, final, trust, withheld, args_withheld))
+            add("authorization approval was valid", _precommit_approval_valid(pre, final, parse_instant(p.get("timestamp")), trust, withheld, args_withheld))
+
+    if "operation" in p or "operation" in q:
+        add("authorization names this operation", _same_operation(p.get("operation"), q.get("operation"), submitted=True))
 
     head = _tree_head(a["treeHead"], trust, Report(), "")
     add("authorization tree head signature", head is not None)
@@ -1043,14 +1062,14 @@ def _authorization_checks(statement: dict, bundle: dict, trust: Trust, add, forw
     add("authorization logged before execution", before, f"leaf {inclusion['leafIndex']} before leaf {receipt['leafIndex']}")
 
 
-def _precommit_approval_valid(pre: Any, final: dict, trust: Trust, envelope_withheld: bool, args_withheld: bool) -> bool:
-    if _approval_record_fault(pre) or pre["status"] != "approved":
+def _precommit_approval_valid(pre: Any, final: Any, receipt_time: Optional[float], trust: Trust, envelope_withheld: bool, args_withheld: bool) -> bool:
+    if _approval_record_fault(pre) or pre["status"] != "approved" or not isinstance(final, dict) or parse_instant(final.get("checkedAt")) is None:
         return False
     ids = pre["approverKeyids"]
     if len(set(ids)) != len(ids) or len(ids) < pre["requiredApprovers"]:
         return False
     checked = parse_instant(pre["checkedAt"])
-    if checked > parse_instant(final["checkedAt"]):
+    if receipt_time is None or not receipt_time <= checked <= parse_instant(final["checkedAt"]):
         return False
     if envelope_withheld:
         return args_withheld
@@ -1062,88 +1081,179 @@ def _precommit_approval_valid(pre: Any, final: dict, trust: Trust, envelope_with
     return set(ids) <= trusted and _within(checked, payload)
 
 
-def _same_operation(op: dict, pre: Any, paths: list) -> bool:
-    if not isinstance(pre, dict):
+OPERATION_STATUSES = ("submitted", "pending", "confirmed", "failed", "unknown")
+OPEN_STATUSES = ("submitted", "pending", "unknown")
+BUDGET_PERIOD = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+CURRENCY = re.compile(r"^[A-Z]{3}$")
+
+
+def _operation_fault(op: Any) -> str:
+    if not isinstance(op, dict):
+        return "operation is not an object"
+    if "id" in op and not (_is_str(op["id"]) and UUID.match(op["id"])):
+        return "operation id is not a UUID"
+    if not (_is_str(op.get("originalReceiptId")) and UUID.match(op["originalReceiptId"])):
+        return "operation originalReceiptId is not a UUID"
+    if not all(_is_str(op.get(k)) and HEX64.match(op[k]) for k in ("idempotencyKey", "lookupDigest")):
+        return "operation idempotencyKey or lookupDigest is not a sha256"
+    if op.get("status") not in OPERATION_STATUSES or op.get("provenance") != "observed":
+        return "operation status or provenance is invalid"
+    budget = op.get("budget")
+    if not (
+        isinstance(budget, dict)
+        and _is_str(budget.get("id"))
+        and 0 < len(budget["id"]) <= 128
+        and _is_str(budget.get("currency"))
+        and CURRENCY.match(budget["currency"])
+        and _is_str(budget.get("period"))
+        and BUDGET_PERIOD.match(budget["period"])
+    ):
+        return "operation budget is invalid"
+    return ""
+
+
+def _same_operation(op: Any, first: Any, *, submitted: bool = False) -> bool:
+    """The same logical operation; an id withheld on either side is not compared."""
+    if not isinstance(op, dict) or _operation_fault(first):
         return False
-    keys = ["idempotencyKey", "lookupDigest", "budget", "originalReceiptId"]
-    if ["operation", "id"] not in paths:
-        keys.append("id")
-    return all(op.get(k, _MISSING) == pre.get(k, _MISSING) for k in keys)
+    if submitted and first["status"] != "submitted":
+        return False
+    same_id = "id" not in op or "id" not in first or op["id"] == first["id"]
+    return same_id and all(op.get(k, _MISSING) == first.get(k, _MISSING) for k in ("idempotencyKey", "lookupDigest", "originalReceiptId")) and canonical_json(op.get("budget")) == canonical_json(first.get("budget"))
+
+
+def _operation_checks(p: dict, kind: Any, status: str, reconciliation: bool, add) -> None:
+    op = p["operation"]
+    add("operation observed by gateway", kind == "gateway" and op["provenance"] == "observed")
+    if reconciliation:
+        return
+    retry = op["originalReceiptId"] != p["receiptId"]
+    add("operation names this original receipt", not retry or status == "withheld", "a retry is withheld and names the first receipt" if retry else "")
+    refused = status in ("withheld", "denied")
+    awaits = retry or op["status"] in OPEN_STATUSES or (refused and op["status"] == "failed")
+    add("operation awaits provider reconciliation", awaits, "" if awaits else f"a {op['status']} outcome needs a provider reconciliation receipt")
+    add("operation carries committed authorization", refused or "authorization" in p, "" if refused or "authorization" in p else f"a {status} financial call with no authorization committed first")
 
 
 def _reconciliation_checks(p: dict, bundle: dict, trust: Trust, report: Report, add, prefix: str) -> None:
     r = p["reconciliation"]
     original = r["original"]
-    sub = Report()
-    original_statement = dsse_payload(original.get("envelope"))
-    is_receipt = isinstance(original_statement, dict) and original_statement.get("predicateType") == RECEIPT_PREDICATE
-    if is_receipt:
-        _verify(original, trust, sub, log=None, log_id=None, require_strict=False, prefix="", nested=True)
-    else:
-        _verify_authorization_bundle(original, trust, sub)
-    for c in sub.checks:
-        report.add(prefix + "reconciliation original " + c.name, c.ok, c.detail)
+    signers = dsse_signers(original.get("envelope"), trust.issuer)
+    original_statement = dsse_payload(original.get("envelope")) if signers else None
     q = original_statement.get("predicate") if isinstance(original_statement, dict) else None
-    if not isinstance(q, dict):
-        add("reconciliation links the original operation", False, "the original has no predicate")
-        return
+    eligible = isinstance(q, dict) and "reconciliation" not in q
+    original_ok = False
+    if eligible:
+        sub = Report()
+        if original_statement.get("predicateType") == RECEIPT_PREDICATE:
+            _verify(original, trust, sub, log=None, log_id=None, require_strict=False, prefix="", nested=True)
+        else:
+            _verify_authorization_bundle(original, trust, sub)
+        original_ok = sub.ok
+        for c in sub.checks:
+            report.add(prefix + "reconciliation original " + c.name, c.ok, c.detail)
+    add("reconciliation original evidence verifies", eligible and original_ok)
+    q = q if isinstance(q, dict) else {}
     op, first = p.get("operation"), q.get("operation")
+    first_t, t = parse_instant(q.get("timestamp")), parse_instant(p.get("timestamp"))
     links = (
-        "reconciliation" not in q
+        isinstance(first, dict)
+        and not _operation_fault(first)
+        and first["status"] in OPEN_STATUSES
+        and first["originalReceiptId"] == q.get("receiptId")
         and isinstance(op, dict)
-        and isinstance(first, dict)
-        and all(op.get(k, _MISSING) == first.get(k, _MISSING) for k in ("id", "idempotencyKey", "budget", "originalReceiptId"))
-        and first.get("originalReceiptId") == q.get("receiptId")
-        and _at(q, ("principal", "id")) == p["principal"].get("id")
-        and _at(q, ("agent", "id")) == p["agent"]["id"]
-        and _at(q, ("tool", "name")) == p["tool"]["name"]
-        and q.get("delegation", _MISSING) == p.get("delegation", _MISSING)
+        and op.get("originalReceiptId") == q.get("receiptId")
+        and p["receiptId"] != q.get("receiptId")
+        and _same_operation(op, first)
+        and all(canonical_json(p.get(k)) == canonical_json(q.get(k)) for k in ("principal", "agent", "tool", "delegation"))
+        and p["issuer"]["keyid"] == _at(q, ("issuer", "keyid"))
+        and first_t is not None
+        and t is not None
+        and t >= first_t
     )
     add("reconciliation links the original operation", links)
     lookup = r["lookup"]
-    add("reconciliation lookup matches authorization", isinstance(first, dict) and digest(lookup) == first.get("lookupDigest") == (op or {}).get("lookupDigest"))
-    add("reconciliation lookup args match request", lookup.get("args", _MISSING) == p["request"]["args"])
-    add("reconciliation provider status", *_provider_status(p, lookup))
+    add("reconciliation lookup matches authorization", isinstance(first, dict) and digest(lookup) == first.get("lookupDigest"))
+    paths = _note_paths(p)[0] or []
+    if any(_under(path, ("request", "args")) for path in paths):
+        add("reconciliation lookup args match request", True, "request arguments committed under the capture rule")
+    else:
+        add("reconciliation lookup args match request", canonical_json(lookup.get("args")) == canonical_json(p["request"]["args"]))
     included = original.get("inclusion")
-    add("reconciliation logged after original", _is_inclusion(included) and included["leafIndex"] < bundle["inclusion"]["leafIndex"])
+    before = _is_inclusion(included) and included["leafIndex"] < bundle["inclusion"]["leafIndex"] and included["treeSize"] <= bundle["inclusion"]["treeSize"]
+    heads = [dsse_payload(h) if dsse_signers(h, trust.log + trust.issuer) else None for h in (original.get("treeHead"), bundle["treeHead"])]
+    same_log = all(isinstance(h, dict) for h in heads) and heads[0].get("log") == heads[1].get("log")
+    add("reconciliation logged after original", before and same_log)
+    terminal = isinstance(op, dict) and op.get("status") in ("confirmed", "failed")
+    add("reconciliation records a terminal provider outcome", terminal and p["execution"]["status"] == "executed" and p["execution"].get("provenance") == "observed")
+    if _result_withheld(paths):
+        add("reconciliation provider status", True, "provider result withheld; disclose it to recompute the observed status")
+    else:
+        add("reconciliation provider status", *_provider_status(p, lookup, terminal))
 
 
-def _provider_status(p: dict, lookup: dict) -> tuple[bool, str]:
-    op = p.get("operation") or {}
-    states = {"confirmed": lookup.get("confirmed"), "failed": lookup.get("failed")}.get(op.get("status"))
-    if not isinstance(states, list):
-        return False, f"operation status {op.get('status')} is not terminal"
-    other = lookup.get("failed" if op.get("status") == "confirmed" else "confirmed")
-    if isinstance(other, list) and set(map(str, states)) & set(map(str, other)):
-        return False, "the lookup maps one provider state to both outcomes"
-    result = p["execution"].get("result")
+def _provider_value(result: Any, path: Any) -> Any:
     content = result.get("content") if isinstance(result, dict) else None
-    if not isinstance(content, list) or not content or not isinstance(content[0], dict) or not _is_str(content[0].get("text")):
-        return False, "the provider result has no text"
+    text = next((c for c in content if isinstance(c, dict) and c.get("type") == "text"), None) if isinstance(content, list) else None
+    if not (isinstance(text, dict) and _is_str(text.get("text")) and _is_str(path)):
+        return _MISSING
     try:
-        record = parse_json(content[0]["text"])
+        record = parse_json(text["text"])
     except ValueError:
-        return False, "the provider result is not JSON"
-    state = _at(record, str(lookup.get("statusPath", "")).split("."))
-    identity = _at(record, str(lookup.get("identityPath", "idempotencyKey")).split("."))
-    if identity != op.get("idempotencyKey"):
-        return False, "the provider record names another idempotency key"
-    if state not in states:
-        return False, f"provider state {state} does not map to {op.get('status')}"
-    return True, f"{state} -> {op.get('status')}"
+        return _MISSING
+    return _at(record, path.split("."))
+
+
+def _provider_status(p: dict, lookup: dict, terminal: bool) -> tuple[bool, str]:
+    op = p.get("operation") or {}
+    result = p["execution"].get("result")
+    state = _provider_value(result, lookup.get("statusPath"))
+    confirmed, failed = lookup.get("confirmed"), lookup.get("failed")
+    mapped = None
+    if _is_str(state):
+        mapped = "confirmed" if isinstance(confirmed, list) and state in confirmed else "failed" if isinstance(failed, list) and state in failed else None
+    identity = _provider_value(result, lookup.get("identityPath"))
+    errored = isinstance(result, dict) and result.get("isError") is True
+    ok = terminal and mapped == op.get("status") and identity == op.get("idempotencyKey") and not errored
+    return ok, f"provider state {state if state is not _MISSING else 'missing'} maps to {mapped}; the gateway observed the read, no provider signature is implied"
 
 
 def _verify_authorization_bundle(bundle: dict, trust: Trust, report: Report) -> None:
     env = bundle.get("envelope")
     signers = dsse_signers(env, trust.issuer)
-    if not report.add("authorization signature (issuer key)", bool(signers)):
+    st = dsse_payload(env) if signers else None
+    typed = isinstance(st, dict) and env["payloadType"] == IN_TOTO and st.get("predicateType") == AUTHORIZATION_PREDICATE
+    if not report.add("authorization signature (issuer key)", typed):
         return
-    statement = dsse_payload(env)
-    report.add("authorization payload type", isinstance(statement, dict) and statement.get("predicateType") == AUTHORIZATION_PREDICATE)
-    if not _is_inclusion(bundle.get("inclusion")):
-        report.add("structural parts in clear", False, "the authorization has no inclusion proof")
+    p = st.get("predicate")
+    shaped = dict(st, predicate=dict(p, session={"id": None, "toolUseId": None, "provenance": "claimed"}, model={"id": None, "provenance": "claimed"}, execution={"status": "withheld", "provenance": "observed"})) if isinstance(p, dict) else st
+    fault = _structural(shaped)
+    if not (isinstance(bundle.get("treeHead"), dict) and _is_inclusion(bundle.get("inclusion"))):
+        fault = fault or "the authorization has no tree head and inclusion proof"
+    if not report.add("structural parts in clear", not fault, fault):
         return
-    head = _tree_head(bundle.get("treeHead"), trust, report)
+    report.add("authorization issued by the gateway", p["issuer"].get("kind") == "gateway" and p["issuer"]["keyid"] in signers)
+    report.add("authorization operation is submitted", _at(p, ("operation", "status")) == "submitted")
+    policy = p.get("policy")
+    permits = isinstance(policy, dict) and (
+        (policy["decision"] == "allow" and isinstance(policy.get("errors"), list) and not policy["errors"])
+        or (policy["decision"] == "deny" and policy.get("enforced") is False)
+    )
+    report.add("authorization permits the original call", permits)
+    links, fault, root_signers = _delegation_chain(_at(p, ("delegation", "envelope")), trust.principal) if "delegation" in p else (None, "no delegation", [])
+    report.add("delegation signature (principal key)", links is not None, fault)
+    if links is not None:
+        leaf = links[0]
+        principal = p["principal"]
+        report.add("delegation binds principal and agent", principal["provenance"] == "attested" and leaf["principal"] == principal["id"] and leaf["agent"] == p["agent"]["id"] and principal["keyid"] in root_signers)
+        t = parse_instant(p.get("timestamp"))
+        report.add("delegation valid at receipt time", t is not None and max(parse_instant(x["issuedAt"]) for x in links) <= t < min(parse_instant(x["expiresAt"]) for x in links))
+        report.add("executed tool within delegated scope", p["tool"]["name"] in leaf["scopes"])
+    paths = _note_paths(p)[0] or []
+    report.add("captured commitments are well formed", all(is_commitment(_at(p, path)) for path in paths))
+    args_withheld = any(_under(path, ("request", "args")) for path in paths)
+    report.add("request args digest", st["subject"][0]["digest"]["sha256"] == p["request"]["argsDigest"] and (args_withheld or digest(p["request"]["args"]) == p["request"]["argsDigest"]))
+    head = _tree_head(bundle["treeHead"], trust, report)
     if head is not None:
         inclusion = bundle["inclusion"]
         report.add("log inclusion proof", inclusion["treeSize"] == head["treeSize"] and _inclusion(_utf8(canonical_json(env)), inclusion, head))

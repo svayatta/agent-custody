@@ -28,7 +28,7 @@ async with MemoryClient("http://127.0.0.1:8790/mcp", token=os.environ["MEMORY_DI
 
 Everything recorded is `claimed`: the sidecar trusts what this process reports, the same as the in-process TypeScript SDK. For enforcement the agent cannot skip, put the gateway in front of the tools instead; it is an MCP server and needs nothing from this package.
 
-**The verifier.** `agent_custody.verify` (extra `verify`, which installs `cryptography` for Ed25519) checks a receipt bundle against the public keys you trust, with no sidecar and no network. It is written from the [receipt specification](../../site/receipt/v0.2.md), not ported from the TypeScript verifier, and `tests/test_verify.py` runs every [conformance vector](../receipts/vectors/) and compares the failing checks by name.
+**The verifier.** `agent_custody.verify` (extra `verify`, which installs `cryptography` for Ed25519) checks a receipt bundle against the public keys you trust, with no sidecar and no network. It is written from the [receipt specification](../../site/receipt/v0.2.md), not ported from the TypeScript verifier; the financial-operation checks, which the specification does not name, follow `src/verify.ts`. `tests/test_verify.py` runs every [conformance vector](../receipts/vectors/) and compares the failing checks by name, and it holds the verifier to the TypeScript verdicts on receipts that `tests/cross_language.mts` issues with the TypeScript code for cases the vectors do not cover.
 
 ```bash
 pip install 'agent-custody[verify]'
