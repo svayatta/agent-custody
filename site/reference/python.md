@@ -42,6 +42,36 @@ except PolicyDeniedError as e:
 | `agent_custody.hermes` | `hermes_hooks(client)` → `{"pre_tool_call", "post_tool_call"}` | Hermes Agent plugin hooks: `pre_tool_call(tool_name, args, task_id, **kwargs)` returns `{"action": "block", "message": "agent-custody: … (receipt …)"}` on a policy deny after recording the denial, `None` otherwise; `post_tool_call(tool_name, args, result, task_id, duration_ms, **kwargs)` records the call. `register_hermes(ctx, client)` registers both with `ctx.register_hook`; `register(ctx)` is the plugin entry, reading `sidecar_url` from the plugin's settings |
 | `agent_custody.adk` | `adk_callbacks(client)` → `{"before_tool_callback", "after_tool_callback"}` | Google ADK callbacks, for `LlmAgent(..., **adk_callbacks(client))`: `before_tool_callback(tool, args, tool_context)` returns `{"error": "agent-custody: … (receipt …)", "agent-custody/receipt": "…"}` on an enforced policy deny after recording the denial, which skips the tool and shows the model the receipt, `None` otherwise; `after_tool_callback(tool, args, tool_context, tool_response)` records the executed call (the response as JSON when it is JSON, else as text) and returns `None`, skipping the denial dict it recognises. The session is ADK's `invocation_id` and `function_call_id`. Extra `adk` (`google-adk[a2a]`). Delegations over A2A are not tool calls; the gateway's `--a2a` front covers them |
 
+## `agent_custody.verify`
+
+An independent verifier, written from the [receipt specification](/receipt/v0.2) and checked against every [conformance vector](/receipt/vectors). It needs the extra `verify` (`cryptography`, for Ed25519) and no sidecar.
+
+```bash
+agent-custody-verify receipts/<id>.json --issuer-key gateway.pub --principal-key principal.pub --log log.jsonl
+```
+
+| flag | meaning |
+| --- | --- |
+| `--issuer-key`, `--principal-key`, `--approval-key`, `--upstream-key`, `--log-key` | PEM public keys, each repeatable; signatures are matched by keyid |
+| `--provider-secret-env PROVIDER=VAR` | the environment variable holding a provider's shared secret (`stripe`, `github`); never the secret itself |
+| `--log` | a copy of the log, one JSON value per line |
+| `--log-id` | the log id the tree head must name |
+| `--require-strict` | adds `strict mode in force` and `strict: call precommitted before forwarding` |
+| `--json` | the report as JSON |
+
+Exit code 0 when every check passes, 1 otherwise.
+
+| function | returns |
+| --- | --- |
+| `verify_bundle(bundle, trust, *, log=None, log_id=None, require_strict=False)` | a `Report`: `ok`, `failing`, and `checks`, each a `Check(name, ok, detail)` named as the specification names it |
+| `audit_extends(older, newer, proof, keys)` | a `Report` with `older tree head signature`, `newer tree head signature`, `older is not larger than newer`, `newer log extends older log` |
+| `Trust(issuer, principal=[], approval=[], upstream=[], log=[], provider_secrets={})` | the keys and secrets a verifier holds |
+| `load_public_key(pem)` | a `PublicKey` with its `keyid` |
+| `read_log(path)` | the leaves of a log file, for `log=` |
+| `canonical_json(value)`, `digest(value)`, `pae(payload_type, payload)` | the building blocks of the specification |
+
+It does not decrypt or restore withheld fields; a receipt under a capture rule verifies as committed.
+
 ## `MemoryClient`
 
 The memory tools over MCP, against a memory server started with `agent-custody-memory serve --http --allow-direct`. Pass the direct writers' token (`--direct-token-env`), never the gateways' token. Writes made this way are `claimed` and quarantined until a gateway confirms them; that is the honest position of an SDK-only agent.
