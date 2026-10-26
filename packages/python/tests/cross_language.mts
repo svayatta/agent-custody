@@ -84,6 +84,24 @@ const cases = [
     trust: { approval: [], upstream: [] },
   },
   {
+    name: "upstream-unknown-provider",
+    description: "An executed refund whose execution.upstream names a provider no verifier recognises, verified with an upstream key: an unknown provider must not stand in for the upstream's signature.",
+    bundle: issue("gateway-executed", (st) => { st.predicate.execution.upstream = { provider: "unknown" }; }),
+    trust: { approval: [], upstream: ["upstream"] },
+  },
+  {
+    name: "upstream-malformed-provider",
+    description: "A recognised provider name with no delivery body, signature, or bind, verified with an upstream key: a malformed delivery is not a provider attestation.",
+    bundle: issue("gateway-executed", (st) => { st.predicate.execution.upstream = { provider: "stripe-webhook" }; }),
+    trust: { approval: [], upstream: ["upstream"] },
+  },
+  {
+    name: "provider-secret-for-other-provider",
+    description: "A well-formed Stripe delivery verified with only a GitHub secret: the delivery cannot be checked, and that is a failure, not a skip.",
+    bundle: issue("gateway-executed-stripe-webhook", () => {}),
+    trust: { approval: [], upstream: [], providerSecrets: { github: "not-the-stripe-secret" } },
+  },
+  {
     name: "numeric-keys",
     description: "Arguments and a result with array-index keys: the producer's canonical JSON puts them first, in numeric order.",
     bundle: issue("sdk-executed", (st) => {
@@ -104,7 +122,8 @@ const cases = [
 
 const pub = (name: string) => ({ keyid: keys[name]!.keyid, publicKey: keys[name]!.publicKey });
 const out = cases.map((c) => {
-  const r = verifyBundle(c.bundle as never, { issuerKeys: [pub("issuer")], principalKeys: [pub("principal")], approvalKeys: c.trust.approval.map(pub), upstreamKeys: c.trust.upstream.map(pub), logFile });
+  const providerSecrets = (c.trust as { providerSecrets?: Record<string, string> }).providerSecrets;
+  const r = verifyBundle(c.bundle as never, { issuerKeys: [pub("issuer")], principalKeys: [pub("principal")], approvalKeys: c.trust.approval.map(pub), upstreamKeys: c.trust.upstream.map(pub), ...(providerSecrets ? { providerSecrets } : {}), logFile });
   return { ...c, tsFailing: r.checks.filter((x) => !x.ok).map((x) => x.name) };
 });
 console.log(JSON.stringify({ keys: Object.fromEntries(Object.entries(keys).map(([n, k]) => [n, publicKeyToPem(k.publicKey)])), log: logFile, cases: out }));

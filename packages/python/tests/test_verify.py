@@ -170,6 +170,9 @@ def test_a_fresh_sidecar_receipt_gets_the_reference_verdict(client, sidecar):
 CROSS_LANGUAGE = {
     "approval-only-in-precommit": ["authorization carries this approval", "authorization approval was valid"],
     "upstream-evidence-missing": ["upstream signature (upstream key)"],
+    "upstream-unknown-provider": ["upstream signature (upstream key)"],
+    "upstream-malformed-provider": ["upstream signature (upstream key)"],
+    "provider-secret-for-other-provider": ["upstream signature (provider secret)"],
     "operation-confirmed-without-evidence": ["operation awaits provider reconciliation", "operation carries committed authorization"],
     "numeric-keys": [],
     "astral-key": [],
@@ -195,7 +198,7 @@ def cross_language(tmp_path_factory):
 def test_cross_language_verdicts(cross_language, name):
     case, k = cross_language["cases"][name], cross_language["keys"]
     assert sorted(case["tsFailing"]) == sorted(CROSS_LANGUAGE[name]), "the TypeScript verifier changed its verdict"
-    trust = v.Trust(issuer=[k["issuer"]], principal=[k["principal"]], approval=[k[n] for n in case["trust"]["approval"]], upstream=[k[n] for n in case["trust"]["upstream"]])
+    trust = v.Trust(issuer=[k["issuer"]], principal=[k["principal"]], approval=[k[n] for n in case["trust"]["approval"]], upstream=[k[n] for n in case["trust"]["upstream"]], provider_secrets=case["trust"].get("providerSecrets") or {})
     report = v.verify_bundle(case["bundle"], trust, log=v.read_log(cross_language["log"]))
     assert sorted(report.failing) == sorted(case["tsFailing"]), [(c.name, c.ok, c.detail) for c in report.checks]
 

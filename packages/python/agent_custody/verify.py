@@ -936,18 +936,31 @@ def _result_withheld(paths: list) -> bool:
     return any(_under(path, ("execution", "result")) and not _under(path, ("execution", "result", "_meta")) for path in paths)
 
 
+_PROVIDERS = {"stripe-webhook": ("stripe", "Stripe"), "github-delivery": ("github", "GitHub")}
+
+
+def _is_provider_attestation(v: Any) -> bool:
+    # Only a recognised, well-formed delivery takes the provider branch, so unknown or malformed evidence cannot
+    # suppress the upstream-key check.
+    return isinstance(v, dict) and v.get("provider") in _PROVIDERS and all(_is_str(v.get(f)) or is_commitment(v.get(f)) for f in ("rawBody", "signature", "bind"))
+
+
 def _upstream_checks(p: dict, paths: list, trust: Trust, add) -> None:
     execution = p["execution"]
     if execution["status"] not in ("executed", "failed") or "upstream" not in execution:
         return
     upstream = execution["upstream"]
     result = execution["result"]
-    if isinstance(upstream, dict) and "provider" in upstream:
-        secret = trust.provider_secrets.get(str(upstream["provider"]).split("-")[0])
-        if secret is None:
+    if _is_provider_attestation(upstream):
+        if not trust.provider_secrets:
             return
         if _result_withheld(paths) or any(_under(path, ("execution", "upstream")) for path in paths):
             add("upstream signature not checked", True, "the result or the delivery is withheld")
+            return
+        name, label = _PROVIDERS[upstream["provider"]]
+        secret = trust.provider_secrets.get(name)
+        if secret is None:
+            add("upstream signature (provider secret)", False, f"no {label} secret given")
             return
         ok, detail = _provider_delivery(upstream, result, secret, parse_instant(p.get("timestamp")))
         add("upstream signature (provider secret)", ok, detail)
