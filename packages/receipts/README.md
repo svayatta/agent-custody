@@ -24,6 +24,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [Anchoring the log on a chain](docs/anchoring.md): the log's checkpoints committed to Ethereum mainnet, or another EVM chain the installation picks, from a published address, what that proves and what it does not, running the anchor, and `log-check` against the chain
 - [Payment mandates and agent identity](docs/mandates.md): the design for fitting grants and receipts to Google's AP2 mandates, Visa's Trusted Agent Protocol and Mastercard Agent Pay; not yet built
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
+- [Aligning with IETF SCITT](docs/scitt.md): the receipt as a SCITT signed statement, the log as a transparency service, our RFC 9162 proofs as COSE Receipts (RFC 9942), what differs and the options for each, an agent-action profile, and the steps toward the working group
 
 ## Getting started
 
