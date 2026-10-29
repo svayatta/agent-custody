@@ -11,15 +11,18 @@ For a window and a set of tools, it lists the provider's objects and matches eac
 | provider actions with no receipt | an object the provider created in the window that no verified receipt names | the finding this command exists for: an action taken outside the gateway, or by a gateway whose receipts you were not given |
 | receipts the provider does not have | an executed receipt in the window whose object the provider has no record of | a receipt for something that did not happen at the provider, or an object in another account or mode |
 | mismatches | a matched pair whose amount, currency (ignoring case), or a beneficiary field differs | the receipt and the provider disagree about what happened |
+| one provider object, several receipts | more than one verified receipt names the same provider object; each is still compared with it | one action recorded twice, or receipts that contradict each other |
 | forwarded without an outcome receipt | a call committed to the log before it was forwarded (`precommit`) whose outcome receipt is missing | the gateway stopped after forwarding; this explains a provider object that has no receipt, without guessing which one |
-| unmatchable | a verified, executed receipt whose provider id cannot be read, usually because a capture rule withholds the result | match it by hand against the values disclosed with `agent-custody reveal` |
-| not verified | a receipt file that failed verification | it is not matched, so its provider object shows as having no receipt |
+| unmatchable | a verified, executed receipt whose provider id cannot be read, or whose amount, currency, or beneficiary argument cannot be compared, because a capture rule withholds it | match it by hand against the values disclosed with `agent-custody reveal` |
+| not verified | a receipt file that failed verification, or a valid receipt or authorization stored under a name that is not its signed receipt id | it is not matched, so its provider object shows as having no receipt |
 
 The result is `COMPLETE` only when every section but the matches is empty, and the command exits 1 otherwise.
 
 Only receipts that verify against the keys you give are matched. A forged or edited receipt file cannot cover for a provider action, because it fails verification and its object then appears as having no receipt. Denied, withheld, and failed calls are not expected to have a provider object, and reconciliation receipts are skipped, because the original receipt is the one that names the object.
 
-The provider is listed fifteen minutes either side of the window (`marginMs` in code), so a receipt signed just inside the window still finds an object created just outside it. Only objects and receipts inside the window are reported.
+The provider is listed fifteen minutes either side of the window (`marginMs` in code), so a receipt signed just inside the window still finds an object created just outside it. The margin does not widen the period reported on: a pair is reported only when its receipt or its object falls inside the window, and a call forwarded without an outcome only when its authorization was signed inside it.
+
+An authorization is tied to its outcome by the receipt id both of them sign, never by the file name. A valid receipt copied under the name of a missing outcome therefore hides nothing: it is reported as not verified, and the call is still listed as forwarded without an outcome.
 
 ## Running it
 
@@ -50,7 +53,7 @@ Use a restricted Stripe key with read-only access to the objects you check. The 
 
 - **The receipts you were given.** The check proves completeness against those receipts. A second gateway, or a second receipts directory, that issued receipts you were not handed shows up as provider actions with no receipt, which is the correct finding.
 - **One provider account and mode per run.** Test-mode and live-mode objects are separate lists.
-- **The id must be readable.** A capture rule that withholds the result also withholds the object id inside it, and such receipts are reported as unmatchable, never as matched or missing. Reading the id from disclosed values is still to come.
+- **The id must be readable.** A capture rule that withholds the result content also withholds the object id inside it, and such receipts are reported as unmatchable, never as matched or missing. A rule that keeps `content` in clear (`result: { mode: "digest", clear: ["content"] }`) leaves the id readable. Likewise, keep the amount, currency, and beneficiary arguments in clear, or those comparisons are reported as unmatchable. Reading values from disclosures is still to come.
 - **Stripe first.** Other providers, and on-chain transfers from an agent's wallet, are `ProviderSource` implementations still to come.
 
 In code, `checkCompleteness({ receiptsDir, verify, source, tools, sinceMs, untilMs })` returns the report, `stripeSource({ secretKey, object })` lists Stripe objects, and `formatCompleteness(report)` prints it. Example 35 runs the whole check against a stand-in for Stripe's list API.

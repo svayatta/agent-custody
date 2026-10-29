@@ -108,6 +108,8 @@ export interface CompletenessReport {
   /** executed receipts in the window whose provider object the provider does not have */
   receiptOnly: { receiptId: string; providerId: string; timestamp: string }[];
   mismatches: { receiptId: string; providerId: string; field: string; receipt: unknown; provider: unknown }[];
+  /** provider objects that more than one verified receipt names: one action recorded twice, or receipts that disagree */
+  duplicates: { providerId: string; receiptIds: string[] }[];
   /** receipt files that did not verify, and so were not matched */
   unverified: { file: string; failing: string[] }[];
   /** verified, executed receipts whose provider id cannot be read */
@@ -132,11 +134,15 @@ function at(value: unknown, path: string): unknown {
 /** The provider object id that an executed call's result carries, or why it cannot be read. */
 function providerIdOf(p: ReceiptPredicate, idPath: string): { id: string } | { reason: string } {
   const result = (p.execution as { result?: unknown }).result;
-  if (isCommitment(result) || isCommitment((result as Record<string, unknown> | null)?.[REST])) return { reason: "the result is withheld under a capture rule; the provider's object id cannot be read from the receipt" };
-  const content = (result as { content?: unknown } | null)?.content;
+  if (isCommitment(result)) return { reason: "the result is withheld under a capture rule; the provider's object id cannot be read from the receipt" };
+  const r = result as Record<string, unknown> | null;
+  // a `$rest` commitment may hold only unrelated fields: the content is withheld only when it is not kept in clear
+  if (r && !Object.hasOwn(r, "content") && isCommitment(r[REST])) return { reason: "the result content is withheld under a capture rule; the provider's object id cannot be read from the receipt" };
+  const content = r?.content;
   const first = Array.isArray(content) ? content[0] : undefined;
   if (isCommitment(content) || isCommitment(first)) return { reason: "the result content is withheld under a capture rule; the provider's object id cannot be read from the receipt" };
   const text = (first as { text?: unknown } | undefined)?.text;
+  if (isCommitment(text)) return { reason: "the result content is withheld under a capture rule; the provider's object id cannot be read from the receipt" };
   if (typeof text !== "string") return { reason: "the result carries no text to read the provider's object id from" };
   let parsed: unknown;
   try {
@@ -146,6 +152,12 @@ function providerIdOf(p: ReceiptPredicate, idPath: string): { id: string } | { r
   }
   const id = at(parsed, idPath);
   return typeof id === "string" && id.length ? { id } : { reason: `the result has no string at "${idPath}"` };
+}
+
+/** A call argument, or that a capture rule withholds it: listed fields stay in clear beside one `$rest` commitment. */
+function argOf(args: Record<string, unknown>, field: string): { value: unknown } | { withheld: true } {
+  if (Object.hasOwn(args, field)) return isCommitment(args[field]) ? { withheld: true } : { value: args[field] };
+  return isCommitment(args[REST]) ? { withheld: true } : { value: undefined };
 }
 
 export async function checkCompleteness(o: CompletenessOptions): Promise<CompletenessReport> {
@@ -164,6 +176,7 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
     providerOnly: [],
     receiptOnly: [],
     mismatches: [],
+    duplicates: [],
     unverified: [],
     unmatchable: [],
     forwardedWithoutOutcome: [],
@@ -171,26 +184,14 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
   };
 
   const names = readdirSync(o.receiptsDir, { withFileTypes: true }).filter((e) => (e.isFile() || e.isSymbolicLink()) && e.name.endsWith(".json")).map((e) => e.name).sort();
-  const have = new Set(names);
-  const byProviderId = new Map<string, ReceiptPredicate>();
+  const outcomes = new Set<string>();
+  const byProviderId = new Map<string, ReceiptPredicate[]>();
   for (const name of names) {
-    const file = join(o.receiptsDir, name);
-    if (name.endsWith(AUTHORIZATION)) {
-      if (have.has(`${name.slice(0, -AUTHORIZATION.length)}.json`)) continue;
-      // committed and forwarded, then nothing: the provider may hold an object this report cannot tie to a receipt
-      try {
-        const auth = verifyOrphanAuthorization(JSON.parse(readFileSync(file, "utf8")) as AuthorizationBundle, o.verify.issuerKeys, o.verify.logKeys ?? []);
-        const tool = (auth as { tool?: { name?: unknown } }).tool?.name;
-        if (typeof tool === "string" && tools.has(tool)) report.forwardedWithoutOutcome.push({ receiptId: String((auth as { receiptId?: unknown }).receiptId), tool });
-      } catch (e) {
-        report.unverified.push({ file: name, failing: [e instanceof Error ? e.message : String(e)] });
-      }
-      continue;
-    }
+    if (name.endsWith(AUTHORIZATION)) continue;
     report.receiptsRead++;
     let result: ReturnType<typeof verifyBundle>;
     try {
-      result = verifyBundle(JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle, o.verify);
+      result = verifyBundle(JSON.parse(readFileSync(join(o.receiptsDir, name), "utf8")) as ReceiptBundle, o.verify);
     } catch (e) {
       report.unverified.push({ file: name, failing: [e instanceof Error ? e.message : String(e)] });
       continue;
@@ -200,43 +201,77 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
       continue;
     }
     const p = result.statement.predicate;
+    // the gateway names each file by its receipt id: a valid receipt under another name could stand in for a missing outcome
+    if (name !== `${p.receiptId}.json`) {
+      report.unverified.push({ file: name, failing: [`the file name does not match the signed receipt id ${p.receiptId}`] });
+      continue;
+    }
+    outcomes.add(p.receiptId);
     if (!tools.has(p.tool.name) || p.reconciliation || p.execution.status !== "executed") continue;
     const id = providerIdOf(p, idPath);
     if ("reason" in id) {
       if (inWindow(Date.parse(p.timestamp))) report.unmatchable.push({ receiptId: p.receiptId, reason: id.reason });
       continue;
     }
-    byProviderId.set(id.id, p);
+    byProviderId.set(id.id, [...(byProviderId.get(id.id) ?? []), p]);
+  }
+
+  for (const name of names) {
+    if (!name.endsWith(AUTHORIZATION)) continue;
+    // committed and forwarded, then nothing: the provider may hold an object this report cannot tie to a receipt
+    let auth: ReturnType<typeof verifyOrphanAuthorization>;
+    try {
+      auth = verifyOrphanAuthorization(JSON.parse(readFileSync(join(o.receiptsDir, name), "utf8")) as AuthorizationBundle, o.verify.issuerKeys, o.verify.logKeys ?? []);
+    } catch (e) {
+      report.unverified.push({ file: name, failing: [e instanceof Error ? e.message : String(e)] });
+      continue;
+    }
+    if (name !== `${auth.receiptId}${AUTHORIZATION}`) report.unverified.push({ file: name, failing: [`the file name does not match the signed receipt id ${auth.receiptId}`] });
+    if (outcomes.has(auth.receiptId) || !tools.has(auth.tool.name) || !inWindow(Date.parse(auth.timestamp))) continue;
+    report.forwardedWithoutOutcome.push({ receiptId: auth.receiptId, tool: auth.tool.name });
   }
 
   const seen = new Set<string>();
   for await (const obj of o.source.list(o.sinceMs - margin, o.untilMs + margin)) {
     seen.add(obj.id);
-    const p = byProviderId.get(obj.id);
-    if (!p) {
-      if (inWindow(obj.createdMs)) report.providerOnly.push({ providerId: obj.id, created: iso(obj.createdMs), ...(obj.amount !== undefined ? { amount: obj.amount } : {}), ...(obj.currency !== undefined ? { currency: obj.currency } : {}) });
+    const receipts = byProviderId.get(obj.id) ?? [];
+    // the margin finds a receipt across the window's edge; it does not widen the period reported on
+    const inScope = inWindow(obj.createdMs) || receipts.some((p) => inWindow(Date.parse(p.timestamp)));
+    if (!inScope) continue;
+    if (!receipts.length) {
+      report.providerOnly.push({ providerId: obj.id, created: iso(obj.createdMs), ...(obj.amount !== undefined ? { amount: obj.amount } : {}), ...(obj.currency !== undefined ? { currency: obj.currency } : {}) });
       continue;
     }
-    report.matched.push({ receiptId: p.receiptId, providerId: obj.id });
-    const args = p.request.args;
-    const amount = args[amountField];
-    if (obj.amount !== undefined && amount !== obj.amount) report.mismatches.push({ receiptId: p.receiptId, providerId: obj.id, field: "amount", receipt: amount, provider: obj.amount });
-    const currency = args[currencyField];
-    if (typeof currency === "string" && obj.currency !== undefined && currency.toLowerCase() !== obj.currency.toLowerCase()) report.mismatches.push({ receiptId: p.receiptId, providerId: obj.id, field: "currency", receipt: currency, provider: obj.currency });
-    for (const [arg, field] of Object.entries(o.beneficiary ?? {})) {
-      if (!Object.hasOwn(args, arg) || isCommitment(args[arg])) {
-        report.unmatchable.push({ receiptId: p.receiptId, reason: `the beneficiary argument "${arg}" is missing or withheld, so it cannot be compared` });
-        continue;
+    if (receipts.length > 1) report.duplicates.push({ providerId: obj.id, receiptIds: receipts.map((p) => p.receiptId) });
+    for (const p of receipts) {
+      report.matched.push({ receiptId: p.receiptId, providerId: obj.id });
+      const args = p.request.args;
+      const withheld = (arg: string) => report.unmatchable.push({ receiptId: p.receiptId, reason: `the argument "${arg}" is withheld under a capture rule, so it cannot be compared` });
+      const amount = argOf(args, amountField);
+      if ("withheld" in amount) {
+        if (obj.amount !== undefined) withheld(amountField);
+      } else if (obj.amount !== undefined && amount.value !== obj.amount) report.mismatches.push({ receiptId: p.receiptId, providerId: obj.id, field: "amount", receipt: amount.value, provider: obj.amount });
+      const currency = argOf(args, currencyField);
+      if ("withheld" in currency) {
+        if (obj.currency !== undefined) withheld(currencyField);
+      } else if (typeof currency.value === "string" && obj.currency !== undefined && currency.value.toLowerCase() !== obj.currency.toLowerCase()) report.mismatches.push({ receiptId: p.receiptId, providerId: obj.id, field: "currency", receipt: currency.value, provider: obj.currency });
+      for (const [arg, field] of Object.entries(o.beneficiary ?? {})) {
+        const value = argOf(args, arg);
+        if ("withheld" in value || value.value === undefined) {
+          report.unmatchable.push({ receiptId: p.receiptId, reason: `the beneficiary argument "${arg}" is missing or withheld, so it cannot be compared` });
+          continue;
+        }
+        const provider = at(obj.raw, field);
+        if (String(value.value) !== String(provider)) report.mismatches.push({ receiptId: p.receiptId, providerId: obj.id, field: arg, receipt: value.value, provider });
       }
-      const provider = at(obj.raw, field);
-      if (String(args[arg]) !== String(provider)) report.mismatches.push({ receiptId: p.receiptId, providerId: obj.id, field: arg, receipt: args[arg], provider });
     }
   }
-  for (const [providerId, p] of byProviderId) {
-    if (!seen.has(providerId) && inWindow(Date.parse(p.timestamp))) report.receiptOnly.push({ receiptId: p.receiptId, providerId, timestamp: p.timestamp });
+  for (const [providerId, receipts] of byProviderId) {
+    if (seen.has(providerId)) continue;
+    for (const p of receipts) if (inWindow(Date.parse(p.timestamp))) report.receiptOnly.push({ receiptId: p.receiptId, providerId, timestamp: p.timestamp });
   }
   report.matched.sort((a, b) => a.receiptId.localeCompare(b.receiptId));
-  report.complete = [report.providerOnly, report.receiptOnly, report.mismatches, report.unverified, report.unmatchable, report.forwardedWithoutOutcome].every((l) => l.length === 0);
+  report.complete = [report.providerOnly, report.receiptOnly, report.mismatches, report.duplicates, report.unverified, report.unmatchable, report.forwardedWithoutOutcome].every((l) => l.length === 0);
   return report;
 }
 
@@ -248,6 +283,7 @@ export function formatCompleteness(r: CompletenessReport): string {
   section("PROVIDER ACTIONS WITH NO RECEIPT", r.providerOnly.map((x) => `${x.providerId} created ${x.created}${x.amount !== undefined ? ` amount ${x.amount}${x.currency ? ` ${x.currency}` : ""}` : ""}`));
   section("RECEIPTS THE PROVIDER DOES NOT HAVE", r.receiptOnly.map((x) => `${x.receiptId} names ${x.providerId}, signed ${x.timestamp}`));
   section("MISMATCHES", r.mismatches.map((x) => `${x.receiptId} / ${x.providerId}: ${x.field} is ${JSON.stringify(x.receipt)} in the receipt, ${JSON.stringify(x.provider)} at the provider`));
+  section("ONE PROVIDER OBJECT, SEVERAL RECEIPTS", r.duplicates.map((x) => `${x.providerId} is named by ${x.receiptIds.join(", ")}`));
   section("FORWARDED WITHOUT AN OUTCOME RECEIPT", r.forwardedWithoutOutcome.map((x) => `${x.receiptId} (${x.tool}): committed and forwarded, no receipt of the outcome`));
   section("UNMATCHABLE", r.unmatchable.map((x) => `${x.receiptId}: ${x.reason}`));
   section("NOT VERIFIED, NOT MATCHED", r.unverified.map((x) => `${x.file}: ${x.failing.join("; ")}`));

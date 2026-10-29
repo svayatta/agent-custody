@@ -209,6 +209,91 @@ describe("completeness from the provider's side", () => {
     rmSync(pre.dir, { recursive: true, force: true });
   });
 
+  /** A fresh gateway under a config change, the calls it made, and options that verify its receipts. */
+  const gatewayWith = async (change: (cfg: Record<string, unknown>) => void, calls: Record<string, unknown>[]) => {
+    const g = buildFixture(mkdtempSync(join(tmpdir(), "completeness-gw-")));
+    const cfg = JSON.parse(readFileSync(g.configFile, "utf8"));
+    change(cfg);
+    writeFileSync(g.configFile, JSON.stringify(cfg));
+    const gw = await createGateway(loadConfig(g.configFile));
+    const made: { receiptId: string; text: string }[] = [];
+    try {
+      for (const args of calls) {
+        const r = await gw.handleCall({ name: "stripe.refund", arguments: args });
+        made.push({ receiptId: String(r._meta![RECEIPT_META_KEY]), text: (r.content as { text: string }[])[0]!.text });
+      }
+    } finally {
+      await gw.close();
+    }
+    const verify = { issuerKeys: [loadPublicKey(g.gatewayPub)], principalKeys: [loadPublicKey(g.principalPub)], logFile: g.logFile };
+    return { g, made, with: (objects: StubObject[], extra: Partial<CompletenessOptions> = {}) => ({ ...opts(objects), receiptsDir: g.receiptsDir, verify, ...extra }) };
+  };
+
+  it("keeps every receipt that names one provider object, so a contradicting receipt cannot be dropped", async () => {
+    // both refunds name the same customer: read as the object id, two verified receipts claim one provider object
+    const object: StubObject = { id: "cust_123", created: Math.floor(Date.now() / 1000), amount: 2500 };
+    const report = await checkCompleteness(opts([object], { idPath: "customer_id" }));
+    expect(report.duplicates).toEqual([{ providerId: "cust_123", receiptIds: refunds.map((r) => r.receiptId).sort() }]);
+    expect(report.mismatches).toEqual([{ receiptId: refunds[0]!.receiptId, providerId: "cust_123", field: "amount", receipt: 5000, provider: 2500 }]);
+    expect(report.complete).toBe(false);
+    expect(formatCompleteness(report)).toMatch(/ONE PROVIDER OBJECT, SEVERAL RECEIPTS \(1\)\n {2}cust_123 is named by/);
+  });
+
+  it("does not let another valid receipt, copied under the missing outcome's name, hide a call forwarded without an outcome", async () => {
+    const { g, made, with: w } = await gatewayWith((cfg) => (cfg.precommit = ["stripe.refund"]), [{ customer_id: "cust_123", amount: 300 }, { customer_id: "cust_123", amount: 400 }]);
+    const [a, b] = made.map((m) => m.receiptId) as [string, string];
+    writeFileSync(join(g.receiptsDir, `${a}.json`), readFileSync(join(g.receiptsDir, `${b}.json`)));
+    // and A's authorization renamed to B's, whose outcome exists: matched by the signed id, not the name
+    writeFileSync(join(g.receiptsDir, `${b}.authorization.json`), readFileSync(join(g.receiptsDir, `${a}.authorization.json`)));
+    rmSync(join(g.receiptsDir, `${a}.authorization.json`));
+    const report = await checkCompleteness(w([]));
+    expect(report.forwardedWithoutOutcome).toEqual([{ receiptId: a, tool: "stripe.refund" }]);
+    expect(report.unverified).toEqual([
+      { file: `${a}.json`, failing: [`the file name does not match the signed receipt id ${b}`] },
+      { file: `${b}.authorization.json`, failing: [`the file name does not match the signed receipt id ${a}`] },
+    ].sort((x, y) => x.file.localeCompare(y.file)));
+    expect(report.complete).toBe(false);
+    rmSync(g.dir, { recursive: true, force: true });
+  });
+
+  it("reports only what falls in the window: an earlier orphan, or an earlier mismatched pair found through the margin, is not a finding", async () => {
+    const { g, made, with: w } = await gatewayWith((cfg) => (cfg.precommit = ["stripe.refund"]), [{ customer_id: "cust_123", amount: 300 }, { customer_id: "cust_123", amount: 400 }]);
+    rmSync(join(g.receiptsDir, `${made[0]!.receiptId}.json`));
+    const kept = JSON.parse(made[1]!.text) as { refund_id: string };
+    // the call and the provider object are both five minutes before the window, inside the margin
+    const later = { sinceMs: Date.now() + 5 * 60_000, untilMs: Date.now() + 60 * 60_000 };
+    const report = await checkCompleteness(w([{ id: kept.refund_id, created: Math.floor(Date.now() / 1000), amount: 999 }], later));
+    expect(report.forwardedWithoutOutcome).toEqual([]);
+    expect(report.mismatches).toEqual([]);
+    expect(report.complete).toBe(true);
+    // the same evidence, in the window, is reported
+    const now = await checkCompleteness(w([{ id: kept.refund_id, created: Math.floor(Date.now() / 1000), amount: 999 }]));
+    expect(now.forwardedWithoutOutcome.map((f) => f.receiptId)).toEqual([made[0]!.receiptId]);
+    expect(now.mismatches.map((m) => m.field)).toEqual(["amount"]);
+    rmSync(g.dir, { recursive: true, force: true });
+  });
+
+  it("calls a currency withheld under a capture rule unmatchable, instead of skipping the comparison", async () => {
+    const { g, made, with: w } = await gatewayWith((cfg) => (cfg.capture = { "stripe.refund": { args: { mode: "digest", clear: ["amount"] }, result: { mode: "clear" } } }), [{ customer_id: "cust_123", amount: 300, currency: "USD" }]);
+    const { refund_id } = JSON.parse(made[0]!.text) as { refund_id: string };
+    const report = await checkCompleteness(w([{ id: refund_id, created: Math.floor(Date.now() / 1000), amount: 300, currency: "eur" }]));
+    expect(report.matched.map((m) => m.providerId)).toEqual([refund_id]);
+    expect(report.unmatchable).toEqual([{ receiptId: made[0]!.receiptId, reason: expect.stringMatching(/"currency" is withheld/) }]);
+    expect(report.complete).toBe(false);
+    rmSync(g.dir, { recursive: true, force: true });
+  });
+
+  it("reads the provider id from result content kept in clear beside a commitment over the other fields", async () => {
+    const { g, made, with: w } = await gatewayWith((cfg) => (cfg.capture = { "stripe.refund": { args: { mode: "digest", clear: ["customer_id", "amount"] }, result: { mode: "digest", clear: ["content"] } } }), [{ customer_id: "cust_123", amount: 300 }]);
+    const receipt = JSON.parse(readFileSync(join(g.receiptsDir, `${made[0]!.receiptId}.json`), "utf8")) as { envelope: { payload: string } };
+    expect(JSON.parse(Buffer.from(receipt.envelope.payload, "base64").toString()).predicate.execution.result).toHaveProperty("$rest");
+    const { refund_id } = JSON.parse(made[0]!.text) as { refund_id: string };
+    const report = await checkCompleteness(w([{ id: refund_id, created: Math.floor(Date.now() / 1000), amount: 300 }]));
+    expect(report.matched).toEqual([{ receiptId: made[0]!.receiptId, providerId: refund_id }]);
+    expect(report.complete).toBe(true);
+    rmSync(g.dir, { recursive: true, force: true });
+  });
+
   it("stops on a provider error instead of reporting a partial list as complete", async () => {
     const report = checkCompleteness({ ...opts([]), source: stripeSource({ secretKey: "rk_wrong", object: "refunds", fetch: stripeStub(theProvider()).f }) });
     await expect(report).rejects.toThrow(/HTTP 401/);
