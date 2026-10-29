@@ -2,7 +2,7 @@
 
 All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agent-custody` on PyPI, move in lockstep. The receipt format has stayed at v0.2 throughout; every addition to it is an optional field, so earlier receipts and the published conformance vectors remain valid.
 
-## Unreleased
+## 0.13.0 — 2026-10-29
 
 - **Completeness from the provider's side (issue #178).** `agent-custody completeness` is for an auditor. With a read-only key of their own (`--key-env`), it lists the provider's objects over a window (Stripe refunds, payouts, or transfers, every page) and matches each to a verified receipt by the provider's object id in the receipt's result (`--id-path`, default `id`). It reports provider actions with no receipt, which no gateway can see; receipts the provider does not have; amount, currency (ignoring case), and `--beneficiary` mismatches; provider objects that more than one verified receipt names, each still compared; calls committed and forwarded without an outcome receipt, tied to their outcome by the signed receipt id rather than the file name; receipts whose id, amount, currency, or beneficiary a capture rule withholds; and files that do not verify or are stored under a name other than their signed receipt id, which are never matched. The provider is listed fifteen minutes either side of the window, and only what falls inside it is reported. It exits 1 unless complete. `checkCompleteness`, `stripeSource`, and `formatCompleteness` in code; `docs/completeness.md`, example 35.
 
