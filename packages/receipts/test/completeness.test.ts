@@ -248,10 +248,11 @@ describe("completeness from the provider's side", () => {
     rmSync(join(g.receiptsDir, `${a}.authorization.json`));
     const report = await checkCompleteness(w([]));
     expect(report.forwardedWithoutOutcome).toEqual([{ receiptId: a, tool: "stripe.refund" }]);
-    expect(report.unverified).toEqual([
+    expect(report.unverified).toHaveLength(2);
+    expect(report.unverified).toEqual(expect.arrayContaining([
       { file: `${a}.json`, failing: [`the file name does not match the signed receipt id ${b}`] },
       { file: `${b}.authorization.json`, failing: [`the file name does not match the signed receipt id ${a}`] },
-    ].sort((x, y) => x.file.localeCompare(y.file)));
+    ]));
     expect(report.complete).toBe(false);
     rmSync(g.dir, { recursive: true, force: true });
   });
