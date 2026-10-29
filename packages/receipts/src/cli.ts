@@ -18,6 +18,7 @@ import { connectSigner, fetchLogKeys, localSigner, serveSigner, type RetiredKey,
 import { fetchWitnessKeys, Witness } from "./witness.ts";
 import { checkLog, formatLogCheck } from "./log-check.ts";
 import { Anchor, ANCHOR_CHAINS, resolveAnchorChain } from "./anchor.ts";
+import { checkCompleteness, formatCompleteness, stripeSource, type StripeObject } from "./completeness.ts";
 import { evmChain } from "./anchor-evm.ts";
 import { serveHttp } from "./gateway-http.ts";
 import { serveA2a } from "./a2a.ts";
@@ -99,6 +100,12 @@ const USAGE = `agent-custody <command>
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
   verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--require-strict] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]
   policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
+  completeness --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--log-id <id>]
+               --provider stripe --object refunds|payouts|transfers --key-env NAME --tool <name>... --since <ISO> --until <ISO>
+               [--id-path id] [--amount-field amount] [--currency-field currency] [--beneficiary <arg>=<field>]... [--json]
+                                                 for an auditor: lists the provider's objects in the window with a read-only key, and
+                                                 matches each to a verified receipt by the provider's object id; reports actions with no
+                                                 receipt, receipts the provider does not have, and mismatched amounts; exits 1 unless complete
                                                    replay verified local receipts against a proposed policy using their recorded inputs;
                                                    --out saves the full JSON report. Exits 1 when any call could not be evaluated.
   log     ... --db-env NAME                     the same server over Postgres: tenants and tokens from the database, one writer per tenant,
@@ -660,6 +667,65 @@ async function main(argv: string[]): Promise<number> {
       });
       console.log(values.json ? JSON.stringify(result, null, 2) : formatReport(result));
       return result.ok ? 0 : 1;
+    }
+    case "completeness": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          receipts: { type: "string" },
+          "issuer-key": { type: "string", multiple: true },
+          "principal-key": { type: "string", multiple: true },
+          "approval-key": { type: "string", multiple: true },
+          "log-key": { type: "string", multiple: true },
+          log: { type: "string" },
+          "log-id": { type: "string" },
+          provider: { type: "string" },
+          object: { type: "string", default: "refunds" },
+          "key-env": { type: "string" },
+          tool: { type: "string", multiple: true },
+          since: { type: "string" },
+          until: { type: "string" },
+          "id-path": { type: "string" },
+          "amount-field": { type: "string" },
+          "currency-field": { type: "string" },
+          beneficiary: { type: "string", multiple: true },
+          json: { type: "boolean", default: false },
+        },
+      });
+      if (!values.receipts || !values["issuer-key"]?.length || !values["key-env"] || !values.tool?.length || !values.since || !values.until) throw new Error("completeness needs --receipts, --issuer-key, --provider stripe, --key-env, --tool, --since and --until");
+      if (values.provider !== "stripe") throw new Error(`completeness supports --provider stripe; got "${values.provider ?? ""}"`);
+      const objects: StripeObject[] = ["refunds", "payouts", "transfers"];
+      if (!objects.includes(values.object as StripeObject)) throw new Error(`--object is one of ${objects.join(", ")}; got "${values.object}"`);
+      const sinceMs = Date.parse(values.since);
+      const untilMs = Date.parse(values.until);
+      if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs) || untilMs <= sinceMs) throw new Error("--since and --until must be ISO times, --until after --since");
+      const beneficiary: Record<string, string> = {};
+      for (const pair of values.beneficiary ?? []) {
+        const at = pair.indexOf("=");
+        if (at < 1 || at === pair.length - 1) throw new Error(`--beneficiary takes <argument>=<provider field>; got "${pair}"`);
+        beneficiary[pair.slice(0, at)] = pair.slice(at + 1);
+      }
+      const report = await checkCompleteness({
+        receiptsDir: values.receipts,
+        verify: {
+          issuerKeys: values["issuer-key"].map(loadPublicKey),
+          principalKeys: (values["principal-key"] ?? []).map(loadPublicKey),
+          ...(values["approval-key"] ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}),
+          ...(values["log-key"] ? { logKeys: values["log-key"].map(loadPublicKey) } : {}),
+          ...(values.log ? { logFile: values.log } : {}),
+          ...(values["log-id"] ? { logId: values["log-id"] } : {}),
+        },
+        source: stripeSource({ secretKey: secretFrom(values["key-env"]), object: values.object as StripeObject }),
+        tools: values.tool,
+        sinceMs,
+        untilMs,
+        ...(values["id-path"] ? { idPath: values["id-path"] } : {}),
+        ...(values["amount-field"] ? { amountField: values["amount-field"] } : {}),
+        ...(values["currency-field"] ? { currencyField: values["currency-field"] } : {}),
+        ...(Object.keys(beneficiary).length ? { beneficiary } : {}),
+      });
+      console.log(values.json ? JSON.stringify(report, null, 2) : formatCompleteness(report));
+      return report.complete ? 0 : 1;
     }
     case "policy": {
       const [subcommand, ...args] = rest;

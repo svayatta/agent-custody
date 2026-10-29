@@ -44,6 +44,7 @@ Suggested reading order is the numbering. Output lands in `examples-out/`, which
 | 32 | the gateway console | [32-console.ts](../examples/32-console.ts) | a gateway that has made two receipts, and its operator's console: a token on every route, the receipts with a verdict each, a stricter policy replayed against the recorded calls before it is saved, the save recorded with the old version kept and a stale edit refused, and a grant inspected, revoked, and then refused by the gateway | `src/console.ts`, `src/console-page.ts` |
 | 33 | anchoring the log on a chain | [33-chain-anchor.ts](../examples/33-chain-anchor.ts) | a log publishes a checkpoint, the anchor commits it to a stand-in chain in one transaction, and `log-check` passes against the chain; the operator swaps in a rewritten log under the same key and log id, and `log-check` fails it from the chain alone |
 | 34 | strict mode | [34-strict-mode.ts](../examples/34-strict-mode.ts) | `check` lists what strict mode would refuse; a local log and a log that is not hash-only are refused at startup; behind a hash-only log with a pinned key, a read is precommitted and its receipt says `issuer.strict`; `requireStrict` accepts it and refuses an ordinary receipt; with the log down the call is not forwarded and the outbox stays empty | `src/config.ts`, `src/gateway.ts`, `src/check.ts`, `src/verify.ts` |
+| 35 | completeness from the provider's side | [35-completeness.ts](../examples/35-completeness.ts) | two refunds through the gateway and a third issued straight through the provider; the auditor lists the provider's refunds with a read-only key, matches two to verified receipts, and reports the third as an action with no receipt |
 
 ## How policies are defined, in one paragraph
 
@@ -55,6 +56,7 @@ A policy is a Cedar file. The gateway turns each tool call into a Cedar request:
 - [codex-recovery.md](codex-recovery.md): the opt-in live Codex support incident, operator-reviewed recovery, and its offline state example
 - [approvals.md](approvals.md): exact-action signatures, two-person thresholds, consumption, and privacy limits
 - [console.md](console.md): the admin console: run it, what each tab does, how it is protected, and its limits
+- [completeness.md](completeness.md): matching the provider's own records against verified receipts, to find actions taken outside the gateway
 - [anchoring.md](anchoring.md): the log's checkpoints on Ethereum: what an anchor proves, running it, and checking a log against the chain
 - [financial-operations.md](financial-operations.md): payment retries, budget reservations, provider contract, and operator reconciliation
 - [sdk.md](sdk.md): the interceptor and every adapter
