@@ -138,6 +138,7 @@ export async function verifyConsistency(oldSize: number, oldRoot: string, newSiz
 const ISSUER_NOTE: Record<string, string> = {
   gateway: "enforced outside the agent's process; the agent could neither skip nor forge this receipt",
   sdk: "self-reported by the agent's own process; tamper-evident after issue, but nothing here was enforced outside the agent",
+  door: "enforced in front of the business's own HTTP surface; the arriving party could neither skip nor forge this receipt, and is attested only when it presented a grant",
 };
 const short = (s: string) => s.slice(0, 12);
 
@@ -336,7 +337,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   const broken = structuralProblem(st.predicate);
   if (!add("structural parts in clear", !broken, broken ?? undefined)) return done(null);
   const p = st.predicate;
-  add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
+  add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk" || p.issuer.kind === "door", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
   add("issuer keyid matches signer", p.issuer.keyid === sig.keyid);
   if (opts.requireStrict) {
     add("strict mode in force", p.issuer.kind === "gateway" && p.issuer.strict === true, p.issuer.strict === true ? undefined : "the issuer does not say it ran in strict mode");
@@ -360,6 +361,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
     add("gateway receipt carries a delegation", p.delegation !== undefined);
     add("gateway receipt carries a policy decision", p.policy !== null);
   }
+  if (p.issuer.kind === "door") add("door receipt carries a policy decision", p.policy !== null);
   if (p.delegation) {
     const del = await verifyDelegationChain(p.delegation.envelope, opts.principalKeys);
     const d = del.ok ? del.delegation : null;
