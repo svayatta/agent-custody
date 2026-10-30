@@ -189,7 +189,7 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   if (!add("structural parts in clear", !broken, broken ?? undefined)) return done(null);
   const p = st.predicate;
 
-  add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
+  add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk" || p.issuer.kind === "door", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
   add("issuer keyid matches signer", p.issuer.keyid === sig.keyid);
   if (opts.requireStrict) {
     add("strict mode in force", p.issuer.kind === "gateway" && p.issuer.strict === true, p.issuer.strict === true ? undefined : "the issuer does not say it ran in strict mode");
@@ -213,6 +213,8 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     add("gateway receipt carries a delegation", p.delegation !== undefined);
     add("gateway receipt carries a policy decision", p.policy !== null);
   }
+  // A door decides every arrival by policy; an arrival carries a grant only when it chose to present one.
+  if (p.issuer.kind === "door") add("door receipt carries a policy decision", p.policy !== null);
 
   if (p.delegation) {
     const del = verifyDelegation(p.delegation.envelope, opts.principalKeys);
