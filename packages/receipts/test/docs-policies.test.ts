@@ -126,6 +126,8 @@ describe("docs/policies.md examples", () => {
     expect(evaluate(blocks[15]!, door("refund", { method: "POST", path: "/refunds", body: { amount: 1000 } }, "unknown")).decision).toBe("deny");
     expect(evaluate(blocks[15]!, door("refund", { method: "POST", path: "/refunds", body: { amount: 4500 } }, "verified")).decision).toBe("allow");
     expect(evaluate(blocks[15]!, door("refund", { method: "POST", path: "/refunds", body: { amount: 9000 } }, "verified")).decision).toBe("deny");
+    expect(evaluate(blocks[15]!, door("refund", { method: "POST", path: "/refunds", body: { amount: -1 } }, "verified")).decision).toBe("deny");
+    expect(evaluate(blocks[15]!, door("refund", { method: "POST", path: "/refunds", body: { amount: 0 } }, "verified")).decision).toBe("deny");
     // no JSON body at all: the amount comparison errors, and an error is a deny
     expect(evaluate(blocks[15]!, door("refund", { method: "POST", path: "/refunds" }, "verified")).decision).toBe("deny");
   });

@@ -207,8 +207,8 @@ async function verifyOriginalAuthorization(bundle: Bundle, opts: Options): Promi
   const problem = structuralProblem({ ...p, session: { id: null, toolUseId: null, provenance: "claimed" }, model: { id: null, provenance: "claimed" }, execution: { status: "withheld", provenance: "observed" } });
   add("structural parts in clear", !problem, problem ?? undefined);
   if (problem) return { ok: false, checks };
-  add("authorization issued by the gateway", p.issuer.kind === "gateway" && p.issuer.keyid === sig.keyid);
-  add("authorization operation is submitted", p.operation?.status === "submitted");
+  add("authorization issued by the gateway", (p.issuer.kind === "gateway" || p.issuer.kind === "door") && p.issuer.keyid === sig.keyid, p.issuer.kind === "door" ? "a door commits a request before relaying it, as a gateway commits a call" : undefined);
+  add("authorization operation is submitted", p.issuer.kind === "door" || p.operation?.status === "submitted", p.issuer.kind === "door" ? "a door has no operations" : undefined);
   add("authorization permits the original call", p.policy?.decision === "allow" ? Array.isArray(p.policy.errors) && p.policy.errors.length === 0 : p.policy?.decision === "deny" && p.policy.enforced === false);
   const del = p.delegation && await verifyDelegationChain(p.delegation.envelope, opts.principalKeys);
   add("delegation signature (principal key)", !!del?.ok);

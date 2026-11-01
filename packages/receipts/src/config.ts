@@ -260,6 +260,8 @@ export const DoorConfigSchema = z.object({
   trustProxy: z.boolean().optional(),
   /** the largest request body the door relays; a larger one is refused with 413 and receipted. Default 10 MiB */
   maxBodyBytes: z.number().int().positive().default(10 * 1024 * 1024),
+  /** routes whose arrivals are committed to the log before they are relayed whatever the method, or ["*"]; every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless */
+  precommit: z.array(z.string().min(1)).default([]),
   receiptsDir: z.string(),
   logFile: z.string().optional(),
   log: LogSchema.optional(),
@@ -267,7 +269,8 @@ export const DoorConfigSchema = z.object({
   splunk: SplunkSchema.optional(),
   capture: CaptureSchema.optional(),
   captureKeyEnv: z.string().min(1).optional(),
-}).refine(hasOneLog, oneLog).refine((c) => new Set(c.routes.map((r) => r.name)).size === c.routes.length, { message: "route names must be unique" });
+}).refine(hasOneLog, oneLog).refine((c) => new Set(c.routes.map((r) => r.name)).size === c.routes.length, { message: "route names must be unique" })
+  .refine((c) => !c.log || !!c.log.keys?.length, { message: "a remote log needs log.keys: the log's public key files, pinned, to check its answer before a request is relayed" });
 export type DoorConfig = z.infer<typeof DoorConfigSchema>;
 
 export function loadDoorConfig(path: string): DoorConfig {

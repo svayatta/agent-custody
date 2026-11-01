@@ -4,8 +4,9 @@
 // The gateway stands in front of an agent's tools. The door stands in front of a business: a shop's API here. Every
 // arrival is classified by what it presented, decided by the Cedar policy for its route, relayed or refused, and
 // receipted either way. An unknown arrival may read the catalogue and may not refund; an agent carrying a grant signed
-// by the shop's principal key is verified and may refund up to £50; a grant signed by a stranger leaves it claimed.
-import { readFileSync } from "node:fs";
+// by the shop's principal key is verified and may refund a positive amount up to £50, and that refund is committed to
+// the log before it is relayed; a grant signed by a stranger leaves it claimed.
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey } from "../src/crypto.ts";
@@ -43,6 +44,8 @@ const grant = createDelegation(fx.principalKey, { version: "0.1", principal: "sh
 const passport = { authorization: `Bearer ${grantHeader(grant)}`, "content-type": "application/json" };
 const allowed = await show("POST /refunds £45    ", await fetch(`${door.url}/refunds`, { method: "POST", headers: passport, body: JSON.stringify({ order: "o_2", amount: 4500 }) }));
 await show("POST /refunds £90    ", await fetch(`${door.url}/refunds`, { method: "POST", headers: passport, body: JSON.stringify({ order: "o_3", amount: 9000 }) }));
+await show("POST /refunds -£10   ", await fetch(`${door.url}/refunds`, { method: "POST", headers: passport, body: JSON.stringify({ order: "o_3b", amount: -1000 }) }));
+console.log("   the £45 refund was committed to the log before it was relayed:", existsSync(join(fx.receiptsDir, `${allowed}.authorization.json`)) ? "receipts/<id>.authorization.json is on disk" : "MISSING");
 
 step(4, "a grant signed by a stranger is claimed, not verified, and the policy refuses it");
 const forged = createDelegation(generateKeyPair(), { version: "0.1", principal: "shop-owner", agent: "shopping-agent", scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() });

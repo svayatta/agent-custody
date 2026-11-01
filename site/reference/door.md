@@ -38,8 +38,9 @@ A reverse proxy in front of your own website, API, or forms. Where the [gateway]
 | `policyFile` | path | Cedar; re-read on change; a file that does not parse is refused and the policy in force stays |
 | `mode` | `enforce` (default) or `observe` | observe relays everything and records `enforced: false` |
 | `trustProxy` | boolean, optional | the arrival's address is the first in `X-Forwarded-For` |
-| `maxBodyBytes` | integer, default 10 MiB | a larger request body is refused with 413 and receipted as `withheld` |
-| `receiptsDir`, `logFile` or `log`, `otel`, `splunk`, `capture`, `captureKeyEnv` | | as for the [gateway](./gateway#the-config-file). Capture rules are keyed by route name |
+| `maxBodyBytes` | integer, default 10 MiB | a larger request body the policy allowed is refused with 413 and receipted as `withheld`; one the policy refuses is `denied` as any other |
+| `precommit` | strings, default `[]` | route names whose arrivals are committed to the log before they are relayed whatever their method, or `["*"]`. Every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless |
+| `receiptsDir`, `logFile` or `log`, `otel`, `splunk`, `capture`, `captureKeyEnv` | | as for the [gateway](./gateway#the-config-file). Capture rules are keyed by route name. A remote `log` needs `log.keys` |
 
 ## Running it
 
@@ -48,7 +49,7 @@ agent-custody check --config door.json
 agent-custody door --config door.json [--port 8780] [--host 127.0.0.1]
 ```
 
-Plain HTTP; bind to loopback or put TLS in front. `check` on a door config reports unknown keys, the key, the principal keys, the policy, the routes, the origin's scheme and credential variables, and the paths; exit 1 on an error.
+Plain HTTP; bind to loopback or put TLS in front. `check` on a door config reports unknown keys, the key, the principal keys, the policy (and warns on a permit that names an agent without requiring `context.facts.arrival.class == "verified"`), the routes, what is precommitted, the origin's scheme, every credential variable the door reads at startup (origin headers, log, Splunk, OTel, capture key), and the paths; exit 1 on an error.
 
 In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `matchRoute(routes, unmatched, method, pathname)` and `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` are exported for embedding the door in a server of your own.
 
@@ -69,20 +70,25 @@ Recorded as `facts.arrival` (observed) and given to the policy as `context.facts
 { "class": "verified", "subject": "shopping-agent", "grant": "verified", "signature": false, "remote": "203.0.113.9", "method": "POST", "path": "/refunds", "route": "refund" }
 ```
 
-`class`: `verified` | `claimed` | `unknown`. `grant`: `verified` | `out-of-scope` | `invalid` | `absent`, with `grantError` when not verified. `declared` when the agent header was sent. There is no `human` class.
+`class`: `verified` | `claimed` | `unknown`. `grant`: `verified` | `out-of-scope` | `invalid` | `absent`, with `grantError` when not verified. `declared` when the agent header was sent. There is no `human` class. `subject` reaches the Cedar principal only when `class` is `verified`.
 
 ## The Cedar request
 
-`principal` `Agent::"<subject>"`, `action` and `resource` the route name. `context.args`: `{ method, path, query, headers, body?, bodyBytes, bodyDigest }`, where `query` maps names to a string or an array of strings, `headers` carries `user-agent`, `content-type`, `accept`, `host` only, and `body` is present for a JSON body of at most 64 KiB. `context.facts.arrival` as above. `context.grant` `{ principal, scopes }` only when verified.
+`principal` `Agent::"<agent>"` for a verified arrival's agent, `Agent::"unknown"` otherwise; `action` and `resource` the route name. `context.args`: `{ method, path, query, headers, body?, bodyBytes, bodyDigest }`, where `query` maps names to a string or an array of strings, `headers` carries `user-agent`, `content-type`, `accept`, `host` only, and `body` is present for a JSON body of at most 64 KiB. A body above `maxBodyBytes` gives `bodyBytes` (read so far) and `bodyOversized: true`, no `body`, no `bodyDigest`. `context.facts.arrival` as above. `context.grant` `{ principal, scopes }` only when verified.
+
+## Before relaying
+
+An arrival whose method is not GET, HEAD, or OPTIONS, or whose route is in `precommit`, is committed to the log as an authorization statement before it is relayed, as the [gateway's precommit](./gateway#the-config-file) does; `receipts/<receiptId>.authorization.json`, embedded in the receipt as `authorization`. A refusal by the log: 503, `withheld`, nothing relayed; in observe mode relayed, and printed.
 
 ## Responses
 
 | outcome | status | body | headers | receipt `execution` |
 | --- | --- | --- | --- | --- |
-| relayed | the origin's | the origin's | the origin's, minus hop-by-hop, plus the door's | `executed`; `failed` on an origin 5xx. `result` is `{ status, contentType?, bodyBytes, bodyDigest }` |
-| denied | 403 | `{ "error": "refused by the door's policy", "reason", "receipt" }` | the door's | `denied` |
+| relayed | the origin's | the origin's | the origin's, minus hop-by-hop, plus the door's; a `Location` at the origin's own address becomes a path | `executed`; `failed` on an origin 5xx. `result` is `{ status, contentType?, bodyBytes, bodyDigest }` |
+| denied, whatever the body's size | 403 | `{ "error": "refused by the door's policy", "reason", "receipt" }` | the door's | `denied` |
 | origin unreachable | 502 | `{ "error", "detail", "receipt" }` | the door's | `error` |
-| body too large | 413 | `{ "error": "not relayed", "reason", "receipt" }` | the door's | `withheld` |
+| allowed, body too large | 413 | `{ "error": "not relayed", "reason", "receipt" }` | the door's | `withheld` |
+| allowed, log refused the authorization | 503 | `{ "error": "not relayed", "reason", "receipt" }` | the door's | `withheld` |
 
 The door's headers on every answer: `X-Agent-Custody-Receipt` (receipt id), `X-Agent-Custody-Class`, and `X-Agent-Custody-Log-Pending: true` when the receipt waits in the outbox. On the relayed request: the same two, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `Accept-Encoding: identity`.
 
@@ -90,8 +96,8 @@ The door's headers on every answer: `X-Agent-Custody-Receipt` (receipt id), `X-A
 
 ## The receipt
 
-Receipt v0.2 with `issuer: { kind: "door", keyid, version, framework: "http" }`. `tool.name` is the route, observed. `request.args` as the Cedar request's `args`, claimed. For a verified arrival `principal` and `agent` are attested and `delegation` carries the grant; otherwise `principal` is `{ id: null, provenance: "claimed" }` and `agent.id` is the subject, claimed. Verification runs `door receipt carries a policy decision` and otherwise the gateway's checks; vectors `door-*`. See the [specification](/receipt/v0.2).
+Receipt v0.2 with `issuer: { kind: "door", keyid, version, framework: "http" }`. `tool.name` is the route, observed. `request.args` as the Cedar request's `args`, claimed. For a verified arrival `principal` and `agent` are attested and `delegation` carries the grant; otherwise `principal` is `{ id: null, provenance: "claimed" }` and `agent.id` is the subject, claimed. `authorization` is present when the request was committed before relaying. Verification runs `door receipt carries a policy decision` and otherwise the gateway's checks, the authorization checks included; vectors `door-*`. See the [specification](/receipt/v0.2).
 
 ## Not yet
 
-Agent detection in web or API traffic, RFC 9421 and Web Bot Auth verification, AP2 mandates, a challenge branch, grant revocation lists, and streamed or >32 MiB responses.
+Agent detection in web or API traffic, RFC 9421 and Web Bot Auth verification, AP2 mandates, a challenge branch, grant revocation lists, streamed request bodies, and streamed or >32 MiB responses.

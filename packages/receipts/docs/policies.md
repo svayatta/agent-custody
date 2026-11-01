@@ -227,7 +227,7 @@ The report is an analysis of the supplied receipt directory; it does not prove t
 
 ## How an arrival at the door becomes a Cedar request
 
-The [door](door.md) uses the same evaluator for arrivals at your own HTTP surface. `principal` is `Agent::"<subject>"`: the agent a verified grant names, else the name the arrival declared, else `unknown`. `action` and `resource` are the route the arrival fell under. `context.args` is the request (`method`, `path`, `query`, `headers`, a JSON `body` when small, `bodyBytes`, `bodyDigest`), claimed. `context.facts.arrival` is the door's own observation of the arrival: its `class` (`verified`, `claimed`, `unknown`), `subject`, what became of its `grant`, and its `remote` address. `context.grant` is present only for a verified arrival. A policy that lets `unknown` through on a route lets everything through on that route.
+The [door](door.md) uses the same evaluator for arrivals at your own HTTP surface. `principal` is `Agent::"<agent>"` for the agent a verified grant names, and `Agent::"unknown"` for every other arrival: a declared name is a claim and stays in the arrival fact. `action` and `resource` are the route the arrival fell under. `context.args` is the request (`method`, `path`, `query`, `headers`, a JSON `body` when small, `bodyBytes`, `bodyDigest`; `bodyOversized: true` and no digest when the body passed `maxBodyBytes`), claimed. `context.facts.arrival` is the door's own observation of the arrival: its `class` (`verified`, `claimed`, `unknown`), `subject`, what became of its `grant`, and its `remote` address. `context.grant` is present only for a verified arrival. A policy that lets `unknown` through on a route lets everything through on that route.
 
 ```cedar
 permit(principal, action == Action::"catalogue", resource);
@@ -235,6 +235,9 @@ permit(principal, action == Action::"catalogue", resource);
 permit(principal, action == Action::"refund", resource)
 when {
   context.facts.arrival.class == "verified" &&
+  context.args.body.amount > 0 &&
   context.args.body.amount <= 5000
 };
 ```
+
+A bound on an amount needs both ends: `amount <= 5000` alone lets a negative refund through, and the door relays the body as it came. A permit that names an agent, `principal == Agent::"shopping-agent"`, is satisfied only by a verified grant for that agent: a declared name never reaches the principal slot. `agent-custody check` still warns on a permit that names an agent without requiring `context.facts.arrival.class == "verified"`, because a policy copied from the gateway reads as if it did.

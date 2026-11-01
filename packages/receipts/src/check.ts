@@ -77,6 +77,27 @@ export function isDoorConfig(configPath: string): boolean {
 }
 
 /** `agent-custody check` on a door config: what the door would fail on at startup, and what it would silently do less than the config seems to promise. */
+/**
+ * The agents named by permits that do not also require a verified arrival. At the door the principal is the agent of a
+ * verified grant, or `unknown`, so such a permit admits only a verified agent; the warning is for the reader who
+ * expects it to admit a declared name, as the same text would at the gateway.
+ */
+export function permitsNamingAgentWithoutVerifiedArrival(policyText: string): string[] {
+  const parts = cedar.policySetTextToParts(policyText);
+  if (parts.type !== "success") return [];
+  const out: string[] = [];
+  for (const policy of parts.policies) {
+    const j = cedar.policyToJson(policy);
+    if (j.type !== "success" || j.json.effect !== "permit") continue;
+    const principal = j.json.principal as { op: string; entity?: { type: string; id: string } };
+    if (principal.op === "All" || !principal.entity) continue;
+    const conditions = JSON.stringify(j.json.conditions ?? []);
+    if (conditions.includes('"class"') && conditions.includes('"verified"')) continue;
+    out.push(`${principal.entity.type}::"${principal.entity.id}"`);
+  }
+  return out;
+}
+
 export function checkDoorConfig(configPath: string): CheckFinding[] {
   const out: CheckFinding[] = [];
   const add = (level: CheckFinding["level"], check: string, message: string) => out.push({ level, check, message });
@@ -129,9 +150,13 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
     const r = cedar.checkParsePolicySet({ staticPolicies: text });
     if (r.type !== "success") for (const e of r.errors) add("error", "policy", `${cfg.policyFile}: ${e.message}`);
     else if (!hasPermitRule(text)) add("warn", "policy", `${cfg.policyFile} has no permit rule, so every arrival is refused`);
-    else add("ok", "policy", "the policy parses");
+    else {
+      add("ok", "policy", "the policy parses");
+      for (const name of permitsNamingAgentWithoutVerifiedArrival(text)) add("warn", "policy", `a permit names ${name} without requiring context.facts.arrival.class == "verified": the principal is that agent only for a verified grant, so this permit admits nothing else; if it was copied from a gateway policy, add the arrival condition`);
+    }
   }
   if (cfg.mode === "observe") add("warn", "mode", "observe mode relays every arrival and records what the policy would have decided; nothing is refused by policy");
+  add("ok", "precommit", cfg.precommit.includes("*") ? "every arrival is committed to the log before it is relayed" : `every POST, PUT, PATCH, and DELETE${cfg.precommit.length ? `, and every arrival at ${cfg.precommit.join(", ")},` : ""} is committed to the log before it is relayed`);
   if (cfg.routes.length === 0) add("warn", "routes", `no routes: every arrival is the action "${cfg.unmatchedRoute}"`);
   else add("ok", "routes", `${cfg.routes.length} route(s); unmatched arrivals are "${cfg.unmatchedRoute}"`);
   const origin = new URL(cfg.origin.url);
@@ -139,6 +164,8 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
   else add("ok", "origin", `relays to ${cfg.origin.url}`);
   for (const [, variable] of Object.entries(cfg.origin.headerEnv ?? {})) if (!process.env[variable]) add("error", "credentials", `origin header variable ${variable} is not set in this environment`);
   if (cfg.log?.tokenEnv && !process.env[cfg.log.tokenEnv]) add("error", "credentials", `log token variable ${cfg.log.tokenEnv} is not set in this environment`);
+  if (cfg.splunk?.tokenEnv && !process.env[cfg.splunk.tokenEnv]) add("error", "credentials", `splunk token variable ${cfg.splunk.tokenEnv} is not set in this environment`);
+  for (const v of Object.values(cfg.otel?.headersEnv ?? {})) if (!process.env[v]) add("error", "credentials", `otel header variable ${v} is not set in this environment`);
   for (const f of cfg.log?.keys ?? []) if (!existsSync(f)) add("error", "log keys", `${f} does not exist`);
   if (cfg.captureKeyEnv && !process.env[cfg.captureKeyEnv]) add("error", "credentials", `capture key variable ${cfg.captureKeyEnv} is not set in this environment`);
   const dir = writableAncestor(cfg.receiptsDir);

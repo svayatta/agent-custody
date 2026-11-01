@@ -763,7 +763,7 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
         if decision == "allow":
             consistent, detail = status != "denied", "allow"
         elif enforced:
-            consistent, detail = status in ("denied", "withheld"), "enforced deny"
+            consistent, detail = status == "denied", "enforced deny"
         else:
             consistent, detail = status != "denied", "observe mode, not enforced"
         add("policy decision consistent with execution", consistent, f"{detail}, {status}")
@@ -1247,8 +1247,9 @@ def _verify_authorization_bundle(bundle: dict, trust: Trust, report: Report) -> 
         fault = fault or "the authorization has no tree head and inclusion proof"
     if not report.add("structural parts in clear", not fault, fault):
         return
-    report.add("authorization issued by the gateway", p["issuer"].get("kind") == "gateway" and p["issuer"]["keyid"] in signers)
-    report.add("authorization operation is submitted", _at(p, ("operation", "status")) == "submitted")
+    kind = p["issuer"].get("kind")
+    report.add("authorization issued by the gateway", kind in ("gateway", "door") and p["issuer"]["keyid"] in signers)
+    report.add("authorization operation is submitted", kind == "door" or _at(p, ("operation", "status")) == "submitted", "a door has no operations" if kind == "door" else "")
     policy = p.get("policy")
     permits = isinstance(policy, dict) and (
         (policy["decision"] == "allow" and isinstance(policy.get("errors"), list) and not policy["errors"])

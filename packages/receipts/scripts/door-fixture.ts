@@ -8,16 +8,17 @@ import { join } from "node:path";
 import { generateKeyPair, writeKeyPair, type KeyPair } from "../src/crypto.ts";
 
 /**
- * Anyone may read the catalogue. A refund is for a verified agent, up to £50 (5000 pence); an unknown or claimed
+ * Anyone may read the catalogue. A refund is for a verified agent, a positive amount up to £50 (5000 pence); an unknown or claimed
  * arrival gets no refund. Anything else at the API is for verified agents only. The arrival fact is the door's own.
  */
 export const DOOR_POLICY = `// The catalogue is public: humans, agents, anyone.
 permit(principal, action == Action::"catalogue", resource);
 
-// Refunds: a verified agent, in its grant's scope, for at most £50.
+// Refunds: a verified agent, in its grant's scope, for a positive amount of at most £50.
 permit(principal, action == Action::"refund", resource)
 when {
   context.facts.arrival.class == "verified" &&
+  context.args.body.amount > 0 &&
   context.args.body.amount <= 5000
 };
 
@@ -69,7 +70,7 @@ export interface Origin {
   close(): Promise<void>;
 }
 
-/** The site behind the door: answers 200 with a JSON echo, 404 when the path contains /missing, 500 when it contains /broken. */
+/** The site behind the door: answers 200 with a JSON echo, 404 when the path contains /missing, 500 when it contains /broken, and a 302 to its own /catalogue/after when it contains /redirect. */
 export function startOrigin(): Promise<Origin> {
   const seen: Origin["seen"] = [];
   const server: Server = createServer((req, res) => {
@@ -78,6 +79,11 @@ export function startOrigin(): Promise<Origin> {
     req.on("end", () => {
       const body = Buffer.concat(chunks).toString("utf8");
       seen.push({ method: req.method ?? "", path: req.url ?? "", headers: req.headers, body });
+      if (req.url?.includes("/redirect")) {
+        res.writeHead(302, { location: `http://127.0.0.1:${(server.address() as AddressInfo).port}/catalogue/after?from=redirect`, "x-origin": "shop" });
+        res.end();
+        return;
+      }
       const status = req.url?.includes("/missing") ? 404 : req.url?.includes("/broken") ? 500 : 200;
       res.writeHead(status, { "content-type": "application/json", "x-origin": "shop" });
       res.end(JSON.stringify({ ok: status === 200, method: req.method, path: req.url, body: body ? JSON.parse(body) : null }));

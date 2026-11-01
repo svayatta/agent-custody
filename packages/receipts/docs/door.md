@@ -40,10 +40,11 @@ agent-custody door --config door.json --port 8780
 | `policyFile` | the Cedar policy, re-read when the file changes; one that does not parse is refused and the policy in force stays |
 | `mode` | `enforce` (default) refuses what the policy denies. `observe` relays everything and records the decision with `enforced: false` |
 | `trustProxy` | behind a reverse proxy you run: the arrival's address is the first in `X-Forwarded-For` |
-| `maxBodyBytes` | the largest request body the door relays; a larger one gets 413 and a `withheld` receipt. Default 10 MiB |
-| `receiptsDir`, `logFile` or `log`, `otel`, `splunk`, `capture`, `captureKeyEnv` | as for the [gateway](configuration.md): where receipts and the log go, exporters, and private evidence per route |
+| `maxBodyBytes` | the largest request body the door relays; a larger one gets 413 and a `withheld` receipt once the policy has allowed it. Default 10 MiB |
+| `precommit` | route names whose arrivals are committed to the log before they are relayed whatever their method, or `["*"]`. Every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless; see [before the origin hears of it](#before-the-origin-hears-of-it). Default `[]` |
+| `receiptsDir`, `logFile` or `log`, `otel`, `splunk`, `capture`, `captureKeyEnv` | as for the [gateway](configuration.md): where receipts and the log go, exporters, and private evidence per route. A remote `log` needs `log.keys`, because its answer is checked before a request is relayed |
 
-`agent-custody check --config door.json` reads a door config the way the door would: unknown keys, the key, the principal keys, the policy, the routes, the origin's scheme and credential variables, and the paths. It exits 1 on an error.
+`agent-custody check --config door.json` reads a door config the way the door would: unknown keys, the key, the principal keys, the policy (including a permit that names an agent without requiring a verified arrival, see below), the routes, what is precommitted, the origin's scheme, every credential variable the door reads at startup (origin headers, the log, Splunk, OTel, the capture key), and the paths. It exits 1 on an error.
 
 ## What the door knows about an arrival
 
@@ -52,7 +53,7 @@ The door records one fact for every arrival, `arrival`, observed by the door its
 | field | values | meaning |
 | --- | --- | --- |
 | `class` | `verified`, `claimed`, `unknown` | `verified`: a grant signed by a trusted principal, inside its window, naming this route among its scopes. `claimed`: something was asserted that the door could not accept: a grant from a stranger, an expired one, one for other routes, a declared agent name, or an HTTP signature header. `unknown`: nothing was presented |
-| `subject` | string | the agent named in a verified grant; else the declared name or the agent a rejected grant named; else `unknown` |
+| `subject` | string | the agent named in a verified grant; else the declared name or the agent a rejected grant named; else `unknown`. Only a verified subject reaches the Cedar `principal` |
 | `grant` | `verified`, `out-of-scope`, `invalid`, `absent` | what became of the grant header, with `grantError` when it was not accepted |
 | `signature` | boolean | an RFC 9421 `Signature-Input` header was present. **Not checked yet.** It is a claim |
 | `declared` | string | the `x-agent-custody-agent` header, when sent. A claim |
@@ -67,10 +68,10 @@ There is no `human` class. The door cannot tell a person from a program that pre
 
 | Cedar slot | value |
 | --- | --- |
-| `principal` | `Agent::"<subject>"`: the verified agent, the declared name, or `unknown` |
+| `principal` | `Agent::"<agent>"` for the agent a verified grant names; `Agent::"unknown"` for every other arrival. A declared name and the agent a rejected grant names stay in the arrival fact: a permit on `principal == Agent::"shopping-agent"` cannot be satisfied by sending a header |
 | `action` | `Action::"<route>"` |
 | `resource` | `Tool::"<route>"` |
-| `context.args` | `{ method, path, query, headers, body?, bodyBytes, bodyDigest }`. `headers` carries `user-agent`, `content-type`, `accept`, and `host` only. `body` is present for a JSON body of at most 64 KiB; every body is recorded by `bodyDigest` (sha256 of the raw bytes) and `bodyBytes`. **Provenance: claimed** |
+| `context.args` | `{ method, path, query, headers, body?, bodyBytes, bodyDigest }`. `headers` carries `user-agent`, `content-type`, `accept`, and `host` only. `body` is present for a JSON body of at most 64 KiB; every body the door read is recorded by `bodyDigest` (sha256 of the raw bytes) and `bodyBytes`. A body above `maxBodyBytes` is dropped as it passes the limit and recorded as `bodyBytes` read so far and `bodyOversized: true`, with no digest and no `body`. **Provenance: claimed** |
 | `context.facts.arrival` | the fact above. **Provenance: observed** |
 | `context.grant` | `{ principal, scopes }`, present only when the arrival is `verified`. **Provenance: attested** |
 
@@ -80,10 +81,11 @@ Every rule the gateway's policies obey applies: default deny, `forbid` wins, an 
 // The catalogue is public: humans, agents, anyone.
 permit(principal, action == Action::"catalogue", resource);
 
-// Refunds: a verified agent, in its grant's scope, for at most £50.
+// Refunds: a verified agent, in its grant's scope, for a positive amount of at most £50.
 permit(principal, action == Action::"refund", resource)
 when {
   context.facts.arrival.class == "verified" &&
+  context.args.body.amount > 0 &&
   context.args.body.amount <= 5000
 };
 
@@ -92,16 +94,25 @@ permit(principal, action == Action::"api", resource)
 when { context.facts.arrival.class == "verified" };
 ```
 
-A refund without a JSON body, or with no `amount`, is an evaluation error and a deny. That is the behaviour you want in front of a payments route.
+A refund without a JSON body, or with no `amount`, is an evaluation error and a deny. That is the behaviour you want in front of a payments route. The bound has two ends on purpose: `amount <= 5000` alone admits `{"amount": -1}`, and the door relays the body as it came.
+
+A permit that names an agent, `permit(principal == Agent::"shopping-agent", action == Action::"refund", resource)`, admits only an arrival whose verified grant names that agent, since nothing else reaches the principal slot. `agent-custody check` still warns on such a permit when it does not also require `context.facts.arrival.class == "verified"`: the same text in a gateway policy reads differently, and the condition says what the permit relies on.
+
+## Before the origin hears of it
+
+A request that can change something at the origin, any method but GET, HEAD, and OPTIONS, and any arrival at a route named in `precommit`, is committed to the log before it is relayed, exactly as the gateway's precommit does for a consequential tool call: the door signs an authorization statement (the receipt without its outcome), appends it, writes it as `receipts/<receiptId>.authorization.json`, and only then relays. The receipt embeds it as `authorization`, and the verifier checks that it names this receipt and sits in the log before it. A door that dies between the relay and the receipt leaves the authorization behind, so the side effect has a record and a retry can be told from a first attempt. If the log will not take the authorization, the request is not relayed: 503 and a `withheld` receipt. In observe mode it is relayed and the missing authorization is printed.
 
 ## What the arrival gets back
 
 | the door's decision | HTTP | body | receipt `execution.status` |
 | --- | --- | --- | --- |
 | policy allows, origin answered | the origin's status and body, plus the door's headers | the origin's | `executed`, or `failed` when the origin answered 5xx |
-| policy denies | 403 | `{ error, reason, receipt }` | `denied` |
+| policy denies, whatever the body's size | 403 | `{ error, reason, receipt }` | `denied` |
 | origin unreachable or timed out | 502 | `{ error, detail, receipt }` | `error` |
-| body above `maxBodyBytes` | 413 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
+| policy allows, body above `maxBodyBytes` | 413 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
+| policy allows, the log refused the authorization | 503 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
+
+A redirect from the origin to its own address is rewritten to a path, so the client's next request comes back through the door and is classified again; a redirect elsewhere is relayed as sent.
 
 Every answer carries `X-Agent-Custody-Receipt` and `X-Agent-Custody-Class`. When the log did not take the receipt, it waits in `receipts/outbox/` and the answer also carries `X-Agent-Custody-Log-Pending: true`; a serving door appends the outbox every 30 seconds, as the gateway does.
 
@@ -111,7 +122,7 @@ Every answer carries `X-Agent-Custody-Receipt` and `X-Agent-Custody-Class`. When
 
 A door receipt is a v0.2 receipt with `issuer.kind: "door"` and `issuer.framework: "http"`. The route is the tool, observed. `request.args` is the arrival as the table above describes it, claimed. `facts.arrival` is the door's observation. When the arrival was verified, `principal` and `agent` are attested and `delegation` carries the grant; otherwise `principal` is `{ id: null, provenance: "claimed" }` and `agent` is the subject, claimed. `execution.result` for a relayed call is `{ status, contentType?, bodyBytes, bodyDigest }`: the origin's body is never copied into the receipt, only committed to.
 
-The verifier runs `door receipt carries a policy decision` in place of the gateway's two checks, and otherwise the same checks: a verified arrival's receipt passes `delegation binds principal and agent` and `executed tool within delegated scope`; an unknown arrival's passes `principal is claimed, not attested`. Both verifiers, the Python verifier, and `policy simulate` accept door receipts; the conformance vectors `door-unknown-executed`, `door-unknown-denied`, and `door-verified-executed` pin them.
+The verifier runs `door receipt carries a policy decision` in place of the gateway's two checks, and otherwise the same checks: a verified arrival's receipt passes `delegation binds principal and agent` and `executed tool within delegated scope`; an unknown arrival's passes `principal is claimed, not attested`; a receipt that carries an `authorization` passes the authorization checks, including `authorization logged before execution`. Both verifiers, the Python verifier, and `policy simulate` accept door receipts; the conformance vectors `door-unknown-executed`, `door-unknown-denied`, and `door-verified-executed` pin them.
 
 ## What it does not do yet
 
@@ -119,6 +130,7 @@ The verifier runs `door receipt carries a policy decision` in place of the gatew
 - Check RFC 9421 HTTP message signatures, Web Bot Auth directories, or AP2 mandates. The grant is the only passport today.
 - Challenge an arrival. There is no human branch.
 - Revoke a grant by a revocation list; a grant stands until it expires.
+- Stream a request body: the body is read whole, up to `maxBodyBytes`, so that the policy can read it and the receipt can commit to it.
 - Relay a response larger than 32 MiB, or stream one: the body is relayed whole so that its digest can be recorded.
 
 Tutorial: [36-door.ts](../examples/36-door.ts).

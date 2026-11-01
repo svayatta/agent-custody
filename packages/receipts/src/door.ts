@@ -17,7 +17,7 @@ import { createIssuer, ReceiptPending, type FlushResult } from "./issue.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
-import type { FactRecord, ReceiptPredicate } from "./receipt.ts";
+import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
 
 export const DOOR_VERSION = "0.1.0";
 /** on every answer the door gives: the receipt that records the decision */
@@ -128,21 +128,25 @@ export interface DoorHost {
   close(): Promise<void>;
 }
 
-function readBody(req: IncomingMessage, max: number): Promise<Buffer | null> {
+/** methods that must not change anything at the origin; every other method is relayed only after its receipt is committed to the log */
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/** The body, or how many bytes had arrived when it passed the limit; the rest is drained and dropped. */
+function readBody(req: IncomingMessage, max: number): Promise<{ body: Buffer } | { oversized: true; bytes: number }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     req.on("data", (c: Buffer) => {
       size += c.length;
       if (size > max) {
-        resolve(null);
+        resolve({ oversized: true, bytes: size });
         req.removeAllListeners("data");
         req.resume();
         return;
       }
       chunks.push(c);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("end", () => resolve({ body: Buffer.concat(chunks) }));
     req.on("error", reject);
   });
 }
@@ -174,6 +178,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   const sink = options.log ?? openLog(cfg, key);
   const issuer = createIssuer(key, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
   const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework: "http" };
+  const precommit = new Set(cfg.precommit);
 
   // The policy, re-read when the file changes, as the gateway does; a file that does not parse is refused and the
   // policy in force stays. The bytes and the metadata come from one open file.
@@ -219,7 +224,8 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     const { arrival, delegation } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp);
     const { text: policyText, digest: pDigest } = currentPolicy();
 
-    const body = await readBody(req, cfg.maxBodyBytes);
+    const read = await readBody(req, cfg.maxBodyBytes);
+    const body = "body" in read ? read.body : null;
     const headers: Record<string, string> = {};
     for (const name of RECORDED_HEADERS) {
       const v = req.headers[name];
@@ -230,21 +236,25 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     if (body && body.length > 0 && body.length <= RECORDED_BODY_BYTES && /^application\/json\b/i.test(contentType)) {
       try { recordedBody = JSON.parse(body.toString("utf8")); } catch { recordedBody = undefined; }
     }
+    // An oversized body is dropped before anything is decided: the receipt records how far it was read and that there
+    // is no digest of it, rather than a digest of nothing.
     const args: Record<string, unknown> = {
       method,
       path: url.pathname,
       query: queryOf(url),
       headers,
       ...(recordedBody !== undefined ? { body: recordedBody } : {}),
-      bodyBytes: body ? body.length : 0,
-      bodyDigest: sha256Hex(body ?? Buffer.alloc(0)),
+      ...(body ? { bodyBytes: body.length, bodyDigest: sha256Hex(body) } : { bodyBytes: (read as { bytes: number }).bytes, bodyOversized: true }),
     };
     const facts: Record<string, FactRecord> = { [ARRIVAL_FACT]: { tool: "door.arrival", args: {}, value: arrival, resultDigest: digestOf(arrival), provenance: "observed" } };
 
+    // The Cedar principal is an agent the door checked: the one a verified grant names. A declared name, or the agent a
+    // rejected grant names, stays in the arrival fact as a claim, so a permit on `principal == Agent::"x"` cannot be
+    // satisfied by sending a header.
     let policy: PolicyDecision;
     try {
       policy = evaluate(policyText, {
-        agentId: arrival.subject,
+        agentId: delegation ? delegation.grant.agent : "unknown",
         tool: route,
         context: { args, facts: { [ARRIVAL_FACT]: arrival }, ...(delegation ? { grant: { principal: delegation.grant.principal, scopes: delegation.grant.scopes } } : {}) },
       });
@@ -254,13 +264,40 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     if (cfg.mode === "observe") policy = { ...policy, enforced: false };
     const forward = policy.decision === "allow" || policy.enforced === false;
 
-    let execution: ReceiptPredicate["execution"];
+    const head = {
+      receiptId,
+      timestamp,
+      issuer: issuedBy,
+      principal: delegation ? { id: delegation.grant.principal, keyid: delegation.principalKeyid, provenance: "attested" as const } : { id: null, provenance: "claimed" as const },
+      agent: { id: arrival.subject, provenance: delegation ? "attested" as const : "claimed" as const },
+      ...(delegation ? { delegation: { envelope: delegation.envelope, provenance: "attested" as const } } : {}),
+      tool: { name: route, provenance: "observed" as const },
+      request: { args, argsDigest: digestOf(args), provenance: "claimed" as const },
+      facts,
+      policy: { ...policy, provenance: "observed" as const },
+    };
+
+    let execution: ReceiptPredicate["execution"] | undefined;
+    let authorization: AuthorizationBundle | undefined;
     let answer: { status: number; headers: Record<string, string>; body: Buffer } | undefined;
-    if (body === null) {
-      execution = { status: "withheld", reason: `the request body is larger than ${cfg.maxBodyBytes} bytes and was not relayed`, provenance: "observed" };
-    } else if (!forward) {
+    if (!forward) {
       execution = { status: "denied", reason: [...policy.reasons, ...policy.errors].join("; ") || "no permit policy matched", provenance: "observed" };
+    } else if (body === null) {
+      execution = { status: "withheld", reason: `the request body is larger than ${cfg.maxBodyBytes} bytes and was not relayed`, provenance: "observed" };
     } else {
+      if (!SAFE_METHODS.has(method) || precommit.has("*") || precommit.has(route)) {
+        // A request that can change something at the origin is committed to the log before it is relayed, so that
+        // evidence of the side effect exists before the side effect does. If the log will not take it, the request
+        // is not relayed; in observe mode it is relayed and the missing authorization is printed.
+        try {
+          authorization = await issuer.authorize(head);
+        } catch (e) {
+          if (cfg.mode === "observe") console.error(`agent-custody door (observe mode): the log did not commit the authorization for ${route}, receipt ${receiptId}; the request was relayed without it: ${String(e instanceof Error ? e.message : e)}`);
+          else execution = { status: "withheld", reason: `the log did not commit the authorization, so the request was not relayed: ${String(e instanceof Error ? e.message : e)}`, provenance: "observed" };
+        }
+      }
+    }
+    if (!execution) {
       try {
         const target = new URL(url.pathname + url.search, origin);
         const out = new Headers();
@@ -277,11 +314,19 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         out.set(RECEIPT_HEADER, receiptId);
         out.set(CLASS_HEADER, arrival.class);
         for (const [h, v] of Object.entries(originHeaders)) out.set(h, v);
-        const upstream = await f(target, { method, headers: out, ...(method === "GET" || method === "HEAD" ? {} : { body: new Uint8Array(body) }), redirect: "manual", signal: AbortSignal.timeout(cfg.origin.timeoutMs) });
+        const upstream = await f(target, { method, headers: out, ...(method === "GET" || method === "HEAD" ? {} : { body: new Uint8Array(body!) }), redirect: "manual", signal: AbortSignal.timeout(cfg.origin.timeoutMs) });
         const relayed = Buffer.from(await upstream.arrayBuffer());
         if (relayed.length > MAX_RESPONSE_BYTES) throw new Error(`the origin's response is larger than ${MAX_RESPONSE_BYTES} bytes`);
         const back: Record<string, string> = {};
         upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k) && k !== "content-length" && k !== "content-encoding") back[k] = v; });
+        // A redirect to the origin's own address would take the client's next request around the door: it is rewritten
+        // to a path, which the client follows back through the door.
+        if (back.location) {
+          try {
+            const loc = new URL(back.location, target);
+            if (loc.origin === origin.origin) back.location = loc.pathname + loc.search + loc.hash;
+          } catch { /* not a URL: relayed as the origin sent it */ }
+        }
         answer = { status: upstream.status, headers: back, body: relayed };
         const result = { status: upstream.status, ...(back["content-type"] ? { contentType: back["content-type"] } : {}), bodyBytes: relayed.length, bodyDigest: sha256Hex(relayed) };
         execution = { status: upstream.status >= 500 ? "failed" : "executed", result, resultDigest: digestOf(result), provenance: "observed" };
@@ -293,18 +338,10 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     let logPending = false;
     try {
       await issuer.issue({
-        receiptId,
-        timestamp,
-        issuer: issuedBy,
-        principal: delegation ? { id: delegation.grant.principal, keyid: delegation.principalKeyid, provenance: "attested" } : { id: null, provenance: "claimed" },
-        agent: { id: arrival.subject, provenance: delegation ? "attested" : "claimed" },
-        ...(delegation ? { delegation: { envelope: delegation.envelope, provenance: "attested" } } : {}),
+        ...head,
         session: { id: null, toolUseId: null, provenance: "claimed" },
         model: { id: null, provenance: "claimed" },
-        tool: { name: route, provenance: "observed" },
-        request: { args, argsDigest: digestOf(args), provenance: "claimed" },
-        facts,
-        policy: { ...policy, provenance: "observed" },
+        ...(authorization ? { authorization } : {}),
         execution,
       }, undefined, undefined, { deferLog: true });
     } catch (e) {
@@ -314,13 +351,13 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     }
 
     const mark = { [RECEIPT_HEADER]: receiptId, [CLASS_HEADER]: arrival.class, ...(logPending ? { "x-agent-custody-log-pending": "true" } : {}) };
-    switch (execution.status) {
+    switch (execution!.status) {
       case "denied":
-        return json(res, 403, mark, { error: "refused by the door's policy", reason: execution.reason, receipt: receiptId });
+        return json(res, 403, mark, { error: "refused by the door's policy", reason: execution!.reason, receipt: receiptId });
       case "withheld":
-        return json(res, 413, mark, { error: "not relayed", reason: execution.reason, receipt: receiptId });
+        return json(res, body === null ? 413 : 503, mark, { error: "not relayed", reason: execution!.reason, receipt: receiptId });
       case "error":
-        return json(res, 502, mark, { error: "the origin could not be reached", detail: execution.error, receipt: receiptId });
+        return json(res, 502, mark, { error: "the origin could not be reached", detail: execution!.error, receipt: receiptId });
       default: {
         res.writeHead(answer!.status, { ...answer!.headers, ...mark });
         res.end(answer!.body);
