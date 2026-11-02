@@ -2,7 +2,7 @@
 
 A pull request is where a team reviews the work of an agent. The GitHub Action in this repository verifies the receipts of that work and puts the result on the pull request. A reviewer sees the result and installs nothing.
 
-The action runs `agent-custody verify --markdown` on a directory of receipt bundles. It writes one table to the job summary. On a pull request it also posts the same table as one comment, and it edits that comment on each later push.
+The action runs `agent-custody verify --markdown` on a directory of receipt bundles. It writes one table to the job summary. On a pull request it also posts the same table as one comment, and it edits that comment on each later push. The `agent-custody export` command puts the receipts into the branch, and it refuses a receipt that publishes the call.
 
 ## The workflow file
 
@@ -69,15 +69,67 @@ Keep the key files out of reach of the pull request. With the `pull_request` eve
 
 ## How receipts get into the pull request
 
-Receipts stay on the machine of the developer today, in the `receiptsDir` of the gateway or the SDK. The action reads a directory in the checkout, so the receipts you want reviewed must be in the branch. There is no export command yet. To commit receipts, copy the `<id>.json` files of the session into `.custody/receipts/` by hand.
+Receipts stay on the machine of the developer, in the `receiptsDir` of the gateway or the SDK. The action reads a directory in the checkout, so the receipts you want reviewed must be in the branch. The `export` command puts them there.
+
+```bash
+agent-custody export --receipts ~/.config/agent-custody/receipts --out .custody/receipts \
+  --issuer-key .custody/keys/agent.pub --since 2026-11-02T09:00:00Z
+git add .custody/receipts
+```
+
+The command prints one line for each receipt, then a count.
+
+```
+copied  6e2de8f3-4e51-43e5-af8b-a2b283dd7709.json
+refused 981d2afd-63f2-49ed-854a-83fc1bf1c035.json: args and result in clear: a capture rule must withhold it (or give --allow-clear)
+skipped 0b7c5f6e-93f7-4f06-a1f1-2f8d2d5f63a0.json: issued 2026-11-01T17:02:11.480Z, before --since
+1 copied, 1 refused, 1 skipped
+```
+
+| flag | meaning |
+| --- | --- |
+| `--receipts <dir>` | the receipts directory of the machine |
+| `--out <dir>` | where the copies go; the command creates it when it copies a receipt |
+| `--issuer-key <pub>` | the public key of the issuer; repeat it for more than one issuer (required) |
+| `--principal-key <pub>` | the public key of a principal whose grant a gateway receipt carries; SDK and Claude Code hook receipts need none |
+| `--approval-key <pub>` | the public key of an approver, for a gateway receipt that carries approval evidence |
+| `--since <ISO time>` | keep the receipts issued at or after this time, for example the start of the branch |
+| `--allow-clear` | copy a receipt that carries plain values; see the warning below |
+
+What the command does, in this order, for each file:
+
+1. It reads only the `<id>.json` files at the top level of `--receipts`. It never reads or copies `salts/`, `outbox/`, `*.authorization.json`, a subdirectory, a symbolic link, or any other file.
+2. It verifies the receipt with the issuer key. It refuses a receipt that does not verify, and a receipt whose file name is not its signed receipt id (`file name matches receipt id`, as the action does). `--issuer-key` is required, because the next step trusts what the signed receipt says about its own capture. An unverified file can claim anything.
+3. It skips a receipt issued before `--since`. A skipped receipt is not a failure.
+4. It runs the privacy check below. It refuses a receipt that fails the check.
+5. It copies the file byte for byte. It never rewrites a receipt, because the signature covers it. It writes nothing to `--out` for a refused or a skipped receipt.
+
+The command exits 1 when it refuses any receipt, and when it copies none. The other receipts are still copied. A file in the directory with a `.json` name that is not a receipt bundle is refused as well.
+
+### The privacy check
+
+The signed receipt has a capture note. The note lists the paths that hold a commitment in place of the value. The check reads the note, and it refuses a receipt when a side that holds data has no withheld path under it. The sides are the arguments (`request.args`), the result (`execution.result`, with the error message and the denial reason), and the value of each fact (`facts.<name>.value`). The command prints the sides in the reason, for example `args and result in clear`.
+
+A field that a rule lists in its `clear` list stays in clear on purpose, so the check allows it when the rule withholds the other fields of that side. An empty side is not data.
+
+`--allow-clear` turns the check off. The command then copies the receipt, marks it `(plain values: args, result)`, and prints this warning on standard error: each receipt marked with plain values publishes its arguments or its result to everyone who can read the output directory.
+
+The check has limits. Read them before you rely on it.
+
+- A receipt cannot be redacted after it is issued. The arguments and the result are signed as they are, and a change breaks the signature. Only a capture rule at issue time keeps a value out of the receipt. A receipt that an agent made before you set the rule stays in clear. Use `--since` to leave it out.
+- A side whose every field is on the `clear` list has nothing left to withhold, so it has no commitment. The check cannot tell it from a side in mode `clear`, and it refuses it. A `Bash` call with the argument `command` alone is such a side under the second rule below. Read the receipt, and give `--allow-clear` if you accept it.
+- The check does not look inside a value that the rule keeps in clear. The command text of a `Bash` call can hold a secret as well, for example a token in a `curl` header or in an `export` line. Keep a field in clear only when you accept that a reader sees all of it.
+- The tool name, the ids, the timestamps, the status, and the policy decision always stay in clear.
 
 ### A committed receipt publishes the call
 
 By default a receipt carries the call in plain text. It holds the arguments the agent sent and the result the tool returned. For a `Bash` call that is the command and its output. For a file tool it is the content of the file. Anyone who can read the repository can read these values. If the repository is public, everyone can.
 
-Before you commit a receipt, check these four points.
+Before you commit a receipt, check these points.
 
-1. Set a capture rule. A `capture` rule in the gateway config or the SDK config withholds a side of the call. With mode `digest`, the receipt holds one commitment over the fields you do not list in `clear`. With mode `encrypted`, it holds the same commitment and the value encrypted under a key that only you hold (`captureKeyEnv`). The rule applies to the receipt, to the log, and to every exporter. [Private evidence](usage.md#private-evidence) has the full rules.
+1. Set a capture rule before the session starts. A `capture` rule in the gateway config or in the SDK config (`sdk.json`) withholds a side of the call. With mode `digest`, the receipt holds one commitment over the fields you do not list in `clear`. With mode `encrypted`, it holds the same commitment and the value encrypted under a key that only you hold (`captureKeyEnv`). The rule applies to the receipt, to the log, and to every exporter. [Private evidence](usage.md#private-evidence) has the full rules. Two rules follow.
+
+   The strict rule. Every tool, every side, in mode `digest`. A reviewer sees the tool name, the status, and the decision of each call, and no value.
 
    ```json
    "capture": {
@@ -85,10 +137,23 @@ Before you commit a receipt, check these four points.
    }
    ```
 
-2. Commit the `<id>.json` files only. Never commit `salts/`, `outbox/`, `*.authorization.json`, or a local `log.jsonl`. The salts let a reader confirm a guess of a withheld value. The action does not read the other files, and the authorization files and the log hold the call data as well.
+   The rule that shows the commands. The `command` argument of `Bash` stays in clear, and the result is in mode `digest`. A reviewer sees what the agent ran, and not what it printed. Every other tool takes the strict rule from `"*"`.
+
+   ```json
+   "capture": {
+     "*": { "args": { "mode": "digest" }, "result": { "mode": "digest" }, "facts": { "mode": "digest" } },
+     "Bash": { "args": { "mode": "digest", "clear": ["command"] }, "result": { "mode": "digest" } }
+   }
+   ```
+
+   The second rule has a cost. The command text can hold a secret: a token on a command line, a password in a connection string, a path that names a customer. The rule publishes that text. In the second rule the other arguments of `Bash` (`description`, `timeout`) are withheld together in one commitment. Use the strict rule when you cannot read every command.
+
+2. Run `agent-custody export` instead of a copy by hand. It leaves `salts/`, `outbox/`, `*.authorization.json`, and a local `log.jsonl` behind. The salts let a reader confirm a guess of a withheld value, and the authorization files and the log hold the call data as well. Never copy these files into a branch.
 3. Keep the capture key out of the repository and out of the workflow. The action needs no key. A receipt with withheld values verifies as committed, and the table still shows the tool and the status, because those parts stay in clear.
-4. Read one committed receipt before the first push. Run `agent-custody verify <file> --issuer-key <pub>` and read the `args` and `execution` rows.
+4. Read one exported receipt before the first push. Run `agent-custody verify <file> --issuer-key <pub>` and read the `args` and `execution` rows.
 
 A reviewer who needs a withheld value asks the owner of the key for a disclosure (`agent-custody reveal`), and verifies it with `verify --disclose`.
+
+If you set up the Claude Code hook with `agent-custody init claude-code`, the `sdk.json` that it writes has no `capture` rule. Add the rule to that file before the session, and run `export` on the `receipts` directory next to it.
 
 An agent that runs inside the CI job needs no transport. Write its receipts in the job and run the action in the same job.

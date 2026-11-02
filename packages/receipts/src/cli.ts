@@ -37,6 +37,7 @@ import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
 import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
 import { auditExtends, formatReport, verifyBundle, type VerifyOptions } from "./verify.ts";
+import { CLEAR_WARNING, exportReceipts, formatReceiptExport as formatExportLines } from "./export.ts";
 import { formatSummaryMarkdown, receiptFiles, summarizeReceipts } from "./pr-summary.ts";
 import { formatSimulation, simulatePolicy, verifyOrphanAuthorization, type SimulationSkip } from "./simulate.ts";
 
@@ -101,6 +102,9 @@ const USAGE = `agent-custody <command>
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
   verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--require-strict] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]
           verify --markdown <dir|bundle.json>... --issuer-key <pub>   one Markdown table for a directory of bundles; exit 1 when one does not verify or none exists
+  export  --receipts <dir> --out <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--since <ISO time>] [--allow-clear]
+                                                   copies the verified receipt bundles that keep their values private into a directory for a pull request, byte for byte.
+                                                   Reads only <id>.json at the top level; never salts/, outbox/, or *.authorization.json. Exits 1 when it refuses a receipt, and when it copies none
   policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
   completeness --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--log-id <id>]
                --provider stripe --object refunds|payouts|transfers --key-env NAME --tool <name>... --since <ISO> --until <ISO>
@@ -676,6 +680,38 @@ async function main(argv: string[]): Promise<number> {
       const result = verifyBundle(JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle, verifyOptions);
       console.log(values.json ? JSON.stringify(result, null, 2) : formatReport(result));
       return result.ok ? 0 : 1;
+    }
+    case "export": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          receipts: { type: "string" },
+          out: { type: "string" },
+          "issuer-key": { type: "string", multiple: true },
+          "principal-key": { type: "string", multiple: true },
+          "approval-key": { type: "string", multiple: true },
+          since: { type: "string" },
+          "allow-clear": { type: "boolean", default: false },
+        },
+      });
+      if (!values.receipts || !values.out || !values["issuer-key"]?.length) throw new Error("export needs --receipts <dir>, --out <dir> and --issuer-key <pub>");
+      const since = values.since === undefined ? undefined : Date.parse(values.since);
+      if (since !== undefined && !Number.isFinite(since)) throw new Error(`--since must be an ISO time; got "${values.since}"`);
+      const result = exportReceipts({
+        receiptsDir: values.receipts,
+        outDir: values.out,
+        verify: {
+          issuerKeys: values["issuer-key"].map(loadPublicKey),
+          principalKeys: (values["principal-key"] ?? []).map(loadPublicKey),
+          ...(values["approval-key"] ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}),
+        },
+        ...(since !== undefined ? { since } : {}),
+        allowClear: values["allow-clear"],
+      });
+      for (const line of formatExportLines(result)) console.log(line);
+      if (result.lines.some((l) => l.outcome === "copied" && l.clear.length)) console.error(CLEAR_WARNING);
+      if (result.problem) console.error(`agent-custody export: ${result.problem}`);
+      return result.refused > 0 || result.copied === 0 ? 1 : 0;
     }
     case "completeness": {
       const { values } = parseArgs({

@@ -61,3 +61,4 @@ export * from "./upstream.ts";
 export * from "./retention.ts";
 export * from "./simulate.ts";
 export * from "./pr-summary.ts";
+export * from "./export.ts";

@@ -99,6 +99,27 @@ In code: `summarizeReceipts(receiptFiles(dir), options): { ok, rows, problem? }`
 
 The [GitHub Action](/receipts/github-action) in this repository runs this command and posts the table on a pull request. Its inputs are `path`, `issuer-key`, `principal-key`, `log-url`, `log-id`, `version`, and `github-token`.
 
+### `export`
+
+```bash
+agent-custody export --receipts ~/.config/agent-custody/receipts --out .custody/receipts --issuer-key keys/agent.pub [--issuer-key keys/other.pub] [--principal-key keys/principal.pub] [--approval-key keys/approver.pub] [--since 2026-11-02T09:00:00Z] [--allow-clear]
+```
+
+The command puts receipts into a directory that goes into a pull request. For each `<id>.json` at the top level of `--receipts`, it does these steps in order.
+
+1. It verifies the receipt with the issuer keys. It refuses a receipt that does not verify, and a receipt whose file name is not its signed receipt id (`file name matches receipt id`). `--issuer-key` is required, because the privacy check trusts the signed capture note.
+2. It skips a receipt issued before `--since`. `--since` takes an ISO time. A receipt issued at that time is kept.
+3. It refuses a receipt when a side that holds data has no withheld path under it in the signed capture note. The sides are `args` (`request.args`), `result` (`execution.result`, the error message, and the denial reason), and `facts` (the value of each fact). A field that a rule lists in its `clear` list is allowed when the rule withholds the other fields of that side. `--allow-clear` turns the check off; the command then marks the receipt `(plain values: ...)` and prints a warning on standard error.
+4. It copies the file byte for byte, and writes nothing for a refused or skipped receipt. The command creates `--out` when it copies a receipt.
+
+The command never reads or copies `salts/`, `outbox/`, `*.authorization.json`, a subdirectory, a symbolic link, or a file that does not end in `.json`. A `.json` file that is not a receipt bundle is refused.
+
+It prints one line for each receipt (`copied`, `refused` with the reason, or `skipped`), then `<n> copied, <n> refused, <n> skipped`. Exit 1 when it refuses a receipt, and when it copies none. The receipts that pass are copied even when the exit code is 1.
+
+A side whose every field is on the `clear` list has no commitment, and the check cannot tell it from a side in mode `clear`. The command refuses it. [Receipts on a pull request](/receipts/github-action#how-receipts-get-into-the-pull-request) has the capture rules that keep receipts safe to commit, and their limits.
+
+In code: `exportReceipts({ receiptsDir, outDir, verify, since?, allowClear? }): ReceiptExportResult` (`{ lines, copied, refused, skipped, problem? }`), `formatReceiptExport(result): string[]`, and `clearSides(predicate): string[]`.
+
 ## `reveal`
 
 The values a receipt withheld under a capture rule in mode `encrypted`, as a disclosure file for `verify --disclose`. Needs the customer's capture key.
