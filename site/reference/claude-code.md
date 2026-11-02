@@ -2,6 +2,36 @@
 
 One hook command records every tool call of a session as a receipt, and can deny a call before it runs. Claude Code invokes it as a command hook with the event on stdin; the Claude Agent SDK calls the same handler in process.
 
+## One command
+
+```bash
+npx agent-custody init claude-code [--dir <dir>] [--user] [--enforce] [--log-url <url> [--log-id <id>] [--log-token-env NAME] [--log-key <pub>]]
+```
+
+The command makes an agent key, writes `sdk.json` with `"mode": "observe"`, writes a starter deny set to `policy.cedar`, and registers the three hooks with absolute paths. It prints each step and ends with the next step.
+
+| option | effect |
+| --- | --- |
+| `--dir <dir>` | where the key, `sdk.json`, `policy.cedar`, and `receipts/` go. Default: `~/.config/agent-custody` |
+| `--user` | write the hooks to `~/.claude/settings.json`. Default: `.claude/settings.local.json` in the current directory, which Claude Code does not commit |
+| `--enforce` | leave out `"mode": "observe"`: a denied call is blocked |
+| `--log-url <url>` | log the receipts to this URL as hashes (`hashOnly`, `timeoutMs` 3000). Without it, the config has `"logFile": "log.jsonl"` and the receipts stay on the machine |
+| `--log-id <id>` | the log id that the tree heads must name |
+| `--log-token-env NAME` | the NAME of the environment variable that holds the log token. Default: `AGENT_CUSTODY_LOG_TOKEN`. The token never goes into a flag or a file |
+| `--log-key <pub>` | the log's public key file. It is copied to `log.pub` and pinned in `log.keys` |
+
+The starter deny set permits every call and forbids these Bash commands: `git push` with `--force` or `-f`, `rm -rf` on `/` or `~`, `terraform destroy`, and `drop database` or `DROP DATABASE` (the Cedar `like` operator is case-sensitive). The file ships in the package as `templates/claude-code.cedar`.
+
+The settings file is merged, not replaced. Every other key and hook stays, a hook that is already there is not added again, and a settings file that is not valid JSON stops the command before it changes anything. The command never overwrites an existing key, `sdk.json`, or `policy.cedar`, so it is safe to run two times. A second run updates the path of a hook of ours. When the path is in the npx cache (`/_npx/`), the command warns that npm can clear the cache; install the package globally and run the command again.
+
+## The report
+
+```bash
+agent-custody report --config <sdk.json>
+```
+
+The command reads `receiptsDir` of the config and verifies each receipt with the agent's key (and the log keys of the config, when it has a log). It prints `would have denied N calls` and, for each call, the tool, the command or the file path, the rule, and the receipt id. A denial recorded with `enforced: false` is a call that ran. A receipt that does not verify is listed apart with its reason and is not counted. Exit code 1 when any receipt does not verify, otherwise 0. The last line says how to enforce: remove the `"mode": "observe"` line from `sdk.json`.
+
 ## Registering the hook
 
 `.claude/settings.json` in the project, or the user's settings:

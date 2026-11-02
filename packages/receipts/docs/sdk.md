@@ -38,6 +38,46 @@ Policies see `context.args` and an empty `context.facts`. A policy that reads `c
 
 ## Claude Code
 
+### One command
+
+```bash
+npx agent-custody init claude-code
+```
+
+The command sets up custody for your own Claude Code sessions. It prints each step.
+
+1. It makes an agent key in `~/.config/agent-custody/keys/`.
+2. It writes `sdk.json` in `~/.config/agent-custody/` with `"mode": "observe"` and a `receiptsDir`. No log is configured, so the receipts stay on your machine.
+3. It writes a starter deny set to `policy.cedar`: force push, `rm -rf` on `/` and `~`, `terraform destroy`, and `drop database` in both cases. The policy permits every other call.
+4. It registers the `PreToolUse`, `PostToolUse`, and `PostToolUseFailure` hooks in `.claude/settings.local.json` of the current directory. Claude Code does not commit that file. With `--user`, the hooks go to `~/.claude/settings.json` and apply to every project.
+5. It prints the next step: start a Claude Code session, then run the report.
+
+The hook command in the settings file uses absolute paths: the Node binary, the CLI script that runs now, and the absolute path of `sdk.json`. The command merges into an existing settings file. It keeps every other key and every other hook, and it does not add a hook that is already there. If the settings file is not valid JSON, the command stops with an error and changes nothing.
+
+You can run the command two times. It never overwrites an existing key, `sdk.json`, or `policy.cedar`, so your edits stay. A second run does update the path in a hook of ours. When the first run came from the npx cache (a path with `/_npx/`), the command prints a warning, because npm can clear that cache and the hooks then stop working. Install the package globally with `npm install -g @agent-custody/receipts` and run the command again. The second run replaces the old path.
+
+| option | effect |
+| --- | --- |
+| `--dir <dir>` | the directory for the key, the config, the policy, and the receipts. Default: `~/.config/agent-custody` |
+| `--user` | write the hooks to `~/.claude/settings.json` |
+| `--enforce` | leave out `"mode": "observe"`, so a denied call is blocked |
+| `--log-url <url>` | send the receipts to a log as hashes (`hashOnly`, a 3 second timeout) instead of a local `log.jsonl` |
+| `--log-id <id>` | the log id that the tree heads must name |
+| `--log-token-env NAME` | the NAME of the environment variable that holds the log token. Default: `AGENT_CUSTODY_LOG_TOKEN`. The command refuses a value that is not an uppercase variable name, so a token never enters a file |
+| `--log-key <pub>` | the log's public key file. The command copies it to `log.pub` and pins it in `log.keys` |
+
+### The report
+
+```bash
+agent-custody report --config ~/.config/agent-custody/sdk.json
+```
+
+`init` prints this command with absolute paths. The report reads the receipts directory of the config and verifies each receipt with the agent's key. Then it prints `would have denied N calls`, and for each call the tool, the command or the file path, the Cedar rule, and the receipt id. A receipt that does not verify is counted apart, listed with the reason, and never counted as a denial. The command then exits with code 1. The report ends with the next step: remove the `"mode": "observe"` line from `sdk.json` to enforce the policy. A denial that the policy enforced (a config without the observe line) is listed apart as `denied`.
+
+`policy simulate` answers another question: what a proposed policy would change in recorded history. Use `report` to read what the policy in the config decided in observe mode.
+
+### Register the hook by hand
+
 Register the hook command in `.claude/settings.json`. The same command handles all three events.
 
 ```json

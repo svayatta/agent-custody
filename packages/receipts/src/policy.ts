@@ -36,6 +36,12 @@ export function policyParseErrors(policyText: string): string[] {
   return parsed.type === "success" ? [] : parsed.errors.map((e) => e.message);
 }
 
+/** The text of each static policy, in file order. Cedar names them `policy0`, `policy1`, and so on in this order. */
+export function policyRules(policyText: string): string[] {
+  const parts = cedar.policySetTextToParts(policyText);
+  return parts.type === "success" ? parts.policies : [];
+}
+
 export function policyDigest(policyText: string): string {
   return sha256Hex(policyText);
 }
