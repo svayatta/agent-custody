@@ -24,11 +24,11 @@ export interface HookOutput {
 }
 
 /** What Claude Code and the person see. A rule with a `@reason` gives its text; any other rule gives its id. The rules are in file order. A deny with no rule keeps the plain text. */
-function denialText(issuer: SdkIssuer, policy: PolicyDecision, reason: string, receiptId: string): string {
-  if (policy.reasons.length === 0) return `agent-custody: ${reason} (receipt ${receiptId})`;
+function denialText(issuer: SdkIssuer, policy: PolicyDecision, reason: string, evidence: string): string {
+  if (policy.reasons.length === 0) return `agent-custody: ${reason} (${evidence})`;
   const ids = [...policy.reasons].sort((a, b) => Number(a.replace(/^policy/, "")) - Number(b.replace(/^policy/, "")));
   const said = [...ids.map((id) => reasonOfRule(id, issuer.ruleReasons)), ...policy.errors].join("; ");
-  return `agent-custody denied this call: ${said} (${ids.length === 1 ? "rule" : "rules"} ${ids.join(", ")}, receipt ${receiptId})`;
+  return `agent-custody denied this call: ${said} (${ids.length === 1 ? "rule" : "rules"} ${ids.join(", ")}, ${evidence})`;
 }
 
 function toEvent(input: HookInput): ToolEvent {
@@ -49,13 +49,19 @@ export async function handleHookEvent(issuer: SdkIssuer, input: HookInput): Prom
       const policy = issuer.decide(ev);
       if (denies(policy)) {
         const reason = [...policy.reasons, ...policy.errors].join("; ") || "no permit policy matched";
-        const bundle = await issuer.record(ev, { status: "denied", reason }, policy);
+        // A hook that throws does not block the call, so a log outage must not cost the denial.
+        let evidence: string;
+        try {
+          evidence = `receipt ${receiptIdOf(await issuer.record(ev, { status: "denied", reason }, policy))}`;
+        } catch (e) {
+          evidence = `no receipt: ${e instanceof Error ? e.message : String(e)}`;
+        }
         return {
           continue: true,
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
-            permissionDecisionReason: denialText(issuer, policy, reason, receiptIdOf(bundle)),
+            permissionDecisionReason: denialText(issuer, policy, reason, evidence),
           },
         };
       }
