@@ -23,7 +23,7 @@ jobs:
         with:
           bun-version: 1.3.2
       - run: bun install --frozen-lockfile
-      - run: bun run build
+      - run: bun run --cwd packages/receipts build
       - name: Pack the CLI from this commit
         id: pack
         run: |
