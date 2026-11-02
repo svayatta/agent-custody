@@ -198,7 +198,7 @@ Try the [live Codex recovery demo](packages/receipts/docs/codex-recovery.md): a 
 
 ## Agent sessions in this repository
 
-A Claude Code session in this repository can run under custody. On a machine with the recording config, each tool call becomes a signed receipt, and its hash goes to our tenant on the hosted log within seconds. A force push is refused by policy, and the refusal is a receipt too. A machine without that config records and refuses nothing, so the tenant does not cover all the work in this repository. The hook is committed in `.claude/`, the receipts and keys stay outside the repository, and [agent-custody.dev/custody](https://agent-custody.dev/custody) shows the live tenant and sample receipts anyone can verify.
+A Claude Code session in this repository can run under custody. On a machine with the recording config, each shell command, file edit, and MCP tool call becomes a signed receipt, and its hash goes to our tenant on the hosted log within seconds. A force push is refused by policy, and the refusal is a receipt too. A machine without that config records and refuses nothing, so the tenant does not cover all the work in this repository. The hook is committed in `.claude/`, the receipts and keys stay outside the repository, and [agent-custody.dev/custody](https://agent-custody.dev/custody) shows the live tenant and sample receipts anyone can verify.
 
 ## Security
 
