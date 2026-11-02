@@ -36,7 +36,8 @@ import { TREEHEAD_TYPE, type AuthorizationBundle, type ReceiptBundle, type TreeH
 import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
 import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
-import { auditExtends, formatReport, verifyBundle } from "./verify.ts";
+import { auditExtends, formatReport, verifyBundle, type VerifyOptions } from "./verify.ts";
+import { formatSummaryMarkdown, receiptFiles, summarizeReceipts } from "./pr-summary.ts";
 import { formatSimulation, simulatePolicy, verifyOrphanAuthorization, type SimulationSkip } from "./simulate.ts";
 
 /**
@@ -99,6 +100,7 @@ const USAGE = `agent-custody <command>
           retention on the receipt log: replaces older leaves with their hashes, so proofs still verify and the content is gone
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
   verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--require-strict] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]
+          verify --markdown <dir|bundle.json>... --issuer-key <pub>   one Markdown table for a directory of bundles; exit 1 when one does not verify or none exists
   policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
   completeness --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--log-id <id>]
                --provider stripe --object refunds|payouts|transfers --key-env NAME --tool <name>... --since <ISO> --until <ISO>
@@ -642,17 +644,18 @@ async function main(argv: string[]): Promise<number> {
           disclose: { type: "string" },
           "capture-key-env": { type: "string" },
           json: { type: "boolean", default: false },
+          markdown: { type: "boolean", default: false },
         },
       });
       const file = positionals[0];
       const issuerKeyFiles = [...(values["issuer-key"] ?? []), ...(values["gateway-key"] ?? [])];
       if (!file || issuerKeyFiles.length === 0) throw new Error("verify needs <bundle> --issuer-key (alias --gateway-key)");
-      const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
+      if (values.markdown && (values.json || values.disclose)) throw new Error("verify --markdown does not combine with --json or --disclose");
       const captureKey = values["capture-key-env"] ? captureKeyFrom(secretFrom(values["capture-key-env"])) : undefined;
       const disclosed = values.disclose ? (JSON.parse(readFileSync(values.disclose, "utf8")) as Record<string, unknown>) : undefined;
       const fetchedLogKeys = values["log-url"] ? (await fetchLogKeys(values["log-url"])).keys : [];
       const logKeys = [...(values["log-key"] ?? []).map(loadPublicKey), ...fetchedLogKeys];
-      const result = verifyBundle(bundle, {
+      const verifyOptions: VerifyOptions = {
         issuerKeys: issuerKeyFiles.map(loadPublicKey),
         principalKeys: (values["principal-key"] ?? []).map(loadPublicKey),
         ...(values["approval-key"] ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}),
@@ -664,7 +667,13 @@ async function main(argv: string[]): Promise<number> {
         ...(values.log ? { logFile: values.log } : {}),
         ...(captureKey ? { captureKey } : {}),
         ...(disclosed ? { disclosed } : {}),
-      });
+      };
+      if (values.markdown) {
+        const summary = summarizeReceipts(positionals.flatMap(receiptFiles), verifyOptions);
+        console.log(formatSummaryMarkdown(summary));
+        return summary.ok ? 0 : 1;
+      }
+      const result = verifyBundle(JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle, verifyOptions);
       console.log(values.json ? JSON.stringify(result, null, 2) : formatReport(result));
       return result.ok ? 0 : 1;
     }

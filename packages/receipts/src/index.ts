@@ -60,3 +60,4 @@ export * from "./sidecar.ts";
 export * from "./upstream.ts";
 export * from "./retention.ts";
 export * from "./simulate.ts";
+export * from "./pr-summary.ts";

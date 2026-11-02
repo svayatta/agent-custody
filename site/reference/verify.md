@@ -5,7 +5,7 @@ A receipt is verified with public keys alone: no server, no account, no trust in
 ## `verify`
 
 ```bash
-agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub [--approval-key approver.pub] [--log-key log.pub | --log-url https://log.example.com/] [--log-id acme] [--require-strict] [--upstream-key upstream.pub] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log log.jsonl] [--disclose disclosure.json] [--capture-key-env NAME] [--json]
+agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principal-key keys/principal.pub [--approval-key approver.pub] [--log-key log.pub | --log-url https://log.example.com/] [--log-id acme] [--require-strict] [--upstream-key upstream.pub] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log log.jsonl] [--disclose disclosure.json] [--capture-key-env NAME] [--json] [--markdown]
 ```
 
 | option | meaning |
@@ -22,6 +22,7 @@ agent-custody verify receipts/<id>.json --issuer-key keys/gateway.pub --principa
 | `--disclose` | a disclosure file: `{ "receiptId", … }` with `{ "$custody": "disclosed", "salt", "value" }` at the paths a capture rule withheld (`request.args.$rest`, `execution.result.$rest`, `execution.error`, `execution.upstream.rawBody`, `execution.upstream.signature`, `execution.upstream.bind`, `execution.upstream.envelope`, `policy.errors`, `facts.<name>.value.$rest`, `facts.<name>.args.<field>`, `facts.<name>.resultDigest`, `consumed.factIds`, `model.id`, `session.id`), any part of them, as `reveal` writes it or as the party that holds the values and the salts hands it over; each value is checked against its commitment under its salt and the digests are recomputed; a value without its salt, or a file for another receipt, is refused |
 | `--capture-key-env` | the environment variable holding the customer's capture key; encrypted fields are decrypted, checked against their commitments, and the digests recomputed; a key that is not theirs fails the checks, naming the key id |
 | `--json` | machine-readable output |
+| `--markdown` | the arguments are directories of bundles (or bundle files), and the output is one Markdown table instead of a report; see [verify --markdown](#verify-markdown). It does not combine with `--json` or `--disclose` |
 
 Exit 0 when every check passes, 1 otherwise. The text report is one line per check, `PASS`/`FAIL`, the name, and a detail, ending in `RESULT: VERIFIED` or `RESULT: NOT VERIFIED`. The JSON:
 
@@ -71,6 +72,32 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 | tree head signature, tree head names the expected log | the head was signed by an issuer or log key, and by the log the verifier expected |
 | log inclusion proof | the leaf is in the tree the head describes |
 | log file root matches | with `--log`, the copy's root at that size equals the head's |
+
+### `verify --markdown`
+
+```bash
+agent-custody verify --markdown .custody/receipts --issuer-key keys/agent.pub [--principal-key keys/principal.pub] [--log-url https://log.example.com/] [--log-id acme]
+```
+
+The command verifies each `<id>.json` in the directory, except `<id>.authorization.json` files and subdirectories, with the same keys and options as `verify`. It prints this, and nothing else, on stdout:
+
+```
+<!-- agent-custody -->
+## agent-custody receipts
+
+**Not verified.** 1 of 2 receipts do not verify.
+
+| Receipt | Tool | Status | Result |
+| --- | --- | --- | --- |
+| `981d2afd-63f2-49ed-854a-83fc1bf1c035` | - | - | `receipt signature (issuer key)` |
+| `6e2de8f3-4e51-43e5-af8b-a2b283dd7709` | `stripe.refund` | executed | verified |
+```
+
+The failed rows come first, and the table has 200 rows at most. `Status` is the execution status in the signed receipt, or `-` when the signature does not verify. A file whose name is not its receipt id fails with `file name matches receipt id`. Text from a receipt is sanitized, so it cannot break the table or add Markdown or HTML. Exit 1 when one receipt does not verify, when the directory holds no receipt, and when the path does not exist.
+
+In code: `summarizeReceipts(receiptFiles(dir), options): { ok, rows, problem? }` and `formatSummaryMarkdown(summary): string`. The first line of the output is `SUMMARY_MARKER`.
+
+The [GitHub Action](/receipts/github-action) in this repository runs this command and posts the table on a pull request. Its inputs are `path`, `issuer-key`, `principal-key`, `log-url`, `log-id`, `version`, and `github-token`.
 
 ## `reveal`
 
