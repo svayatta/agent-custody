@@ -41,7 +41,7 @@ Policies see `context.args` and an empty `context.facts`. A policy that reads `c
 ### One command
 
 ```bash
-npx agent-custody init claude-code
+npx @agent-custody/receipts init claude-code
 ```
 
 The command sets up custody for your own Claude Code sessions. It prints each step.
