@@ -76,6 +76,10 @@ agent-custody report --config ~/.config/agent-custody/sdk.json
 
 `policy simulate` answers another question: what a proposed policy would change in recorded history. Use `report` to read what the policy in the config decided in observe mode.
 
+### An incident replay
+
+`node examples/38-incident-replay.ts` runs the hook in enforce mode with scripted events. `terraform plan` runs. `terraform destroy -auto-approve` and `rm -rf ~` are denied before they run, and a reviewer verifies the denial receipts with the public key only. The page [An incident replay](../../../site/guide/incident-replay.md) shows the output and the limit: a credential in the agent's environment goes around the hook.
+
 ### Register the hook by hand
 
 Register the hook command in `.claude/settings.json`. The same command handles all three events.
