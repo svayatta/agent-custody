@@ -7,7 +7,7 @@ Two paths. The **SDK path** records what the agent's own process reports: the qu
 For your own Claude Code sessions, one command does the setup and prints each step: an agent key, a config in observe mode, a starter deny policy (force push, `rm -rf /`, `terraform destroy`, `drop database`), and the three hooks.
 
 ```bash
-npx agent-custody init claude-code
+npx @agent-custody/receipts init claude-code
 ```
 
 Work in Claude Code as usual. Nothing is blocked, and the receipts stay on your machine. Then read what the policy would have denied:
@@ -23,7 +23,7 @@ agent-custody report --config ~/.config/agent-custody/sdk.json
 Install the package, make a key and a config once, then add the lines for your framework: Claude Code, the Claude Agent SDK, the OpenAI Agents SDK, LangChain, Vercel AI, OpenClaw, DeepSeek Harness, Hermes, Google ADK, or plain Python. Each produces a receipt in `receipts/` that [the browser verifier](/verify) checks with the `.pub` file.
 
 ```bash
-npm install @agent-custody/receipts && npx agent-custody keygen --dir keys --name app
+npm install @agent-custody/receipts && npx @agent-custody/receipts keygen --dir keys --name app
 ```
 
 ::: code-group
@@ -103,7 +103,7 @@ config_schema:
 ```
 
 ```python [Google ADK]
-# pip install "agent-custody[adk]"; the sidecar is `npx agent-custody serve --config sdk.json`
+# pip install "agent-custody[adk]"; the sidecar is `npx @agent-custody/receipts serve --config sdk.json`
 from google.adk.agents import LlmAgent
 from agent_custody import Client
 from agent_custody.adk import adk_callbacks
@@ -112,7 +112,7 @@ agent = LlmAgent(name="billing", model="gemini-2.5-flash", tools=[refund, lookup
 ```
 
 ```python [Python]
-# pip install agent-custody; the sidecar is `npx agent-custody sidecar`
+# pip install agent-custody; the sidecar is `npx @agent-custody/receipts sidecar`
 from agent_custody import Client, PolicyDeniedError
 
 client = Client("http://127.0.0.1:8791")
@@ -125,7 +125,7 @@ refund({"amount": 5000})   # decide, run, record; raises PolicyDeniedError on de
 Then verify the receipt in the shell, or drop it on [/verify](/verify):
 
 ```bash
-npx agent-custody verify receipts/<id>.json --issuer-key keys/app.pub --log log.jsonl
+npx @agent-custody/receipts verify receipts/<id>.json --issuer-key keys/app.pub --log log.jsonl
 ```
 
 Every adapter is on [the SDK page](/receipts/sdk) with what it enforces and what it only records. **To make a receipt evidence** a customer or auditor accepts, put [the gateway](/receipts/usage) in front of the tool and log to [a log run by someone else](/early-access): the receipt then carries a signed grant, a policy decision made outside the agent, and a tree head signed by a key you do not hold.

@@ -5,7 +5,7 @@ One hook command records every tool call of a session as a receipt, and can deny
 ## One command
 
 ```bash
-npx agent-custody init claude-code [--dir <dir>] [--user] [--enforce] [--log-url <url> [--log-id <id>] [--log-token-env NAME] [--log-key <pub>]]
+npx @agent-custody/receipts init claude-code [--dir <dir>] [--user] [--enforce] [--log-url <url> [--log-id <id>] [--log-token-env NAME] [--log-key <pub>]]
 ```
 
 The command makes an agent key, writes `sdk.json` with `"mode": "observe"`, writes a starter deny set to `policy.cedar`, and registers the three hooks with absolute paths. It prints each step and ends with the next step.
@@ -63,6 +63,7 @@ Claude Code writes the hook event as JSON on stdin. The fields the handler reads
 | event | what the handler does | stdout |
 | --- | --- | --- |
 | `PreToolUse`, policy denies | issues a **denied** receipt, blocks the call | `{ "continue": true, "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "agent-custody: policy1 (receipt 47eb52af-…)" } }` |
+| `PreToolUse`, policy denies, the receipt cannot be recorded | blocks the call | the same, with `(no receipt: <why>)` in the reason |
 | `PreToolUse`, policy allows or none | nothing | `{}`: Claude Code's own permission prompts still apply; the hook never auto-approves |
 | `PostToolUse` | issues an **executed** receipt with `tool_response` as the result | `{}` |
 | `PostToolUseFailure` | issues a **failed** receipt with the error as the result | `{}` |
