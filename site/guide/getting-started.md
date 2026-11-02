@@ -4,7 +4,7 @@ Two paths. The **SDK path** records what the agent's own process reports: the qu
 
 ## Claude Code in one command
 
-For your own Claude Code sessions, one command does the setup and prints each step: an agent key, a config in observe mode, a starter deny policy (force push, `rm -rf /`, `terraform destroy`, `drop database`), and the three hooks.
+For your own Claude Code sessions, one command does the setup and prints each step: an agent key, a config in observe mode, a starter deny policy (force push, `rm -rf` on `/`, `~`, and `$HOME`, `terraform destroy`, `drop database`), and the three hooks.
 
 ```bash
 npx @agent-custody/receipts init claude-code

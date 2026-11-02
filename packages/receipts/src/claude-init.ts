@@ -1,10 +1,11 @@
 // `agent-custody init claude-code`: the key, the config, the starter policy, and the three hooks for the user's own
 // Claude Code sessions, in one command. It is safe to run two times.
+import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { SdkConfigSchema, loadSdkConfig } from "./config.ts";
-import { generateKeyPair, writeKeyPair } from "./crypto.ts";
+import { generateKeyPair, publicKeyFromPem, writeKeyPair } from "./crypto.ts";
 
 export const HOOK_EVENTS = ["PreToolUse", "PostToolUse", "PostToolUseFailure"] as const;
 export const HOOK_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*";
@@ -26,7 +27,7 @@ export interface ClaudeInitOptions {
   logId?: string;
   /** The NAME of the environment variable that holds the log token. Never the token. */
   logTokenEnv?: string;
-  /** The log's public key file. The command copies it into the directory. */
+  /** The log's public key file. A log URL needs it. The command copies it into the directory when it writes a new config. */
   logKey?: string;
   home?: string;
   cwd?: string;
@@ -113,7 +114,7 @@ function buildConfig(o: ClaudeInitOptions, user: string): Json {
       url: o.logUrl,
       tokenEnv: o.logTokenEnv ?? DEFAULT_TOKEN_ENV,
       hashOnly: true,
-      ...(o.logKey ? { keys: ["log.pub"] } : {}),
+      keys: ["log.pub"],
       ...(o.logId ? { logId: o.logId } : {}),
       timeoutMs: 3000,
     };
@@ -121,6 +122,22 @@ function buildConfig(o: ClaudeInitOptions, user: string): Json {
     config.logFile = "log.jsonl";
   }
   return config;
+}
+
+/** Throws unless the file holds a PUBLIC key in PEM form. A private key is refused too, so that `log.pub` never holds one. */
+function checkLogKey(file: string): void {
+  const text = readFileSync(file, "utf8");
+  try {
+    if (!text.includes("-----BEGIN PUBLIC KEY-----")) throw new Error("no PEM public key");
+    publicKeyFromPem(text);
+  } catch {
+    throw new Error(`init: the log key file ${file} does not hold a public key in PEM form. Give the .pub file of the log.`);
+  }
+}
+
+/** True when the path is in a git work tree and git does not ignore it. False when git cannot tell. */
+function notIgnoredByGit(file: string): boolean {
+  return spawnSync("git", ["check-ignore", "-q", file], { cwd: dirname(file), stdio: "ignore", timeout: 5000 }).status === 1;
 }
 
 function userName(): string {
@@ -137,7 +154,9 @@ export function initClaudeCode(o: ClaudeInitOptions): ClaudeInitResult {
   if (!isAbsolute(o.cliPath)) throw new Error("init: the CLI path must be absolute");
   if ((o.logId || o.logTokenEnv || o.logKey) && !o.logUrl) throw new Error("init: --log-id, --log-token-env, and --log-key need --log-url");
   if (o.logTokenEnv && !/^[A-Z_][A-Z0-9_]*$/.test(o.logTokenEnv)) throw new Error("init: --log-token-env takes the NAME of an environment variable, such as AGENT_CUSTODY_LOG_TOKEN. Never give the token itself.");
+  if (o.logUrl && !o.logKey) throw new Error("init: --log-url needs --log-key <pub>, the public key of the log. Without it, `report` cannot check the tree head of any receipt, and every receipt fails.");
   if (o.logKey && !existsSync(o.logKey)) throw new Error(`init: the log key file ${o.logKey} does not exist`);
+  if (o.logKey) checkLogKey(o.logKey);
   const config = buildConfig(o, userName());
   const checked = SdkConfigSchema.safeParse(config);
   if (!checked.success) throw new Error(`init: the config is not valid: ${checked.error.issues.map((i) => `${i.path.join(".") || "(config)"}: ${i.message}`).join("; ")}`);
@@ -163,14 +182,16 @@ export function initClaudeCode(o: ClaudeInitOptions): ClaudeInitResult {
     print(`2. Policy: kept the existing ${policyFile}`);
   } else {
     copyFileSync(new URL("../templates/claude-code.cedar", import.meta.url), policyFile);
-    print(`2. Policy: wrote the starter deny set to ${policyFile}. It forbids force push, rm -rf on / and ~, terraform destroy, and drop database.`);
+    print(`2. Policy: wrote the starter deny set to ${policyFile}. It forbids force push (not --force-with-lease), rm -rf on /, ~, and $HOME, terraform destroy and apply -destroy, and drop database.`);
   }
 
   mkdirSync(join(dir, "receipts"), { recursive: true, mode: 0o700 });
-  if (o.logKey) copyFileSync(o.logKey, join(dir, "log.pub"));
   if (existsSync(configFile)) {
     print(`3. Config: kept the existing ${configFile}. The command does not change it.`);
+    const ignored = ([["--enforce", o.enforce], ["--log-url", o.logUrl], ["--log-id", o.logId], ["--log-token-env", o.logTokenEnv], ["--log-key", o.logKey]] as const).filter(([, given]) => given).map(([flag]) => flag);
+    if (ignored.length) print(`   Warning: ${ignored.join(", ")} not applied, because the config exists. The pinned log key stays as it is. Edit ${configFile}, or remove the file and run this command again.`);
   } else {
+    if (o.logKey) copyFileSync(o.logKey, join(dir, "log.pub"));
     writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`);
     print(`3. Config: wrote ${configFile}, ${o.enforce ? "in enforce mode: a denied call is blocked" : 'with "mode": "observe": the policy records a denied call and blocks nothing'}.`);
     print(o.logUrl ? `   Receipts go to ${o.logUrl} as hashes. The token comes from the environment variable ${o.logTokenEnv ?? DEFAULT_TOKEN_ENV}.` : `   Receipts stay on this machine in ${join(dir, "receipts")}. No log is configured.`);
@@ -186,6 +207,11 @@ export function initClaudeCode(o: ClaudeInitOptions): ClaudeInitResult {
   const parts = ([["registered", "added"], ["updated", "updated"], ["found already registered", "kept"]] as const).filter(([, c]) => by(c).length).map(([word, c]) => `${word} ${by(c).join(", ")}`);
   print(`4. Hooks: ${parts.join("; ")} in ${settingsFile}. The command keeps every other key and hook in that file.`);
 
+  if (!o.user && notIgnoredByGit(settingsFile)) {
+    print("");
+    print(`Warning: ${settingsFile} is in a git repository, and git does not ignore it. The file holds absolute paths of your home directory.`);
+    print("Add this line to .gitignore: .claude/settings.local.json");
+  }
   if (/[\\/]_npx[\\/]/.test(o.cliPath)) {
     print("");
     print("Warning: this command runs from the npx cache, and npm can clear that cache. The hooks then stop working.");

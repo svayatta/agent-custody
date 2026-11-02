@@ -2,7 +2,7 @@
 // Run:    node examples/38-incident-replay.ts
 //
 // A coding agent runs `terraform destroy` or `rm -rf ~`. The starter deny set, in enforce mode, stops the call before it runs.
-// The example sets up the hooks with `init claude-code --enforce` in a temporary home and a temporary project.
+// The example makes the same setup as `init claude-code --enforce`, in a temporary home and a temporary project.
 // A script plays the Claude Code side: it runs the hook command from settings.json for each event, with the event on stdin.
 // No model and no network. No command of the script runs: a stub records which calls the hook lets through.
 import { spawnSync } from "node:child_process";
@@ -50,9 +50,10 @@ function agentRuns(command: string, toolUseId: string) {
     console.log("   denied before it runs. Claude Code shows the agent this text:");
     console.log(`   ${pre.permissionDecisionReason}`);
     const reason = pre.permissionDecisionReason ?? "";
-    denials.push({ command, receiptId: /\(receipt ([0-9a-f-]+)\)$/.exec(reason)![1]! });
-    const rule = rules[Number(/policy(\d+)/.exec(reason)![1])]!;
-    console.log(`   that rule, in policy.cedar: ${rule.replace(/\s+/g, " ").trim()}`);
+    denials.push({ command, receiptId: /receipt ([0-9a-f-]+)\)$/.exec(reason)![1]! });
+    const rule = rules[Number(/rule policy(\d+)/.exec(reason)![1])]!;
+    const shown = rule.replace(/^(?:\s*@\w+\s*\("(?:[^"\\]|\\.)*"\))+\s*/, "").replace(/\s+/g, " ").trim();
+    console.log(`   that rule, in policy.cedar: ${shown.length > 200 ? `${shown.slice(0, 200)} ...` : shown}`);
     return;
   }
   ran.push(command);
