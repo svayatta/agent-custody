@@ -161,6 +161,22 @@ describe("the starter policy", () => {
   });
 });
 
+describe("the starter policy reasons", () => {
+  it("gives each forbid rule a reason, and the hook text names it", async () => {
+    const { configFile } = init();
+    const issuer = createSdkIssuer(loadSdkConfig(configFile));
+    const enforced = createSdkIssuer({ ...loadSdkConfig(configFile), mode: undefined });
+    expect(issuer.ruleReasons[0]).toBeNull();
+    expect(issuer.ruleReasons.slice(1).every((r) => typeof r === "string" && r.length > 0)).toBe(true);
+    const reasonOf = async (command: string) => (await handleHookEvent(enforced, { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command } })).hookSpecificOutput!.permissionDecisionReason!;
+    expect(await reasonOf("terraform destroy -auto-approve")).toMatch(/^agent-custody denied this call: terraform destroy deletes infrastructure \(rule policy6, receipt [0-9a-f-]{36}\)$/);
+    expect(await reasonOf("rm -rf ~")).toMatch(/^agent-custody denied this call: rm -rf on the home directory \(rule policy5, receipt /);
+    expect(await reasonOf("rm -rf /")).toContain("rm -rf on the root directory");
+    expect(await reasonOf("git push -f origin main")).toContain("force push rewrites shared history");
+    expect(await reasonOf("psql -c 'DROP DATABASE prod'")).toContain("drop database deletes a database");
+  });
+});
+
 describe("report", () => {
   it("counts the calls that observe mode let through and the policy would have denied, with the tool, the command, the rule, and the receipt id", async () => {
     const { configFile } = init();
@@ -169,11 +185,14 @@ describe("report", () => {
     expect(report).toMatchObject({ observe: true, verified: 3, denied: [], unverified: [] });
     expect(report.wouldDeny.map((c) => [c.tool, c.target])).toEqual([["Bash", "git push --force origin main"], ["Bash", "terraform destroy"]]);
     expect(report.wouldDeny[0]!.rules[0]).toContain("git push*--force");
+    expect(report.wouldDeny[0]!.rules[0]).not.toContain("@reason");
+    expect(report.wouldDeny[1]!.reasons).toEqual(["terraform destroy deletes infrastructure"]);
     const ids = readdirSync(join(home, ".config", "agent-custody", "receipts")).map((f) => f.replace(".json", ""));
     expect(ids).toContain(report.wouldDeny[0]!.receiptId);
     const run = spawnSync(process.execPath, [cli, "report", "--config", configFile], { encoding: "utf8", timeout: 30_000 });
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toContain("would have denied 2 calls");
+    expect(run.stdout).toContain("reason:  terraform destroy deletes infrastructure");
     expect(run.stdout).toContain(report.wouldDeny[1]!.receiptId);
     expect(run.stdout).toContain('remove the "mode": "observe" line');
   });

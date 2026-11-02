@@ -20,7 +20,7 @@ The command makes an agent key, writes `sdk.json` with `"mode": "observe"`, writ
 | `--log-token-env NAME` | the NAME of the environment variable that holds the log token. Default: `AGENT_CUSTODY_LOG_TOKEN`. The token never goes into a flag or a file |
 | `--log-key <pub>` | the log's public key file. It is copied to `log.pub` and pinned in `log.keys` |
 
-The starter deny set permits every call and forbids these Bash commands: `git push` with `--force` or `-f`, `rm -rf` on `/` or `~`, `terraform destroy`, and `drop database` or `DROP DATABASE` (the Cedar `like` operator is case-sensitive). The file ships in the package as `templates/claude-code.cedar`.
+The starter deny set permits every call and forbids these Bash commands: `git push` with `--force` or `-f`, `rm -rf` on `/` or `~`, `terraform destroy`, and `drop database` or `DROP DATABASE` (the Cedar `like` operator is case-sensitive). Each rule has a `@reason`, which the denial text shows. The file ships in the package as `templates/claude-code.cedar`.
 
 The settings file is merged, not replaced. Every other key and hook stays, a hook that is already there is not added again, and a settings file that is not valid JSON stops the command before it changes anything. The command never overwrites an existing key, `sdk.json`, or `policy.cedar`, so it is safe to run two times. A second run updates the path of a hook of ours. When the path is in the npx cache (`/_npx/`), the command warns that npm can clear the cache; install the package globally and run the command again.
 
@@ -30,7 +30,7 @@ The settings file is merged, not replaced. Every other key and hook stays, a hoo
 agent-custody report --config <sdk.json>
 ```
 
-The command reads `receiptsDir` of the config and verifies each receipt with the agent's key (and the log keys of the config, when it has a log). It prints `would have denied N calls` and, for each call, the tool, the command or the file path, the rule, and the receipt id. A denial recorded with `enforced: false` is a call that ran. A receipt that does not verify is listed apart with its reason and is not counted. Exit code 1 when any receipt does not verify, otherwise 0. The last line says how to enforce: remove the `"mode": "observe"` line from `sdk.json`.
+The command reads `receiptsDir` of the config and verifies each receipt with the agent's key (and the log keys of the config, when it has a log). It prints `would have denied N calls` and, for each call, the tool, the command or the file path, the `@reason` of the rule when it has one, the rule, and the receipt id. A denial recorded with `enforced: false` is a call that ran. A receipt that does not verify is listed apart with its reason and is not counted. Exit code 1 when any receipt does not verify, otherwise 0. The last line says how to enforce: remove the `"mode": "observe"` line from `sdk.json`.
 
 An [incident replay](/guide/incident-replay) runs the hook in enforce mode and shows the denial text that Claude Code gets.
 
@@ -62,10 +62,12 @@ Claude Code writes the hook event as JSON on stdin. The fields the handler reads
 
 | event | what the handler does | stdout |
 | --- | --- | --- |
-| `PreToolUse`, policy denies | issues a **denied** receipt, blocks the call | `{ "continue": true, "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "agent-custody: policy1 (receipt 47eb52af-…)" } }` |
+| `PreToolUse`, policy denies | issues a **denied** receipt, blocks the call | `{ "continue": true, "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "agent-custody denied this call: terraform destroy deletes infrastructure (rule policy6, receipt 47eb52af-…)" } }` |
 | `PreToolUse`, policy allows or none | nothing | `{}`: Claude Code's own permission prompts still apply; the hook never auto-approves |
 | `PostToolUse` | issues an **executed** receipt with `tool_response` as the result | `{}` |
 | `PostToolUseFailure` | issues a **failed** receipt with the error as the result | `{}` |
+
+The reason text comes from the `@reason("...")` annotation of the rule that denied the call. With several denying rules, the reasons join with `; ` in file order and the line says `rules policy1, policy2`. A rule with no annotation gives its id in place of the reason. A deny that names no rule keeps the plain text, such as `agent-custody: no permit policy matched (receipt …)`. The receipt does not change: it keeps the policy ids and the digest. The issuer parses the annotations once, when it loads the policy, and exposes them as `issuer.ruleReasons`.
 
 Exit code 0 in every case; a receipt that could not be logged is printed on stderr. If the user declines a call at the permission prompt, no `PostToolUse` fires and no receipt is issued for it.
 

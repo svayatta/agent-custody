@@ -48,7 +48,7 @@ The command sets up custody for your own Claude Code sessions. It prints each st
 
 1. It makes an agent key in `~/.config/agent-custody/keys/`.
 2. It writes `sdk.json` in `~/.config/agent-custody/` with `"mode": "observe"` and a `receiptsDir`. No log is configured, so the receipts stay on your machine.
-3. It writes a starter deny set to `policy.cedar`: force push, `rm -rf` on `/` and `~`, `terraform destroy`, and `drop database` in both cases. The policy permits every other call.
+3. It writes a starter deny set to `policy.cedar`: force push, `rm -rf` on `/` and `~`, `terraform destroy`, and `drop database` in both cases. Each rule has a `@reason`, so the denial text says what the rule forbids. The policy permits every other call.
 4. It registers the `PreToolUse`, `PostToolUse`, and `PostToolUseFailure` hooks in `.claude/settings.local.json` of the current directory. Claude Code does not commit that file. With `--user`, the hooks go to `~/.claude/settings.json` and apply to every project.
 5. It prints the next step: start a Claude Code session, then run the report.
 
@@ -66,13 +66,31 @@ You can run the command two times. It never overwrites an existing key, `sdk.jso
 | `--log-token-env NAME` | the NAME of the environment variable that holds the log token. Default: `AGENT_CUSTODY_LOG_TOKEN`. The command refuses a value that is not an uppercase variable name, so a token never enters a file |
 | `--log-key <pub>` | the log's public key file. The command copies it to `log.pub` and pins it in `log.keys` |
 
+### The denial text
+
+A Cedar policy can carry a `@reason("...")` annotation. When a rule that denies a call has one, the hook returns its text. When several rules deny the call, the hook joins their reasons with `; ` in file order and lists the rules.
+
+```cedar
+@reason("terraform destroy deletes infrastructure")
+forbid(principal, action == Action::"Bash", resource)
+when { context.args has command && context.args.command like "*terraform destroy*" };
+```
+
+```text
+agent-custody denied this call: terraform destroy deletes infrastructure (rule policy6, receipt 47eb52af-...)
+```
+
+A rule with no annotation gives its id in place of the reason: `agent-custody denied this call: policy3 (rule policy3, receipt ...)`. A deny that names no rule keeps the plain text, such as `agent-custody: no permit policy matched (receipt ...)` or the evaluation error. The issuer parses the annotations one time, when it loads the policy.
+
+The receipt does not change. It keeps the policy ids and the policy digest, and its `execution.reason` stays the list of ids. The reason text is for the agent and for the person who reads the session. The other adapters in this file still return the rule ids.
+
 ### The report
 
 ```bash
 agent-custody report --config ~/.config/agent-custody/sdk.json
 ```
 
-`init` prints this command with absolute paths. The report reads the receipts directory of the config and verifies each receipt with the agent's key. Then it prints `would have denied N calls`, and for each call the tool, the command or the file path, the Cedar rule, and the receipt id. A receipt that does not verify is counted apart, listed with the reason, and never counted as a denial. The command then exits with code 1. The report ends with the next step: remove the `"mode": "observe"` line from `sdk.json` to enforce the policy. A denial that the policy enforced (a config without the observe line) is listed apart as `denied`.
+`init` prints this command with absolute paths. The report reads the receipts directory of the config and verifies each receipt with the agent's key. Then it prints `would have denied N calls`, and for each call the tool, the command or the file path, the `@reason` of the rule when it has one, the Cedar rule, and the receipt id. A receipt that does not verify is counted apart, listed with the reason, and never counted as a denial. The command then exits with code 1. The report ends with the next step: remove the `"mode": "observe"` line from `sdk.json` to enforce the policy. A denial that the policy enforced (a config without the observe line) is listed apart as `denied`.
 
 `policy simulate` answers another question: what a proposed policy would change in recorded history. Use `report` to read what the policy in the config decided in observe mode.
 
@@ -102,7 +120,7 @@ Register the hook command in `.claude/settings.json`. The same command handles a
 
 `AGENT_CUSTODY_CONFIG` works instead of `--config`. Behaviour per event:
 
-- **PreToolUse.** Evaluates the policy. On deny, issues a denial receipt and returns `permissionDecision: "deny"` with the receipt id in the reason. On allow, or with no policy, returns no decision, so Claude Code's own permission prompts still apply. The hook never auto-approves.
+- **PreToolUse.** Evaluates the policy. On deny, issues a denial receipt and returns `permissionDecision: "deny"` with a reason that says what the rule forbids: `agent-custody denied this call: terraform destroy deletes infrastructure (rule policy6, receipt <id>)`. See [The denial text](#the-denial-text). On allow, or with no policy, returns no decision, so Claude Code's own permission prompts still apply. The hook never auto-approves.
 - **PostToolUse.** Issues an executed receipt carrying `tool_response`.
 - **PostToolUseFailure.** Issues a failed receipt.
 
