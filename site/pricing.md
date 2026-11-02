@@ -22,7 +22,7 @@ Everything you run yourself, the gateway, the SDK, the ledger, the verifier, is 
 
 ## What 10,000 appends is
 
-One append per receipt, one receipt per tool call, allowed or denied. An allowed call to a tool in `precommit`, or to a financial operation, uses two appends: the signed authorization before the call and the receipt after it. A worked week, with round numbers and one append per call:
+One append per receipt, one receipt per tool call, allowed or denied. An allowed call to a tool in `precommit` (every tool, in strict mode), or to a financial operation, uses two appends: the signed authorization before the call and the receipt after it. A worked week, with round numbers and one append per call:
 
 | who | tool calls | appends a day | appends a month | plan |
 | --- | --- | --- | --- | --- |

@@ -82,7 +82,7 @@ name: agent-custody
 version: 1.0.0
 provides_hooks: [pre_tool_call, post_tool_call]
 config_schema:
-  sidecar_url: { type: str, default: "http://127.0.0.1:8791" }
+  sidecar_url: { type: str, default: "http://127.0.0.1:8788" }
 # then: pip install agent-custody && hermes plugins enable agent-custody
 ```
 
@@ -96,10 +96,10 @@ agent = LlmAgent(name="billing", model="gemini-2.5-flash", tools=[refund, lookup
 ```
 
 ```python [Python]
-# pip install agent-custody; the sidecar is `npx @agent-custody/receipts sidecar`
+# pip install agent-custody; the sidecar is `npx @agent-custody/receipts serve --config sdk.json`
 from agent_custody import Client, PolicyDeniedError
 
-client = Client("http://127.0.0.1:8791")
+client = Client("http://127.0.0.1:8788")
 refund = client.wrap("stripe.refund", lambda args: stripe.refund(**args))
 refund({"amount": 5000})   # decide, run, record; raises PolicyDeniedError on deny
 ```
