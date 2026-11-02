@@ -4,20 +4,21 @@
 
 **Stop your coding agent from running destructive commands, and keep a signed record that a reviewer can check.**
 
-This is for engineers who run Claude Code against repositories and systems that touch production. One command adds a hook to Claude Code. The hook checks each tool call against a deny list before the call runs. The starter list covers force push, `rm -rf` on `/` and `~`, `terraform destroy`, and `drop database`.
+This is for engineers who run Claude Code against repositories and systems that touch production. One command adds a hook to Claude Code. The hook checks each shell command, file edit, and MCP tool call against a deny list before the call runs. The starter list covers force push, `rm -rf` on `/` and `~`, `terraform destroy`, and `drop database`.
 
 ```bash
-npx @agent-custody/receipts init claude-code
+npm install -g @agent-custody/receipts
+agent-custody init claude-code
 ```
 
-The command needs Node 22. It makes an agent key, writes a starter deny list, and registers the hooks in `.claude/settings.local.json` of the current directory. It starts in observe mode: it blocks nothing until you say so. Details and options: [Setup for Claude Code](site/guide/getting-started.md#claude-code-in-one-command).
+The command needs Node 22. To try it once, run `npx @agent-custody/receipts init claude-code`. Do not keep the npx form: npm can clear its cache, and the hooks then stop working. The command makes an agent key, writes a starter deny list, and registers the hooks in `.claude/settings.local.json` of the current directory. It starts in observe mode: it blocks nothing until you say so. Details and options: [Setup for Claude Code](site/guide/getting-started.md#claude-code-in-one-command).
 
 ## What you see
 
-Work in Claude Code as usual. The hook signs a record of each tool call. The record is called a receipt. Then run the report. It checks the signature of every receipt, and it lists the calls that the deny list would have stopped.
+Work in Claude Code as usual. The hook signs a record of each shell command, file edit, and MCP tool call. The record is called a receipt. Then run the report. It checks the signature of every receipt, and it lists the calls that the deny list would have stopped.
 
 ```bash
-npx @agent-custody/receipts report --config ~/.config/agent-custody/sdk.json
+agent-custody report --config ~/.config/agent-custody/sdk.json
 ```
 
 ```text
@@ -51,16 +52,17 @@ cd packages/receipts && node examples/38-incident-replay.ts
 - `terraform plan` runs. The hook records an executed receipt.
 - `terraform destroy -auto-approve` is denied before it runs. Claude Code shows the agent `agent-custody: policy6 (receipt d7c6318e-186e-431e-be47-91853ace8684)`.
 - `rm -rf ~` is denied the same way.
-- A reviewer holds the agent's public key and the receipt files. They verify the three receipts offline. A key that is not the agent's does not verify them.
+- A reviewer holds the agent's public key and the receipt files. They verify the three receipts offline. The same check with a key that is not the agent's fails for the `terraform destroy` receipt.
 
 The full output is on the page [An incident replay](site/guide/incident-replay.md).
 
 ## What the hook does not stop
 
-The hook stops a call that the agent makes through its tools. Read these limits before you rely on it.
+The hook stops a shell command, a file edit, or an MCP tool call that the agent makes. Read these limits before you rely on it.
 
 - **A credential in the agent's environment goes around the hook.** If the shell of the agent holds a cloud key or a database password, a process that the agent starts can use it. The hook does not stop that process.
 - **The starter list matches the text of a command.** It catches the plain form of each command. It is not a sandbox.
+- **Some tools are not seen.** The hook matches `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and MCP tools. It does not see `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, or `Task`. The starter deny list has rules for `Bash` only.
 - **The record is the agent's own report.** Every field is `claimed`. The signature shows that the record did not change after the hook wrote it. It does not show that the hook saw every call.
 
 To cover more, keep production credentials out of the agent's environment, and put a gateway between the agent and the tools that touch production. The [threat model](packages/receipts/docs/threat-model.md) lists what each part defends, and what it does not. No independent witness runs yet, and the hosted log is not anchored on mainnet yet.
@@ -198,11 +200,9 @@ Try the [live Codex recovery demo](packages/receipts/docs/codex-recovery.md): a 
 
 A Claude Code session in this repository can run under custody. On a machine with the recording config, each tool call becomes a signed receipt, and its hash goes to our tenant on the hosted log within seconds. A force push is refused by policy, and the refusal is a receipt too. A machine without that config records and refuses nothing, so the tenant does not cover all the work in this repository. The hook is committed in `.claude/`, the receipts and keys stay outside the repository, and [agent-custody.dev/custody](https://agent-custody.dev/custody) shows the live tenant and sample receipts anyone can verify.
 
-
 ## Security
 
 Report a vulnerability privately to partha@charioteerconsulting.com; [SECURITY.md](SECURITY.md) has the scope, the response times, and how keys and tokens are protected.
-
 
 ## Working in the repository
 
@@ -217,7 +217,6 @@ bun run demo                        # the receipts demo: keys, grant, policy, to
 
 Everything runs on plain Node 22 or later. No build step. Package-level commands, such as the CLI and the tutorials, run from inside that package's directory; each package README says how. [CONTRIBUTING.md](CONTRIBUTING.md) has the rules for a change, a release, and a publish.
 
-
 ## Layout
 
 ```
@@ -228,7 +227,6 @@ packages/python/      the Python client package: agent_custody, tests run with u
 packages/state/       the state package: src, test, examples
 site/                 the website, generated from this repository's markdown by VitePress
 ```
-
 
 ## Plan
 

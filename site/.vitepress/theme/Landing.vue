@@ -13,7 +13,9 @@ const { isDark } = useData();
 const year = new Date().getUTCFullYear();
 
 const repo = "https://github.com/svayatta/agent-custody";
-const command = "npx @agent-custody/receipts init claude-code";
+const commands = ["npm install -g @agent-custody/receipts", "agent-custody init claude-code"];
+const command = commands.join("\n");
+const tryCommand = "npx @agent-custody/receipts init claude-code";
 const setupHref = "/guide/getting-started#claude-code-in-one-command";
 
 // The Copy button shows "Copied" for 1.5 seconds. The id says which of the two command boxes was used.
@@ -37,7 +39,7 @@ const label = (id: string) => (copied.value === id ? "Copied" : failed.value ===
 onBeforeUnmount(() => clearTimeout(copyTimer));
 
 // The output of `report` after a session of four calls in observe mode (tutorial 36). The path of sdk.json is shortened.
-const reportCommand = "npx @agent-custody/receipts report --config ~/.config/agent-custody/sdk.json";
+const reportCommand = "agent-custody report --config ~/.config/agent-custody/sdk.json";
 const report = `would have denied 2 calls (the policy recorded each one and blocked nothing)
 
   Bash: git push --force origin main
@@ -54,13 +56,15 @@ To enforce this policy, remove the "mode": "observe" line from ~/.config/agent-c
 
 // The replay (tutorial 38): the text that Claude Code shows the agent, and the offline check.
 const denial = `agent-custody: policy6 (receipt d7c6318e-186e-431e-be47-91853ace8684)`;
-const verified = `d7c6318e-186e-431e-be47-91853ace8684  VERIFIED (12 checks)  denied    decision deny  terraform destroy -auto-approve
+const verified = `0afc4931-4fec-4576-86f0-f11a06d14fd0  VERIFIED (13 checks)  executed  decision allow  terraform plan
+d7c6318e-186e-431e-be47-91853ace8684  VERIFIED (12 checks)  denied    decision deny  terraform destroy -auto-approve
 6bc21898-755d-4793-820a-a867aaf65db5  VERIFIED (12 checks)  denied    decision deny  rm -rf ~
+terraform destroy receipt, key that is not the agent's:
 receipt signature (issuer key): FAIL. RESULT: NOT VERIFIED`;
 
 const steps = [
   { t: "Run the command", d: "It makes a key, a starter deny list, and the Claude Code hooks for the current directory." },
-  { t: "Work as usual", d: "In observe mode the hook blocks nothing. It records each tool call." },
+  { t: "Work as usual", d: "In observe mode the hook blocks nothing. It records each shell command, file edit, and MCP tool call." },
   { t: "Read the report", d: "It lists each call that the policy would have denied." },
   { t: "Enforce", d: "Remove one line from the config. A denied call then stops before it runs." },
 ];
@@ -72,6 +76,7 @@ const replay = [
 const limits = [
   { t: "A credential in the environment", d: "If the agent's shell holds a cloud key or a database password, a process that the agent starts can use it. The hook stops a call that the agent makes through its tools. It does not stop that process." },
   { t: "The match is on text", d: "The starter list matches the text of a command. It catches the plain form of each command. It is not a sandbox." },
+  { t: "Some tools are not seen", d: "The hook matches shell commands, file edits, and MCP tools. It does not see Read, Grep, Glob, WebFetch, WebSearch, or Task. The starter deny list has rules for shell commands only." },
   { t: "The record is the agent's own report", d: "The signature shows that the record did not change after the hook wrote it. It does not show that the hook saw every call." },
 ];
 </script>
@@ -105,10 +110,11 @@ const limits = [
         <div class="wrap">
           <div>
             <h1>Stop your coding agent from running destructive commands, and keep a signed record that a reviewer can check.</h1>
-            <p class="lede">For engineers who run Claude Code against repositories and systems that touch production. One command adds a hook to Claude Code. The hook checks each tool call against a deny list before the call runs. The starter list covers force push, <code>rm -rf</code> on <code>/</code> and <code>~</code>, <code>terraform destroy</code>, and <code>drop database</code>.</p>
-            <div class="cmd"><span class="prompt" aria-hidden="true">$</span><code>{{ command }}</code><button type="button" aria-live="polite" @click="copy('hero')">{{ label("hero") }}</button></div>
+            <p class="lede">For engineers who run Claude Code against repositories and systems that touch production. One command adds a hook to Claude Code. The hook checks each shell command, file edit, and MCP tool call against a deny list before the call runs. The starter list covers force push, <code>rm -rf</code> on <code>/</code> and <code>~</code>, <code>terraform destroy</code>, and <code>drop database</code>.</p>
+            <div class="cmd"><div class="lines"><div v-for="c in commands" :key="c"><span class="prompt" aria-hidden="true">$</span><code>{{ c }}</code></div></div><button type="button" aria-live="polite" @click="copy('hero')">{{ label("hero") }}</button></div>
             <p v-if="failed === 'hero'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
             <p class="note">Needs Node 22. It starts in observe mode: nothing is blocked until you say so.</p>
+            <p class="note">To try it once, run <code>{{ tryCommand }}</code>. Do not keep the npx form: npm can clear its cache, and the hooks then stop working.</p>
             <div class="ctas">
               <a class="btn primary" href="/guide/incident-replay">See the incident replay</a>
               <a class="btn" :href="setupHref">Setup for Claude Code</a>
@@ -134,15 +140,15 @@ const limits = [
       <section id="report" class="sec alt">
         <div class="wrap">
           <h2>What you see</h2>
-          <p class="sub">Work in Claude Code as usual. The hook signs a record of each tool call. The record is called a receipt. The report checks the signature of every receipt, and then it lists the calls that the deny list would have stopped.</p>
+          <p class="sub">Work in Claude Code as usual. The hook signs a record of each shell command, file edit, and MCP tool call. The record is called a receipt. The report checks the signature of every receipt, and then it lists the calls that the deny list would have stopped.</p>
           <div class="two">
             <ol class="steps">
               <li v-for="(s, i) in steps" :key="s.t"><span class="n">{{ String(i + 1).padStart(2, "0") }}</span><div><b>{{ s.t }}</b><p>{{ s.d }}</p></div></li>
             </ol>
             <div>
               <div class="term" role="group" aria-label="The report">
-                <div class="termbar"><span class="prompt" aria-hidden="true">$</span><code>{{ reportCommand }}</code></div>
-                <pre>{{ report }}</pre>
+                <div class="termbar" tabindex="0" role="group" aria-label="The report command"><span class="prompt" aria-hidden="true">$</span><code>{{ reportCommand }}</code></div>
+                <pre tabindex="0" aria-label="The output of the report command">{{ report }}</pre>
               </div>
               <p class="caption">Output of <a :href="`${repo}/blob/main/packages/receipts/examples/36-claude-code-init.ts`">tutorial 36</a>, with the path of <code>sdk.json</code> shortened. The tutorial runs four calls: two match the list.</p>
             </div>
@@ -164,13 +170,13 @@ const limits = [
           <div class="two replay-out">
             <div>
               <p class="h3">What Claude Code shows the agent</p>
-              <div class="term"><pre>{{ denial }}</pre></div>
+              <div class="term"><pre tabindex="0" aria-label="The text that Claude Code shows the agent">{{ denial }}</pre></div>
               <p class="caption">The rule is <code>policy6</code>, and the id names a signed record of the denial.</p>
             </div>
             <div>
               <p class="h3">What a reviewer checks, offline</p>
-              <div class="term"><pre>{{ verified }}</pre></div>
-              <p class="caption">The reviewer holds the agent's public key and the receipt files. Nothing else. The last line is the same receipt checked with a key that is not the agent's. <a href="/verify">Verify a receipt in your browser →</a></p>
+              <div class="term"><pre tabindex="0" aria-label="The offline check of the receipts">{{ verified }}</pre></div>
+              <p class="caption">The reviewer holds the agent's public key and the receipt files. Nothing else. The last line is the <code>terraform destroy</code> receipt checked with a key that is not the agent's. <a href="/verify">Verify a receipt in your browser →</a></p>
             </div>
           </div>
           <div class="ctas after">
@@ -182,8 +188,8 @@ const limits = [
       <section id="limits" class="sec alt">
         <div class="wrap">
           <h2>What the hook does not stop</h2>
-          <p class="sub">The hook stops a call that the agent makes through its tools. Read these limits before you rely on it.</p>
-          <div class="cards c3">
+          <p class="sub">The hook stops a shell command, a file edit, or an MCP tool call that the agent makes. Read these limits before you rely on it.</p>
+          <div class="cards c2">
             <div v-for="l in limits" :key="l.t" class="card"><h3>{{ l.t }}</h3><p>{{ l.d }}</p></div>
           </div>
           <p class="after">To cover more, keep production credentials out of the agent's environment, and put a gateway between the agent and the tools that touch production. The gateway is on the <a href="/advanced">advanced page</a>. The <a href="/receipts/threat-model">threat model</a> lists what each part defends, and what it does not. No independent witness runs yet, and the hosted log is not anchored on mainnet yet.</p>
@@ -193,8 +199,8 @@ const limits = [
       <section id="start" class="sec final">
         <div class="wrap">
           <h2>Try it on your own sessions</h2>
-          <p class="sub">Needs Node 22. No account.</p>
-          <div class="cmd"><span class="prompt" aria-hidden="true">$</span><code>{{ command }}</code><button type="button" aria-live="polite" @click="copy('final')">{{ label("final") }}</button></div>
+          <p class="sub">Needs Node 22. No account. A global install keeps the hooks working.</p>
+          <div class="cmd"><div class="lines"><div v-for="c in commands" :key="c"><span class="prompt" aria-hidden="true">$</span><code>{{ c }}</code></div></div><button type="button" aria-live="polite" @click="copy('final')">{{ label("final") }}</button></div>
           <p v-if="failed === 'final'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
           <div class="ctas">
             <a class="btn primary" :href="setupHref">Setup for Claude Code →</a>
@@ -288,7 +294,9 @@ h2 { font-size: clamp(28px, 4vw, 36px); line-height: 1.15; letter-spacing: -.025
 .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
 .cmd { display: flex; align-items: center; gap: 12px; background: var(--term); color: var(--term-ink); border-radius: 10px; padding: 12px 12px 12px 16px; font: 13.5px var(--mono); max-width: 560px; }
 .cmd .prompt { color: #a8a29e; flex: none; }
-.cmd code { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+.cmd .lines { flex: 1; min-width: 0; display: grid; gap: 4px; user-select: all; }
+.cmd .lines > div { display: flex; gap: 12px; min-width: 0; }
+.cmd code { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cmd button { flex: none; min-width: 64px; font: 12px var(--sans); background: #292524; color: var(--term-ink); border: 1px solid #44403c; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
 .cmd button:hover { background: #44403c; }
 .note { font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }
@@ -315,6 +323,7 @@ h2 { font-size: clamp(28px, 4vw, 36px); line-height: 1.15; letter-spacing: -.025
 /* Cards */
 .cards { display: grid; gap: 20px; }
 .c3 { grid-template-columns: repeat(3, 1fr); }
+.c2 { grid-template-columns: repeat(2, 1fr); }
 .card { border: 1px solid var(--line); border-radius: var(--r); padding: 24px; background: var(--bg); min-width: 0; }
 .card h3 { font-size: 16px; margin: 0 0 8px; font-weight: 600; } .card p { margin: 0; font-size: 14.5px; color: var(--ink-2); }
 .card .badge { margin-bottom: 14px; }
@@ -385,7 +394,8 @@ footer.site { border-top: 1px solid var(--line); padding: 56px 0 40px; font-size
 }
 @media (max-width: 40rem) {
   .wrap { padding: 0 24px; }
-  .c3 { grid-template-columns: 1fr; }
+  .c3, .c2 { grid-template-columns: 1fr; }
+  .ctas .btn { height: auto; min-height: 44px; padding-top: 8px; padding-bottom: 8px; white-space: normal; max-width: 100%; }
   .denied dl { grid-template-columns: 1fr; }
   .denied dt { padding-bottom: 0; border-bottom: 0; } .denied dd { padding-top: 2px; }
   .denied dl > :nth-last-child(2) { border-bottom: 0; }

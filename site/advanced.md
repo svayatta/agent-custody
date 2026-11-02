@@ -163,7 +163,7 @@ Each use case has a runnable example, or says that it has none.
 - **Payments and refunds.** A refund within a limit, for a customer that the gateway verified. [The refund demo](#the-refund-demo), and [example 17: a REST upstream](https://github.com/svayatta/agent-custody/blob/main/packages/receipts/examples/17-rest-upstream.ts).
 - **Agents that write code.** Risk-tiered merges, and change-management evidence for SOC 2 and ISO 27001. [Risk-tiered merges, with evidence](/blog/risk-tiered-merges-with-evidence), and [example 24: the merge gate](https://github.com/svayatta/agent-custody/blob/main/packages/receipts/examples/24-agentic-cicd-merge-gate.ts).
 - **Knowledge bases.** Read anything, and write just under `notes/`, with a source. [A 22-second film](/demo-langchain-kb.mp4), and [example 23: LangChain](https://github.com/svayatta/agent-custody/blob/main/packages/receipts/examples/23-langchain-kb-agent.ts).
-- **Your own repository.** Every Claude Code tool call as a receipt. [This repository](/custody), and [the hook](/reference/claude-code).
+- **Your own repository.** Every Claude Code shell command, file edit, and MCP tool call as a receipt. [This repository](/custody), and [the hook](/reference/claude-code).
 
 More, by kind of team, each with its policy: [Use cases](/use-cases).
 
@@ -179,7 +179,7 @@ More, by kind of team, each with its policy: [Use cases](/use-cases).
 | Extra memory adapters | Write-through to Mem0 and Zep, so the ledger sits under a store that you already run | [The fact ledger](/state/) |
 | Single sign-on and roles | An enterprise tenant signs in through its own identity provider, with roles (`owner`, `admin`, `reviewer`, `readonly`) | [Hosted log and portal](/reference/hosted), [tutorial 31](/receipts/tutorials) |
 | The consoles | The gateway console (config, tools, receipts with a verdict each, policy replay, grant revocation) and the state review console | [The gateway console](/receipts/console), [Explain, review, packs](/reference/state-tools) |
-| Payload-bound approvals | Two people sign the exact action before it runs | [Approvals](/receipts/approvals) |
+| Payload-bound approvals | One or two approvers' keys sign the exact action before it runs | [Approvals](/receipts/approvals) |
 | Financial operations | Durable operation ids, provider idempotency keys, budget reservations, and reconciliation | [Financial operations](/receipts/financial-operations) |
 | Completeness | Match the provider's own records against verified receipts, to find actions taken outside the gateway | [Completeness](/receipts/completeness) |
 | The chain anchor | Commits the log's checkpoints to Ethereum from a published address. It has not run on mainnet for the hosted log yet | [Anchoring](/receipts/anchoring) |

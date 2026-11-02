@@ -1,6 +1,6 @@
 # Claude Code and the Claude Agent SDK
 
-One hook command records every tool call of a session as a receipt, and can deny a call before it runs. Claude Code invokes it as a command hook with the event on stdin; the Claude Agent SDK calls the same handler in process.
+One hook command records each shell command, file edit, and MCP tool call of a session as a receipt, and can deny a call before it runs. It does not see `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, or `Task`. Claude Code invokes it as a command hook with the event on stdin; the Claude Agent SDK calls the same handler in process.
 
 ## One command
 

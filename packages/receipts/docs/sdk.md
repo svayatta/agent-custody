@@ -41,8 +41,11 @@ Policies see `context.args` and an empty `context.facts`. A policy that reads `c
 ### One command
 
 ```bash
-npx @agent-custody/receipts init claude-code
+npm install -g @agent-custody/receipts
+agent-custody init claude-code
 ```
+
+To try it once, run `npx @agent-custody/receipts init claude-code`. The npx form can break the hooks, as the next paragraphs explain.
 
 The command sets up custody for your own Claude Code sessions. It prints each step.
 
