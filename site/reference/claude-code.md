@@ -32,6 +32,8 @@ agent-custody report --config <sdk.json>
 
 The command reads `receiptsDir` of the config and verifies each receipt with the agent's key (and the log keys of the config, when it has a log). It prints `would have denied N calls` and, for each call, the tool, the command or the file path, the rule, and the receipt id. A denial recorded with `enforced: false` is a call that ran. A receipt that does not verify is listed apart with its reason and is not counted. Exit code 1 when any receipt does not verify, otherwise 0. The last line says how to enforce: remove the `"mode": "observe"` line from `sdk.json`.
 
+An [incident replay](/guide/incident-replay) runs the hook in enforce mode and shows the denial text that Claude Code gets.
+
 ## Registering the hook
 
 `.claude/settings.json` in the project, or the user's settings:
