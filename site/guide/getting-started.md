@@ -7,7 +7,7 @@ Two paths. The **SDK path** records what the agent's own process reports: the qu
 For your own Claude Code sessions, one command does the setup and prints each step: an agent key, a config in observe mode, a starter deny policy (force push, `rm -rf /`, `terraform destroy`, `drop database`), and the three hooks.
 
 ```bash
-npx agent-custody init claude-code
+npx @agent-custody/receipts init claude-code
 ```
 
 Work in Claude Code as usual. Nothing is blocked, and the receipts stay on your machine. Then read what the policy would have denied:
