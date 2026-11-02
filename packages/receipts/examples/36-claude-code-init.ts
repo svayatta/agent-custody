@@ -3,7 +3,7 @@
 //
 // `agent-custody init claude-code` makes the key, the config, the starter policy, and the three hooks. The config is in
 // observe mode: the policy records a denied call and blocks nothing. After a session, `report` lists the calls that
-// the policy would have denied. The example uses a temporary home and a temporary project, never your own.
+// the policy would have denied. Each rule has a `@reason`, and the hook text in enforce mode names it. The example uses a temporary home and a temporary project, never your own.
 import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { initClaudeCode } from "../src/claude-init.ts";
@@ -47,5 +47,14 @@ step(5, "report: each receipt is verified with the agent's key, then the denials
 const report = denyReport(configFile);
 console.log(formatDenyReport(report).split("\n").map((l) => `   ${l}`).join("\n"));
 if (report.wouldDeny.length !== 2 || report.unverified.length !== 0) throw new Error("the report should list two calls and no receipt that fails");
+
+step(6, "the same policy in enforce mode: the hook text names what the rule forbids");
+const enforcing = createSdkIssuer({ ...loadSdkConfig(configFile), mode: undefined });
+for (const command of ["terraform destroy -auto-approve", "rm -rf ~"]) {
+  const denied = await handleHookEvent(enforcing, { hook_event_name: "PreToolUse", session_id: "demo", tool_name: "Bash", tool_input: { command } });
+  const text = denied.hookSpecificOutput?.permissionDecisionReason ?? "";
+  console.log(`   ${command}: ${text}`);
+  if (!text.startsWith("agent-custody denied this call: ")) throw new Error("the denial text does not name the reason");
+}
 
 console.log("\nOK");

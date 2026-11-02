@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadSdkConfig } from "./config.ts";
 import { loadPrivateKey, loadPublicKey } from "./crypto.ts";
-import { policyDigest, policyRules } from "./policy.ts";
+import { policyDigest, policyReasons, policyRules } from "./policy.ts";
 import type { ReceiptBundle } from "./receipt.ts";
 import { verifyBundle } from "./verify.ts";
 
@@ -16,6 +16,8 @@ export interface DeniedCall {
   target: string;
   /** The Cedar policy ids that decided, such as `policy3`. */
   policyIds: string[];
+  /** The `@reason` of each rule that has one. */
+  reasons: string[];
   /** The text of each rule, when the policy file still has the digest that the receipt names. */
   rules: string[];
 }
@@ -33,6 +35,7 @@ export interface DenyReport {
   unverified: { file: string; reason: string }[];
 }
 
+const ANNOTATIONS = /^(?:\s*@\w+\s*\("(?:[^"\\]|\\.)*"\))+\s*/;
 const TARGET_ARGS = ["command", "file_path", "notebook_path", "path", "url"];
 
 function targetOf(args: unknown): string {
@@ -55,6 +58,7 @@ export function denyReport(configFile: string): DenyReport {
   };
   const policyText = cfg.policyFile && existsSync(cfg.policyFile) ? readFileSync(cfg.policyFile, "utf8") : null;
   const rules = policyText === null ? [] : policyRules(policyText);
+  const reasons = policyText === null ? [] : policyReasons(policyText);
   const currentDigest = policyText === null ? null : policyDigest(policyText);
 
   const report: DenyReport = { configFile, receiptsDir: cfg.receiptsDir, observe: cfg.mode === "observe", verified: 0, wouldDeny: [], denied: [], unverified: [] };
@@ -80,7 +84,8 @@ export function denyReport(configFile: string): DenyReport {
         tool: p.tool.name,
         target: targetOf(p.request.args),
         policyIds,
-        rules: known ? policyIds.map((id) => rules[Number(id.replace(/^policy/, ""))]).filter((r): r is string => typeof r === "string").map((r) => r.replace(/\s+/g, " ").replace(/;$/, "").trim()) : [],
+        reasons: known ? policyIds.map((id) => reasons[Number(id.replace(/^policy/, ""))]).filter((r): r is string => typeof r === "string") : [],
+        rules: known ? policyIds.map((id) => rules[Number(id.replace(/^policy/, ""))]).filter((r): r is string => typeof r === "string").map((r) => r.replace(/\s+/g, " ").replace(/;$/, "").replace(ANNOTATIONS, "").trim()) : [],
       };
       (p.policy.enforced === false ? report.wouldDeny : report.denied).push(call);
     } catch (e) {
@@ -101,6 +106,7 @@ export function formatDenyReport(r: DenyReport): string {
   const list = (calls: DeniedCall[]) => {
     for (const c of calls) {
       lines.push("", `  ${c.tool}: ${clip(c.target)}`);
+      if (c.reasons.length) lines.push(`    reason:  ${c.reasons.join("; ")}`);
       lines.push(`    rule:    ${c.rules.length ? c.rules.join(" | ") : c.policyIds.join(", ") || "(none)"}${c.rules.length ? ` [${c.policyIds.join(", ")}]` : ""}`);
       lines.push(`    receipt: ${c.receiptId}  (${c.timestamp})`);
     }

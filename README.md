@@ -25,12 +25,14 @@ agent-custody report --config ~/.config/agent-custody/sdk.json
 would have denied 2 calls (the policy recorded each one and blocked nothing)
 
   Bash: git push --force origin main
-    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && context.args.command like "*git push*--force*" } [policy1]
-    receipt: b28236da-282d-4c0b-88f2-e0cc0ddb3079  (2026-11-02T10:03:31.404Z)
+    reason:  force push rewrites shared history (git push --force-with-lease is allowed)
+    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && ( context.args.command like "*git push*--force *" || context.args.command like "*git push*--force" || context.args.command like "*git push -f*" || context.args.command like "*git push* -f" ) } [policy1]
+    receipt: 191e1095-db76-45fc-82d4-3dc9a6e14023  (2026-11-02T11:15:18.824Z)
 
   Bash: terraform destroy -auto-approve
-    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && context.args.command like "*terraform destroy*" } [policy6]
-    receipt: c35bdb75-2463-4200-a1b4-5d90e2cac640  (2026-11-02T10:03:31.406Z)
+    reason:  terraform destroy deletes infrastructure
+    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && context.args.command like "*terraform destroy*" } [policy5]
+    receipt: 6f4c2455-b578-4a0f-b7ed-7fee177e5a9b  (2026-11-02T11:15:18.827Z)
 
 Checked 4 receipts: 4 verified, 0 did not verify.
 
@@ -50,7 +52,7 @@ cd packages/receipts && node examples/38-incident-replay.ts
 ```
 
 - `terraform plan` runs. The hook records an executed receipt.
-- `terraform destroy -auto-approve` is denied before it runs. Claude Code shows the agent `agent-custody: policy6 (receipt d7c6318e-186e-431e-be47-91853ace8684)`.
+- `terraform destroy -auto-approve` is denied before it runs. Claude Code shows the agent `agent-custody denied this call: terraform destroy deletes infrastructure (rule policy5, receipt 980d078f-2922-42b7-a5de-de3b99b00997)`.
 - `rm -rf ~` is denied the same way.
 - A reviewer holds the agent's public key and the receipt files. They verify the three receipts offline. The same check with a key that is not the agent's fails for the `terraform destroy` receipt.
 
@@ -231,4 +233,3 @@ site/                 the website, generated from this repository's markdown by 
 ## Plan
 
 The receipts package's roadmap is in [its README](packages/receipts/README.md#plan). The state package has the ledger on JSONL, SQLite, or Postgres with every query answered from an index, the memory server behind the gateway and shared over HTTP, quarantine with three provenance levels and value-level evidence, policy over the fact being changed, consumed facts and blast radius, certified forget with keyed digests and verified removal from stores, retention sweeps and legal holds, the custody pack for counsel, a ledger that lives in a JSONL file, SQLite, or your Postgres, write-through to Mem0 and Zep, and the eval CLI with signed reports; its remaining item is the hosted plane, tracked as an issue in [its README](packages/state/README.md#plan).
-

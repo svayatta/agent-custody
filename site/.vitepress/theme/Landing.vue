@@ -43,23 +43,25 @@ const reportCommand = "agent-custody report --config ~/.config/agent-custody/sdk
 const report = `would have denied 2 calls (the policy recorded each one and blocked nothing)
 
   Bash: git push --force origin main
-    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && context.args.command like "*git push*--force*" } [policy1]
-    receipt: b28236da-282d-4c0b-88f2-e0cc0ddb3079  (2026-11-02T10:03:31.404Z)
+    reason:  force push rewrites shared history (git push --force-with-lease is allowed)
+    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && ( context.args.command like "*git push*--force *" || context.args.command like "*git push*--force" || context.args.command like "*git push -f*" || context.args.command like "*git push* -f" ) } [policy1]
+    receipt: 191e1095-db76-45fc-82d4-3dc9a6e14023  (2026-11-02T11:15:18.824Z)
 
   Bash: terraform destroy -auto-approve
-    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && context.args.command like "*terraform destroy*" } [policy6]
-    receipt: c35bdb75-2463-4200-a1b4-5d90e2cac640  (2026-11-02T10:03:31.406Z)
+    reason:  terraform destroy deletes infrastructure
+    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && context.args.command like "*terraform destroy*" } [policy5]
+    receipt: 6f4c2455-b578-4a0f-b7ed-7fee177e5a9b  (2026-11-02T11:15:18.827Z)
 
 Checked 4 receipts: 4 verified, 0 did not verify.
 
 To enforce this policy, remove the "mode": "observe" line from ~/.config/agent-custody/sdk.json. A denied call is then blocked before it runs.`;
 
 // The replay (tutorial 38): the text that Claude Code shows the agent, and the offline check.
-const denial = `agent-custody: policy6 (receipt d7c6318e-186e-431e-be47-91853ace8684)`;
-const verified = `0afc4931-4fec-4576-86f0-f11a06d14fd0  VERIFIED (13 checks)  executed  decision allow  terraform plan
-d7c6318e-186e-431e-be47-91853ace8684  VERIFIED (12 checks)  denied    decision deny  terraform destroy -auto-approve
-6bc21898-755d-4793-820a-a867aaf65db5  VERIFIED (12 checks)  denied    decision deny  rm -rf ~
-terraform destroy receipt, key that is not the agent's:
+const denial = `agent-custody denied this call: terraform destroy deletes infrastructure (rule policy5, receipt 980d078f-2922-42b7-a5de-de3b99b00997)`;
+const verified = `6dd02745-62bd-46fa-9866-2e51adc0f682  VERIFIED (13 checks)  executed  decision allow  terraform plan
+980d078f-2922-42b7-a5de-de3b99b00997  VERIFIED (12 checks)  denied    decision deny  terraform destroy -auto-approve
+095d119e-5da7-4c74-bcc1-c91f0f2873c4  VERIFIED (12 checks)  denied    decision deny  rm -rf ~
+the same receipt checked against a key that is not the agent's does not verify
 receipt signature (issuer key): FAIL. RESULT: NOT VERIFIED`;
 
 const steps = [
@@ -128,9 +130,9 @@ const limits = [
             </header>
             <dl>
               <dt>The agent ran</dt><dd>terraform destroy -auto-approve</dd>
-              <dt>Rule</dt><dd>deny any command that matches <code>*terraform destroy*</code></dd>
+              <dt>Rule</dt><dd>terraform destroy deletes infrastructure</dd>
               <dt>Result</dt><dd>denied before it ran</dd>
-              <dt>The agent was told</dt><dd>agent-custody: policy6</dd>
+              <dt>The agent was told</dt><dd>{{ denial }}</dd>
             </dl>
             <footer><span>From the incident replay. No command ran.</span><a href="/guide/incident-replay">Read the replay →</a></footer>
           </article>
@@ -171,7 +173,7 @@ const limits = [
             <div>
               <p class="h3">What Claude Code shows the agent</p>
               <div class="term"><pre tabindex="0" aria-label="The text that Claude Code shows the agent">{{ denial }}</pre></div>
-              <p class="caption">The rule is <code>policy6</code>, and the id names a signed record of the denial.</p>
+              <p class="caption">The text says what the rule forbids. It names the rule, <code>policy5</code>, and the id of the signed record of the denial.</p>
             </div>
             <div>
               <p class="h3">What a reviewer checks, offline</p>
