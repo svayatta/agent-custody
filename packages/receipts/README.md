@@ -22,7 +22,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
 - [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, the EU AI Act, and UK GDPR, with what none of them claims
 - [Anchoring the log on a chain](docs/anchoring.md): the log's checkpoints committed to Ethereum mainnet, or another EVM chain the installation picks, from a published address, what that proves and what it does not, running the anchor, and `log-check` against the chain
-- [Receipts on a pull request](docs/github-action.md): the GitHub Action that verifies a directory of receipt bundles and posts one table on the pull request, the workflow file to copy, and why a committed receipt publishes the call unless a capture rule withholds it
+- [Receipts on a pull request](docs/github-action.md): the GitHub Action that verifies a directory of receipt bundles and posts one table on the pull request, the workflow file to copy, the `export` command that copies the receipts into the branch, and why a committed receipt publishes the call unless a capture rule withholds it
 - [Completeness](docs/completeness.md): an auditor's read-only key lists the provider's objects and matches each to a verified receipt, so an action taken outside the gateway shows up
 - [Payment mandates and agent identity](docs/mandates.md): the design for fitting grants and receipts to Google's AP2 mandates, Visa's Trusted Agent Protocol and Mastercard Agent Pay; not yet built
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
@@ -255,6 +255,7 @@ src/anchor.ts      the anchor: commits a Merkle root over new checkpoints to a c
 src/anchor-evm.ts  the anchor's transactions on Ethereum or another EVM chain, through the optional dependency viem
 src/completeness.ts  completeness from the provider's side: the provider's own list, matched against verified receipts
 src/pr-summary.ts  `verify --markdown`: a directory of bundles verified into one Markdown table, for the GitHub Action
+src/export.ts      `export`: verified receipt bundles that keep their values private, copied byte for byte into a directory for a pull request
 src/signer.ts      the signer: the log's key in its own process, the key document verifiers fetch
 src/checkpoints.ts signed heads published on a schedule, to files and to Postgres
 src/log-store.ts   the log server's backends: the file, and Postgres with tenants, hashed tokens, one writer per tenant, rate limits
@@ -285,7 +286,7 @@ src/retention.ts   pruning the log: leaves become their hashes, bundles are remo
 src/index.ts       the package's public surface; adapters are exported on ./sdk/<framework> subpaths
 tsconfig.build.json  emits dist/ (JavaScript plus declarations) for consumers; the repo itself runs the .ts directly
 scripts/           fake Stripe upstream (signs its results with --key), a second fake upstream, fixture builders for gateway and SDK, the replay builder (`replay.ts`: example 27 and state example 07 as a folder of receipts and public keys anyone can verify with the published packages), demo
-examples/          thirty-five runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
+examples/          thirty-seven runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
 test/              unit tests per module, end-to-end gateway test, SDK and hook tests,
                    adapter tests against the real packages, and a test that runs every policy in docs/policies.md
 docs/              tutorials, usage (gateway), codex-recovery (live demo), approvals, sdk, policies, verification
@@ -297,7 +298,8 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Done**
 
-- A GitHub Action (`action.yml` at the repository root) that runs `verify --markdown` on a directory of receipt bundles, posts one table as a pull request comment that it edits on each push, writes the same table to the job summary, and fails when a receipt does not verify or none exists; [guide](docs/github-action.md). [Issue #205](https://github.com/svayatta/agent-custody/issues/205). Not yet done: an export command that puts the receipts of a session into a branch.
+- `agent-custody export`: copies the receipt bundles of a session into a directory for a pull request, byte for byte. It verifies each receipt against the issuer key, refuses one that carries plain arguments, results, or facts (unless `--allow-clear`), reads only `<id>.json` at the top level (never `salts/`, `outbox/`, or `*.authorization.json`), and keeps only the receipts issued at or after `--since`; [guide](docs/github-action.md), tutorial 39.
+- A GitHub Action (`action.yml` at the repository root) that runs `verify --markdown` on a directory of receipt bundles, posts one table as a pull request comment that it edits on each push, writes the same table to the job summary, and fails when a receipt does not verify or none exists; [guide](docs/github-action.md). [Issue #205](https://github.com/svayatta/agent-custody/issues/205).
 - Strict mode: `"strict": true` refuses a local log, a log that is not hash-only, and a log without pinned keys; precommits every tool, in observe mode too; and turns the outbox off. No call the agent makes is forwarded before its authorization is in a log the operator does not run, every receipt says `issuer.strict`, and `verify --require-strict` requires it ([usage](docs/usage.md#strict-mode), tutorial 34). [Issue #177](https://github.com/svayatta/agent-custody/issues/177).
 - Policy reload: the gateway re-reads `policy.cedar` whenever it changes and applies it from the next call, with no restart and no dropped session; a policy that does not parse is refused and the one in force stays, and every change or refusal is recorded in `receipts/policy-reloads.jsonl` ([usage](docs/usage.md)).
 - Live Codex support recovery demo: model-selected MCP calls, incorrect CRM memory, a reviewed recovery plan, simulated credit compensation, and verified evidence; [guide](docs/codex-recovery.md), with offline regression coverage.
