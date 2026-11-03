@@ -79,7 +79,7 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 agent-custody verify --markdown .custody/receipts --issuer-key keys/agent.pub [--principal-key keys/principal.pub] [--log-url https://log.example.com/] [--log-id acme]
 ```
 
-The command verifies each `<id>.json` in the directory, except `<id>.authorization.json` files, subdirectories, and symbolic links, with the same keys and options as `verify`. It prints this, and nothing else, on stdout:
+The command verifies each `<id>.json` in the directory, except `<id>.authorization.json` files, subdirectories, and symbolic links, with the same keys and options as `verify`. `verify --markdown` follows a symbolic link when the link is the file argument or the directory argument itself, but not a link inside the directory. The table shows only fixed error text or verified fields, so a followed link shows no text from its target. It prints this, and nothing else, on stdout:
 
 ```
 <!-- agent-custody -->

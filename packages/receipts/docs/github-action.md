@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: svayatta/agent-custody@<commit sha of the release> # 0.14.0
+      - uses: svayatta/agent-custody@<commit sha of the release> # 0.15.0
         with:
           path: .custody/receipts
           issuer-key: .custody/keys/agent.pub
@@ -37,7 +37,7 @@ Pin the action to the commit of a release, as you pin every other action. A movi
 | `principal-key` | the public key files of the principals whose grants a gateway receipt carries, one path on each line; SDK and Claude Code hook receipts need none | |
 | `log-url` | the URL of the log; the action fetches the log key from it (`verify --log-url`) | |
 | `log-id` | the id that every tree head must name (`verify --log-id`) | |
-| `version` | the `@agent-custody/receipts` version that `npx` runs | `0.14.0` |
+| `version` | the `@agent-custody/receipts` version that `npx` runs | `0.15.0` |
 | `github-token` | a token that can write pull request comments | `github.token` |
 | `comment-author` | the login of the account that `github-token` posts as; the action edits only a comment from this account | `github-actions[bot]` |
 
@@ -62,6 +62,7 @@ The table has one row for each receipt. The failed rows come first.
 - `Status` is the execution status in the signed receipt: `executed`, `denied`, `failed`, `error`, or `withheld`. When the signature does not verify, the table shows `-`, because nothing in that receipt is trusted.
 - `Result` is `verified`, or the names of the checks that failed. [Verifying a receipt](verification.md#what-each-check-means) explains each check.
 - A file that is not valid JSON shows `not a JSON file`, and a file with the wrong shape shows `not a receipt bundle`. The table never shows text from the file, because anyone who can change the branch can choose the file. The action does not read a symbolic link in `path`, so a link cannot bring a file from the runner into the comment.
+- `verify --markdown` follows a symbolic link when the link is the file argument or the directory argument itself, but not a link inside the directory. The table shows only fixed error text or verified fields, so a followed link shows no text from its target.
 - A file whose name is not `<receipt id>.json` fails with `file name matches receipt id`. A valid receipt under the name of another receipt could hide that receipt.
 - The table shows 200 rows at most. Every failed row is in it.
 
