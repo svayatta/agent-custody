@@ -19,25 +19,57 @@ function readOwner(lockFile: string): LockOwner | undefined {
   }
 }
 
-/** The owner on this host is gone, or no one has touched the file for `staleMs`. */
-function lockIsStale(lockFile: string, staleMs: number): boolean {
+type Judgment = "held" | "gone" | { token: string | undefined; ino: number };
+
+/**
+ * A lock is stale when its owner on this host is gone. A live owner on this host keeps its lock, so a laptop that
+ * sleeps while it holds the lock keeps it. The owner on another host, and a file with no readable owner, are judged by age.
+ */
+function judge(lockFile: string, staleMs: number): Judgment {
   try {
-    const age = Date.now() - statSync(lockFile).mtimeMs;
+    const st = statSync(lockFile);
+    const age = Date.now() - st.mtimeMs;
     const owner = readOwner(lockFile);
-    if (!owner) return age > UNREADABLE_STALE_MS;
-    if (owner.host === hostname() && !ownerAlive({ ownerPid: owner.pid, ...(owner.start ? { ownerStart: owner.start } : {}) })) return true;
-    return age > staleMs;
+    const stale = { token: owner?.token, ino: st.ino };
+    if (!owner) return age > UNREADABLE_STALE_MS ? stale : "held";
+    if (owner.host === hostname()) return ownerAlive({ ownerPid: owner.pid, ...(owner.start ? { ownerStart: owner.start } : {}) }) ? "held" : stale;
+    return age > staleMs ? stale : "held";
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "gone";
     throw e;
+  }
+}
+
+/** Moves the lock away only if it is still the file that was judged stale. One breaker at a time holds `<lock>.break`. */
+function breakLock(lockFile: string, judged: { token: string | undefined; ino: number }): void {
+  const breaker = `${lockFile}.break`;
+  try {
+    closeSync(openSync(breaker, "wx", 0o600));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    try {
+      if (Date.now() - statSync(breaker).mtimeMs > UNREADABLE_STALE_MS) rmSync(breaker, { force: true });
+    } catch {}
+    return;
+  }
+  try {
+    // between the judgment and now, the judged owner can release and a live caller can take the lock
+    if (statSync(lockFile).ino !== judged.ino || readOwner(lockFile)?.token !== judged.token) return;
+    const gone = `${lockFile}.stale-${randomUUID()}`;
+    renameSync(lockFile, gone);
+    rmSync(gone, { force: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  } finally {
+    rmSync(breaker, { force: true });
   }
 }
 
 /**
  * Takes the lock with an exclusive create, and returns its release. The release removes the file only when it still
  * holds this call's token, so a holder whose lock was broken never removes the lock of the next holder. Returns
- * undefined when a live holder has the lock. A stale lock is moved away with a rename: of two callers that find it
- * stale, one moves it and the other gets ENOENT and tries again.
+ * undefined when a live holder has the lock. A lock file that is gone between the create and the judgment is no
+ * reason to break anything: the caller tries the create again.
  */
 export function takeLock(lockFile: string, staleMs: number): (() => void) | undefined {
   const token = randomUUID();
@@ -56,14 +88,9 @@ export function takeLock(lockFile: string, staleMs: number): (() => void) | unde
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     }
-    if (!lockIsStale(lockFile, staleMs)) return undefined;
-    try {
-      const gone = `${lockFile}.stale-${randomUUID()}`;
-      renameSync(lockFile, gone);
-      rmSync(gone, { force: true });
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-    }
+    const j = judge(lockFile, staleMs);
+    if (j === "held") return undefined;
+    if (j !== "gone") breakLock(lockFile, j);
   }
   return undefined;
 }

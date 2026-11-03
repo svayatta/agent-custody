@@ -33,7 +33,7 @@ describe("the lock", () => {
     expect(existsSync(lock)).toBe(false);
   });
 
-  it("breaks the lock of a process that is gone at once, and the lock of a live process only when it is old", () => {
+  it("breaks the lock of a process on this host that is gone, and never the lock of a live one", () => {
     const lock = join(dir(), "x.lock");
     writeFileSync(lock, ownerBody({ pid: deadPid() }));
     expect(takeLock(lock, 60_000)).toBeTypeOf("function");
@@ -42,8 +42,27 @@ describe("the lock", () => {
     expect(takeLock(lock, 60_000)).toBeUndefined();
     const old = new Date(Date.now() - 120_000);
     utimesSync(lock, old, old);
-    expect(takeLock(lock, 60_000)).toBeTypeOf("function");
+    expect(takeLock(lock, 60_000)).toBeUndefined();
   });
+
+  it("loses no acknowledged leaf when many processes append at the same time", async () => {
+    const file = join(dir(), "log.jsonl");
+    const logModule = join(import.meta.dirname, "..", "src", "log.ts");
+    const writer = (w: number) =>
+      new Promise<string>((done, fail) => {
+        const script = `import { MerkleLog } from ${JSON.stringify(logModule)}; const log = new MerkleLog(${JSON.stringify(file)}); const out = []; for (let k = 0; k < 50; k++) out.push([log.append("w${w}-" + k).leafIndex, "w${w}-" + k]); process.stdout.write(JSON.stringify(out));`;
+        const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+        let out = "";
+        child.stdout.on("data", (d) => (out += d));
+        child.on("exit", (code) => (code === 0 ? done(out) : fail(new Error(`writer ${w} exited ${code}`))));
+      });
+    const acks = (await Promise.all(Array.from({ length: 20 }, (_, w) => writer(w)))).flatMap((o) => JSON.parse(o) as [number, string][]);
+    const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l) as string);
+    expect(acks).toHaveLength(1000);
+    expect(lines).toHaveLength(1000);
+    for (const [index, leaf] of acks) expect(lines[index]).toBe(leaf);
+    expect(existsSync(`${file}.torn`)).toBe(false);
+  }, 60_000);
 
   it("does not take the lock file of another host as dead, and leaves a lock file with no owner for a minute", () => {
     const lock = join(dir(), "x.lock");
