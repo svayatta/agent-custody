@@ -31,12 +31,12 @@ export interface PrSummary {
   problem?: string;
 }
 
-/** The bundle files of a directory (not the `<id>.authorization.json` files, not the subdirectories), or the one file given. A path that does not exist holds no receipts. */
+/** The bundle files of a directory (not the `<id>.authorization.json` files, not the subdirectories, not the symbolic links), or the one file given. A path that does not exist holds no receipts. */
 export function receiptFiles(path: string): string[] {
   if (!existsSync(path)) return [];
   if (!statSync(path).isDirectory()) return [path];
   return readdirSync(path, { withFileTypes: true })
-    .filter((e) => (e.isFile() || e.isSymbolicLink()) && e.name.endsWith(".json") && !e.name.endsWith(AUTHORIZATION))
+    .filter((e) => e.isFile() && e.name.endsWith(".json") && !e.name.endsWith(AUTHORIZATION))
     .map((e) => join(path, e.name))
     .sort();
 }
@@ -47,14 +47,15 @@ function rowOf(file: string, opts: VerifyOptions): SummaryRow {
   let bundle: ReceiptBundle;
   try {
     bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
-  } catch (e) {
-    return fail(`not a JSON file: ${e instanceof Error ? e.message : String(e)}`);
+  } catch {
+    // the comment is public: a parser message can quote the first bytes of the file
+    return fail("not a JSON file");
   }
   let result: ReturnType<typeof verifyBundle>;
   try {
     result = verifyBundle(bundle, opts);
-  } catch (e) {
-    return fail(`not a receipt bundle: ${e instanceof Error ? e.message : String(e)}`);
+  } catch {
+    return fail("not a receipt bundle");
   }
   const failed = result.checks.filter((c) => !c.ok).map((c) => c.name);
   const p = result.statement?.predicate;

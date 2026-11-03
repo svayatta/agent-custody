@@ -32,20 +32,23 @@ Pin the action to the commit of a release, as you pin every other action. A movi
 
 | input | meaning | default |
 | --- | --- | --- |
-| `path` | a directory of receipt bundles; the action reads the `.json` files in it, not `<id>.authorization.json` files and not subdirectories | `.custody/receipts` |
+| `path` | a directory of receipt bundles; the action reads the `.json` files in it, not `<id>.authorization.json` files, not symbolic links, and not subdirectories | `.custody/receipts` |
 | `issuer-key` | the public key files of the issuers you trust, one path on each line (required) | |
 | `principal-key` | the public key files of the principals whose grants a gateway receipt carries, one path on each line; SDK and Claude Code hook receipts need none | |
 | `log-url` | the URL of the log; the action fetches the log key from it (`verify --log-url`) | |
 | `log-id` | the id that every tree head must name (`verify --log-id`) | |
 | `version` | the `@agent-custody/receipts` version that `npx` runs | `0.14.0` |
 | `github-token` | a token that can write pull request comments | `github.token` |
+| `comment-author` | the login of the account that `github-token` posts as; the action edits only a comment from this account | `github-actions[bot]` |
 
 ## What the action does
 
 1. It sets up Node 22 and runs `npx @agent-custody/receipts@<version> verify --markdown <path> --issuer-key ...`.
 2. It writes the table to `$GITHUB_STEP_SUMMARY`.
-3. On a `pull_request` event, it looks for an earlier comment that starts with `<!-- agent-custody -->` and edits it. When there is none, it posts a new comment.
+3. On a `pull_request` event, it looks for an earlier comment that starts with `<!-- agent-custody -->` and that the account in `comment-author` posted, and it edits that comment. When there is none, it posts a new comment.
 4. It fails the step when one receipt does not verify, and when the directory holds no receipt.
+
+Any user can post a comment that starts with the marker line. The action ignores such a comment, because the author does not match. If you give `github-token` the token of a user or of an app, set `comment-author` to the login of that account. With the wrong login, the action does not find its own comment, and it posts a new comment on each push.
 
 When the token cannot write a comment, the action prints a warning and keeps the job summary. This is the case for a pull request from a fork, where GitHub gives the `pull_request` event a read-only token. The step does not fail for that reason. Do not switch to `pull_request_target` to get the comment. That event gives a write token to a workflow that handles code from the fork.
 
@@ -58,6 +61,7 @@ The table has one row for each receipt. The failed rows come first.
 
 - `Status` is the execution status in the signed receipt: `executed`, `denied`, `failed`, `error`, or `withheld`. When the signature does not verify, the table shows `-`, because nothing in that receipt is trusted.
 - `Result` is `verified`, or the names of the checks that failed. [Verifying a receipt](verification.md#what-each-check-means) explains each check.
+- A file that is not valid JSON shows `not a JSON file`, and a file with the wrong shape shows `not a receipt bundle`. The table never shows text from the file, because anyone who can change the branch can choose the file. The action does not read a symbolic link in `path`, so a link cannot bring a file from the runner into the comment.
 - A file whose name is not `<receipt id>.json` fails with `file name matches receipt id`. A valid receipt under the name of another receipt could hide that receipt.
 - The table shows 200 rows at most. Every failed row is in it.
 

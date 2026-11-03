@@ -23,6 +23,9 @@ inputs:
   github-token:
     description: A token that can write pull request comments. Without that right, the action writes the job summary only.
     default: ${{ github.token }}
+  comment-author:
+    description: The login of the account that github-token posts as. The action edits only a comment from this account. Change it when you give a token of a user or of an app.
+    default: "github-actions[bot]"
 
 runs:
   using: composite
@@ -40,6 +43,7 @@ runs:
         INPUT_LOG_ID: ${{ inputs.log-id }}
         INPUT_VERSION: ${{ inputs.version }}
         GH_TOKEN: ${{ inputs.github-token }}
+        COMMENT_AUTHOR: ${{ inputs.comment-author }}
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
@@ -68,7 +72,8 @@ runs:
 
         if [ -n "$PR_NUMBER" ]; then
           url="repos/${REPO}/issues/${PR_NUMBER}/comments"
-          comment_id=$(gh api --paginate "$url" --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" 2> /dev/null | tail -n 1)
+          # any user can post the marker line, so the author must match as well
+          comment_id=$(MARKER="$marker" gh api --paginate "$url" --jq '.[] | select(.user.login == env.COMMENT_AUTHOR and (.body | startswith(env.MARKER))) | .id' 2> /dev/null | tail -n 1)
           posted=1
           if [ -n "$comment_id" ]; then
             gh api --method PATCH "repos/${REPO}/issues/comments/${comment_id}" -F body=@"$summary" > /dev/null 2>&1 && posted=0

@@ -79,7 +79,7 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 agent-custody verify --markdown .custody/receipts --issuer-key keys/agent.pub [--principal-key keys/principal.pub] [--log-url https://log.example.com/] [--log-id acme]
 ```
 
-The command verifies each `<id>.json` in the directory, except `<id>.authorization.json` files and subdirectories, with the same keys and options as `verify`. It prints this, and nothing else, on stdout:
+The command verifies each `<id>.json` in the directory, except `<id>.authorization.json` files, subdirectories, and symbolic links, with the same keys and options as `verify`. It prints this, and nothing else, on stdout:
 
 ```
 <!-- agent-custody -->
@@ -93,11 +93,11 @@ The command verifies each `<id>.json` in the directory, except `<id>.authorizati
 | `6e2de8f3-4e51-43e5-af8b-a2b283dd7709` | `stripe.refund` | executed | verified |
 ```
 
-The failed rows come first, and the table has 200 rows at most. `Status` is the execution status in the signed receipt, or `-` when the signature does not verify. A file whose name is not its receipt id fails with `file name matches receipt id`. Text from a receipt is sanitized, so it cannot break the table or add Markdown or HTML. Exit 1 when one receipt does not verify, when the directory holds no receipt, and when the path does not exist.
+The failed rows come first, and the table has 200 rows at most. `Status` is the execution status in the signed receipt, or `-` when the signature does not verify. A file whose name is not its receipt id fails with `file name matches receipt id`. Text from a receipt is sanitized, so it cannot break the table or add Markdown or HTML. A file that is not valid JSON shows `not a JSON file`, and a file with the wrong shape shows `not a receipt bundle`; the table never quotes the file. Exit 1 when one receipt does not verify, when the directory holds no receipt, and when the path does not exist.
 
 In code: `summarizeReceipts(receiptFiles(dir), options): { ok, rows, problem? }` and `formatSummaryMarkdown(summary): string`. The first line of the output is `SUMMARY_MARKER`.
 
-The [GitHub Action](/receipts/github-action) in this repository runs this command and posts the table on a pull request. Its inputs are `path`, `issuer-key`, `principal-key`, `log-url`, `log-id`, `version`, and `github-token`.
+The [GitHub Action](/receipts/github-action) in this repository runs this command and posts the table on a pull request. Its inputs are `path`, `issuer-key`, `principal-key`, `log-url`, `log-id`, `version`, `github-token`, and `comment-author`.
 
 ### `export`
 
@@ -108,7 +108,7 @@ agent-custody export --receipts ~/.config/agent-custody/receipts --out .custody/
 The command puts receipts into a directory that goes into a pull request. For each `<id>.json` at the top level of `--receipts`, it does these steps in order.
 
 1. It verifies the receipt with the issuer keys. It refuses a receipt that does not verify, and a receipt whose file name is not its signed receipt id (`file name matches receipt id`). `--issuer-key` is required, because the privacy check trusts the signed capture note.
-2. It skips a receipt issued before `--since`. `--since` takes an ISO time. A receipt issued at that time is kept.
+2. It skips a receipt issued before `--since`. `--since` takes an ISO time that starts with a date, for example `2026-11-02` or `2026-11-02T09:00:00Z`. A receipt issued at that time is kept.
 3. It refuses a receipt when a side that holds data has no withheld path under it in the signed capture note. The sides are `args` (`request.args`), `result` (`execution.result`, the error message, and the denial reason), and `facts` (the value of each fact). A field that a rule lists in its `clear` list is allowed when the rule withholds the other fields of that side. `--allow-clear` turns the check off; the command then marks the receipt `(plain values: ...)` and prints a warning on standard error.
 4. It copies the file byte for byte, and writes nothing for a refused or skipped receipt. The command creates `--out` when it copies a receipt.
 

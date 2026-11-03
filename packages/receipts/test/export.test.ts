@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { loadSdkConfig } from "../src/config.ts";
+import { clearSides } from "../src/export.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { createSdkIssuer } from "../src/sdk/index.ts";
 import { buildSdkFixture } from "../scripts/fixture.ts";
@@ -24,6 +25,8 @@ let late: ReceiptBundle;
 let bash: ReceiptBundle;
 let bashLoneCommand: ReceiptBundle;
 let plain: ReceiptBundle;
+let clearError: ReceiptBundle;
+let clearDenied: ReceiptBundle;
 
 beforeAll(async () => {
   const fx = buildSdkFixture(mkdtempSync(join(tmpdir(), "export-")));
@@ -42,6 +45,9 @@ beforeAll(async () => {
   bash = await sdk.record({ tool: "Bash", args: { command: "ls -la", description: "list files with TOKEN_IN_DESCRIPTION" } }, { status: "executed", result: { stdout: "secret output" } });
   bashLoneCommand = await sdk.record({ tool: "Bash", args: { command: "ls" } }, { status: "executed", result: { stdout: "secret output" } });
   plain = await sdk.record({ tool: "plain.tool", args: { q: "plain question" } }, { status: "executed", result: { a: "plain answer" } });
+  // no arguments, so only the error message and the denial reason carry data; a rule that withholds nothing leaves them in clear
+  clearError = await sdk.record({ tool: "plain.tool", args: {} }, { status: "error", error: "failed with TOKEN_IN_ERROR" });
+  clearDenied = await sdk.record({ tool: "plain.tool", args: {} }, { status: "denied", reason: "denied for TOKEN_IN_REASON" });
   early = await sdk.record({ tool: "stripe.refund", args: { amount: 1 } }, { status: "executed", result: { ok: true } });
   await pause(10);
   late = await sdk.record({ tool: "stripe.refund", args: { amount: 2 } }, { status: "executed", result: { ok: true } });
@@ -72,7 +78,7 @@ describe("agent-custody export", () => {
     expect(copiedNames(outDir)).toEqual([name(digest), name(bash), name(early), name(late)].sort());
     for (const b of [digest, bash, early, late]) expect(bytes(join(outDir, name(b))).equals(bytes(join(receipts, name(b))))).toBe(true);
     expect(r.stdout).toContain(`copied  ${name(digest)}`);
-    expect(r.stdout).toMatch(/4 copied, 2 refused, 0 skipped/);
+    expect(r.stdout).toMatch(/4 copied, 4 refused, 0 skipped/);
     // no value of the digest receipt reaches the output directory
     for (const f of copiedNames(outDir)) expect(readFileSync(join(outDir, f), "utf8")).not.toMatch(/cust_EXPORT_SECRET|ending 4242|TOKEN_IN_DESCRIPTION|secret output/);
   });
@@ -102,6 +108,26 @@ describe("agent-custody export", () => {
     expect(decode(bash).predicate.request.args).toMatchObject({ command: "ls -la", $rest: { $custody: "withheld" } });
     // nothing is left to withhold in { command }, and the check cannot tell it from mode clear
     expect(r.stdout).toContain(`refused ${name(bashLoneCommand)}: args in clear`);
+  });
+
+  it("refuses a receipt whose error message or denial reason is in clear", () => {
+    expect(decode(clearError).predicate.execution).toMatchObject({ error: "failed with TOKEN_IN_ERROR" });
+    expect(decode(clearDenied).predicate.execution).toMatchObject({ reason: "denied for TOKEN_IN_REASON" });
+    const outDir = out();
+    const r = run(outDir);
+    expect(r.stdout).toContain(`refused ${name(clearError)}: result in clear`);
+    expect(r.stdout).toContain(`refused ${name(clearDenied)}: result in clear`);
+    expect(copiedNames(outDir)).not.toContain(name(clearError));
+    expect(copiedNames(outDir)).not.toContain(name(clearDenied));
+  });
+
+  it("counts the value of a fact as in clear unless the capture note withholds it", () => {
+    const p = decode(early).predicate;
+    expect(clearSides(p)).toEqual([]);
+    const facts = { customer: { tool: "customer.lookup", args: {}, value: { verified: true }, resultDigest: "d", provenance: "observed" as const } };
+    expect(clearSides({ ...p, facts })).toEqual(["facts"]);
+    const note = { ...p.capture!, withheld: [...p.capture!.withheld, ["facts", "customer", "value", "$rest"]] };
+    expect(clearSides({ ...p, facts, capture: note })).toEqual([]);
   });
 
   it("exits 0 and copies everything when every receipt keeps its values private", () => {
@@ -159,6 +185,8 @@ describe("agent-custody export", () => {
     const noKey = spawnSync(process.execPath, [cli, "export", "--receipts", receipts, "--out", out()], { encoding: "utf8", timeout: 30_000 });
     expect(noKey.status).toBe(1);
     expect(noKey.stderr).toContain("--issuer-key");
-    expect(run(out(), "--since", "last week").stderr).toContain("--since must be an ISO time");
+    // Date.parse reads a bare number as a year
+    for (const since of ["last week", "1", "2001"]) expect(run(out(), "--since", since).stderr).toContain("--since must be an ISO time");
+    expect(run(out(), "--since", "2999-01-01").stderr).toContain("No receipt was copied.");
   });
 });

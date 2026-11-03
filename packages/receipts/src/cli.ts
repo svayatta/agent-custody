@@ -737,7 +737,8 @@ async function main(argv: string[]): Promise<number> {
         },
       });
       if (!values.receipts || !values.out || !values["issuer-key"]?.length) throw new Error("export needs --receipts <dir>, --out <dir> and --issuer-key <pub>");
-      const since = values.since === undefined ? undefined : Date.parse(values.since);
+      // Date.parse reads "1" as the year 2001, so the text must start with a date
+      const since = values.since === undefined ? undefined : /^\d{4}-\d{2}-\d{2}/.test(values.since) ? Date.parse(values.since) : NaN;
       if (since !== undefined && !Number.isFinite(since)) throw new Error(`--since must be an ISO time; got "${values.since}"`);
       const result = exportReceipts({
         receiptsDir: values.receipts,

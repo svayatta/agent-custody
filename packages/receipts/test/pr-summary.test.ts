@@ -1,12 +1,15 @@
 // The table that the GitHub Action posts. The input is the signed vectors, so the test needs no gateway and no network.
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { loadSdkConfig } from "../src/config.ts";
 import { publicKeyFromPem } from "../src/crypto.ts";
 import { formatSummaryMarkdown, receiptFiles, summarizeReceipts, SUMMARY_MARKER } from "../src/pr-summary.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
+import { createSdkIssuer } from "../src/sdk/index.ts";
+import { buildSdkFixture } from "../scripts/fixture.ts";
 
 const vectors = JSON.parse(readFileSync(join(import.meta.dirname, "..", "vectors", "receipts.json"), "utf8"));
 const cli = join(import.meta.dirname, "..", "src", "cli.ts");
@@ -92,6 +95,34 @@ describe("the pull request table", () => {
     expect(md).not.toMatch(/<img>/);
     const row = md.split("\n").find((l) => l.includes("evil"))!;
     expect(row.split("|").length).toBe(6);
+  });
+});
+
+describe("what a pull request can put into the comment", () => {
+  it("shows a signed tool name that holds Markdown, a newline, and the marker as one escaped cell", async () => {
+    const fx = buildSdkFixture(mkdtempSync(join(tmpdir(), "pr-summary-sdk-")));
+    const sdk = createSdkIssuer(loadSdkConfig(fx.configFile));
+    await sdk.record({ tool: `x\`|\n${SUMMARY_MARKER}<img src=x>\\y`, args: {} }, { status: "executed", result: {} });
+    const summary = summarizeReceipts(receiptFiles(fx.receiptsDir), { issuerKeys: [publicKeyFromPem(readFileSync(fx.appPub, "utf8"))], principalKeys: [] });
+    expect(summary.ok).toBe(true);
+    const md = formatSummaryMarkdown(summary);
+    expect(md.split(SUMMARY_MARKER)).toHaveLength(2);
+    expect(md).not.toContain("<img");
+    const rows = md.split("\n").filter((l) => l.startsWith("| `"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatch(/^\| `[0-9a-f-]+` \| `[^`|]+` \| executed \| verified \|$/);
+  });
+
+  it("does not follow a symbolic link, and does not print what a file holds", () => {
+    const { dir, receipts } = setup(good());
+    writeFileSync(join(dir, "runner-file"), "RUNNER_SECRET_LINE 127.0.0.1");
+    symlinkSync(join(dir, "runner-file"), join(receipts, "linked.json"));
+    writeFileSync(join(receipts, "plain.json"), "RUNNER_SECRET_LINE in a file that is not JSON");
+    const files = receiptFiles(receipts);
+    expect(files.map((f) => basename(f))).not.toContain("linked.json");
+    const summary = summarizeReceipts(files, keys);
+    expect(summary.rows.find((r) => r.receiptId === "plain")!.result).toBe("not a JSON file");
+    expect(formatSummaryMarkdown(summary)).not.toContain("RUNNER_SECRET_LINE");
   });
 });
 
