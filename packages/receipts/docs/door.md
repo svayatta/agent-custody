@@ -133,4 +133,4 @@ The verifier runs `door receipt carries a policy decision` in place of the gatew
 - Stream a request body: the body is read whole, up to `maxBodyBytes`, so that the policy can read it and the receipt can commit to it.
 - Relay a response larger than 32 MiB, or stream one: the body is relayed whole so that its digest can be recorded.
 
-Tutorial: [36-door.ts](../examples/36-door.ts).
+Tutorial: [37-door.ts](../examples/37-door.ts).

@@ -1,5 +1,5 @@
 // Aspect: the door, a receipted reverse proxy in front of your own site or API. Source: src/door.ts, src/config.ts
-// Run:    node examples/36-door.ts
+// Run:    node examples/37-door.ts
 //
 // The gateway stands in front of an agent's tools. The door stands in front of a business: a shop's API here. Every
 // arrival is classified by what it presented, decided by the Cedar policy for its route, relayed or refused, and
@@ -20,7 +20,7 @@ import { out, step } from "./_out.ts";
 
 step(1, "a stand-in shop API, and the door in front of it from door.json");
 const origin = await startOrigin();
-const fx = buildDoorFixture(out("36-door"), origin.url);
+const fx = buildDoorFixture(out("37-door"), origin.url);
 console.log("   policy:\n" + readFileSync(join(fx.dir, "policy.cedar"), "utf8").split("\n").map((l) => "     " + l).join("\n"));
 const host = await createDoorHost(loadDoorConfig(fx.configFile));
 const door = await serveDoor(host, { port: 0, log: () => {} });
