@@ -76,7 +76,6 @@ export function isDoorConfig(configPath: string): boolean {
   }
 }
 
-/** `agent-custody check` on a door config: what the door would fail on at startup, and what it would silently do less than the config seems to promise. */
 /**
  * The agents named by permits that do not also require a verified arrival. At the door the principal is the agent of a
  * verified grant, or `unknown`, so such a permit admits only a verified agent; the warning is for the reader who
@@ -98,6 +97,7 @@ export function permitsNamingAgentWithoutVerifiedArrival(policyText: string): st
   return out;
 }
 
+/** `agent-custody check` on a door config: what the door would fail on at startup, and what it would silently do less than the config seems to promise. */
 export function checkDoorConfig(configPath: string): CheckFinding[] {
   const out: CheckFinding[] = [];
   const add = (level: CheckFinding["level"], check: string, message: string) => out.push({ level, check, message });

@@ -62,7 +62,39 @@ const RECORDED_HEADERS = ["user-agent", "content-type", "accept", "host"];
 const RECORDED_BODY_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 
-/** The route an arrival falls under: the first configured route whose methods and path match, else the unmatched name. */
+/**
+ * The path as the origin will read it: each segment percent-decoded once, so that `/%61dmin` falls under `/admin/*`.
+ * Refused when a segment does not decode, or decodes to a slash, a backslash, or a dot segment: the origin would then
+ * read a path the door did not match. `relay` is the decoded path encoded once more, the form the origin is sent.
+ */
+export function normalizePath(pathname: string): { path: string; relay: string } | { problem: string } {
+  const segments: string[] = [];
+  for (const raw of pathname.split("/")) {
+    let segment: string;
+    try {
+      segment = decodeURIComponent(raw);
+    } catch {
+      return { problem: `the path segment "${raw}" does not percent-decode` };
+    }
+    if (segment.includes("/") || segment.includes("\\")) return { problem: `the path segment "${raw}" decodes to a slash` };
+    if (segment === "." || segment === "..") return { problem: `the path segment "${raw}" decodes to a dot segment` };
+    segments.push(segment);
+  }
+  return { path: segments.join("/"), relay: segments.map(encodeSegment).join("/") };
+}
+
+/** A path segment encoded once: what `encodeURIComponent` does, except that the characters a path segment may carry in clear stay in clear. */
+function encodeSegment(segment: string): string {
+  return encodeURIComponent(segment).replace(/%(3A|40|24|26|2B|2C|3B|3D)/gi, (m) => decodeURIComponent(m));
+}
+
+/** The request target as a URL whose host is the door's own: an origin-form target `//x/y` is a path, never a scheme-relative URL. */
+function requestUrl(req: IncomingMessage): URL {
+  const raw = req.url ?? "/";
+  return raw.startsWith("/") ? new URL(`http://door${raw}`) : new URL(raw, "http://door");
+}
+
+/** The route an arrival falls under: the first configured route whose methods and decoded path match, else the unmatched name. */
 export function matchRoute(routes: DoorRouteConfig[], unmatched: string, method: string, pathname: string): string {
   for (const r of routes) {
     if (r.methods && !(r.methods as string[]).includes(method)) continue;
@@ -71,12 +103,15 @@ export function matchRoute(routes: DoorRouteConfig[], unmatched: string, method:
   return unmatched;
 }
 
-/** The arrival's address: the socket's, or with trustProxy the first address a proxy appended. */
+/**
+ * The arrival's address: the socket's, or with trustProxy the last address in `X-Forwarded-For`, the one the proxy in
+ * front of the door appended. Everything before it was sent by the client, which may write what it likes there.
+ */
 export function remoteOf(req: IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
     const xff = req.headers["x-forwarded-for"];
-    const first = (Array.isArray(xff) ? xff[0] : xff)?.split(",")[0]?.trim();
-    if (first) return first;
+    const last = (Array.isArray(xff) ? xff.join(",") : xff)?.split(",").map((a) => a.trim()).filter(Boolean).pop();
+    if (last) return last;
   }
   return req.socket.remoteAddress ?? "unknown";
 }
@@ -88,12 +123,13 @@ export function remoteOf(req: IncomingMessage, trustProxy: boolean): string {
  * An `x-agent-custody-agent` header or an HTTP signature header alone is `claimed`. Nothing at all is `unknown`.
  */
 export function classifyArrival(req: IncomingMessage, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string): Classified {
-  const url = new URL(req.url ?? "/", "http://door");
+  const url = requestUrl(req);
   const method = (req.method ?? "GET").toUpperCase();
   const declaredRaw = req.headers[AGENT_HEADER];
   const declared = typeof declaredRaw === "string" && declaredRaw.trim() ? declaredRaw.trim().slice(0, 200) : undefined;
   const signature = typeof req.headers["signature-input"] === "string";
-  const base = { signature, ...(declared ? { declared } : {}), remote: remoteOf(req, trustProxy), method, path: url.pathname, route };
+  const norm = normalizePath(url.pathname);
+  const base = { signature, ...(declared ? { declared } : {}), remote: remoteOf(req, trustProxy), method, path: "path" in norm ? norm.path : url.pathname, route };
   const envelope = parseGrantHeader(req);
   if (!envelope) {
     const claimed = !!declared || signature;
@@ -151,6 +187,24 @@ function readBody(req: IncomingMessage, max: number): Promise<{ body: Buffer } |
   });
 }
 
+/** The origin's answer, or how many bytes had arrived when it passed the limit; the rest is not read. */
+async function readResponse(upstream: Response, max: number): Promise<{ body: Buffer } | { oversized: true; bytes: number }> {
+  if (!upstream.body) return { body: Buffer.alloc(0) };
+  const reader = upstream.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return { body: Buffer.concat(chunks) };
+    size += value.length;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      return { oversized: true, bytes: size };
+    }
+    chunks.push(value);
+  }
+}
+
 function queryOf(url: URL): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {};
   for (const [k, v] of url.searchParams) {
@@ -174,6 +228,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     originHeaders[header] = v;
   }
   const origin = new URL(cfg.origin.url);
+  const originPath = origin.pathname.replace(/\/$/, "");
   const f = options.fetch ?? fetch;
   const sink = options.log ?? openLog(cfg, key);
   const issuer = createIssuer(key, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
@@ -218,9 +273,13 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const receiptId = randomUUID();
     const timestamp = new Date().toISOString();
-    const url = new URL(req.url ?? "/", "http://door");
+    res.setHeader(RECEIPT_HEADER, receiptId);
+    const url = requestUrl(req);
     const method = (req.method ?? "GET").toUpperCase();
-    const route = matchRoute(cfg.routes, cfg.unmatchedRoute, method, url.pathname);
+    // A path that does not decode cleanly is never relayed; it falls under the unmatched route for the receipt.
+    const norm = normalizePath(url.pathname);
+    const path = "path" in norm ? norm.path : url.pathname;
+    const route = "path" in norm ? matchRoute(cfg.routes, cfg.unmatchedRoute, method, path) : cfg.unmatchedRoute;
     const { arrival, delegation } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp);
     const { text: policyText, digest: pDigest } = currentPolicy();
 
@@ -240,7 +299,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     // is no digest of it, rather than a digest of nothing.
     const args: Record<string, unknown> = {
       method,
-      path: url.pathname,
+      path,
       query: queryOf(url),
       headers,
       ...(recordedBody !== undefined ? { body: recordedBody } : {}),
@@ -279,10 +338,15 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
 
     let execution: ReceiptPredicate["execution"] | undefined;
     let authorization: AuthorizationBundle | undefined;
-    let answer: { status: number; headers: Record<string, string>; body: Buffer } | undefined;
+    let answer: { status: number; headers: Record<string, string | string[]>; body: Buffer } | undefined;
+    let withheldStatus = 503;
     if (!forward) {
       execution = { status: "denied", reason: [...policy.reasons, ...policy.errors].join("; ") || "no permit policy matched", provenance: "observed" };
+    } else if ("problem" in norm) {
+      withheldStatus = 400;
+      execution = { status: "withheld", reason: `the path was not relayed: ${norm.problem}`, provenance: "observed" };
     } else if (body === null) {
+      withheldStatus = 413;
       execution = { status: "withheld", reason: `the request body is larger than ${cfg.maxBodyBytes} bytes and was not relayed`, provenance: "observed" };
     } else {
       if (!SAFE_METHODS.has(method) || precommit.has("*") || precommit.has(route)) {
@@ -299,36 +363,53 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     }
     if (!execution) {
       try {
-        const target = new URL(url.pathname + url.search, origin);
+        // The path is set on a copy of the origin's URL, never resolved against it: resolving `//evil.example/x` would
+        // move the relay, with the origin's credentials, to another host.
+        const target = new URL(origin);
+        target.pathname = originPath + (norm as { relay: string }).relay;
+        target.search = url.search;
         const out = new Headers();
         for (const [name, value] of Object.entries(req.headers)) {
-          if (value === undefined || HOP_BY_HOP.has(name) || name === "host" || name === GRANT_HEADER || name === AGENT_HEADER || name === "accept-encoding") continue;
+          // `expect` is the client's conversation with the door, which Node answered; fetch refuses to carry it
+          if (value === undefined || HOP_BY_HOP.has(name) || name === "host" || name === "expect" || name === GRANT_HEADER || name === AGENT_HEADER || name === "accept-encoding") continue;
           // the grant travelled in Authorization: it is the door's credential, not the origin's
           if (name === "authorization" && arrival.grant !== "absent" && !req.headers[GRANT_HEADER]) continue;
           out.set(name, Array.isArray(value) ? value.join(", ") : value);
         }
         out.set("accept-encoding", "identity");
-        out.set("x-forwarded-for", arrival.remote);
-        out.set("x-forwarded-host", req.headers.host ?? "");
-        out.set("x-forwarded-proto", "http");
+        // Behind a trusted proxy the chain it sent is kept and the socket's address appended, as any proxy does; otherwise
+        // whatever the client wrote in these headers is replaced.
+        const inbound = (name: string) => (cfg.trustProxy ? (Array.isArray(req.headers[name]) ? (req.headers[name] as string[]).join(", ") : req.headers[name] as string | undefined) : undefined);
+        const socketAddress = req.socket.remoteAddress ?? "unknown";
+        const chain = inbound("x-forwarded-for");
+        out.set("x-forwarded-for", chain ? `${chain}, ${socketAddress}` : socketAddress);
+        out.set("x-forwarded-host", inbound("x-forwarded-host") || req.headers.host || "");
+        out.set("x-forwarded-proto", inbound("x-forwarded-proto") || "http");
         out.set(RECEIPT_HEADER, receiptId);
         out.set(CLASS_HEADER, arrival.class);
         for (const [h, v] of Object.entries(originHeaders)) out.set(h, v);
         const upstream = await f(target, { method, headers: out, ...(method === "GET" || method === "HEAD" ? {} : { body: new Uint8Array(body!) }), redirect: "manual", signal: AbortSignal.timeout(cfg.origin.timeoutMs) });
-        const relayed = Buffer.from(await upstream.arrayBuffer());
-        if (relayed.length > MAX_RESPONSE_BYTES) throw new Error(`the origin's response is larger than ${MAX_RESPONSE_BYTES} bytes`);
-        const back: Record<string, string> = {};
-        upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k) && k !== "content-length" && k !== "content-encoding") back[k] = v; });
+        const got = await readResponse(upstream, MAX_RESPONSE_BYTES);
+        const back: Record<string, string | string[]> = {};
+        upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k) && k !== "content-length" && k !== "content-encoding" && k !== "set-cookie") back[k] = v; });
+        // every cookie the origin set, not the last one: `forEach` gives them one at a time under the same name
+        const cookies = upstream.headers.getSetCookie();
+        if (cookies.length) back["set-cookie"] = cookies;
         // A redirect to the origin's own address would take the client's next request around the door: it is rewritten
-        // to a path, which the client follows back through the door.
-        if (back.location) {
+        // to a path under the door, which the client follows back through it.
+        if (typeof back.location === "string") {
           try {
             const loc = new URL(back.location, target);
-            if (loc.origin === origin.origin) back.location = loc.pathname + loc.search + loc.hash;
+            if (loc.origin === origin.origin && (loc.pathname === originPath || loc.pathname.startsWith(`${originPath}/`))) back.location = (loc.pathname.slice(originPath.length) || "/") + loc.search + loc.hash;
           } catch { /* not a URL: relayed as the origin sent it */ }
         }
-        answer = { status: upstream.status, headers: back, body: relayed };
-        const result = { status: upstream.status, ...(back["content-type"] ? { contentType: back["content-type"] } : {}), bodyBytes: relayed.length, bodyDigest: sha256Hex(relayed) };
+        const contentType = typeof back["content-type"] === "string" ? { contentType: back["content-type"] } : {};
+        // The origin has answered either way, so the request happened: a response too large to relay is still recorded
+        // as executed, by its size, so that nobody retries a refund on the strength of the 502 the client gets.
+        const result = "body" in got
+          ? { status: upstream.status, ...contentType, bodyBytes: got.body.length, bodyDigest: sha256Hex(got.body) }
+          : { status: upstream.status, ...contentType, bodyBytes: got.bytes, bodyOversized: true };
+        if ("body" in got) answer = { status: upstream.status, headers: back, body: got.body };
         execution = { status: upstream.status >= 500 ? "failed" : "executed", result, resultDigest: digestOf(result), provenance: "observed" };
       } catch (e) {
         execution = { status: "error", error: String(e instanceof Error ? e.message : e), provenance: "observed" };
@@ -345,7 +426,13 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         execution,
       }, undefined, undefined, { deferLog: true });
     } catch (e) {
-      if (!(e instanceof ReceiptPending)) throw e;
+      if (!(e instanceof ReceiptPending)) {
+        // The decision was carried out and the receipt of it could not be written. The client is told what happened at
+        // the origin rather than "not relayed", which would invite a retry of a refund that went through.
+        console.error(`agent-custody door: receipt ${receiptId} was not written: ${e instanceof Error ? e.message : String(e)}`);
+        const outcome = execution!.status === "executed" || execution!.status === "failed" ? "the origin acted on the request; its answer is not relayed because there is no receipt of it. Do not retry" : execution!.status === "error" ? "the origin could not be reached" : "nothing was relayed";
+        return json(res, 500, { [CLASS_HEADER]: arrival.class }, { error: "the door could not record this request", outcome, receipt: receiptId });
+      }
       console.error(`agent-custody door: ${e.message}`);
       logPending = true;
     }
@@ -355,12 +442,13 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
       case "denied":
         return json(res, 403, mark, { error: "refused by the door's policy", reason: execution!.reason, receipt: receiptId });
       case "withheld":
-        return json(res, body === null ? 413 : 503, mark, { error: "not relayed", reason: execution!.reason, receipt: receiptId });
+        return json(res, withheldStatus, mark, { error: "not relayed", reason: execution!.reason, receipt: receiptId });
       case "error":
         return json(res, 502, mark, { error: "the origin could not be reached", detail: execution!.error, receipt: receiptId });
       default: {
-        res.writeHead(answer!.status, { ...answer!.headers, ...mark });
-        res.end(answer!.body);
+        if (!answer) return json(res, 502, mark, { error: `the origin answered, but its response is larger than ${MAX_RESPONSE_BYTES} bytes and was not relayed. Do not retry`, receipt: receiptId });
+        res.writeHead(answer.status, { ...answer.headers, ...mark });
+        res.end(answer.body);
       }
     }
   }
@@ -410,7 +498,7 @@ export async function serveDoor(host: DoorHost, opts: DoorServerOptions): Promis
       log(`agent-custody door: ${e instanceof Error ? e.message : String(e)}`);
       if (!res.headersSent) {
         res.writeHead(500, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "the door could not record this request, so it was not relayed" }));
+        res.end(JSON.stringify({ error: "the door failed before it could answer; whether the origin acted on the request is unknown", receipt: res.getHeader(RECEIPT_HEADER) ?? null }));
       } else res.end();
     });
   });

@@ -70,7 +70,7 @@ export interface Origin {
   close(): Promise<void>;
 }
 
-/** The site behind the door: answers 200 with a JSON echo, 404 when the path contains /missing, 500 when it contains /broken, and a 302 to its own /catalogue/after when it contains /redirect. */
+/** The site behind the door: answers 200 with a JSON echo, 404 when the path contains /missing, 500 when it contains /broken, a 302 to its own /catalogue/after when it contains /redirect, and two cookies when it contains /cookies. */
 export function startOrigin(): Promise<Origin> {
   const seen: Origin["seen"] = [];
   const server: Server = createServer((req, res) => {
@@ -85,7 +85,7 @@ export function startOrigin(): Promise<Origin> {
         return;
       }
       const status = req.url?.includes("/missing") ? 404 : req.url?.includes("/broken") ? 500 : 200;
-      res.writeHead(status, { "content-type": "application/json", "x-origin": "shop" });
+      res.writeHead(status, { "content-type": "application/json", "x-origin": "shop", ...(req.url?.includes("/cookies") ? { "set-cookie": ["session=1; HttpOnly", "csrf=2"] } : {}) });
       res.end(JSON.stringify({ ok: status === 200, method: req.method, path: req.url, body: body ? JSON.parse(body) : null }));
     });
   });

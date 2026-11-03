@@ -34,12 +34,12 @@ agent-custody door --config door.json --port 8780
 | field | meaning |
 | --- | --- |
 | `identity.keyFile` | the door's Ed25519 key; signs every receipt. From `agent-custody keygen` |
-| `origin.url` | where allowed arrivals are relayed: the site or API behind the door. `headers` and `headerEnv` add headers to every relayed request, the latter from the environment, so the origin can require a secret only the door holds. `timeoutMs` bounds one relayed request, default 30 s |
-| `routes` | what the policy sees as the action. `path` is exact (`/refunds`), a prefix (`/api/*`), or `*`; `methods` narrows it, default every method. The first route that matches wins; an arrival no route matches is the action `unmatchedRoute`, default `other` |
+| `origin.url` | where allowed arrivals are relayed: the site or API behind the door. `headers` and `headerEnv` add headers to every relayed request, the latter from the environment, so the origin can require a secret only the door holds. `timeoutMs` bounds one relayed request, default 30 s. A path in the URL (`https://host/api/v1`) is kept: the arrival's path goes under it, and a redirect from the origin to a place under it comes back as a door path |
+| `routes` | what the policy sees as the action. `path` is exact (`/refunds`), a prefix (`/api/*`), or `*`; `methods` narrows it, default every method. The first route that matches wins; an arrival no route matches is the action `unmatchedRoute`, default `other`. The match reads the path as the origin will: percent-decoded once, so `/%61dmin` falls under `/admin/*`; the origin is sent that form. A path with a segment that does not decode, or decodes to a slash or a backslash, falls under `unmatchedRoute` and is never relayed |
 | `trustedPrincipalKeys` | public keys of principals whose signed grants the door accepts as a passport. Without any, no arrival can be `verified` |
 | `policyFile` | the Cedar policy, re-read when the file changes; one that does not parse is refused and the policy in force stays |
 | `mode` | `enforce` (default) refuses what the policy denies. `observe` relays everything and records the decision with `enforced: false` |
-| `trustProxy` | behind a reverse proxy you run: the arrival's address is the first in `X-Forwarded-For` |
+| `trustProxy` | behind one reverse proxy you run: the arrival's address is the last in `X-Forwarded-For`, the one your proxy appended; everything before it is what the client sent. The proxy's `X-Forwarded-For`, `-Proto`, and `-Host` are kept on the relay, with the door's own socket address appended; without `trustProxy` whatever the client wrote in them is replaced |
 | `maxBodyBytes` | the largest request body the door relays; a larger one gets 413 and a `withheld` receipt once the policy has allowed it. Default 10 MiB |
 | `precommit` | route names whose arrivals are committed to the log before they are relayed whatever their method, or `["*"]`. Every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless; see [before the origin hears of it](#before-the-origin-hears-of-it). Default `[]` |
 | `receiptsDir`, `logFile` or `log`, `otel`, `splunk`, `capture`, `captureKeyEnv` | as for the [gateway](configuration.md): where receipts and the log go, exporters, and private evidence per route. A remote `log` needs `log.keys`, because its answer is checked before a request is relayed |
@@ -111,8 +111,11 @@ A request that can change something at the origin, any method but GET, HEAD, and
 | origin unreachable or timed out | 502 | `{ error, detail, receipt }` | `error` |
 | policy allows, body above `maxBodyBytes` | 413 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
 | policy allows, the log refused the authorization | 503 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
+| policy allows, the path does not decode cleanly | 400 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
+| policy allows, the origin's response above 32 MiB | 502 | `{ error, receipt }`, and "do not retry" | `executed` or `failed`: the origin acted; `result` carries the status and `bodyOversized: true`, no digest |
+| the receipt could not be written | 500 | `{ error, outcome, receipt }` | none on disk; `outcome` says whether the origin acted, so that a refund is not retried on the strength of a 500 |
 
-A redirect from the origin to its own address is rewritten to a path, so the client's next request comes back through the door and is classified again; a redirect elsewhere is relayed as sent.
+A redirect from the origin to its own address is rewritten to a path, so the client's next request comes back through the door and is classified again; a redirect elsewhere is relayed as sent. Every `Set-Cookie` the origin sent reaches the client. An `Expect: 100-continue` is the client's conversation with the door, which answers it; the origin does not see the header.
 
 Every answer carries `X-Agent-Custody-Receipt` and `X-Agent-Custody-Class`. When the log did not take the receipt, it waits in `receipts/outbox/` and the answer also carries `X-Agent-Custody-Log-Pending: true`; a serving door appends the outbox every 30 seconds, as the gateway does.
 
@@ -131,6 +134,6 @@ The verifier runs `door receipt carries a policy decision` in place of the gatew
 - Challenge an arrival. There is no human branch.
 - Revoke a grant by a revocation list; a grant stands until it expires.
 - Stream a request body: the body is read whole, up to `maxBodyBytes`, so that the policy can read it and the receipt can commit to it.
-- Relay a response larger than 32 MiB, or stream one: the body is relayed whole so that its digest can be recorded.
+- Relay a response larger than 32 MiB, or stream one: the body is relayed whole so that its digest can be recorded. A larger one is not held: reading stops at the limit, the client gets 502, and the receipt records that the origin answered.
 
 Tutorial: [37-door.ts](../examples/37-door.ts).

@@ -29,15 +29,15 @@ A reverse proxy in front of your own website, API, or forms. Where the [gateway]
 | field | type | meaning |
 | --- | --- | --- |
 | `identity.keyFile` | path | the door's Ed25519 private key; signs every receipt |
-| `origin.url` | URL | where allowed arrivals are relayed |
+| `origin.url` | URL | where allowed arrivals are relayed; a path in it is kept as the prefix of every relayed path |
 | `origin.headers`, `origin.headerEnv` | maps, optional | headers added to every relayed request; `headerEnv` maps a header name to an environment variable, read at startup, missing is a startup error |
 | `origin.timeoutMs` | integer, default 30000 | one relayed request's budget |
-| `routes[]` | `{ name, methods?, path }` | the action per arrival. `path`: exact (`/refunds`), prefix (`/api/*`, which also matches `/api`), or `*`. `methods`: a subset of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS; default all. First match wins. Names are unique |
+| `routes[]` | `{ name, methods?, path }` | the action per arrival. `path`: exact (`/refunds`), prefix (`/api/*`, which also matches `/api`), or `*`. `methods`: a subset of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS; default all. First match wins, on the path percent-decoded once (`normalizePath`); the origin is sent the decoded form encoded once. Names are unique |
 | `unmatchedRoute` | string, default `other` | the action for an arrival no route matches |
 | `trustedPrincipalKeys` | paths, default `[]` | principals whose grants are passports |
 | `policyFile` | path | Cedar; re-read on change; a file that does not parse is refused and the policy in force stays |
 | `mode` | `enforce` (default) or `observe` | observe relays everything and records `enforced: false` |
-| `trustProxy` | boolean, optional | the arrival's address is the first in `X-Forwarded-For` |
+| `trustProxy` | boolean, optional | one trusted proxy in front: the arrival's address is the last in `X-Forwarded-For`; the proxy's `X-Forwarded-*` are kept on the relay |
 | `maxBodyBytes` | integer, default 10 MiB | a larger request body the policy allowed is refused with 413 and receipted as `withheld`; one the policy refuses is `denied` as any other |
 | `precommit` | strings, default `[]` | route names whose arrivals are committed to the log before they are relayed whatever their method, or `["*"]`. Every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless |
 | `receiptsDir`, `logFile` or `log`, `otel`, `splunk`, `capture`, `captureKeyEnv` | | as for the [gateway](./gateway#the-config-file). Capture rules are keyed by route name. A remote `log` needs `log.keys` |
@@ -51,7 +51,7 @@ agent-custody door --config door.json [--port 8780] [--host 127.0.0.1]
 
 Plain HTTP; bind to loopback or put TLS in front. `check` on a door config reports unknown keys, the key, the principal keys, the policy (and warns on a permit that names an agent without requiring `context.facts.arrival.class == "verified"`), the routes, what is precommitted, the origin's scheme, every credential variable the door reads at startup (origin headers, log, Splunk, OTel, capture key), and the paths; exit 1 on an error.
 
-In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `matchRoute(routes, unmatched, method, pathname)` and `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` are exported for embedding the door in a server of your own.
+In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `normalizePath(pathname)`, `matchRoute(routes, unmatched, method, path)`, and `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` are exported for embedding the door in a server of your own.
 
 ## What an arrival presents
 
@@ -74,7 +74,7 @@ Recorded as `facts.arrival` (observed) and given to the policy as `context.facts
 
 ## The Cedar request
 
-`principal` `Agent::"<agent>"` for a verified arrival's agent, `Agent::"unknown"` otherwise; `action` and `resource` the route name. `context.args`: `{ method, path, query, headers, body?, bodyBytes, bodyDigest }`, where `query` maps names to a string or an array of strings, `headers` carries `user-agent`, `content-type`, `accept`, `host` only, and `body` is present for a JSON body of at most 64 KiB. A body above `maxBodyBytes` gives `bodyBytes` (read so far) and `bodyOversized: true`, no `body`, no `bodyDigest`. `context.facts.arrival` as above. `context.grant` `{ principal, scopes }` only when verified.
+`principal` `Agent::"<agent>"` for a verified arrival's agent, `Agent::"unknown"` otherwise; `action` and `resource` the route name. `context.args`: `{ method, path, query, headers, body?, bodyBytes, bodyDigest }`, where `path` is percent-decoded once, `query` maps names to a string or an array of strings, `headers` carries `user-agent`, `content-type`, `accept`, `host` only, and `body` is present for a JSON body of at most 64 KiB. A body above `maxBodyBytes` gives `bodyBytes` (read so far) and `bodyOversized: true`, no `body`, no `bodyDigest`. `context.facts.arrival` as above. `context.grant` `{ principal, scopes }` only when verified.
 
 ## Before relaying
 
@@ -89,8 +89,11 @@ An arrival whose method is not GET, HEAD, or OPTIONS, or whose route is in `prec
 | origin unreachable | 502 | `{ "error", "detail", "receipt" }` | the door's | `error` |
 | allowed, body too large | 413 | `{ "error": "not relayed", "reason", "receipt" }` | the door's | `withheld` |
 | allowed, log refused the authorization | 503 | `{ "error": "not relayed", "reason", "receipt" }` | the door's | `withheld` |
+| allowed, a path segment does not decode or decodes to a slash | 400 | `{ "error": "not relayed", "reason", "receipt" }` | the door's | `withheld`, under `unmatchedRoute` |
+| allowed, origin's response above 32 MiB | 502 | `{ "error", "receipt" }` | the door's | `executed` or `failed`; `result` is `{ status, contentType?, bodyBytes, bodyOversized: true }` |
+| receipt could not be written | 500 | `{ "error", "outcome", "receipt" }` | `X-Agent-Custody-Receipt`, `-Class` | none; `outcome` says whether the origin acted |
 
-The door's headers on every answer: `X-Agent-Custody-Receipt` (receipt id), `X-Agent-Custody-Class`, and `X-Agent-Custody-Log-Pending: true` when the receipt waits in the outbox. On the relayed request: the same two, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `Accept-Encoding: identity`.
+The door's headers on every answer: `X-Agent-Custody-Receipt` (receipt id), `X-Agent-Custody-Class`, and `X-Agent-Custody-Log-Pending: true` when the receipt waits in the outbox. On the relayed request: the same two, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto` (the socket's address, the `Host`, and `http`; with `trustProxy` the proxy's values, the address appended), and `Accept-Encoding: identity`; `Expect` is not relayed. Every `Set-Cookie` from the origin is relayed.
 
 `GET /.well-known/agent-custody-door` → `{ "keyid", "policyDigest", "version", "pendingReceipts" }`.
 
@@ -100,4 +103,4 @@ Receipt v0.2 with `issuer: { kind: "door", keyid, version, framework: "http" }`.
 
 ## Not yet
 
-Agent detection in web or API traffic, RFC 9421 and Web Bot Auth verification, AP2 mandates, a challenge branch, grant revocation lists, streamed request bodies, and streamed or >32 MiB responses.
+Agent detection in web or API traffic, RFC 9421 and Web Bot Auth verification, AP2 mandates, a challenge branch, grant revocation lists, streamed request bodies, and streamed or >32 MiB responses (a larger response is cut at the limit: 502 to the client, `executed` with `bodyOversized` in the receipt).

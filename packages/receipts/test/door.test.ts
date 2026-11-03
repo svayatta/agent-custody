@@ -3,9 +3,12 @@
 // grant, and a grant for other routes leave the arrival claimed; a declared name alone is claimed and never reaches the
 // Cedar principal; a request that can change something is committed to the log before it is relayed, and not relayed
 // when the log refuses; a redirect to the origin's own address comes back through the door; the policy decides before
-// the body limit; observe mode relays and records; the origin down is an error receipt. Every receipt the door writes
-// verifies with public keys, the right principal and agent provenance, and the arrival fact the policy decided on.
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+// the body limit; observe mode relays and records; the origin down is an error receipt. A path cannot move the relay to
+// another host or dodge a route by its encoding; every cookie the origin sets arrives; the proxy chain is the proxy's;
+// a response too large to relay is still recorded as the origin's act. Every receipt the door writes verifies with
+// public keys, the right principal and agent provenance, and the arrival fact the policy decided on.
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -13,7 +16,7 @@ import { checkDoorConfig, isDoorConfig } from "../src/check.ts";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey, sha256Hex } from "../src/crypto.ts";
 import { createDelegation } from "../src/delegation.ts";
-import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, matchRoute, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
+import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, matchRoute, normalizePath, remoteOf, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
@@ -368,6 +371,186 @@ describe("the door", () => {
     expect(messages.some((m) => m.startsWith("credentials:") && m.includes("DOOR_TEST_UNSET_OTEL"))).toBe(true);
     expect(good.map((f) => f.check)).toContain("precommit");
     expect(findings.filter((f) => f.level === "warn").map((f) => f.check)).toEqual(expect.arrayContaining(["principal keys", "origin"]));
+  });
+
+  it("the path cannot move the relay: `/.//host/x` reaches the origin as a path and the other host hears nothing", async () => {
+    const other = await startOrigin();
+    const obs = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-escape-")), origin.url, { mode: "observe", origin: { url: origin.url, headers: { "x-door-secret": "s3cret" } } });
+    const h = await createDoorHost(loadDoorConfig(obs.configFile));
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    const before = origin.seen.length;
+    try {
+      const evil = other.url.replace("http://", "");
+      const res = await fetch(`${d.url}/.//${evil}/steal`, { headers: { cookie: "session=1" } });
+      expect(res.status).toBe(200);
+      expect(other.seen).toEqual([]);
+      expect(origin.seen.length).toBe(before + 1);
+      expect(origin.seen.at(-1)).toMatchObject({ path: `//${evil}/steal`, headers: { "x-door-secret": "s3cret", cookie: "session=1" } });
+      expect(decode(JSON.parse(readFileSync(join(obs.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle).predicate.request.args).toMatchObject({ path: `//${evil}/steal` });
+    } finally {
+      await d.close();
+      await h.close();
+      await other.close();
+    }
+  });
+
+  it("an origin with a path keeps it: the arrival's path goes under it, and a redirect under it comes back as a door path", async () => {
+    const based = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-based-")), `${origin.url}/api/v1/`);
+    const targets: string[] = [];
+    const stub: typeof fetch = async (input) => {
+      targets.push(String(input));
+      return new Response("{}", { status: 302, headers: { location: `${origin.url}/api/v1/catalogue/after?x=1`, "content-type": "application/json" } });
+    };
+    const h = await createDoorHost(loadDoorConfig(based.configFile), { fetch: stub });
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      const res = await fetch(`${d.url}/catalogue/shoes?size=9`, { redirect: "manual" });
+      expect(res.status).toBe(302);
+      expect(targets).toEqual([`${origin.url}/api/v1/catalogue/shoes?size=9`]);
+      expect(res.headers.get("location")).toBe("/catalogue/after?x=1");
+    } finally {
+      await d.close();
+      await h.close();
+    }
+  });
+
+  it("a route is matched on the decoded path and the origin is sent that form; a path that decodes to a slash or a dot segment is refused with 400 and a withheld receipt", async () => {
+    expect(normalizePath("/%61dmin/x")).toEqual({ path: "/admin/x", relay: "/admin/x" });
+    expect(normalizePath("/a%20b/%25")).toEqual({ path: "/a b/%", relay: "/a%20b/%25" });
+    expect(normalizePath("/host:8/a@b/c=d&e+f")).toEqual({ path: "/host:8/a@b/c=d&e+f", relay: "/host:8/a@b/c=d&e+f" });
+    expect(normalizePath("/a%2fb")).toMatchObject({ problem: expect.stringContaining("slash") });
+    expect(normalizePath("/a%5cb")).toMatchObject({ problem: expect.stringContaining("slash") });
+    expect(normalizePath("/%2e%2e/x")).toMatchObject({ problem: expect.stringContaining("dot segment") });
+    expect(normalizePath("/%zz")).toMatchObject({ problem: expect.stringContaining("does not percent-decode") });
+
+    const before = origin.seen.length;
+    const refund = await call("POST", "/%72efunds", { body: { amount: 100 } });
+    expect(refund.res.status).toBe(403);
+    expect(refund.p.tool.name).toBe("refund");
+    expect(refund.arrival.path).toBe("/refunds");
+    expect(origin.seen.length).toBe(before);
+
+    const read = await call("GET", "/%63atalogue/sh%6fes");
+    expect(read.res.status).toBe(200);
+    expect(read.p.tool.name).toBe("catalogue");
+    expect(read.p.request.args).toMatchObject({ path: "/catalogue/shoes" });
+    expect(origin.seen.at(-1)?.path).toBe("/catalogue/shoes");
+
+    // the URL parser resolves `%2e%2e` as a dot segment before the door sees it: the route is the one for /admin
+    const dotted = await call("GET", "/catalogue/%2e%2e/admin");
+    expect(dotted.res.status).toBe(403);
+    expect(dotted.p.tool.name).toBe("other");
+    expect(dotted.arrival.path).toBe("/admin");
+    // a path that does not decode cleanly falls under the unmatched route, and the policy decides first: refused here
+    const bad = await call("GET", "/catalogue/a%2fb");
+    expect(bad.res.status).toBe(403);
+    expect(bad.p.tool.name).toBe("other");
+    expect(origin.seen.at(-1)?.path).toBe("/catalogue/shoes");
+
+    // where the policy would relay it, it is withheld with 400
+    const obs = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-malformed-")), origin.url, { mode: "observe" });
+    const h = await createDoorHost(loadDoorConfig(obs.configFile));
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      for (const path of ["/catalogue/a%2fb", "/catalogue/%zz", "/a%5cb"]) {
+        const res = await fetch(`${d.url}${path}`);
+        expect(res.status).toBe(400);
+        const bundle = JSON.parse(readFileSync(join(obs.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle;
+        expect(decode(bundle).predicate.execution).toMatchObject({ status: "withheld", reason: expect.stringContaining("the path was not relayed") });
+        expect(decode(bundle).predicate.tool.name).toBe("other");
+        expect(verifyBundle(bundle, { issuerKeys: [loadPublicKey(obs.doorPub)], principalKeys: [loadPublicKey(obs.principalPub)], logFile: obs.logFile }).checks.filter((c) => !c.ok)).toEqual([]);
+      }
+      expect(origin.seen.at(-1)?.path).toBe("/catalogue/shoes");
+    } finally {
+      await d.close();
+      await h.close();
+    }
+  });
+
+  it("every cookie the origin sets reaches the client", async () => {
+    const res = await fetch(`${door.url}/catalogue/cookies`);
+    expect(res.status).toBe(200);
+    expect(res.headers.getSetCookie()).toEqual(["session=1; HttpOnly", "csrf=2"]);
+  });
+
+  it("a request with `Expect: 100-continue` is relayed; the door answers the expectation itself", async () => {
+    const grant = grantHeader(grantFor("ops-agent", ["api"]));
+    const body = JSON.stringify({ order: 1 });
+    const { port } = new URL(door.url);
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port, method: "POST", path: "/api/orders", headers: { expect: "100-continue", "content-type": "application/json", "content-length": Buffer.byteLength(body), authorization: `Bearer ${grant}` } }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); });
+      req.on("continue", () => req.end(body));
+      req.on("error", reject);
+    });
+    expect(status).toBe(200);
+    expect(origin.seen.at(-1)).toMatchObject({ path: "/api/orders", body });
+    expect(origin.seen.at(-1)?.headers).not.toHaveProperty("expect");
+  });
+
+  it("with trustProxy the arrival's address is the last one the proxy appended, and the proxy's chain and scheme are kept on the relay; without it the client's headers are replaced", async () => {
+    const headers = { "x-forwarded-for": "6.6.6.6, 203.0.113.9", "x-forwarded-proto": "https", "x-forwarded-host": "shop.example" };
+    const direct = await call("GET", "/catalogue/x", { headers });
+    expect(direct.arrival.remote).toBe("127.0.0.1");
+    expect(origin.seen.at(-1)?.headers).toMatchObject({ "x-forwarded-for": "127.0.0.1", "x-forwarded-proto": "http", "x-forwarded-host": `127.0.0.1:${new URL(door.url).port}` });
+
+    const behind = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-proxied-")), origin.url, { trustProxy: true });
+    const h = await createDoorHost(loadDoorConfig(behind.configFile));
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      const res = await fetch(`${d.url}/catalogue/x`, { headers });
+      const arrival = decode(JSON.parse(readFileSync(join(behind.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle).predicate.facts[ARRIVAL_FACT]!.value as Arrival;
+      expect(arrival.remote).toBe("203.0.113.9");
+      expect(origin.seen.at(-1)?.headers).toMatchObject({ "x-forwarded-for": "6.6.6.6, 203.0.113.9, 127.0.0.1", "x-forwarded-proto": "https", "x-forwarded-host": "shop.example" });
+    } finally {
+      await d.close();
+      await h.close();
+    }
+    expect(remoteOf({ headers: { "x-forwarded-for": ["1.1.1.1", "2.2.2.2 , 3.3.3.3"] }, socket: { remoteAddress: "127.0.0.1" } } as never, true)).toBe("3.3.3.3");
+    expect(remoteOf({ headers: { "x-forwarded-for": "" }, socket: { remoteAddress: "127.0.0.1" } } as never, true)).toBe("127.0.0.1");
+  });
+
+  it("a response larger than the limit is not held or relayed: the client gets 502, the receipt records that the origin answered, by size", async () => {
+    let pulled = 0;
+    const chunk = new Uint8Array(1024 * 1024);
+    const stub: typeof fetch = async () => new Response(new ReadableStream({ pull(c) { pulled += 1; c.enqueue(chunk); } }), { status: 200, headers: { "content-type": "application/octet-stream" } });
+    const big = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-big-")), origin.url);
+    const h = await createDoorHost(loadDoorConfig(big.configFile), { fetch: stub });
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      const res = await fetch(`${d.url}/catalogue/huge`);
+      expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({ error: expect.stringContaining("Do not retry") });
+      expect(pulled).toBeLessThan(40);
+      const bundle = JSON.parse(readFileSync(join(big.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle;
+      expect(decode(bundle).predicate.execution).toMatchObject({ status: "executed", result: { status: 200, bodyOversized: true, bodyBytes: 33 * 1024 * 1024 } });
+      expect(decode(bundle).predicate.execution).not.toHaveProperty("result.bodyDigest");
+      expect(verifyBundle(bundle, { issuerKeys: [loadPublicKey(big.doorPub)], principalKeys: [loadPublicKey(big.principalPub)], logFile: big.logFile }).checks.filter((c) => !c.ok)).toEqual([]);
+    } finally {
+      await d.close();
+      await h.close();
+    }
+  });
+
+  it("when the receipt cannot be written after the origin acted, the client is told that, with the receipt id, not that nothing was relayed", async () => {
+    const stuck = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-stuck-")), origin.url);
+    const h = await createDoorHost(loadDoorConfig(stuck.configFile));
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    const errors: string[] = [];
+    const stderr = console.error;
+    console.error = (m: string) => { errors.push(m); };
+    chmodSync(stuck.receiptsDir, 0o500);
+    try {
+      const res = await fetch(`${d.url}/catalogue/x`);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ error: "the door could not record this request", outcome: expect.stringContaining("the origin acted on the request"), receipt: res.headers.get(RECEIPT_HEADER) });
+      expect(origin.seen.at(-1)?.path).toBe("/catalogue/x");
+      expect(errors.some((m) => m.includes("was not written"))).toBe(true);
+    } finally {
+      chmodSync(stuck.receiptsDir, 0o700);
+      console.error = stderr;
+      await d.close();
+      await h.close();
+    }
   });
 
   it("the well-known endpoint names the key and the policy", async () => {
