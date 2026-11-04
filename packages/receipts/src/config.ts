@@ -262,6 +262,16 @@ export const DoorConfigSchema = z.object({
   maxBodyBytes: z.number().int().positive().default(10 * 1024 * 1024),
   /** routes whose arrivals are committed to the log before they are relayed whatever the method, or ["*"]; every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless */
   precommit: z.array(z.string().min(1)).default([]),
+  /** the human branch: a Turnstile or hCaptcha token an arrival sends in `header` is verified with the provider, and the outcome is the arrival's `challenge` signal */
+  challenge: z.object({
+    provider: z.enum(["turnstile", "hcaptcha"]),
+    /** the public site key, given back to a refused arrival so a page can render the widget */
+    siteKey: z.string().min(1),
+    /** the environment variable holding the provider's secret key */
+    secretEnv: z.string().min(1),
+    header: z.string().min(1).default("x-agent-custody-challenge"),
+    timeoutMs: z.number().int().positive().default(5_000),
+  }).optional(),
   receiptsDir: z.string(),
   logFile: z.string().optional(),
   log: LogSchema.optional(),

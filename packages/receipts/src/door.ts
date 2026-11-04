@@ -49,6 +49,36 @@ export interface Arrival {
   route: string;
   /** how often this source has arrived lately, counted by this door process; set by the door, absent from `classifyArrival` alone */
   rate?: ArrivalRate;
+  /** what became of the challenge token, when the door is configured to challenge; absent otherwise, and from `classifyArrival` alone */
+  challenge?: ArrivalChallenge;
+}
+
+/**
+ * The outcome of a human challenge. `passed`: the provider confirmed the token, so the provider judged a person present
+ * at the time it was solved. `failed`: the provider refused it, with its error codes. `unavailable`: the provider did
+ * not answer in time. `absent`: no token was sent. A passed challenge does not change `class`: it says nothing about who
+ * the arrival is, only that a provider's test was passed in front of it.
+ */
+export interface ArrivalChallenge {
+  provider: "turnstile" | "hcaptcha";
+  outcome: "passed" | "failed" | "unavailable" | "absent";
+  error?: string;
+}
+
+const CHALLENGE_VERIFY_URL = { turnstile: "https://challenges.cloudflare.com/turnstile/v0/siteverify", hcaptcha: "https://api.hcaptcha.com/siteverify" } as const;
+
+/** Asks the provider whether the token is good. The token and the secret go to the provider only; neither is recorded. */
+export async function verifyChallengeToken(provider: "turnstile" | "hcaptcha", secret: string, token: string, remote: string, f: typeof fetch, timeoutMs: number): Promise<ArrivalChallenge> {
+  const body = new URLSearchParams({ secret, response: token, remoteip: remote });
+  try {
+    const res = await f(CHALLENGE_VERIFY_URL[provider], { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body, signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return { provider, outcome: "unavailable", error: `the provider answered ${res.status}` };
+    const answer = (await res.json()) as { success?: boolean; "error-codes"?: string[] };
+    if (answer.success === true) return { provider, outcome: "passed" };
+    return { provider, outcome: "failed", error: (answer["error-codes"] ?? []).join(", ") || "the provider refused the token" };
+  } catch (e) {
+    return { provider, outcome: "unavailable", error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /**
@@ -263,6 +293,9 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   const origin = new URL(cfg.origin.url);
   const originPath = origin.pathname.replace(/\/$/, "");
   const f = options.fetch ?? fetch;
+  const challengeSecret = cfg.challenge ? process.env[cfg.challenge.secretEnv] : undefined;
+  if (cfg.challenge && !challengeSecret) throw new Error(`challenge: environment variable ${cfg.challenge.secretEnv} is not set`);
+  const challengeHeader = cfg.challenge?.header.toLowerCase();
   const sink = options.log ?? openLog(cfg, key);
   const issuer = createIssuer(key, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
   const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework: "http" };
@@ -317,6 +350,12 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     const { arrival, delegation } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp);
     const by = delegation ? "agent" : "remote";
     arrival.rate = { by, ...rates.hit(`${by}:${delegation ? arrival.subject : arrival.remote}`) };
+    if (cfg.challenge && challengeHeader) {
+      const token = req.headers[challengeHeader];
+      arrival.challenge = typeof token === "string" && token.trim()
+        ? await verifyChallengeToken(cfg.challenge.provider, challengeSecret!, token.trim(), arrival.remote, f, cfg.challenge.timeoutMs)
+        : { provider: cfg.challenge.provider, outcome: "absent" };
+    }
     const { text: policyText, digest: pDigest } = currentPolicy();
 
     const read = await readBody(req, cfg.maxBodyBytes);
@@ -407,7 +446,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         const out = new Headers();
         for (const [name, value] of Object.entries(req.headers)) {
           // `expect` is the client's conversation with the door, which Node answered; fetch refuses to carry it
-          if (value === undefined || HOP_BY_HOP.has(name) || name === "host" || name === "expect" || name === GRANT_HEADER || name === AGENT_HEADER || name === "accept-encoding") continue;
+          if (value === undefined || HOP_BY_HOP.has(name) || name === "host" || name === "expect" || name === GRANT_HEADER || name === AGENT_HEADER || name === challengeHeader || name === "accept-encoding") continue;
           // the grant travelled in Authorization: it is the door's credential, not the origin's
           if (name === "authorization" && arrival.grant !== "absent" && !req.headers[GRANT_HEADER]) continue;
           out.set(name, Array.isArray(value) ? value.join(", ") : value);
@@ -476,7 +515,8 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     const mark = { [RECEIPT_HEADER]: receiptId, [CLASS_HEADER]: arrival.class, ...(logPending ? { "x-agent-custody-log-pending": "true" } : {}) };
     switch (execution!.status) {
       case "denied":
-        return json(res, 403, mark, { error: "refused by the door's policy", reason: execution!.reason, receipt: receiptId });
+        // A refused arrival that could have passed a challenge is told how: the provider, the public site key, and the header
+        return json(res, 403, mark, { error: "refused by the door's policy", reason: execution!.reason, receipt: receiptId, ...(cfg.challenge && arrival.challenge?.outcome !== "passed" ? { challenge: { provider: cfg.challenge.provider, siteKey: cfg.challenge.siteKey, header: cfg.challenge.header } } : {}) });
       case "withheld":
         return json(res, withheldStatus, mark, { error: "not relayed", reason: execution!.reason, receipt: receiptId });
       case "error":

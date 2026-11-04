@@ -83,6 +83,53 @@ describe("rate", () => {
 });
 
 describe("the door", () => {
+  it("a challenge token is verified with the provider and the outcome is a signal: absent refused with the way in, failed refused with the reason, passed relayed without the token, provider down recorded as unavailable", async () => {
+    process.env.DOOR_TEST_TURNSTILE = "secret-1";
+    const gated = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-challenge-")), origin.url, { challenge: { provider: "turnstile", siteKey: "site-1", secretEnv: "DOOR_TEST_TURNSTILE" } });
+    writeFileSync(join(gated.dir, "policy.cedar"), 'permit(principal, action == Action::"refund", resource) when { context.facts.arrival.challenge.outcome == "passed" };\n');
+    const asked: Array<Record<string, string>> = [];
+    const stub: typeof fetch = async (input, init) => {
+      const u = String(input instanceof Request ? input.url : input);
+      if (!u.startsWith("https://challenges.cloudflare.com/")) return fetch(input, init);
+      const form = Object.fromEntries(new URLSearchParams(String(init?.body)));
+      asked.push(form);
+      if (form.response === "down") throw new Error("ECONNREFUSED");
+      return new Response(JSON.stringify(form.response === "good" ? { success: true } : { success: false, "error-codes": ["invalid-input-response"] }), { headers: { "content-type": "application/json" } });
+    };
+    const h = await createDoorHost(loadDoorConfig(gated.configFile), { fetch: stub });
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    const post = (token?: string) => fetch(`${d.url}/refunds`, { method: "POST", headers: { "content-type": "application/json", ...(token ? { "x-agent-custody-challenge": token } : {}) }, body: JSON.stringify({ order: "o-1", amount: 500 }) });
+    const arrivalOf = (res: Response) => (decode(JSON.parse(readFileSync(join(gated.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle).predicate.facts[ARRIVAL_FACT]!.value as Arrival);
+    try {
+      const none = await post();
+      expect(none.status).toBe(403);
+      expect(await none.json()).toMatchObject({ challenge: { provider: "turnstile", siteKey: "site-1", header: "x-agent-custody-challenge" } });
+      expect(arrivalOf(none)).toMatchObject({ class: "unknown", challenge: { provider: "turnstile", outcome: "absent" } });
+      const bad = await post("bad");
+      expect(bad.status).toBe(403);
+      expect(arrivalOf(bad).challenge).toEqual({ provider: "turnstile", outcome: "failed", error: "invalid-input-response" });
+      const seenBefore = origin.seen.length;
+      const good = await post("good");
+      expect(good.status).toBe(200);
+      expect((await good.json()).ok).toBe(true);
+      expect(arrivalOf(good)).toMatchObject({ class: "unknown", challenge: { provider: "turnstile", outcome: "passed" } });
+      const relayed = origin.seen[seenBefore]!;
+      expect(relayed.headers["x-agent-custody-challenge"]).toBeUndefined();
+      const down = await post("down");
+      expect(down.status).toBe(403);
+      expect(arrivalOf(down).challenge).toMatchObject({ outcome: "unavailable", error: "ECONNREFUSED" });
+      expect(asked.map((q) => q.response)).toEqual(["bad", "good", "down"]);
+      expect(asked[0]).toMatchObject({ secret: "secret-1", remoteip: expect.stringMatching(/127\.0\.0\.1|::1/) });
+    } finally {
+      await d.close();
+      await h.close();
+    }
+    expect(checkDoorConfig(gated.configFile).filter((f) => f.level === "error")).toEqual([]);
+    delete process.env.DOOR_TEST_TURNSTILE;
+    expect(checkDoorConfig(gated.configFile).filter((f) => f.level === "error").map((f) => f.message)).toEqual([expect.stringContaining("DOOR_TEST_TURNSTILE")]);
+    await expect(createDoorHost(loadDoorConfig(gated.configFile), { fetch: stub })).rejects.toThrow("DOOR_TEST_TURNSTILE");
+  });
+
   it("every arrival carries its source's rate, by address for an unverified arrival and by agent for a verified one, and a policy can refuse on it", async () => {
     const paced = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-rate-")), origin.url);
     writeFileSync(join(paced.dir, "policy.cedar"), 'permit(principal, action, resource);\nforbid(principal, action, resource) when { context.facts.arrival.rate.burst > 2 };\n');
