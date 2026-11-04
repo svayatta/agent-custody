@@ -355,21 +355,26 @@ theorem iterC_eq_downC : ∀ (q : List H) (m n : Nat), 0 < m → m < n →
 
 /--
 Soundness: if the node hash is injective, an old root that `verifyConsistency` accepts against the root of the tree
-`l`, for an old size `0 < m ≤ l.length`, is the root of the first `m` leaves of `l`. A log cannot show a head that the
-check takes as extending an old head unless the old tree is a prefix of the new one.
+`l`, for an old size `m ≤ l.length`, is the root of the first `m` leaves of `l`. A log cannot show a head that the check
+takes as extending an old head unless the old tree is a prefix of the new one. At `m = 0` that root is the empty
+tree's root.
 
 For SHA-256 this reads: an accepted old root that is not the root of the prefix needs a SHA-256 collision.
 -/
 theorem verifyConsistency_sound [DecidableEq H] (hinj : ∀ a b c d, node a b = node c d → a = c ∧ b = d)
-    (l : List H) (m : Nat) (r0 : H) (p : List H) (h0 : 0 < m) (hm : m ≤ l.length)
-    (h : verifyConsistency node m r0 l.length (mth node empty l) p = true) :
+    (l : List H) (m : Nat) (r0 : H) (p : List H) (hm : m ≤ l.length)
+    (h : verifyConsistency node empty m r0 l.length (mth node empty l) p = true) :
     r0 = mth node empty (l.take m) := by
   unfold verifyConsistency at h
   by_cases he : m = l.length
   · subst he
     simp at h
     rw [List.take_length]; exact h.2
-  simp only [show ¬ m > l.length by omega, he, show m ≠ 0 by omega, ite_false] at h
+  by_cases h0 : m = 0
+  · subst h0
+    simp only [show ¬ 0 > l.length by omega, he, ite_false, ite_true, Bool.and_eq_true, beq_iff_eq] at h
+    rw [List.take_zero, mth_nil]; exact h.2
+  simp only [show ¬ m > l.length by omega, he, h0, ite_false] at h
   rcases p with _ | ⟨p0, ps⟩
   · simp at h
   simp only [List.isEmpty_cons] at h
@@ -379,17 +384,7 @@ theorem verifyConsistency_sound [DecidableEq H] (hinj : ∀ a b c d, node a b = 
   have hloop : iterC node m l.length P = some (r0, mth node empty l) := by
     match P, hne with
     | first :: rest, _ => simpa [iterC] using h
-  rw [← List.reverse_reverse P, iterC_eq_downC node P.reverse m l.length h0 (by omega)] at hloop
-  exact downC_sound node empty hinj P.reverse l m r0 h0 hm hloop
-
-/--
-The case that soundness leaves out, as `log.ts` has it: for an old size of 0, `verifyConsistency` accepts an empty
-proof whatever the old root is. RFC 9162 has no proof for size 0, and the Python verifier requires the old root to be
-the empty tree's root, `sha256("")`.
--/
-theorem verifyConsistency_zero_any_root [DecidableEq H] (r0 r1 : H) (n : Nat) (hn : 0 < n) :
-    verifyConsistency node 0 r0 n r1 [] = true := by
-  unfold verifyConsistency
-  simp [show ¬ 0 = n by omega]
+  rw [← List.reverse_reverse P, iterC_eq_downC node P.reverse m l.length (by omega) (by omega)] at hloop
+  exact downC_sound node empty hinj P.reverse l m r0 (by omega) hm hloop
 
 end AgentCustodySpec.Merkle

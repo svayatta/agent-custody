@@ -106,14 +106,14 @@ def consistencyRoots : Nat → Nat → H → H → List H → Option (H × H)
     else consistencyRoots (fn / 2) (sn / 2) fr (node sr c) cs
 
 /--
-`verifyConsistency(oldSize, oldRoot, newSize, newRoot, proof)` of `log.ts`, as it is. Note the `oldSize = 0` case: it
-accepts an empty proof whatever `oldRoot` is. The Python verifier also requires `oldRoot` to be the empty tree's root.
+`verifyConsistency(oldSize, oldRoot, newSize, newRoot, proof)` of `log.ts`. At old size 0 the proof is empty and the old
+root must be the empty tree's root.
 -/
 def verifyConsistency [DecidableEq H] (oldSize : Nat) (oldRoot : H) (newSize : Nat) (newRoot : H)
     (proof : List H) : Bool :=
   if oldSize > newSize then false
   else if oldSize = newSize then proof.isEmpty && oldRoot == newRoot
-  else if oldSize = 0 then proof.isEmpty
+  else if oldSize = 0 then proof.isEmpty && oldRoot == empty
   else if proof.isEmpty then false
   else
     -- a power-of-two old size: its root is the first hash, and the proof leaves it out

@@ -19,8 +19,9 @@ Tracking issue: #224.
 | Theorem | Statement |
 | --- | --- |
 | `iterC_eq_downC` | For `0 < m < n` and every list of hashes, the RFC's consistency loop computes the same old and new roots as reading the proof from the root down along the tree's splits. |
-| `verifyConsistency_sound` | If the node hash is injective, an old root that the check accepts against the root of tree `l`, for an old size `0 < m ≤ l.length`, is the root of the first `m` leaves of `l`. A log cannot pass off a head as extending an old head unless the old tree is a prefix of the new one. |
-| `verifyConsistency_zero_any_root` | The case left out above. For an old size of 0, `log.ts` accepts an empty proof whatever the old root is, while the Python verifier requires `sha256("")`. |
+| `verifyConsistency_sound` | If the node hash is injective, an old root that the check accepts against the root of tree `l`, for any old size `m ≤ l.length`, is the root of the first `m` leaves of `l`. A log cannot pass off a head as extending an old head unless the old tree is a prefix of the new one. |
+
+Writing this proof found a gap. `log.ts` accepted any old root at old size 0, while the Python verifier required the empty tree's root. With that case the theorem is false. `log.ts` now requires `sha256("")`, and a vector covers the case.
 
 Each theorem depends only on Lean's standard axioms: `propext`, `Classical.choice` and `Quot.sound`. To check, run `#print axioms`.
 

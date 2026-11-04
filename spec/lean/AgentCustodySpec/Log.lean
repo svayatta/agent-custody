@@ -25,6 +25,6 @@ def consistencyProof (l : List ByteArray) (oldSize newSize : Nat) : List ByteArr
 
 def verifyConsistency (oldSize : Nat) (oldRoot : ByteArray) (newSize : Nat) (newRoot : ByteArray)
     (proof : List ByteArray) : Bool :=
-  Merkle.verifyConsistency nodeHash oldSize oldRoot newSize newRoot proof
+  Merkle.verifyConsistency nodeHash emptyRoot oldSize oldRoot newSize newRoot proof
 
 end AgentCustodySpec.Log
