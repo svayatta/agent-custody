@@ -20,4 +20,11 @@ instance : DecidableEq ByteArray := fun a b =>
 def verifyInclusion (leaf : ByteArray) (i n : Nat) (proof : List ByteArray) (root : ByteArray) : Bool :=
   Merkle.verifyInclusion nodeHash leaf i n proof root
 
+def consistencyProof (l : List ByteArray) (oldSize newSize : Nat) : List ByteArray :=
+  Merkle.consistencyProof nodeHash emptyRoot l oldSize newSize
+
+def verifyConsistency (oldSize : Nat) (oldRoot : ByteArray) (newSize : Nat) (newRoot : ByteArray)
+    (proof : List ByteArray) : Bool :=
+  Merkle.verifyConsistency nodeHash oldSize oldRoot newSize newRoot proof
+
 end AgentCustodySpec.Log

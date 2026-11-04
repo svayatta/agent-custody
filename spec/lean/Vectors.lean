@@ -57,11 +57,26 @@ def merkleVectors (j : Json) : Check Unit := do
     if expected then
       expect s!"path({i}) of size {n} is the vector's proof" (Log.path i (hs.take n) == proof)
 
+def consistencyVectors (j : Json) : Check Unit := do
+  let leaves : Array String ← field j "leaves"
+  let hs := leaves.toList.map (fun l => Log.leafHash l.toUTF8)
+  let cases : Array Json ← field j "consistency"
+  for c in cases do
+    let m : Nat ← field c "oldSize"
+    let n : Nat ← field c "newSize"
+    let oldRoot ← hex (← field c "oldRoot")
+    let newRoot ← hex (← field c "newRoot")
+    let proof ← (← field c "hashes" : Array String).toList.mapM fun s => do return (← hex s)
+    let expected : Bool ← field c "expected"
+    expect s!"consistency {m} -> {n}" (Log.verifyConsistency m oldRoot n newRoot proof == expected)
+    if expected then
+      expect s!"consistencyProof {m} -> {n} is the vector's proof" (Log.consistencyProof hs m n == proof)
+
 def main (args : List String) : IO UInt32 := do
   let dir := args.headD "../../packages/receipts/vectors"
   let merkle ← match Json.parse (← IO.FS.readFile s!"{dir}/merkle.json") with
     | .ok j => pure j
     | .error e => throw (IO.userError s!"merkle.json: {e}")
-  let ((), (pass, fail)) ← (do sha256Examples; merkleVectors merkle : Check Unit).run (0, 0)
+  let ((), (pass, fail)) ← (do sha256Examples; merkleVectors merkle; consistencyVectors merkle : Check Unit).run (0, 0)
   IO.println s!"{pass} passed, {fail} failed"
   return if fail == 0 then 0 else 1

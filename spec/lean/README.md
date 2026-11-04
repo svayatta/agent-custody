@@ -14,7 +14,15 @@ Tracking issue: #224.
 | `verifyInclusion_sound` | If the node hash is injective, then any proof that verifies against the root of tree `l`, for leaf `x` at index `i`, satisfies two things: `x` is the leaf at index `i` of `l`, and the proof is exactly that leaf's audit path. |
 | `inclusionRoot_eq_down` | The RFC's verification loop, which steers by the bits of the leaf index and of the last index, computes the same root as reading the audit path from the root down along the tree's own splits. This holds for every list of hashes, including ones that are too short, too long, or wrong. |
 
-Each theorem depends only on Lean's three standard axioms: `propext`, `Classical.choice` and `Quot.sound`. To check, run `#print axioms`.
+[`AgentCustodySpec/ConsistencyProofs.lean`](AgentCustodySpec/ConsistencyProofs.lean) covers the consistency proofs, modelled from `verifyConsistency` and `subproof` in `log.ts`.
+
+| Theorem | Statement |
+| --- | --- |
+| `iterC_eq_downC` | For `0 < m < n` and every list of hashes, the RFC's consistency loop computes the same old and new roots as reading the proof from the root down along the tree's splits. |
+| `verifyConsistency_sound` | If the node hash is injective, an old root that the check accepts against the root of tree `l`, for an old size `0 < m ≤ l.length`, is the root of the first `m` leaves of `l`. A log cannot pass off a head as extending an old head unless the old tree is a prefix of the new one. |
+| `verifyConsistency_zero_any_root` | The case left out above. For an old size of 0, `log.ts` accepts an empty proof whatever the old root is, while the Python verifier requires `sha256("")`. |
+
+Each theorem depends only on Lean's standard axioms: `propext`, `Classical.choice` and `Quot.sound`. To check, run `#print axioms`.
 
 ## What is assumed
 
@@ -35,13 +43,13 @@ lake exe vectors
 
 `lake build` checks every proof. `lake exe vectors` runs these checks:
 - the FIPS 180-4 SHA-256 examples;
-- `packages/receipts/vectors/merkle.json`: the leaf hashes, the root of every prefix, each inclusion verdict, and that `path` produces each vector's proof.
+- `packages/receipts/vectors/merkle.json`: the leaf hashes, the root of every prefix, each inclusion and consistency verdict, and that `path` and `consistencyProof` produce each vector's proof.
 
 The `lean` workflow runs both, and fails on any `sorry`.
 
 ## Still to do
 
 The remaining items of #224:
-- consistency proofs;
+- completeness of the consistency check (each proof that `consistencyProof` makes verifies);
 - the receipt acceptance rule of `verifyBundle`;
 - canonical JSON.

@@ -71,4 +71,57 @@ def inclusionRoot : Nat → Nat → H → List H → Option H
 def verifyInclusion [DecidableEq H] (leaf : H) (i n : Nat) (proof : List H) (root : H) : Bool :=
   decide (i < n) && inclusionRoot node i (n - 1) leaf proof == some root
 
+/-- SUBPROOF(m, D[n], b) of RFC 9162 section 2.1.4.1, for `0 < m ≤ n`: `subproof` in `log.ts`. -/
+def subproof (m : Nat) (l : List H) (b : Bool) : List H :=
+  if _h : l.length ≤ m ∨ m = 0 then (if b then [] else [mth node empty l])
+  else if m ≤ split l.length then subproof m (l.take (split l.length)) b ++ [mth node empty (l.drop (split l.length))]
+  else subproof (m - split l.length) (l.drop (split l.length)) false ++ [mth node empty (l.take (split l.length))]
+termination_by l.length
+decreasing_by
+  all_goals simp only [List.length_take, List.length_drop]
+  · have := split_lt (n := l.length) (by omega); omega
+  · have := split_pos l.length; omega
+
+/-- `consistencyProof(leafHashes, oldSize, newSize)` of `log.ts`. -/
+def consistencyProof (l : List H) (oldSize newSize : Nat) : List H :=
+  if oldSize = 0 ∨ oldSize = newSize then [] else subproof node empty oldSize (l.take newSize) true
+
+/-- While `fn` is odd, halve `fn` and `sn`: the first `while` of `verifyConsistency`. -/
+def stripOdd (fn sn : Nat) : Nat × Nat :=
+  if fn % 2 = 1 then stripOdd (fn / 2) (sn / 2) else (fn, sn)
+termination_by fn
+decreasing_by omega
+
+/--
+The loop of RFC 9162 section 2.1.4.2 as `verifyConsistency` in `log.ts` runs it, from the second hash on. `fr` and `sr`
+are the old and the new root computed so far. It answers both, or `none` where the TypeScript returns `false`.
+-/
+def consistencyRoots : Nat → Nat → H → H → List H → Option (H × H)
+  | _, sn, fr, sr, [] => if sn = 0 then some (fr, sr) else none
+  | fn, sn, fr, sr, c :: cs =>
+    if sn = 0 then none
+    else if fn % 2 = 1 ∨ fn = sn then
+      let s := strip fn sn
+      consistencyRoots (s.1 / 2) (s.2 / 2) (node c fr) (node c sr) cs
+    else consistencyRoots (fn / 2) (sn / 2) fr (node sr c) cs
+
+/--
+`verifyConsistency(oldSize, oldRoot, newSize, newRoot, proof)` of `log.ts`, as it is. Note the `oldSize = 0` case: it
+accepts an empty proof whatever `oldRoot` is. The Python verifier also requires `oldRoot` to be the empty tree's root.
+-/
+def verifyConsistency [DecidableEq H] (oldSize : Nat) (oldRoot : H) (newSize : Nat) (newRoot : H)
+    (proof : List H) : Bool :=
+  if oldSize > newSize then false
+  else if oldSize = newSize then proof.isEmpty && oldRoot == newRoot
+  else if oldSize = 0 then proof.isEmpty
+  else if proof.isEmpty then false
+  else
+    -- a power-of-two old size: its root is the first hash, and the proof leaves it out
+    let p := if oldSize &&& (oldSize - 1) = 0 then oldRoot :: proof else proof
+    match p with
+    | [] => false
+    | first :: rest =>
+      let s := stripOdd (oldSize - 1) (newSize - 1)
+      consistencyRoots node s.1 s.2 first first rest == some (oldRoot, newRoot)
+
 end AgentCustodySpec.Merkle
