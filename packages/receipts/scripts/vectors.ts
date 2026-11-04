@@ -547,6 +547,7 @@ const merkle = {
   consistency: [
     ...[[0, 7], [1, 7], [2, 5], [3, 7], [4, 7], [5, 6], [7, 7]].map(([m, n]) => ({ oldSize: m, newSize: n, oldRoot: rootOf(hashes, m!), newRoot: rootOf(hashes, n!), hashes: consistencyProof(hashes, m!, n!), expected: true })),
     { oldSize: 3, newSize: 7, oldRoot: rootOf(hashes, 3), newRoot: rootOf(hashes.map((h, i) => (i === 1 ? leafHash("leaf-1-edited") : h)), 7), hashes: consistencyProof(hashes.map((h, i) => (i === 1 ? leafHash("leaf-1-edited") : h)), 3, 7), expected: false, description: "leaf 1 rewritten after the older head was taken" },
+    { oldSize: 0, newSize: 7, oldRoot: rootOf(hashes, 7), newRoot: rootOf(hashes, 7), hashes: [], expected: false, description: "an old head of size 0 whose root is not the empty tree's root, sha256 of nothing" },
   ],
 };
 writeFileSync(join(out, "merkle.json"), JSON.stringify(merkle, null, 2) + "\n");

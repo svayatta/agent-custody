@@ -2,6 +2,10 @@
 
 All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agent-custody` on PyPI, move in lockstep. The receipt format has stayed at v0.2 throughout; every addition to it is an optional field, so earlier receipts and the published conformance vectors remain valid.
 
+## Unreleased
+
+- **Fix: a tree head of size 0 extended any later head, whatever its root.** `verifyConsistency` accepted an empty proof from size 0 without checking the old root. The empty tree has one root, `sha256("")`, which the Python verifier already required. The TypeScript verifier and the WebCrypto verifier (the browser page and the offline case files) now require it too. A case file made before this release keeps the old check. `verifyBundle`, `log-check`, the witness, and the anchor all use this check. A new vector in `merkle.json` covers the case. Modelling the check in Lean (`spec/lean`, issue #224) found the gap.
+
 ## 0.14.0 — 2026-11-03
 
 - **Fix: a fresh install crashed on every command.** `@cedar-policy/cedar-wasm` 4.14.1, published on 2026-11-02, holds no code (2 files, against 21 in 4.14.0). The range `^4.12.0` let npm install it, and the CLI then stopped with `ERR_MODULE_NOT_FOUND .../cedar-wasm/nodejs/cedar_wasm.js`. The dependency is now pinned to 4.12.0, the version the lockfile and every test run use. If you stay on 0.13.0, add `"overrides": { "@cedar-policy/cedar-wasm": "4.12.0" }` to your `package.json`.

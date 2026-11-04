@@ -87,7 +87,8 @@ export function consistencyProof(leafHashes: Buffer[], oldSize: number, newSize 
 export function verifyConsistency(oldSize: number, oldRootHex: string, newSize: number, newRootHex: string, proofHex: string[]): boolean {
   if (oldSize < 0 || oldSize > newSize) return false;
   if (oldSize === newSize) return proofHex.length === 0 && oldRootHex === newRootHex;
-  if (oldSize === 0) return proofHex.length === 0;
+  // the empty tree has one root, sha256 of nothing; any other old root at size 0 is a head no log could have signed
+  if (oldSize === 0) return proofHex.length === 0 && oldRootHex === createHash("sha256").digest("hex");
   if (proofHex.length === 0) return false;
   const proof = proofHex.map((x) => Buffer.from(x, "hex"));
   if ((oldSize & (oldSize - 1)) === 0) proof.unshift(Buffer.from(oldRootHex, "hex"));

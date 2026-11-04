@@ -119,7 +119,8 @@ export async function verifyInclusion(leaf: Bytes, proof: Bundle["inclusion"], r
 export async function verifyConsistency(oldSize: number, oldRoot: string, newSize: number, newRoot: string, proofHex: string[]): Promise<boolean> {
   if (oldSize < 0 || oldSize > newSize) return false;
   if (oldSize === newSize) return proofHex.length === 0 && oldRoot === newRoot;
-  if (oldSize === 0) return proofHex.length === 0;
+  // the empty tree has one root, sha256 of nothing
+  if (oldSize === 0) return proofHex.length === 0 && oldRoot === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   if (proofHex.length === 0) return false;
   const proof = proofHex.map(unhex);
   if ((oldSize & (oldSize - 1)) === 0) proof.unshift(unhex(oldRoot));

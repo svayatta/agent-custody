@@ -72,6 +72,14 @@ describe("Merkle log", () => {
     expect(verifyConsistency(5, oldRoot, 9, rootOf(honest, 9), [])).toBe(false);
   });
 
+  it("an old head of size 0 extends a later one only with the empty tree's root, as the Python verifier requires", () => {
+    const leaves = Array.from({ length: 9 }, (_, i) => leafHash(`leaf-${i}`));
+    expect(verifyConsistency(0, rootOf(leaves, 0), 9, rootOf(leaves, 9), [])).toBe(true);
+    // a head that claims size 0 with another root was never the log's: before, any root passed here
+    expect(verifyConsistency(0, rootOf(leaves, 9), 9, rootOf(leaves, 9), [])).toBe(false);
+    expect(verifyConsistency(0, "00".repeat(32), 9, rootOf(leaves, 9), [])).toBe(false);
+  });
+
   it("the log serves consistency proofs between its own states", () => {
     const dir = mkdtempSync(join(tmpdir(), "mlog-"));
     const log = new MerkleLog(join(dir, "log.jsonl"));

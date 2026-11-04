@@ -195,6 +195,15 @@
       ],
       "expected": false,
       "description": "leaf 1 rewritten after the older head was taken"
+    },
+    {
+      "oldSize": 0,
+      "newSize": 7,
+      "oldRoot": "0b007fb915eb9b2a146f54b1c86ec53b664f8e455b7660b0b6ee13edc0d921c0",
+      "newRoot": "0b007fb915eb9b2a146f54b1c86ec53b664f8e455b7660b0b6ee13edc0d921c0",
+      "hashes": [],
+      "expected": false,
+      "description": "an old head of size 0 whose root is not the empty tree's root, sha256 of nothing"
     }
   ]
 }
