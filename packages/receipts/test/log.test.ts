@@ -78,6 +78,32 @@ describe("Merkle log", () => {
     // a head that claims size 0 with another root was never the log's: before, any root passed here
     expect(verifyConsistency(0, rootOf(leaves, 9), 9, rootOf(leaves, 9), [])).toBe(false);
     expect(verifyConsistency(0, "00".repeat(32), 9, rootOf(leaves, 9), [])).toBe(false);
+    // RFC 9162 has no proof from size 0: a hash beside the empty root is refused
+    expect(verifyConsistency(0, rootOf(leaves, 0), 9, rootOf(leaves, 9), [leaves[0]!.toString("hex")])).toBe(false);
+    // a root is compared as bytes, as in the Python verifier: either case of hex names it
+    expect(verifyConsistency(0, rootOf(leaves, 0).toUpperCase(), 9, rootOf(leaves, 9), [])).toBe(true);
+    expect(verifyConsistency(5, rootOf(leaves, 5).toUpperCase(), 9, rootOf(leaves, 9).toUpperCase(), consistencyProof(leaves, 5, 9))).toBe(true);
+  });
+
+  it("reads only 32-byte hashes: a proof hash of another width, or not lowercase hex, is refused before the loop", () => {
+    const leaves = Array.from({ length: 9 }, (_, i) => leafHash(`leaf-${i}`));
+    const root = rootOf(leaves, 9);
+    const proof = inclusionProof(leaves, 3, 9);
+    expect(verifyInclusion(leaves[3]!, proof, root)).toBe(true);
+    expect(verifyInclusion(leaves[3]!, proof, root.toUpperCase())).toBe(true);
+    // Buffer.from(hex, "hex") read these before: an uppercase hash as the same bytes, a short one as fewer
+    expect(verifyInclusion(leaves[3]!, { ...proof, hashes: proof.hashes.map((x) => x.toUpperCase()) }, root)).toBe(false);
+    expect(verifyInclusion(leaves[3]!, { ...proof, hashes: [proof.hashes[0]!.slice(2), ...proof.hashes.slice(1)] }, root)).toBe(false);
+    // the reason for the width check: moving the boundary between two children keeps the preimage of a node.
+    // sha256(0x01 || n01 || n23) is the root of four leaves; split as 31 bytes || 33 bytes it "proves" a 31-byte leaf
+    const n01 = Buffer.from(rootOf(leaves, 2), "hex");
+    const n23 = Buffer.from(rootOf(leaves.slice(2, 4), 2), "hex");
+    const split = { leafIndex: 0, treeSize: 2, hashes: [Buffer.concat([n01.subarray(31), n23]).toString("hex")] };
+    expect(verifyInclusion(n01.subarray(0, 31), split, rootOf(leaves, 4))).toBe(false);
+    expect(verifyInclusion(leaves[3]!, proof, root.slice(2))).toBe(false);
+    const cp = consistencyProof(leaves, 5, 9);
+    expect(verifyConsistency(5, rootOf(leaves, 5), 9, root, [cp[0]! + "00", ...cp.slice(1)])).toBe(false);
+    expect(verifyConsistency(5, rootOf(leaves, 5), 9, root, cp.map((x) => x.toUpperCase()))).toBe(false);
   });
 
   it("the log serves consistency proofs between its own states", () => {

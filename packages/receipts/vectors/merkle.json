@@ -204,6 +204,26 @@
       "hashes": [],
       "expected": false,
       "description": "an old head of size 0 whose root is not the empty tree's root, sha256 of nothing"
+    },
+    {
+      "oldSize": 0,
+      "newSize": 7,
+      "oldRoot": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "newRoot": "0b007fb915eb9b2a146f54b1c86ec53b664f8e455b7660b0b6ee13edc0d921c0",
+      "hashes": [
+        "305df59f9590c3c9ac63d2b2743c388e3792449078cebf7fb3dbe6471643b2b7"
+      ],
+      "expected": false,
+      "description": "RFC 9162 has no consistency proof from size 0: a hash beside the empty tree's root is refused"
+    },
+    {
+      "oldSize": 0,
+      "newSize": 7,
+      "oldRoot": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "newRoot": "0b007fb915eb9b2a146f54b1c86ec53b664f8e455b7660b0b6ee13edc0d921c0",
+      "hashes": [],
+      "expected": true,
+      "description": "a root is compared as bytes: the empty tree's root in uppercase hex is the same root"
     }
   ]
 }

@@ -103,9 +103,13 @@ export async function verifyDelegationChain(env: Envelope, trusted: PublicKey[],
 // ---- RFC 6962 / 9162 ----
 const leafHash = (data: string) => sha256(concat(new Uint8Array([0]), enc.encode(data)));
 const nodeHash = (l: Bytes, r: Bytes) => sha256(concat(new Uint8Array([1]), l, r));
+// every hash a proof check reads is 32 bytes: a proof hash as 64 lowercase hex digits, a root in either case
+const HASH_HEX = /^[0-9a-f]{64}$/;
+const ROOT_HEX = /^[0-9a-f]{64}$/i;
 export async function verifyInclusion(leaf: Bytes, proof: Bundle["inclusion"], rootHex: string): Promise<boolean> {
   let fn = proof.leafIndex, sn = proof.treeSize - 1;
   if (fn < 0 || sn < 0 || fn > sn) return false;
+  if (leaf.length !== 32 || !ROOT_HEX.test(rootHex) || !proof.hashes.every((x) => HASH_HEX.test(x))) return false;
   let r = leaf;
   for (const h of proof.hashes) {
     if (sn === 0) return false;
@@ -114,10 +118,12 @@ export async function verifyInclusion(leaf: Bytes, proof: Bundle["inclusion"], r
     else r = await nodeHash(r, p);
     fn = Math.floor(fn / 2); sn = Math.floor(sn / 2);
   }
-  return sn === 0 && hex(r) === rootHex;
+  return sn === 0 && hex(r) === rootHex.toLowerCase();
 }
-export async function verifyConsistency(oldSize: number, oldRoot: string, newSize: number, newRoot: string, proofHex: string[]): Promise<boolean> {
+export async function verifyConsistency(oldSize: number, oldRootIn: string, newSize: number, newRootIn: string, proofHex: string[]): Promise<boolean> {
   if (oldSize < 0 || oldSize > newSize) return false;
+  if (!ROOT_HEX.test(oldRootIn) || !ROOT_HEX.test(newRootIn) || !proofHex.every((x) => HASH_HEX.test(x))) return false;
+  const oldRoot = oldRootIn.toLowerCase(), newRoot = newRootIn.toLowerCase();
   if (oldSize === newSize) return proofHex.length === 0 && oldRoot === newRoot;
   // the empty tree has one root, sha256 of nothing
   if (oldSize === 0) return proofHex.length === 0 && oldRoot === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
