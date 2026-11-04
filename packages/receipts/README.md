@@ -22,7 +22,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin and Google ADK callbacks through the Python package, and wrapping tool functions in anything else
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples, and replaying history against a proposed policy with `policy simulate`
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
-- [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, the EU AI Act, and UK GDPR, with what none of them claims
+- [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, UK GDPR, the EU AI Act, FINRA, MAS, Colorado, DORA, the CSA AI Controls Matrix, the OWASP agentic guidance, and ISO/IEC 42001. Each regulation has a primary source, an "as of" date, and a list of what a receipt does not supply
 - [Anchoring the log on a chain](docs/anchoring.md): the log's checkpoints committed to Ethereum mainnet, or another EVM chain the installation picks, from a published address, what that proves and what it does not, running the anchor, and `log-check` against the chain
 - [Completeness](docs/completeness.md): an auditor's read-only key lists the provider's objects and matches each to a verified receipt, so an action taken outside the gateway shows up
 - [Payment mandates and agent identity](docs/mandates.md): the design for fitting grants and receipts to Google's AP2 mandates, Visa's Trusted Agent Protocol and Mastercard Agent Pay; not yet built
@@ -58,7 +58,7 @@ const bundle = JSON.parse(readFileSync("receipts/<id>.json", "utf8"));
 verifyBundle(bundle, { issuerKeys: [loadPublicKey("keys/app.pub")], logFile: "log.jsonl" }).ok;   // true
 ```
 
-For your own Claude Code sessions, one command does the whole setup (key, config in observe mode, starter deny policy, hooks), and `agent-custody report` lists the calls the policy would have denied: `npx @agent-custody/receipts init claude-code`, then see [docs/sdk.md](docs/sdk.md#claude-code).
+For your own Claude Code sessions, one command does the whole setup (key, config in observe mode, starter deny policy, hooks), and `agent-custody report` lists the calls the policy would have denied: `npm install -g @agent-custody/receipts`, then `agent-custody init claude-code`, then see [docs/sdk.md](docs/sdk.md#claude-code).
 
 Framework hooks and adapters, including Claude Code, the OpenAI Agents SDK, the Vercel AI SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes and Google ADK, are in [docs/sdk.md](docs/sdk.md). To enforce rather than record, put the gateway between the agent and its tools: `npx @agent-custody/receipts gateway --config gateway.json`, set up in [docs/usage.md](docs/usage.md); between an agent and the agents it delegates to over A2A, `--a2a` serves the gateway as an A2A agent itself. The gateway is listed in the [MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.svayatta/agent-custody`; its entry is [server.json](server.json), published after each npm release by running the `mcp-registry` workflow from the Actions tab (GitHub OIDC, no token).
 
@@ -248,7 +248,8 @@ If a vendor tells you their receipts prove more than the first five rows, ask th
 ```
 src/config.ts      gateway and SDK config schemas, path resolution
 src/crypto.ts      canonical JSON, sha256, Ed25519 keys, DSSE sign/verify
-src/log.ts         Merkle log: append, root, inclusion and consistency proofs, verify, JSONL persistence; an O_EXCL lock file makes an append safe when several processes share one log file
+src/log.ts         Merkle log: append, root, inclusion and consistency proofs, verify, JSONL persistence; a lock file makes an append safe when several processes share one log file, and a partial last line from a killed writer is moved to `<file>.torn`
+src/lock.ts        the one lock file design (owner token, liveness check, rename to break a stale lock) that the local log, prune, and the gateway outbox share
 src/log-check.ts   the outside monitor: verifies the head, checkpoints, witness, and anchor of a running log
 src/portal.ts      the tenant portal: register, first key, usage against plan, keys, Stripe billing, export, member roles, TOTP MFA, single sign-on, on the log's Postgres
 src/sso.ts         enterprise sign-in for the portal: OIDC (code and PKCE, id_token checked against the IdP's key set) and SAML 2.0 (signed assertions only, through @node-saml/node-saml)

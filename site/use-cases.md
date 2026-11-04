@@ -43,7 +43,7 @@ when { context.facts.customer.kyc == "verified"
 
 **What the receipt proves.** That the withdrawal was within the customer's limit as the system of record stated it at that moment, to an allow-listed destination, authorized under a grant a named person signed, and committed to the log before the money moved. For the refused ones: that the agent tried, what it asked, and why it was stopped.
 
-**Who verifies.** The compliance officer, the external auditor, the regulator, the customer disputing a payout. The [compliance mapping](/receipts/compliance) says which SOC 2, ISO 27001, and EU AI Act provisions each receipt answers.
+**Who verifies.** The compliance officer, the external auditor, the regulator, the customer disputing a payout. The [compliance mapping](/receipts/compliance) says which provisions each receipt gives evidence for, and which it does not, with a primary source and a date for each regulation.
 
 Runnable: the home page's receipt is this case, a £50,000 refund refused before the provider, and [example 16](https://github.com/svayatta/agent-custody/blob/main/packages/receipts/examples/16-precommit.ts) shows the authorization logged before a refund is forwarded.
 
@@ -103,7 +103,7 @@ No runnable example yet; the knowledge-base agent in [example 23](https://github
 
 ## Coding agents on your own repository
 
-**The call.** Every shell command, file write, and tool call a Claude Code session makes. See [agent sessions in this repository](/custody).
+**The call.** Every shell command, file edit, and MCP tool call a Claude Code session makes. See [agent sessions in this repository](/custody).
 
 ## What every case has in common
 
