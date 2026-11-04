@@ -51,7 +51,7 @@ agent-custody door --config door.json [--port 8780] [--host 127.0.0.1]
 
 Plain HTTP; bind to loopback or put TLS in front. `check` on a door config reports unknown keys, the key, the principal keys, the policy (and warns on a permit that names an agent without requiring `context.facts.arrival.class == "verified"`), the routes, what is precommitted, the origin's scheme, every credential variable the door reads at startup (origin headers, log, Splunk, OTel, capture key), and the paths; exit 1 on an error.
 
-In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `normalizePath(pathname)`, `matchRoute(routes, unmatched, method, path)`, and `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` are exported for embedding the door in a server of your own.
+In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `normalizePath(pathname)`, `matchRoute(routes, unmatched, method, path)`, `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` (which leaves `rate` unset), and `createRateTracker(now?)` are exported for embedding the door in a server of your own.
 
 ## What an arrival presents
 
@@ -67,10 +67,10 @@ In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns 
 Recorded as `facts.arrival` (observed) and given to the policy as `context.facts.arrival`:
 
 ```json
-{ "class": "verified", "subject": "shopping-agent", "grant": "verified", "signature": false, "remote": "203.0.113.9", "method": "POST", "path": "/refunds", "route": "refund" }
+{ "class": "verified", "subject": "shopping-agent", "grant": "verified", "signature": false, "remote": "203.0.113.9", "method": "POST", "path": "/refunds", "route": "refund", "rate": { "by": "agent", "burst": 1, "minute": 4 } }
 ```
 
-`class`: `verified` | `claimed` | `unknown`. `grant`: `verified` | `out-of-scope` | `invalid` | `absent`, with `grantError` when not verified. `declared` when the agent header was sent. There is no `human` class. `subject` reaches the Cedar principal only when `class` is `verified`.
+`class`: `verified` | `claimed` | `unknown`. `grant`: `verified` | `out-of-scope` | `invalid` | `absent`, with `grantError` when not verified. `declared` when the agent header was sent. `rate`: arrivals from the same source in the last 10 s (`burst`) and 60 s (`minute`), this one included, counted in this process; `by` is `agent` (a verified agent's name) or `remote` (the address). There is no `human` class. `subject` reaches the Cedar principal only when `class` is `verified`. What each field does and does not mean: [door signals](/receipts/door-signals).
 
 ## The Cedar request
 

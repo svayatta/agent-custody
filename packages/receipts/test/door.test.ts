@@ -16,7 +16,7 @@ import { checkDoorConfig, isDoorConfig } from "../src/check.ts";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey, sha256Hex } from "../src/crypto.ts";
 import { createDelegation } from "../src/delegation.ts";
-import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, matchRoute, normalizePath, remoteOf, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
+import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, createRateTracker, matchRoute, normalizePath, remoteOf, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
@@ -67,7 +67,46 @@ describe("routes", () => {
   });
 });
 
+describe("rate", () => {
+  it("counts one source's arrivals in the last 10 and 60 seconds, this one included, and forgets what is older", () => {
+    let t = 1_000_000;
+    const tracker = createRateTracker(() => t);
+    expect(tracker.hit("remote:1.2.3.4")).toEqual({ burst: 1, minute: 1 });
+    t += 5_000;
+    expect(tracker.hit("remote:1.2.3.4")).toEqual({ burst: 2, minute: 2 });
+    expect(tracker.hit("remote:9.9.9.9")).toEqual({ burst: 1, minute: 1 });
+    t += 6_000;
+    expect(tracker.hit("remote:1.2.3.4")).toEqual({ burst: 2, minute: 3 });
+    t += 55_000;
+    expect(tracker.hit("remote:1.2.3.4")).toEqual({ burst: 1, minute: 2 });
+  });
+});
+
 describe("the door", () => {
+  it("every arrival carries its source's rate, by address for an unverified arrival and by agent for a verified one, and a policy can refuse on it", async () => {
+    const paced = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-rate-")), origin.url);
+    writeFileSync(join(paced.dir, "policy.cedar"), 'permit(principal, action, resource);\nforbid(principal, action, resource) when { context.facts.arrival.rate.burst > 2 };\n');
+    const h = await createDoorHost(loadDoorConfig(paced.configFile));
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    const arrivalOf = (res: Response) => (decode(JSON.parse(readFileSync(join(paced.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle).predicate.facts[ARRIVAL_FACT]!.value as Arrival);
+    try {
+      const first = await fetch(`${d.url}/catalogue/shoes`);
+      const second = await fetch(`${d.url}/catalogue/hats`);
+      const third = await fetch(`${d.url}/admin`);
+      expect([first.status, second.status, third.status]).toEqual([200, 200, 403]);
+      expect(arrivalOf(first).rate).toEqual({ by: "remote", burst: 1, minute: 1 });
+      expect(arrivalOf(second).rate).toEqual({ by: "remote", burst: 2, minute: 2 });
+      expect(arrivalOf(third).rate).toEqual({ by: "remote", burst: 3, minute: 3 });
+      expect(JSON.parse(await third.text()).reason).toBe("policy1");
+      const agent = await fetch(`${d.url}/api/orders`, { headers: { authorization: `Bearer ${grantHeader(grantFor("shopping-agent", ["api"], paced.principalKey))}` } });
+      expect(agent.status).toBe(200);
+      expect(arrivalOf(agent)).toMatchObject({ class: "verified", rate: { by: "agent", burst: 1, minute: 1 } });
+    } finally {
+      await d.close();
+      await h.close();
+    }
+  });
+
   it("an unknown arrival reads the catalogue: relayed, receipted as door/unknown with a claimed principal, and the receipt verifies", async () => {
     const r = await call("GET", "/catalogue/shoes?size=9&size=10&colour=red");
     expect(r.res.status).toBe(200);
