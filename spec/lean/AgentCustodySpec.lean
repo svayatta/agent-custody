@@ -4,3 +4,4 @@ import AgentCustodySpec.Merkle
 import AgentCustodySpec.Log
 import AgentCustodySpec.MerkleProofs
 import AgentCustodySpec.ConsistencyProofs
+import AgentCustodySpec.LogProofs

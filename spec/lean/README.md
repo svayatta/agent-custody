@@ -23,12 +23,23 @@ Tracking issue: #224.
 
 Writing this proof found a gap. `log.ts` accepted any old root at old size 0, while the Python verifier required the empty tree's root. With that case the theorem is false. `log.ts` now requires `sha256("")`, and a vector covers the case.
 
+Those theorems hold for any hash type with an injective `node`. [`AgentCustodySpec/LogProofs.lean`](AgentCustodySpec/LogProofs.lean) applies them to the log's own hash. [`Log.lean`](AgentCustodySpec/Log.lean) runs on 32-byte digests, behind the same hex checks that `log.ts` runs before its loops.
+
+| Theorem | Statement |
+| --- | --- |
+| `nodeCollisionFree_of_sha256` | If SHA-256 returns 32 bytes and has no collision on 65-byte inputs, then `NodeCollisionFree` holds: `nodeHash` is injective on 32-byte children. |
+| `Log.verifyInclusion_sound` | With `NodeCollisionFree`, a check that `Log.verifyInclusion` accepts against the root of tree `leaves` puts the 32-byte leaf at its index. |
+| `Log.verifyConsistency_sound` | With `NodeCollisionFree`, an old root that `Log.verifyConsistency` accepts against the root of tree `leaves` is the root of the first `m` leaves. |
+| `Log.verifyInclusion_parsed` | The hex layer only refuses: an accepted check is the generic check on the parsed digests. |
+
 Each theorem depends only on Lean's standard axioms: `propext`, `Classical.choice` and `Quot.sound`. To check, run `#print axioms`.
 
 ## What is assumed
 
-- **The node hash is injective.** SHA-256 is not injective. So the soundness theorem reads: accepting a wrong leaf, or a proof that is not the audit path, would need a SHA-256 collision, that is, two different inputs to `sha256(0x01 || left || right)` with the same digest.
-- **Hashes are parsed bytes.** In `log.ts`, `verifyInclusion` reads proof hashes with `Buffer.from(hex, "hex")`, which skips invalid characters, and compares the root as a lowercase hex string. The model starts from bytes. The vector checker reads hex strictly: lowercase only, and an even number of digits.
+- **One assumption: `NodeCollisionFree`.** Two node inputs, `0x01 ‖ left ‖ right` with 32-byte children, never have the same SHA-256 digest. `nodeCollisionFree_of_sha256` derives it from two facts about SHA-256: it has no collision on 65-byte inputs, and it returns 32 bytes. `lake exe vectors` checks the second; the first is the usual trust in SHA-256. The width is what makes this a collision. On byte arrays of any width, `sha256(0x01 ‖ left ‖ right)` keeps its preimage when the boundary between the children moves. So the model, like `log.ts` and the Python verifier, refuses before the loop any proof hash that is not 64 lowercase hex digits, any root that is not 64 hex digits, and any leaf that is not 32 bytes. Roots compare as bytes, so either case of hex names the same root.
+- **Sizes below 2^53.** `log.ts` works on JavaScript numbers, which are exact up to 2^53. Its power-of-two test `(oldSize & (oldSize - 1)) === 0` works on the low 32 bits of each side, and the model computes it the same way. That makes the model and `log.ts` agree for every size below 2^53. It also means that, from 2^32 leaves, `log.ts` can take a size such as 2^32 + 1 for a power of two. Then it refuses an honest proof. That is a completeness gap, not a soundness one: the soundness theorem holds whichever way the test goes.
+- **`subproof` within its domain.** `log.ts` calls `subproof` only with `0 < m < n`. Outside that range it would reach a range of one leaf and recurse forever. The model answers `[]` there instead.
+- **The tree size comes from the signed head.** An inclusion check does not pin the tree size by itself. For a leaf in the left subtree, the same proof verifies at size 6 against a 7-leaf root, and a 6-leaf list with that root exists. `verifyBundle` compares the proof's `treeSize` with the signed tree head.
 
 ## Run it
 
@@ -44,7 +55,14 @@ lake exe vectors
 
 `lake build` checks every proof. `lake exe vectors` runs these checks:
 - the FIPS 180-4 SHA-256 examples;
-- `packages/receipts/vectors/merkle.json`: the leaf hashes, the root of every prefix, each inclusion and consistency verdict, and that `path` and `consistencyProof` produce each vector's proof.
+- `packages/receipts/vectors/merkle.json`: the leaf hashes, the root of every prefix, each inclusion and consistency verdict, and that `path` and `consistencyProof` produce each vector's proof;
+- changes that each accepted vector must refuse, because the vectors themselves hold almost only accepted proofs:
+  - another leaf, index or root;
+  - a proof that is too short or too long;
+  - each proof hash replaced in turn;
+  - uppercase proof hashes;
+  - a 31-byte leaf;
+  - for consistency, another old root or old size.
 
 The `lean` workflow runs both, and fails on any `sorry`.
 

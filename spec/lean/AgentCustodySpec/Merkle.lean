@@ -71,9 +71,14 @@ def inclusionRoot : Nat → Nat → H → List H → Option H
 def verifyInclusion [DecidableEq H] (leaf : H) (i n : Nat) (proof : List H) (root : H) : Bool :=
   decide (i < n) && inclusionRoot node i (n - 1) leaf proof == some root
 
-/-- SUBPROOF(m, D[n], b) of RFC 9162 section 2.1.4.1, for `0 < m ≤ n`: `subproof` in `log.ts`. -/
+/--
+SUBPROOF(m, D[n], b) of RFC 9162 section 2.1.4.1: `subproof` in `log.ts`, which returns only when `m = n`. Its domain
+is `0 < m ≤ n`, the only sizes `consistencyProof` gives it. Outside that, `log.ts` reaches a range of one leaf with
+`m ≠ 1`, where `split` is 1 and it recurses on the same range for ever; this model answers `[]` there instead.
+-/
 def subproof (m : Nat) (l : List H) (b : Bool) : List H :=
-  if _h : l.length ≤ m ∨ m = 0 then (if b then [] else [mth node empty l])
+  if l.length = m then (if b then [] else [mth node empty l])
+  else if _h : l.length ≤ 1 then []
   else if m ≤ split l.length then subproof m (l.take (split l.length)) b ++ [mth node empty (l.drop (split l.length))]
   else subproof (m - split l.length) (l.drop (split l.length)) false ++ [mth node empty (l.take (split l.length))]
 termination_by l.length
@@ -116,8 +121,9 @@ def verifyConsistency [DecidableEq H] (oldSize : Nat) (oldRoot : H) (newSize : N
   else if oldSize = 0 then proof.isEmpty && oldRoot == empty
   else if proof.isEmpty then false
   else
-    -- a power-of-two old size: its root is the first hash, and the proof leaves it out
-    let p := if oldSize &&& (oldSize - 1) = 0 then oldRoot :: proof else proof
+    -- a power-of-two old size: its root is the first hash, and the proof leaves it out. `log.ts` tests
+    -- `(oldSize & (oldSize - 1)) === 0`, and JavaScript's `&` works on the low 32 bits of each side.
+    let p := if (oldSize % 2 ^ 32) &&& ((oldSize - 1) % 2 ^ 32) = 0 then oldRoot :: proof else proof
     match p with
     | [] => false
     | first :: rest =>
