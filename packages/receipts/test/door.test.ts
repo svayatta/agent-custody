@@ -453,6 +453,38 @@ describe("the door", () => {
     }
   });
 
+  it("every redirect to the origin's host becomes a door path, so the client never follows it around the door", async () => {
+    const based = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-escape-")), `${origin.url}/api/v1/`);
+    const host = new URL(origin.url);
+    let location = "";
+    const stub: typeof fetch = async () => new Response("{}", { status: 302, headers: { location, "content-type": "application/json" } });
+    const h = await createDoorHost(loadDoorConfig(based.configFile), { fetch: stub });
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      const cases: [string, string][] = [
+        // outside the origin's path: before, left absolute, and the browser went straight to the origin
+        [`${origin.url}/admin`, "/admin"],
+        // normalised out of the prefix by the URL parser
+        [`${origin.url}/api/v1/../../admin?x=1`, "/admin?x=1"],
+        // the same host on another scheme or port
+        [`https://${host.hostname}:1/api/v1/x`, "/x"],
+        // relative forms resolve against the origin, then come back as door paths
+        ["/admin", "/admin"],
+        ["after", "/catalogue/after"],
+        // another host is not the origin: relayed as sent
+        ["https://elsewhere.example/x", "https://elsewhere.example/x"],
+      ];
+      for (const [sent, want] of cases) {
+        location = sent;
+        const res = await fetch(`${d.url}/catalogue/shoes`, { redirect: "manual" });
+        expect(res.headers.get("location"), sent).toBe(want);
+      }
+    } finally {
+      await d.close();
+      await h.close();
+    }
+  });
+
   it("a route is matched on the decoded path and the origin is sent that form; a path that decodes to a slash or a dot segment is refused with 400 and a withheld receipt", async () => {
     expect(normalizePath("/%61dmin/x")).toEqual({ path: "/admin/x", relay: "/admin/x" });
     expect(normalizePath("/a%20b/%25")).toEqual({ path: "/a b/%", relay: "/a%20b/%25" });
