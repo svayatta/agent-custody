@@ -1,8 +1,9 @@
 // Append-only Merkle log with RFC 6962 / RFC 9162 hashing and inclusion proofs.
 // Leaves are stored as JSONL so anyone holding the file can recompute the root.
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readSync, statSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
+import { withLock } from "./lock.ts";
 
 export interface InclusionProof {
   leafIndex: number;
@@ -151,25 +152,94 @@ export function verifyInclusion(leaf: Buffer, proof: InclusionProof, rootHex: st
   return sn === 0 && r.toString("hex") === rootHex;
 }
 
+const LOCK_STALE_MS = 60_000;
+const LOG_LOCK_WAIT_MS = 20_000;
+
+/** Each hook of a coding agent is its own process, so appends overlap: one writer at a time holds `<file>.lock`. */
+export function logLocked<T>(file: string, fn: () => T): T {
+  return withLock(`${file}.lock`, { staleMs: LOCK_STALE_MS, waitMs: LOG_LOCK_WAIT_MS }, fn);
+}
+
 export class MerkleLog {
-  private hashes: Buffer[] = [];
-  private readonly tree: SubtreeCache;
+  private readonly hashes: Buffer[] = [];
+  private tree = new SubtreeCache(this.hashes);
   private readonly file: string;
+  private bytes = 0;
+  private inode: number | bigint = -1;
 
   constructor(file: string) {
     this.file = file;
-    this.tree = new SubtreeCache(this.hashes);
-    if (existsSync(file)) {
-      for (const line of readFileSync(file, "utf8").split("\n")) {
-        if (!line.trim()) continue;
-        const parsed = JSON.parse(line) as string | { pruned?: string; hash?: string };
-        // A pruned leaf keeps only its hash, and a leaf appended by hash never had content here: the tree, its
-        // roots, and every proof are the same either way.
-        this.hashes.push(typeof parsed === "string" ? leafHash(parsed) : Buffer.from((parsed.pruned ?? parsed.hash)!, "hex"));
-      }
-    } else {
-      mkdirSync(dirname(file), { recursive: true });
+    mkdirSync(dirname(file), { recursive: true });
+    this.catchUp();
+  }
+
+  /**
+   * Reads the leaves that another handle or process appended since the last read. A file that was replaced or cut
+   * short is read again from the start. Bytes after the last newline are not read: a writer may be in the middle of its
+   * write, or may have died in it.
+   */
+  private catchUp(): void {
+    let st;
+    try { st = statSync(this.file); } catch { st = null; }
+    if (!st || st.ino !== this.inode || st.size < this.bytes) {
+      this.hashes.length = 0;
+      this.tree = new SubtreeCache(this.hashes);
+      this.bytes = 0;
     }
+    if (!st) return;
+    this.inode = st.ino;
+    if (st.size === this.bytes) return;
+    const buf = Buffer.alloc(st.size - this.bytes);
+    const fd = openSync(this.file, "r");
+    let got = 0;
+    try {
+      while (got < buf.length) {
+        const n = readSync(fd, buf, got, buf.length - got, this.bytes + got);
+        if (n === 0) break;
+        got += n;
+      }
+    } finally {
+      closeSync(fd);
+    }
+    got = buf.subarray(0, got).lastIndexOf(0x0a) + 1;
+    this.bytes += got;
+    for (const line of buf.subarray(0, got).toString("utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line) as string | { pruned?: string; hash?: string };
+      // A pruned leaf keeps only its hash, and a leaf appended by hash never had content here: the tree, its
+      // roots, and every proof are the same either way.
+      this.hashes.push(typeof parsed === "string" ? leafHash(parsed) : Buffer.from((parsed.pruned ?? parsed.hash)!, "hex"));
+    }
+  }
+
+  /**
+   * Under the lock: a last line with no newline is the remains of a writer that died in the middle of its write. No
+   * leaf was acknowledged for it. The bytes go to `<file>.torn`, so no data is lost, and the file ends after the last whole line.
+   */
+  private cutTornTail(): void {
+    let size: number;
+    try { size = statSync(this.file).size; } catch { return; }
+    if (size <= this.bytes) return;
+    const tail = Buffer.alloc(size - this.bytes);
+    const fd = openSync(this.file, "r");
+    try {
+      readSync(fd, tail, 0, tail.length, this.bytes);
+    } finally {
+      closeSync(fd);
+    }
+    appendFileSync(`${this.file}.torn`, tail, { mode: 0o600 });
+    truncateSync(this.file, this.bytes);
+  }
+
+  /** Under the lock: reads what other writers appended, then writes this line, so each leaf gets the next index. */
+  private appendLine(line: string, hash: () => Buffer): InclusionProof & { rootHash: string } {
+    return logLocked(this.file, () => {
+      this.catchUp();
+      this.cutTornTail();
+      appendFileSync(this.file, line);
+      this.bytes += Buffer.byteLength(line);
+      return this.pushHash(hash());
+    });
   }
 
   get size(): number {
@@ -183,8 +253,7 @@ export class MerkleLog {
 
   /** Appends a leaf (an opaque string, typically a canonical JSON envelope). Returns its proof against the new root. */
   append(leaf: string): InclusionProof & { rootHash: string } {
-    appendFileSync(this.file, JSON.stringify(leaf) + "\n");
-    return this.pushHash(leafHash(leaf));
+    return this.appendLine(JSON.stringify(leaf) + "\n", () => leafHash(leaf));
   }
 
   /**
@@ -193,8 +262,7 @@ export class MerkleLog {
    */
   appendHash(leafHashHex: string): InclusionProof & { rootHash: string } {
     if (!/^[0-9a-f]{64}$/.test(leafHashHex)) throw new Error("leafHash must be 64 lowercase hex characters");
-    appendFileSync(this.file, JSON.stringify({ hash: leafHashHex }) + "\n");
-    return this.pushHash(Buffer.from(leafHashHex, "hex"));
+    return this.appendLine(JSON.stringify({ hash: leafHashHex }) + "\n", () => Buffer.from(leafHashHex, "hex"));
   }
 
   private pushHash(hash: Buffer): InclusionProof & { rootHash: string } {

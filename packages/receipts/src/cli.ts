@@ -18,6 +18,7 @@ import { connectSigner, fetchLogKeys, localSigner, serveSigner, type RetiredKey,
 import { fetchWitnessKeys, Witness } from "./witness.ts";
 import { checkLog, formatLogCheck } from "./log-check.ts";
 import { Anchor, ANCHOR_CHAINS, resolveAnchorChain } from "./anchor.ts";
+import { checkCompleteness, formatCompleteness, stripeSource, type StripeObject } from "./completeness.ts";
 import { evmChain } from "./anchor-evm.ts";
 import { serveHttp } from "./gateway-http.ts";
 import { serveA2a } from "./a2a.ts";
@@ -34,8 +35,13 @@ import { serveConsole } from "./console.ts";
 import { TREEHEAD_TYPE, type AuthorizationBundle, type ReceiptBundle, type TreeHead, type ReceiptStatement } from "./receipt.ts";
 import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
+import { initClaudeCode } from "./claude-init.ts";
+import { denyReport, formatDenyReport } from "./deny-report.ts";
+import { fileURLToPath } from "node:url";
 import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
-import { auditExtends, formatReport, verifyBundle } from "./verify.ts";
+import { auditExtends, formatReport, verifyBundle, type VerifyOptions } from "./verify.ts";
+import { CLEAR_WARNING, exportReceipts, formatReceiptExport as formatExportLines } from "./export.ts";
+import { formatSummaryMarkdown, receiptFiles, summarizeReceipts } from "./pr-summary.ts";
 import { formatSimulation, simulatePolicy, verifyOrphanAuthorization, type SimulationSkip } from "./simulate.ts";
 
 /**
@@ -92,13 +98,28 @@ const USAGE = `agent-custody <command>
   gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]
                                                    stdio: one gateway for the grant the config names. --http: one shared gateway, MCP over
                                                    Streamable HTTP at /mcp, each connection presenting its own grant as Authorization: Bearer
+  init claude-code [--dir <dir>] [--user] [--enforce] [--log-url <url> [--log-id <id>] [--log-token-env NAME] [--log-key <pub>]]
+                                                   one command for your own Claude Code sessions: an agent key, sdk.json in observe mode, a starter deny
+                                                   policy, and the three hooks in .claude/settings.local.json (--user: ~/.claude/settings.json). Safe to run twice
+  report  --config <sdk.json>                      the calls that the policy would have denied, from the receipts: tool, command or path, rule, receipt id;
+                                                   a receipt that does not verify is counted apart. Exits 1 when any receipt does not verify
   hook    [--config <sdk.json>]        Claude Code hook command; reads the event on stdin (or AGENT_CUSTODY_CONFIG)
   serve   --config <sdk.json> [--port 8788] [--host 127.0.0.1]   the SDK as a local HTTP API for agents in other languages
   prune   --log <log.jsonl> --before <ISO instant> [--receipts <dir>]
           retention on the receipt log: replaces older leaves with their hashes, so proofs still verify and the content is gone
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
   verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--require-strict] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]
+          verify --markdown <dir|bundle.json>... --issuer-key <pub>   one Markdown table for a directory of bundles; exit 1 when one does not verify or none exists
+  export  --receipts <dir> --out <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--since <ISO time>] [--allow-clear]
+                                                   copies the verified receipt bundles that keep their values private into a directory for a pull request, byte for byte.
+                                                   Reads only <id>.json at the top level; never salts/, outbox/, or *.authorization.json. Exits 1 when it refuses a receipt, and when it copies none
   policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
+  completeness --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--log-id <id>]
+               --provider stripe --object refunds|payouts|transfers --key-env NAME --tool <name>... --since <ISO> --until <ISO>
+               [--id-path id] [--amount-field amount] [--currency-field currency] [--beneficiary <arg>=<field>]... [--json]
+                                                 for an auditor: lists the provider's objects in the window with a read-only key, and
+                                                 matches each to a verified receipt by the provider's object id; reports actions with no
+                                                 receipt, receipts the provider does not have, and mismatched amounts; exits 1 unless complete
                                                    replay verified local receipts against a proposed policy using their recorded inputs;
                                                    --out saves the full JSON report. Exits 1 when any call could not be evaluated.
   log     ... --db-env NAME                     the same server over Postgres: tenants and tokens from the database, one writer per tenant,
@@ -313,6 +334,40 @@ async function main(argv: string[]): Promise<number> {
       await serveStdio(gw);
       await gw.close();
       return 0;
+    }
+    case "init": {
+      const [target, ...args] = rest;
+      if (target !== "claude-code") throw new Error("init needs a target: init claude-code");
+      const { values } = parseArgs({
+        args,
+        options: {
+          dir: { type: "string" },
+          user: { type: "boolean", default: false },
+          enforce: { type: "boolean", default: false },
+          "log-url": { type: "string" },
+          "log-id": { type: "string" },
+          "log-token-env": { type: "string" },
+          "log-key": { type: "string" },
+        },
+      });
+      initClaudeCode({
+        cliPath: fileURLToPath(import.meta.url),
+        ...(values.dir ? { dir: values.dir } : {}),
+        user: values.user,
+        enforce: values.enforce,
+        ...(values["log-url"] ? { logUrl: values["log-url"] } : {}),
+        ...(values["log-id"] ? { logId: values["log-id"] } : {}),
+        ...(values["log-token-env"] ? { logTokenEnv: values["log-token-env"] } : {}),
+        ...(values["log-key"] ? { logKey: values["log-key"] } : {}),
+      });
+      return 0;
+    }
+    case "report": {
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" } } });
+      if (!values.config) throw new Error("report needs --config <sdk.json>");
+      const report = denyReport(resolve(values.config));
+      console.log(formatDenyReport(report));
+      return report.unverified.length ? 1 : 0;
     }
     case "hook": {
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" } } });
@@ -635,17 +690,18 @@ async function main(argv: string[]): Promise<number> {
           disclose: { type: "string" },
           "capture-key-env": { type: "string" },
           json: { type: "boolean", default: false },
+          markdown: { type: "boolean", default: false },
         },
       });
       const file = positionals[0];
       const issuerKeyFiles = [...(values["issuer-key"] ?? []), ...(values["gateway-key"] ?? [])];
       if (!file || issuerKeyFiles.length === 0) throw new Error("verify needs <bundle> --issuer-key (alias --gateway-key)");
-      const bundle = JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle;
+      if (values.markdown && (values.json || values.disclose)) throw new Error("verify --markdown does not combine with --json or --disclose");
       const captureKey = values["capture-key-env"] ? captureKeyFrom(secretFrom(values["capture-key-env"])) : undefined;
       const disclosed = values.disclose ? (JSON.parse(readFileSync(values.disclose, "utf8")) as Record<string, unknown>) : undefined;
       const fetchedLogKeys = values["log-url"] ? (await fetchLogKeys(values["log-url"])).keys : [];
       const logKeys = [...(values["log-key"] ?? []).map(loadPublicKey), ...fetchedLogKeys];
-      const result = verifyBundle(bundle, {
+      const verifyOptions: VerifyOptions = {
         issuerKeys: issuerKeyFiles.map(loadPublicKey),
         principalKeys: (values["principal-key"] ?? []).map(loadPublicKey),
         ...(values["approval-key"] ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}),
@@ -657,9 +713,107 @@ async function main(argv: string[]): Promise<number> {
         ...(values.log ? { logFile: values.log } : {}),
         ...(captureKey ? { captureKey } : {}),
         ...(disclosed ? { disclosed } : {}),
-      });
+      };
+      if (values.markdown) {
+        const summary = summarizeReceipts(positionals.flatMap(receiptFiles), verifyOptions);
+        console.log(formatSummaryMarkdown(summary));
+        return summary.ok ? 0 : 1;
+      }
+      const result = verifyBundle(JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle, verifyOptions);
       console.log(values.json ? JSON.stringify(result, null, 2) : formatReport(result));
       return result.ok ? 0 : 1;
+    }
+    case "export": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          receipts: { type: "string" },
+          out: { type: "string" },
+          "issuer-key": { type: "string", multiple: true },
+          "principal-key": { type: "string", multiple: true },
+          "approval-key": { type: "string", multiple: true },
+          since: { type: "string" },
+          "allow-clear": { type: "boolean", default: false },
+        },
+      });
+      if (!values.receipts || !values.out || !values["issuer-key"]?.length) throw new Error("export needs --receipts <dir>, --out <dir> and --issuer-key <pub>");
+      // Date.parse reads "1" as the year 2001, so the text must start with a date
+      const since = values.since === undefined ? undefined : /^\d{4}-\d{2}-\d{2}/.test(values.since) ? Date.parse(values.since) : NaN;
+      if (since !== undefined && !Number.isFinite(since)) throw new Error(`--since must be an ISO time; got "${values.since}"`);
+      const result = exportReceipts({
+        receiptsDir: values.receipts,
+        outDir: values.out,
+        verify: {
+          issuerKeys: values["issuer-key"].map(loadPublicKey),
+          principalKeys: (values["principal-key"] ?? []).map(loadPublicKey),
+          ...(values["approval-key"] ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}),
+        },
+        ...(since !== undefined ? { since } : {}),
+        allowClear: values["allow-clear"],
+      });
+      for (const line of formatExportLines(result)) console.log(line);
+      if (result.lines.some((l) => l.outcome === "copied" && l.clear.length)) console.error(CLEAR_WARNING);
+      if (result.problem) console.error(`agent-custody export: ${result.problem}`);
+      return result.refused > 0 || result.copied === 0 ? 1 : 0;
+    }
+    case "completeness": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          receipts: { type: "string" },
+          "issuer-key": { type: "string", multiple: true },
+          "principal-key": { type: "string", multiple: true },
+          "approval-key": { type: "string", multiple: true },
+          "log-key": { type: "string", multiple: true },
+          log: { type: "string" },
+          "log-id": { type: "string" },
+          provider: { type: "string" },
+          object: { type: "string", default: "refunds" },
+          "key-env": { type: "string" },
+          tool: { type: "string", multiple: true },
+          since: { type: "string" },
+          until: { type: "string" },
+          "id-path": { type: "string" },
+          "amount-field": { type: "string" },
+          "currency-field": { type: "string" },
+          beneficiary: { type: "string", multiple: true },
+          json: { type: "boolean", default: false },
+        },
+      });
+      if (!values.receipts || !values["issuer-key"]?.length || !values["key-env"] || !values.tool?.length || !values.since || !values.until) throw new Error("completeness needs --receipts, --issuer-key, --provider stripe, --key-env, --tool, --since and --until");
+      if (values.provider !== "stripe") throw new Error(`completeness supports --provider stripe; got "${values.provider ?? ""}"`);
+      const objects: StripeObject[] = ["refunds", "payouts", "transfers"];
+      if (!objects.includes(values.object as StripeObject)) throw new Error(`--object is one of ${objects.join(", ")}; got "${values.object}"`);
+      const sinceMs = Date.parse(values.since);
+      const untilMs = Date.parse(values.until);
+      if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs) || untilMs <= sinceMs) throw new Error("--since and --until must be ISO times, --until after --since");
+      const beneficiary: Record<string, string> = {};
+      for (const pair of values.beneficiary ?? []) {
+        const at = pair.indexOf("=");
+        if (at < 1 || at === pair.length - 1) throw new Error(`--beneficiary takes <argument>=<provider field>; got "${pair}"`);
+        beneficiary[pair.slice(0, at)] = pair.slice(at + 1);
+      }
+      const report = await checkCompleteness({
+        receiptsDir: values.receipts,
+        verify: {
+          issuerKeys: values["issuer-key"].map(loadPublicKey),
+          principalKeys: (values["principal-key"] ?? []).map(loadPublicKey),
+          ...(values["approval-key"] ? { approvalKeys: values["approval-key"].map(loadPublicKey) } : {}),
+          ...(values["log-key"] ? { logKeys: values["log-key"].map(loadPublicKey) } : {}),
+          ...(values.log ? { logFile: values.log } : {}),
+          ...(values["log-id"] ? { logId: values["log-id"] } : {}),
+        },
+        source: stripeSource({ secretKey: secretFrom(values["key-env"]), object: values.object as StripeObject }),
+        tools: values.tool,
+        sinceMs,
+        untilMs,
+        ...(values["id-path"] ? { idPath: values["id-path"] } : {}),
+        ...(values["amount-field"] ? { amountField: values["amount-field"] } : {}),
+        ...(values["currency-field"] ? { currencyField: values["currency-field"] } : {}),
+        ...(Object.keys(beneficiary).length ? { beneficiary } : {}),
+      });
+      console.log(values.json ? JSON.stringify(report, null, 2) : formatCompleteness(report));
+      return report.complete ? 0 : 1;
     }
     case "policy": {
       const [subcommand, ...args] = rest;

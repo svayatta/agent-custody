@@ -10,7 +10,7 @@ Two producers, one receipt format, one verifier.
 Anyone holding the public keys can verify a receipt offline. The agent is not trusted. The layer around it is, and the receipt says exactly how far that trust extends, starting with who issued it. What the receipt file carries of a call is a choice per tool: a field can be withheld as a commitment or encrypted under your key, and the verifier recomputes the digests when it is shown the values.
 
 - [Reference](https://docs.agent-custody.dev/reference/): every function, endpoint, MCP tool, and command with its request and response
-- [Tutorials](docs/tutorials.md): thirty-four runnable examples, one per aspect of the code, all executed by the test suite
+- [Tutorials](docs/tutorials.md): runnable examples, one per aspect of the code, all executed by the test suite
 - [Financial operations](docs/financial-operations.md): durable operation ids, provider idempotency keys, atomic daily budget reservations, and reconciliation receipts for uncertain outcomes
 - [The gateway console](docs/console.md): an admin service for the person who runs a gateway: config, tools, receipts with a verdict each, a policy editor that replays recorded calls before it saves, grant revocation, and an audit trail
 - [Configuring the gateway](docs/configuration.md): who may use which tools and where the tools live, a worked example with two agents, the Docker image, and `agent-custody check` to validate a config before it starts
@@ -20,8 +20,10 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [The interceptor SDK](docs/sdk.md): Claude Code hooks, the Claude Agent SDK, adapters for the OpenAI Agents SDK, Vercel AI SDK, LangChain, OpenClaw and DeepSeek Harness, a Hermes Agent plugin and Google ADK callbacks through the Python package, and wrapping tool functions in anything else
 - [Writing policies](docs/policies.md): how a tool call becomes a Cedar request, with tested examples, and replaying history against a proposed policy with `policy simulate`
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
-- [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, the EU AI Act, and UK GDPR, with what none of them claims
+- [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, UK GDPR, the EU AI Act, FINRA, MAS, Colorado, DORA, the CSA AI Controls Matrix, the OWASP agentic guidance, and ISO/IEC 42001. Each regulation has a primary source, an "as of" date, and a list of what a receipt does not supply
 - [Anchoring the log on a chain](docs/anchoring.md): the log's checkpoints committed to Ethereum mainnet, or another EVM chain the installation picks, from a published address, what that proves and what it does not, running the anchor, and `log-check` against the chain
+- [Receipts on a pull request](docs/github-action.md): the GitHub Action that verifies a directory of receipt bundles and posts one table on the pull request, the workflow file to copy, the `export` command that copies the receipts into the branch, and why a committed receipt publishes the call unless a capture rule withholds it
+- [Completeness](docs/completeness.md): an auditor's read-only key lists the provider's objects and matches each to a verified receipt, so an action taken outside the gateway shows up
 - [Payment mandates and agent identity](docs/mandates.md): the design for fitting grants and receipts to Google's AP2 mandates, Visa's Trusted Agent Protocol and Mastercard Agent Pay; not yet built
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
 - [Aligning with IETF SCITT](docs/scitt.md): the receipt as a SCITT signed statement, the log as a transparency service, our RFC 9162 proofs as COSE Receipts (RFC 9942), what differs and the options for each, an agent-action profile, and the steps toward the working group
@@ -37,7 +39,7 @@ Published on npm as [`@agent-custody/receipts`](https://www.npmjs.com/package/@a
 Record receipts from inside your own agent, no gateway needed. Generate a signing key, point a config at it, wrap the functions the agent calls:
 
 ```bash
-npx agent-custody keygen --dir keys --name app
+npx @agent-custody/receipts keygen --dir keys --name app
 ```
 
 ```json
@@ -55,7 +57,9 @@ const bundle = JSON.parse(readFileSync("receipts/<id>.json", "utf8"));
 verifyBundle(bundle, { issuerKeys: [loadPublicKey("keys/app.pub")], logFile: "log.jsonl" }).ok;   // true
 ```
 
-Framework hooks and adapters, including Claude Code, the OpenAI Agents SDK, the Vercel AI SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes and Google ADK, are in [docs/sdk.md](docs/sdk.md). To enforce rather than record, put the gateway between the agent and its tools: `npx agent-custody gateway --config gateway.json`, set up in [docs/usage.md](docs/usage.md); between an agent and the agents it delegates to over A2A, `--a2a` serves the gateway as an A2A agent itself. The gateway is listed in the [MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.svayatta/agent-custody`; its entry is [server.json](server.json), published after each npm release by running the `mcp-registry` workflow from the Actions tab (GitHub OIDC, no token).
+For your own Claude Code sessions, one command does the whole setup (key, config in observe mode, starter deny policy, hooks), and `agent-custody report` lists the calls the policy would have denied: `npm install -g @agent-custody/receipts`, then `agent-custody init claude-code`, then see [docs/sdk.md](docs/sdk.md#claude-code).
+
+Framework hooks and adapters, including Claude Code, the OpenAI Agents SDK, the Vercel AI SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes and Google ADK, are in [docs/sdk.md](docs/sdk.md). To enforce rather than record, put the gateway between the agent and its tools: `npx @agent-custody/receipts gateway --config gateway.json`, set up in [docs/usage.md](docs/usage.md); between an agent and the agents it delegates to over A2A, `--a2a` serves the gateway as an A2A agent itself. The gateway is listed in the [MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.svayatta/agent-custody`; its entry is [server.json](server.json), published after each npm release by running the `mcp-registry` workflow from the Actions tab (GitHub OIDC, no token).
 
 ## How it fits together
 
@@ -113,7 +117,7 @@ Every receipt names its issuer, and the verifier prints what that issuer kind is
 | --- | --- | --- | --- | --- |
 | any MCP host: Claude Desktop, Claude Code, Cursor, custom | gateway | yes | | a real MCP client and upstream over stdio |
 | Codex CLI (headless) | gateway | yes | | a manual `codex exec` run and offline MCP recovery checks; [guide](docs/codex-recovery.md) |
-| Claude Code | SDK | `hook` command, PreToolUse deny | PostToolUse | the documented hook contract, via stdin |
+| Claude Code | SDK | `hook` command, PreToolUse deny; `init claude-code` sets it up | PostToolUse | the documented hook contract, via stdin; `init` and `report` against a temporary home |
 | Claude Agent SDK | SDK | `claudeAgentHooks` | same | the same handler |
 | OpenAI Agents SDK (JS) | SDK | `wrapTools` | `observeRunner` | a real `Runner` with a scripted model |
 | Vercel AI SDK | SDK | `wrapTools` | | a real `generateText` loop over the SDK's mock model |
@@ -192,7 +196,7 @@ Every field carries a provenance label. This is the design decision that matters
 bun install                              # from the repository root, once for the workspace
 cd packages/receipts
 node scripts/demo.ts                     # gateway: keys, grant, policy, four tool calls, verification, a tampering attempt; then the SDK wrapping the same tool
-node examples/01-keys-and-signing.ts     # first of thirty-four step-by-step examples, see docs/tutorials.md
+node examples/01-keys-and-signing.ts     # first of the step-by-step examples, see docs/tutorials.md
 bun run test                             # this package; `bun run test` at the root runs every package
 ```
 
@@ -243,7 +247,8 @@ If a vendor tells you their receipts prove more than the first five rows, ask th
 ```
 src/config.ts      gateway and SDK config schemas, path resolution
 src/crypto.ts      canonical JSON, sha256, Ed25519 keys, DSSE sign/verify
-src/log.ts         Merkle log: append, root, inclusion and consistency proofs, verify, JSONL persistence
+src/log.ts         Merkle log: append, root, inclusion and consistency proofs, verify, JSONL persistence; a lock file makes an append safe when several processes share one log file, and a partial last line from a killed writer is moved to `<file>.torn`
+src/lock.ts        the one lock file design (owner token, liveness check, rename to break a stale lock) that the local log, prune, and the gateway outbox share
 src/log-check.ts   the outside monitor: verifies the head, checkpoints, witness, and anchor of a running log
 src/portal.ts      the tenant portal: register, first key, usage against plan, keys, Stripe billing, export, member roles, TOTP MFA, single sign-on, on the log's Postgres
 src/sso.ts         enterprise sign-in for the portal: OIDC (code and PKCE, id_token checked against the IdP's key set) and SAML 2.0 (signed assertions only, through @node-saml/node-saml)
@@ -251,6 +256,9 @@ src/log-export.ts  a tenant's export of their own log, self-checked, as a log fi
 src/witness.ts     the witness: countersigns the log's checkpoints from another operator's machine, or refuses with an alarm
 src/anchor.ts      the anchor: commits a Merkle root over new checkpoints to a chain, or refuses with an alarm; checks a record against JSON-RPC
 src/anchor-evm.ts  the anchor's transactions on Ethereum or another EVM chain, through the optional dependency viem
+src/completeness.ts  completeness from the provider's side: the provider's own list, matched against verified receipts
+src/pr-summary.ts  `verify --markdown`: a directory of bundles verified into one Markdown table, for the GitHub Action
+src/export.ts      `export`: verified receipt bundles that keep their values private, copied byte for byte into a directory for a pull request
 src/signer.ts      the signer: the log's key in its own process, the key document verifiers fetch
 src/checkpoints.ts signed heads published on a schedule, to files and to Postgres
 src/log-store.ts   the log server's backends: the file, and Postgres with tenants, hashed tokens, one writer per tenant, rate limits
@@ -276,12 +284,15 @@ src/upstream.ts    attested execution: an upstream signs its result for the rece
 src/capture.ts     private evidence: per-tool capture rules applied by the issuer to the whole statement, withheld values as salted commitments or encrypted under the customer's key, restore and reveal
 vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them
 src/verify.ts      offline verification, the human-readable report, and the audit that a later log extends an earlier one
-src/cli.ts         keygen, grant, gateway, hook, serve, log, prune, verify, reveal, audit, policy simulate
+src/claude-init.ts `init claude-code`: the agent key, the observe-mode config, the starter policy, and the three hooks merged into the settings file with absolute paths
+src/deny-report.ts `report`: verifies the receipts of an SDK config and lists the calls the policy would have denied
+templates/         the starter Cedar policy that `init claude-code` copies (shipped in the package)
+src/cli.ts         keygen, grant, gateway, init, report, hook, serve, log, prune, verify, reveal, audit, policy simulate
 src/retention.ts   pruning the log: leaves become their hashes, bundles are removed, proofs survive
 src/index.ts       the package's public surface; adapters are exported on ./sdk/<framework> subpaths
 tsconfig.build.json  emits dist/ (JavaScript plus declarations) for consumers; the repo itself runs the .ts directly
 scripts/           fake Stripe upstream (signs its results with --key), a second fake upstream, fixture builders for gateway and SDK, the replay builder (`replay.ts`: example 27 and state example 07 as a folder of receipts and public keys anyone can verify with the published packages), demo
-examples/          thirty-four runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
+examples/          runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
 test/              unit tests per module, end-to-end gateway test, SDK and hook tests,
                    adapter tests against the real packages, and a test that runs every policy in docs/policies.md
 docs/              tutorials, usage (gateway), codex-recovery (live demo), approvals, sdk, policies, verification
@@ -293,6 +304,10 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 **Done**
 
+- An incident replay: `node examples/38-incident-replay.ts` plays a Claude Code session against the starter deny set in enforce mode. `terraform destroy` and `rm -rf ~` are denied before they run, and the denial receipts verify offline with the public key only. The site page [An incident replay](../../site/guide/incident-replay.md) shows the output and the limit: a credential in the agent's environment goes around the hook (tutorial 38).
+- One command for Claude Code (issue #204): `agent-custody init claude-code` makes the agent key, writes `sdk.json` in observe mode with no log, writes a starter deny policy, and merges the three hooks into `.claude/settings.local.json` or `~/.claude/settings.json` with absolute paths, safe to run two times. `agent-custody report` verifies the receipts and prints the calls the policy would have denied, with the reason, the rule, and the receipt id; removing the `mode` line enforces. The default local log takes a lock for each append, so hooks that run at the same time keep one log; `--log-url` needs `--log-key`; a second run keeps the pinned log key and warns about log flags it does not apply; `init` warns when git does not ignore the project settings file ([sdk.md](docs/sdk.md#claude-code), tutorial 36).
+- `agent-custody export`: copies the receipt bundles of a session into a directory for a pull request, byte for byte. It verifies each receipt against the issuer key, refuses one that carries plain arguments, results, or facts (unless `--allow-clear`), reads only `<id>.json` at the top level (never `salts/`, `outbox/`, or `*.authorization.json`), and keeps only the receipts issued at or after `--since`; [guide](docs/github-action.md), tutorial 39.
+- A GitHub Action (`action.yml` at the repository root) that runs `verify --markdown` on a directory of receipt bundles, posts one table as a pull request comment that it edits on each push, writes the same table to the job summary, and fails when a receipt does not verify or none exists; [guide](docs/github-action.md). [Issue #205](https://github.com/svayatta/agent-custody/issues/205).
 - Strict mode: `"strict": true` refuses a local log, a log that is not hash-only, and a log without pinned keys; precommits every tool, in observe mode too; and turns the outbox off. No call the agent makes is forwarded before its authorization is in a log the operator does not run, every receipt says `issuer.strict`, and `verify --require-strict` requires it ([usage](docs/usage.md#strict-mode), tutorial 34). [Issue #177](https://github.com/svayatta/agent-custody/issues/177).
 - Policy reload: the gateway re-reads `policy.cedar` whenever it changes and applies it from the next call, with no restart and no dropped session; a policy that does not parse is refused and the one in force stays, and every change or refusal is recorded in `receipts/policy-reloads.jsonl` ([usage](docs/usage.md)).
 - Live Codex support recovery demo: model-selected MCP calls, incorrect CRM memory, a reviewed recovery plan, simulated credit compensation, and verified evidence; [guide](docs/codex-recovery.md), with offline regression coverage.
@@ -338,17 +353,16 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 - The [state review console](../state/README.md#explain-one-action): search receipts by transaction, customer, agent or time, read the ten answers, and hand over a portable HTML/JSON case whose signatures, authorizations and inclusion proofs can be verified offline.
 - A log outage after an ordinary call (issue #149): the signed receipt waits in `receipts/outbox/` and the gateway appends it when the log is back, the agent gets the real outcome marked `log-pending`, `GET /health` counts the pending receipts, and `requirePrecommit` refuses a remote log with an empty `precommit`. The [failure table](docs/usage.md#when-the-log-fails) gives each case.
 - The anchor (issue #176): `agent-custody anchor` proves each new checkpoint extends the last one it anchored, then commits a Merkle root over them in one transaction from its address to itself, on Ethereum by default or on Base, Arbitrum, Optimism, Polygon, or any EVM chain by id (`--chain`), with a fee cap sized per chain. It publishes each log's record and inclusion proof, sends nothing for an idle log, skips a run above a fee cap, and never has two transactions in flight. Every transaction covers every watched log, and a transaction counts only once its block is finalized, following reorgs. `log-check --anchor-url` checks the record against one or more JSON-RPC endpoints, requires the log id the verifier pinned and the address's newest transaction, and checks the log's head against the anchored checkpoint, so a rewritten or rolled-back tree is caught from the chain alone ([anchoring](docs/anchoring.md), example 33).
+- Completeness from the provider's side (issue #178): `agent-custody completeness` lists Stripe's refunds, payouts, or transfers over a window with the auditor's own read-only key, and matches each to a verified receipt by the provider's object id. It reports actions with no receipt, receipts the provider does not have, amount, currency, and beneficiary mismatches, calls forwarded without an outcome receipt, and receipts it cannot match ([completeness](docs/completeness.md), example 35).
 
 **Next, in the order it pays off**
 
 The first three close the gap between a log the operator cannot rewrite and a record the operator cannot shape.
 
 1. Run the anchor for log.agent-custody.dev on mainnet: a funded key held only by the anchor service on the host, its records served beside the checkpoints, its address and each tenant's log id published in the welcome sheet and on the security page, and the monitor checking it. The code is done. [Issue #176](https://github.com/svayatta/agent-custody/issues/176).
-2. Completeness from the provider's side: an auditor's read-only key lists Stripe's refunds, then GitHub's actions, and matches each one to a receipt. That catches what no gateway can see, an action taken outside it. [Issue #178](https://github.com/svayatta/agent-custody/issues/178).
+2. Completeness beyond Stripe: the same check over GitHub's actions, and over on-chain transfers out of an agent's wallet, where the chain itself lists every transfer. [Issue #178](https://github.com/svayatta/agent-custody/issues/178).
 3. A TEE gateway: a confidential container with a reproducible, attested build, the signing key generated and kept in the enclave, TLS ending inside it, and both verifiers checking the path from the receipt key, through the attestation, to the release. It replaces the TEE-hosted signer planned before. [Issue #179](https://github.com/svayatta/agent-custody/issues/179).
 4. Run the witness for log.agent-custody.dev on a machine and under an account that is not ours, and require it in the welcome sheet. The code is done; what it needs is a second operator. [Issue #116](https://github.com/svayatta/agent-custody/issues/116).
 5. Post-quantum signatures: ML-DSA beside Ed25519 in the same DSSE envelope, hybrid by default when a PQ key is present, in every signed artefact and in the browser verifier. [Issue #11](https://github.com/svayatta/agent-custody/issues/11).
 6. Receiver attestation for agent-to-agent calls: the delegate signs its answer for the receipt, as a signing upstream does today.
 7. SD-JWT redaction, then ZK proofs of policy compliance. Not before.
-
-A Python SDK follows the same shape once the TypeScript adapters have settled.
