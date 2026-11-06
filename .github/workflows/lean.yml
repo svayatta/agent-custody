@@ -1,5 +1,5 @@
 # Builds the Lean specification in spec/lean, which checks every proof, and runs the model against the conformance
-# vectors. A proof left as `sorry` fails the job. elan comes from a pinned release, checked by its SHA-256.
+# vectors. A proof left as `sorry`, or resting on an axiom beyond Lean's standard three, fails the job. elan comes from a pinned release, checked by its SHA-256.
 name: lean
 
 on:
@@ -32,5 +32,7 @@ jobs:
       - name: no sorry
         run: |
           if grep -rn --include='*.lean' -w sorry .; then echo "a proof is left as sorry"; exit 1; fi
+      - name: every theorem rests only on propext, Classical.choice and Quot.sound
+        run: ./check-axioms.sh
       - name: the model against the vectors
         run: lake exe vectors

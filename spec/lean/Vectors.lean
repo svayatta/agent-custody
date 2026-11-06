@@ -31,6 +31,16 @@ def sha256Examples : Check Unit := do
     Hex.encode (Sha256.hash "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq".toUTF8) ==
       "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
 
+/--
+A size or an index. The model's are natural numbers; `log.ts` refuses any other number (`Number.isSafeInteger`) before
+its loop, so a vector whose size is not a natural number must expect a refusal.
+-/
+def size (c : Json) (k : String) : IO (Option Nat) := do
+  let v ← field (α := Json) c k
+  match v with
+  | .num _ => pure (v.getNat?.toOption)
+  | _ => throw (IO.userError s!"vector field {k}: not a number")
+
 /-- The hashes of a vector as `log.ts` gets them: hex strings. -/
 def strs (c : Json) (k : String) : IO (List String) := do return (← field c k : Array String).toList
 
@@ -48,12 +58,17 @@ def merkleVectors (j : Json) : Check Unit := do
     expect s!"root of size {n}" (Hex.encode (Log.root (hs.take n)).1 == roots[n]!)
   let cases : Array Json ← field j "inclusion"
   for c in cases do
-    let i : Nat ← field c "leafIndex"
-    let n : Nat ← field c "treeSize"
     let proof ← strs c "hashes"
     let root : String ← field c "root"
     let expected : Bool ← field c "expected"
-    let leaf := (hs.getD i Log.emptyRoot).1
+    let (some i, some n) := (← size c "leafIndex", ← size c "treeSize")
+      | expect s!"inclusion {c.getObjValD "leafIndex"}/{c.getObjValD "treeSize"}: a size that is not a natural number is refused" (!expected)
+    -- a case names its leaf hash when the leaf is not leafHashes[leafIndex]
+    let leaf ← match c.getObjValAs? String "leafHash" with
+      | .ok h => match Hex.decode h with
+        | some b => pure b
+        | none => throw (IO.userError s!"vector leafHash {h}: not hex")
+      | .error _ => pure (hs.getD i Log.emptyRoot).1
     let ok := Log.verifyInclusion leaf i n proof root
     expect s!"inclusion leafIndex {i} treeSize {n}" (ok == expected)
     if expected then
@@ -71,7 +86,7 @@ def merkleVectors (j : Json) : Check Unit := do
       for k in [0:proof.length] do
         expect s!"inclusion {i}/{n}: hash {k} changed is refused" (!Log.verifyInclusion leaf i n (swapHash proof k) root)
       expect s!"inclusion {i}/{n}: uppercase proof hashes are refused" (!Log.verifyInclusion leaf i n (proof.map String.toUpper) root)
-      expect s!"inclusion {i}/{n}: an uppercase root is the same root" (Log.verifyInclusion leaf i n proof root.toUpper)
+      expect s!"inclusion {i}/{n}: an uppercase root is refused" (!Log.verifyInclusion leaf i n proof root.toUpper)
       expect s!"inclusion {i}/{n}: a 31-byte leaf is refused" (!Log.verifyInclusion (leaf.extract 1 32) i n proof root)
 
 def consistencyVectors (j : Json) : Check Unit := do
@@ -79,12 +94,12 @@ def consistencyVectors (j : Json) : Check Unit := do
   let hs := leaves.toList.map (fun l => Log.leafHash l.toUTF8)
   let cases : Array Json ← field j "consistency"
   for c in cases do
-    let m : Nat ← field c "oldSize"
-    let n : Nat ← field c "newSize"
     let oldRoot : String ← field c "oldRoot"
     let newRoot : String ← field c "newRoot"
     let proof ← strs c "hashes"
     let expected : Bool ← field c "expected"
+    let (some m, some n) := (← size c "oldSize", ← size c "newSize")
+      | expect s!"consistency {c.getObjValD "oldSize"} -> {c.getObjValD "newSize"}: a size that is not a natural number is refused" (!expected)
     expect s!"consistency {m} -> {n}" (Log.verifyConsistency m oldRoot n newRoot proof == expected)
     if expected && 0 < m && m < n then
       expect s!"consistencyProof {m} -> {n} is the vector's proof"

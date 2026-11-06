@@ -43,8 +43,8 @@ def digestOf (b : ByteArray) : Option Digest := if h : b.size = 32 then some ⟨
 /-- A proof hash: 64 lowercase hex digits (`HASH_HEX`), as the Python verifier requires. -/
 def hashOfHex (s : String) : Option Digest := if s.length = 64 then Hex.decode s >>= digestOf else none
 
-/-- A root: 64 hex digits in either case (`ROOT_HEX`), compared as bytes. -/
-def rootOfHex (s : String) : Option Digest := hashOfHex (s.map Char.toLower)
+/-- A root: 64 lowercase hex digits, as a signed tree head carries it. The same rule as a proof hash. -/
+def rootOfHex (s : String) : Option Digest := hashOfHex s
 
 /-- `verifyInclusion(leaf, { leafIndex: i, treeSize: n, hashes }, rootHex)` of `log.ts`. -/
 def verifyInclusion (leaf : ByteArray) (i n : Nat) (proof : List String) (rootHex : String) : Bool :=

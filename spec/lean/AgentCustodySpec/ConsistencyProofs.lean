@@ -366,14 +366,14 @@ theorem verifyConsistency_sound [DecidableEq H] (hinj : ∀ a b c d, node a b = 
     (h : verifyConsistency node empty m r0 l.length (mth node empty l) p = true) :
     r0 = mth node empty (l.take m) := by
   unfold verifyConsistency at h
-  by_cases he : m = l.length
-  · subst he
-    simp at h
-    rw [List.take_length]; exact h.2
   by_cases h0 : m = 0
   · subst h0
-    simp only [show ¬ 0 > l.length by omega, he, ite_false, ite_true, Bool.and_eq_true, beq_iff_eq] at h
-    rw [List.take_zero, mth_nil]; exact h.2
+    simp only [show ¬ 0 > l.length by omega, ite_false, ite_true, Bool.and_eq_true, beq_iff_eq] at h
+    rw [List.take_zero, mth_nil]; exact h.1.2
+  by_cases he : m = l.length
+  · subst he
+    simp [h0] at h
+    rw [List.take_length]; exact h.2
   simp only [show ¬ m > l.length by omega, he, h0, ite_false] at h
   rcases p with _ | ⟨p0, ps⟩
   · simp at h

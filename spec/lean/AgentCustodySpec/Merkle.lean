@@ -112,13 +112,13 @@ def consistencyRoots : Nat → Nat → H → H → List H → Option (H × H)
 
 /--
 `verifyConsistency(oldSize, oldRoot, newSize, newRoot, proof)` of `log.ts`. At old size 0 the proof is empty and the old
-root must be the empty tree's root.
+root must be the empty tree's root, and so must the new root when the new size is 0 too.
 -/
 def verifyConsistency [DecidableEq H] (oldSize : Nat) (oldRoot : H) (newSize : Nat) (newRoot : H)
     (proof : List H) : Bool :=
   if oldSize > newSize then false
+  else if oldSize = 0 then proof.isEmpty && oldRoot == empty && (decide (0 < newSize) || newRoot == empty)
   else if oldSize = newSize then proof.isEmpty && oldRoot == newRoot
-  else if oldSize = 0 then proof.isEmpty && oldRoot == empty
   else if proof.isEmpty then false
   else
     -- a power-of-two old size: its root is the first hash, and the proof leaves it out. `log.ts` tests
