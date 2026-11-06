@@ -135,6 +135,9 @@ describe("docs/policies.md examples", () => {
     expect(d(req("customer.lookup", {})).decision).toBe("allow");
     expect(d(req("stripe.refund", { amount: 100000 }, { customer: { verified: true } })).decision).toBe("allow");
     expect(d(req("stripe.refund", { amount: 100001 }, { customer: { verified: true } })).decision).toBe("deny");
+    // a whole number of pence above 0: Rego has floats and negatives, and <= alone admits both
+    for (const amount of [0, -1, 0.5, 99999.5, "500"]) expect(d(req("stripe.refund", { amount }, { customer: { verified: true } })).decision, String(amount)).toBe("deny");
+    expect(d(req("stripe.refund", { amount: 1 }, { customer: { verified: true } })).decision).toBe("allow");
     // a missing attribute is undefined, so the rule does not hold: a deny without an error
     expect(d(req("stripe.refund", {}, { customer: { verified: true } }))).toMatchObject({ decision: "deny", errors: [] });
     // the agent's own claim of verification is not the gateway's fact

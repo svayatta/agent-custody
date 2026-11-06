@@ -13,7 +13,7 @@ import { checkConfig } from "../src/check.ts";
 import { loadConfig, loadSdkConfig, type GatewayConfig } from "../src/config.ts";
 import { loadPublicKey } from "../src/crypto.ts";
 import { createGateway, RECEIPT_META_KEY } from "../src/gateway.ts";
-import { opaDigest } from "../src/opa-server.ts";
+import { opaDigest, opaUrlProblem } from "../src/opa-server.ts";
 import { policyDigest } from "../src/policy.ts";
 import { compileRego, evaluateRego, regoDecision } from "../src/policy-rego.ts";
 import type { ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "../src/receipt.ts";
@@ -206,7 +206,7 @@ describe("Rego in the SDK and in simulation", () => {
 });
 
 /** A stand-in OPA server: answers the Data API as `answer` says, and keeps each request. */
-async function fakeOpa(answer: (input: Record<string, unknown> | undefined, req: IncomingMessage) => { status?: number; body: unknown; delayMs?: number }) {
+async function fakeOpa(answer: (input: Record<string, unknown> | undefined, req: IncomingMessage) => { status?: number; body: unknown; delayMs?: number; location?: string }) {
   const requests: { url: string; authorization?: string; input?: Record<string, unknown> }[] = [];
   const server: Server = createServer(async (req, res) => {
     let raw = "";
@@ -215,7 +215,7 @@ async function fakeOpa(answer: (input: Record<string, unknown> | undefined, req:
     requests.push({ url: req.url ?? "", authorization: req.headers.authorization, input });
     const a = answer(input, req);
     if (a.delayMs) await new Promise((r) => setTimeout(r, a.delayMs));
-    res.writeHead(a.status ?? 200, { "content-type": "application/json" }).end(JSON.stringify(a.body));
+    res.writeHead(a.status ?? 200, { "content-type": "application/json", ...(a.location ? { location: a.location } : {}) }).end(JSON.stringify(a.body));
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   servers.push(server);
@@ -279,15 +279,22 @@ describe("a gateway asking an OPA server", () => {
     const fx = fixture({ opa: { url: opa.url, timeoutMs: 100 } });
     const gw = await quietly(() => createGateway(loadConfig(fx.configFile)));
     try {
-      for (const [m, error] of [["500", /^opa: OPA server answered 500/], ["slow", /^opa: .*(abort|timeout|timed out)/i], ["undefined", /is undefined$/], ["shape", /allow is not a boolean$/]] as const) {
+      const decision = `${opa.url}/v1/data/agentcustody`;
+      // a call the server did not answer is denied under the URL's unanswered digest, never the revision seen before;
+      // an answer outside the contract was still an answer, from a server that reported no revision
+      const unanswered = opaDigest(decision, null);
+      for (const [m, error, digest] of [["500", /^opa: OPA server answered 500/, unanswered], ["slow", /^opa: .*(abort|timeout|timed out)/i, unanswered], ["undefined", /is undefined$/, opaDigest(decision, {})], ["shape", /allow is not a boolean$/, opaDigest(decision, {})]] as const) {
         mode = m;
         const result = await quietly(() => gw.handleCall(refund()));
         expect(result.isError, m).toBe(true);
         const p = await receiptOf(fx, result);
         expect(p.policy!.decision, m).toBe("deny");
         expect((p.policy!.errors as string[])[0], m).toMatch(error);
+        expect(p.policy!.policyDigest, m).toBe(digest);
         expect(p.execution.status, m).toBe("denied");
       }
+      expect(unanswered).not.toBe(opaDigest(decision, { authz: "r" }));
+      expect(reloads(fx).find((r) => r.to === unanswered)).toMatchObject({ event: "opa-provenance", bundles: null, warnings: [expect.stringMatching(/did not answer/)] });
       mode = "ok";
       expect((await receiptOf(fx, await gw.handleCall(refund()))).policy!.decision).toBe("allow");
     } finally {
@@ -314,6 +321,33 @@ describe("a gateway asking an OPA server", () => {
     await expect(createGateway(loadConfig(fixture({ opa: { url: empty.url } }).configFile))).rejects.toThrow(/data\.agentcustody on .* is undefined/);
     const findings = await checkConfig(fixture({ opa: { url: empty.url } }).configFile);
     expect(findings.find((f) => f.check === "policy")).toMatchObject({ level: "error" });
+  });
+
+  it("does not follow a redirect, which would resend the arguments and the token to another host", async () => {
+    const elsewhere = await fakeOpa(() => ({ body: { result: { allow: true } } }));
+    let redirect = false;
+    const opa = await fakeOpa((input) => (redirect ? { status: 307, body: {}, location: `${elsewhere.url}/v1/data/agentcustody?provenance=true` } : { body: { result: fixtureDecision(input) } }));
+    const fx = fixture({ opa: { url: opa.url } });
+    const gw = await quietly(() => createGateway(loadConfig(fx.configFile)));
+    try {
+      redirect = true;
+      const p = await receiptOf(fx, await quietly(() => gw.handleCall(refund())));
+      expect(p.policy).toMatchObject({ decision: "deny", errors: [expect.stringMatching(/redirect \(307\)/)] });
+      expect(elsewhere.requests).toEqual([]);
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("refuses plain http to a host that is not a loopback address, before sending anything", async () => {
+    const fx = fixture({ opa: { url: "http://10.0.0.1:8181" } });
+    await expect(createGateway(loadConfig(fx.configFile))).rejects.toThrow(/is not https or a loopback address/);
+    expect((await checkConfig(fx.configFile)).find((f) => f.check === "policy")).toMatchObject({ level: "error", message: expect.stringMatching(/not https or a loopback/) });
+    expect(opaUrlProblem("https://opa.internal")).toBeNull();
+    expect(opaUrlProblem("http://127.0.0.1:8181")).toBeNull();
+    expect(opaUrlProblem("http://[::1]:8181")).toBeNull();
+    expect(opaUrlProblem("http://localhost:8181")).toBeNull();
+    expect(opaUrlProblem("http://127.0.0.1.evil.example")).not.toBeNull();
   });
 
   it("works against a real OPA server serving the policy as a bundle with a revision", async () => {

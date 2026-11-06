@@ -225,7 +225,8 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   // An OPA server holds the policy itself. Every new provenance it reports is printed and recorded beside file reloads,
   // so each digest a receipt carries maps to the bundle revisions that decided it.
   const opaServer = cfg.opa ? createOpaServerPolicy(cfg.opa, (p) => {
-    const warnings = Object.keys(p.bundles).length ? [] : ["the OPA server reports no bundle revision, so receipts cannot name the policy that decided"];
+    const warnings = p.bundles === null ? ["the OPA server did not answer: the calls it left undecided are denied under this digest"]
+      : Object.keys(p.bundles).length ? [] : ["the OPA server reports no bundle revision, so receipts cannot name the policy that decided"];
     console.error(`agent-custody gateway: OPA policy ${p.digest} at ${p.decision}: ${JSON.stringify(p.bundles)}${warnings.length ? `; WARNING: ${warnings.join("; ")}` : ""}`);
     recordReload({ event: "opa-provenance", to: p.digest, decision: p.decision, bundles: p.bundles, ...(warnings.length ? { warnings } : {}) });
   }) : undefined;

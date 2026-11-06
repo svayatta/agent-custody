@@ -200,10 +200,14 @@ package agentcustody
 # Reads of customer records are permitted to any agent holding the scope.
 allow if input.action == "customer.lookup"
 
-# Refunds: at most £1,000 (100000 pence) and only for customers the gateway itself verified.
+# Refunds: a whole number of pence from 1 to 100000 (£1,000), and only for customers the gateway itself verified.
 allow if {
 	input.action == "stripe.refund"
-	input.context.args.amount <= 100000
+	amount := input.context.args.amount
+	is_number(amount)
+	amount == floor(amount)
+	amount > 0
+	amount <= 100000
 	input.context.facts.customer.verified == true
 }
 
@@ -213,7 +217,7 @@ deny contains "this customer is flagged for review" if {
 }
 ```
 
-A missing attribute is *undefined* in Rego, not an error: `input.context.args.amount <= 100000` does not hold when there is no `amount`, so the call is denied. That is the same outcome as Cedar's error, reached a different way. Rego has floats, which Cedar does not; amounts should still be integer minor units, because a fact or argument that is an integer under one engine should be one under the other.
+A missing attribute is *undefined* in Rego, not an error: the rule does not hold when there is no `amount`, so the call is denied. That is the same outcome as Cedar's error, reached a different way. Rego has floats, which Cedar does not, so `amount <= 100000` alone would hold for `0.5`, and for `0` and `-1` as well. Amounts are integer minor units: `amount == floor(amount)` holds only for a whole number, and `amount > 0` sets the floor.
 
 ### A Rego file, or an OPA server
 
@@ -221,15 +225,15 @@ A missing attribute is *undefined* in Rego, not an error: `input.context.args.am
 | --- | --- | --- |
 | where the policy lives | a file beside `gateway.json`, as with Cedar | in the bundles of an OPA server your platform team runs |
 | how it is evaluated | compiled to WebAssembly by `opa build` when the file loads or changes, then evaluated inside the gateway | an HTTP query to the server's Data API for every call |
-| what it needs | the `opa` binary on `PATH` when the policy loads, never on a call. The gateway image includes it | a reachable server. A call it cannot answer within `timeoutMs` (default 2000) is denied |
-| what `policyDigest` in a receipt is | the sha256 of the file's text, as for Cedar. The portal can name it, and anyone with the file can check it | the sha256 of the decision URL and the revision of every bundle the server reports. Map it back with `receipts/policy-reloads.jsonl` |
+| what it needs | the `opa` binary on `PATH` when the policy loads, never on a call. The gateway image includes it | a reachable server at an `https` URL, or `http` on a loopback address. A call it cannot answer within `timeoutMs` (default 2000) is denied |
+| what `policyDigest` in a receipt is | the sha256 of the file's text, as for Cedar. The portal can name it, and anyone with the file can check it | the sha256 of the decision URL and the revision of every bundle the server reports. Map it back with `receipts/policy-reloads.jsonl`. A call the server did not answer is denied under the URL's own "unanswered" digest, never under a revision that did not decide it |
 | changing the policy | write the file by rename. It applies from the next call, and a file that does not compile is refused while the policy in force stays | publish a new bundle revision. The first call under it records the new digest |
 | builtins | those the WebAssembly runtime supports. `http.send`, `time.now_ns`, and other builtins it cannot run are refused when the file loads | everything the server allows, including `http.send` |
 | best for | a gateway that should decide on its own, with the policy text pinned in every receipt | an organisation that already governs policy centrally in OPA and wants agents under the same bundles |
 
 **What a receipt can prove differs.** With a file, the receipt pins the exact text that decided, so a verifier holding the file can show it was this policy. With a server, the receipt pins only what the server *said* it was running: the bundle revisions in its `provenance` answer. The gateway asks for provenance on every query, records each new combination in `policy-reloads.jsonl` with the bundle names and revisions, and prints it. Serve the policy from a bundle built with `opa build --revision <id>`, so the revision names a version you can find again. A server that reports no revision still works, but the gateway warns at start and on each new answer that its receipts cannot name the policy. `agent-custody check` warns about it as well.
 
-**A server outside the policy also decides.** A Rego file is evaluated where the gateway runs, under the operator's control. An OPA server's answer is trusted as it comes back over HTTP. Run it where only your platform team can change it, use TLS when it is not on localhost, and give the gateway a token with `tokenEnv` when the server requires one. The gateway refuses to start when it cannot reach the server, or when the server does not define the package.
+**A server outside the policy also decides.** A Rego file is evaluated where the gateway runs, under the operator's control. An OPA server's answer is trusted as it comes back over HTTP. Run it where only your platform team can change it, and give the gateway a token with `tokenEnv` when the server requires one. Each query carries the call's arguments and that token, so the gateway refuses a plain `http` URL unless the host is a loopback address, and it never follows a redirect: a 3xx answer denies the call. The gateway refuses to start when it cannot reach the server, or when the server does not define the package.
 
 A gateway config with an OPA server:
 

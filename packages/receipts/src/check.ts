@@ -125,7 +125,7 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   if (cfg.opa) {
     let bundles: Record<string, string> = {};
     try {
-      await createOpaServerPolicy(cfg.opa, (p) => { bundles = p.bundles; }).probe();
+      await createOpaServerPolicy(cfg.opa, (p) => { if (p.bundles) bundles = p.bundles; }).probe();
       add("ok", "policy", `the OPA server at ${cfg.opa.url} answers for data.${(cfg.opa.decision ?? "agentcustody").replaceAll("/", ".")}`);
       if (!Object.keys(bundles).length) add("warn", "policy", "the OPA server reports no bundle revision, so receipts cannot name the policy that decided; serve the policy from a bundle with a revision");
     } catch (e) {
