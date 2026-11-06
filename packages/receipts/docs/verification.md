@@ -69,6 +69,10 @@ execution       observed    executed
 
 A refused call's `execution` row carries the reason the receipt records, for example `denied: delegation grant has been revoked`, and so does a `withheld` one. Under a capture rule the reason is a commitment, and the row says `(reason withheld under the capture rule)` rather than printing it.
 
+## A directory of receipts, as a Markdown table
+
+`verify --markdown <dir> --issuer-key <pub>` verifies every bundle in a directory and prints one table: the receipt id, the tool, the status (`executed`, `denied`, `failed`, `error`, `withheld`), and `verified` or the names of the failed checks. It takes the same key and log options as `verify`. It reads regular `.json` files only, not symbolic links in the directory; it follows a link that is itself the file argument or the directory argument, and the table shows only fixed error text or verified fields. It does not combine with `--json` or `--disclose`. The exit code is 1 when one receipt does not verify and when the directory holds no receipt. The [GitHub Action](github-action.md) posts this table on a pull request. A receipt that goes into a repository publishes its arguments and result unless a capture rule withholds them; that page says how to commit private receipts.
+
 ## What each check means
 
 | check | what it establishes | what a failure usually means |
@@ -228,5 +232,5 @@ Receipts hold values: request arguments, results, facts. The log is append-only 
 node src/cli.ts prune --log log.jsonl --before 2026-06-01T00:00:00Z --receipts receipts
 ```
 
-Every leaf whose receipt is older than the cutoff is replaced in the file by its leaf hash, and the receipt's bundle file is deleted. The Merkle tree is built from leaf hashes, so every root, every inclusion proof, and every consistency proof for the remaining leaves is unchanged, and `--log` verification of later receipts still passes. Someone who kept a pruned receipt's bundle can still prove it was in the log; nobody holding only the log can recover what it said. Run it on the same schedule as memory retention.
+Every leaf whose receipt is older than the cutoff is replaced in the file by its leaf hash, and the receipt's bundle file is deleted. The Merkle tree is built from leaf hashes, so every root, every inclusion proof, and every consistency proof for the remaining leaves is unchanged, and `--log` verification of later receipts still passes. Someone who kept a pruned receipt's bundle can still prove it was in the log; nobody holding only the log can recover what it said. `prune` holds the log lock (`<log>.lock`) while it rewrites the file, so a process that appends at the same time waits, and its leaf is kept. `prune` waits up to 20 seconds for the lock. Run it on the same schedule as memory retention.
 
