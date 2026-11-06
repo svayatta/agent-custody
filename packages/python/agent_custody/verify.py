@@ -238,8 +238,16 @@ def tree_root(leaf_hashes: list[bytes]) -> bytes:
     return node_hash(tree_root(leaf_hashes[:k]), tree_root(leaf_hashes[k:]))
 
 
+def _digests(*values: Any) -> bool:
+    """Every value is 32 bytes. With children of other widths, sha256(0x01 || left || right) no longer fixes where one
+    child ends and the other begins, so a 16-byte leaf and a 48-byte sibling hash like the real 32-byte children."""
+    return all(isinstance(v, (bytes, bytearray)) and len(v) == 32 for v in values)
+
+
 def root_from_inclusion(index: int, size: int, leaf: bytes, proof: list[bytes]) -> Optional[bytes]:
     if not (_is_size(index) and _is_size(size)) or not 0 <= index < size:
+        return None
+    if not isinstance(proof, list) or not _digests(leaf, *proof):
         return None
     fn, sn, r = index, size - 1, leaf
     for p in proof:
@@ -259,6 +267,8 @@ def root_from_inclusion(index: int, size: int, leaf: bytes, proof: list[bytes]) 
 
 def verify_consistency(old_size: int, new_size: int, old_root: bytes, new_root: bytes, proof: list[bytes]) -> bool:
     if not (_is_size(old_size) and _is_size(new_size)) or old_size > new_size:
+        return False
+    if not isinstance(proof, list) or not _digests(old_root, new_root, *proof):
         return False
     # the empty tree has one root, sha256 of nothing; any other root at size 0, old or new, is a head no log could have signed
     empty = hashlib.sha256(b"").digest()

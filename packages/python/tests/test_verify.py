@@ -126,6 +126,22 @@ def test_merkle_consistency(case):
     assert ok is case["expected"]
 
 
+def test_proof_checks_read_only_32_byte_hashes():
+    # sha256(0x01 || n01 || n23) is the root of four leaves; split as 16 bytes || 48 bytes it "proves" a 16-byte leaf
+    hashes = [v.leaf_hash(f"leaf-{i}".encode()) for i in range(4)]
+    n01, n23 = v.tree_root(hashes[:2]), v.tree_root(hashes[2:])
+    root4 = v.tree_root(hashes)
+    assert v.node_hash(n01[:16], n01[16:] + n23) == root4
+    assert v.root_from_inclusion(0, 2, n01[:16], [n01[16:] + n23]) is None
+    assert v.root_from_inclusion(0, 2, n01, [n23]) == root4
+    # the same widths in a consistency check, and roots that are not 32 bytes
+    proof = [n23]
+    assert v.verify_consistency(2, 4, n01, root4, proof) is True
+    assert v.verify_consistency(2, 4, n01, root4, [n23 + b"\x00"]) is False
+    assert v.verify_consistency(2, 4, n01[:31], root4, proof) is False
+    assert v.verify_consistency(0, 0, b"", b"", []) is False
+
+
 def test_cli_verifies_a_bundle_and_exits_nonzero_on_a_forgery(tmp_path, capsys):
     case = next(c for c in RECEIPTS["cases"] if c["name"] == "gateway-executed")
     (tmp_path / "bundle.json").write_text(json.dumps(case["bundle"]))
