@@ -11,12 +11,12 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { checkDoorConfig, isDoorConfig } from "../src/check.ts";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey, sha256Hex } from "../src/crypto.ts";
 import { createDelegation } from "../src/delegation.ts";
-import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, createRateTracker, matchRoute, normalizePath, remoteOf, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
+import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, createRateTracker, matchRoute, RATE_MINUTE_MS, normalizePath, remoteOf, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
@@ -79,6 +79,43 @@ describe("rate", () => {
     expect(tracker.hit("remote:1.2.3.4")).toEqual({ burst: 2, minute: 3 });
     t += 55_000;
     expect(tracker.hit("remote:1.2.3.4")).toEqual({ burst: 1, minute: 2 });
+    tracker.close();
+  });
+
+  it("bounds itself: a client choosing a new key on every request cannot grow the map, nor make a key of any length", () => {
+    const t = 1_000_000;
+    const tracker = createRateTracker(() => t, { maxSources: 3, maxKeyLength: 16 });
+    try {
+      for (let i = 0; i < 100; i++) tracker.hit(`remote:10.0.0.${i}`);
+      expect(tracker.size()).toBe(3);
+      // the least recently seen go first: a source still arriving keeps its count
+      tracker.hit("remote:keep");
+      tracker.hit("remote:a");
+      tracker.hit("remote:b");
+      expect(tracker.hit("remote:keep")).toEqual({ burst: 2, minute: 2 });
+      tracker.hit("remote:c");
+      expect(tracker.hit("remote:keep")).toEqual({ burst: 3, minute: 3 });
+      // a key past the length limit is kept as its digest, and still counts as one source
+      const long = `remote:${"x".repeat(10_000)}`;
+      tracker.hit(long);
+      expect(tracker.hit(long)).toEqual({ burst: 2, minute: 2 });
+    } finally {
+      tracker.close();
+    }
+  });
+
+  it("drops a source with no arrival in the last minute even when no more traffic comes", () => {
+    vi.useFakeTimers();
+    try {
+      const tracker = createRateTracker(() => Date.now());
+      for (let i = 0; i < 50; i++) tracker.hit(`remote:10.0.1.${i}`);
+      expect(tracker.size()).toBe(50);
+      vi.advanceTimersByTime(2 * RATE_MINUTE_MS);
+      expect(tracker.size()).toBe(0);
+      tracker.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
