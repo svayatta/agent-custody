@@ -47,6 +47,72 @@ export interface Arrival {
   method: string;
   path: string;
   route: string;
+  /** how often this source has arrived lately, counted by this door process; set by the door, absent from `classifyArrival` alone */
+  rate?: ArrivalRate;
+}
+
+/**
+ * Arrivals from one source in the last 10 seconds (`burst`) and 60 seconds (`minute`), this one included, whatever the
+ * policy decided about them. The source is the agent a verified grant names, else the arrival's address. One process's
+ * memory: the count starts at one when the door starts, and two doors do not share it.
+ */
+export interface ArrivalRate {
+  by: "agent" | "remote";
+  burst: number;
+  minute: number;
+}
+
+export const RATE_BURST_MS = 10_000;
+export const RATE_MINUTE_MS = 60_000;
+
+export interface RateTrackerLimits {
+  /** sources kept at once; past this the least recently seen is forgotten. Default 10000 */
+  maxSources?: number;
+  /** a source key longer than this is kept as its sha256. Default 256 */
+  maxKeyLength?: number;
+}
+
+export interface RateTracker {
+  hit(source: string): { burst: number; minute: number };
+  /** sources kept now */
+  size(): number;
+  /** stops the sweep */
+  close(): void;
+}
+
+/**
+ * Counts arrivals per source over the two windows. The source key comes from the arrival, and with `trustProxy` the
+ * client may choose it, so the map bounds itself: at most `maxSources` keys, none longer than `maxKeyLength`, and a
+ * source with no arrival in the last minute is dropped every minute whether or not traffic goes on. A source forgotten
+ * early counts again from 1, which only lowers what a pace rule sees for a client that floods the map. `now` is for tests.
+ */
+export function createRateTracker(now: () => number = Date.now, limits: RateTrackerLimits = {}): RateTracker {
+  const maxSources = limits.maxSources ?? 10_000;
+  const maxKeyLength = limits.maxKeyLength ?? 256;
+  // least recently seen first: a hit moves its key to the end
+  const seen = new Map<string, number[]>();
+  const sweep = () => {
+    const cutoff = now() - RATE_MINUTE_MS;
+    for (const [k, v] of seen) if (v[v.length - 1]! <= cutoff) seen.delete(k);
+  };
+  const timer = setInterval(sweep, RATE_MINUTE_MS);
+  timer.unref();
+  return {
+    hit(source) {
+      const key = source.length > maxKeyLength ? `sha256:${sha256Hex(source)}` : source;
+      const t = now();
+      const cutoff = t - RATE_MINUTE_MS;
+      const times = (seen.get(key) ?? []).filter((x) => x > cutoff);
+      times.push(t);
+      seen.delete(key);
+      seen.set(key, times);
+      if (seen.size > maxSources) sweep();
+      while (seen.size > maxSources) seen.delete(seen.keys().next().value!);
+      return { burst: times.filter((x) => x > t - RATE_BURST_MS).length, minute: times.length };
+    },
+    size: () => seen.size,
+    close: () => clearInterval(timer),
+  };
 }
 
 export interface Classified {
@@ -234,6 +300,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   const issuer = createIssuer(key, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
   const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework: "http" };
   const precommit = new Set(cfg.precommit);
+  const rates = createRateTracker();
 
   // The policy, re-read when the file changes, as the gateway does; a file that does not parse is refused and the
   // policy in force stays. The bytes and the metadata come from one open file.
@@ -281,6 +348,8 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     const path = "path" in norm ? norm.path : url.pathname;
     const route = "path" in norm ? matchRoute(cfg.routes, cfg.unmatchedRoute, method, path) : cfg.unmatchedRoute;
     const { arrival, delegation } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp);
+    const by = delegation ? "agent" : "remote";
+    arrival.rate = { by, ...rates.hit(`${by}:${delegation ? arrival.subject : arrival.remote}`) };
     const { text: policyText, digest: pDigest } = currentPolicy();
 
     const read = await readBody(req, cfg.maxBodyBytes);
@@ -474,6 +543,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     pendingReceipts: () => issuer.pending(),
     async close() {
       if (timer) clearInterval(timer);
+      rates.close();
     },
   };
 }
