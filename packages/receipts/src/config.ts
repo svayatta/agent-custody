@@ -271,7 +271,13 @@ export const DoorConfigSchema = z.object({
     secretEnv: z.string().min(1),
     header: z.string().min(1).default("x-agent-custody-challenge"),
     timeoutMs: z.number().int().positive().default(5_000),
-  }).optional(),
+    /** the hostnames of the pages that render the widget; a token the provider issued on any other host fails */
+    hostnames: z.array(z.string().min(1).transform((h) => h.toLowerCase())).min(1),
+    /** the widget's action (Turnstile only); when set, a token issued for another action fails */
+    action: z.string().min(1).optional(),
+    /** checks with the provider at once; an arrival past this is `unavailable`, never relayed on a pass it did not get. Default 64 */
+    maxInFlight: z.number().int().positive().default(64),
+  }).refine((c) => !c.action || c.provider === "turnstile", { message: "challenge.action is a Turnstile field; hCaptcha does not report an action" }).optional(),
   receiptsDir: z.string(),
   logFile: z.string().optional(),
   log: LogSchema.optional(),

@@ -67,15 +67,38 @@ export interface ArrivalChallenge {
 
 const CHALLENGE_VERIFY_URL = { turnstile: "https://challenges.cloudflare.com/turnstile/v0/siteverify", hcaptcha: "https://api.hcaptcha.com/siteverify" } as const;
 
-/** Asks the provider whether the token is good. The token and the secret go to the provider only; neither is recorded. */
-export async function verifyChallengeToken(provider: "turnstile" | "hcaptcha", secret: string, token: string, remote: string, f: typeof fetch, timeoutMs: number): Promise<ArrivalChallenge> {
-  const body = new URLSearchParams({ secret, response: token, remoteip: remote });
+export interface ChallengeCheck {
+  provider: "turnstile" | "hcaptcha";
+  secret: string;
+  token: string;
+  /** the client's address, sent as `remoteip` only when the door knows it is the client's and not a proxy's */
+  remoteIp?: string;
+  /** the hostnames of the pages that render the widget, lowercase */
+  hostnames: string[];
+  /** the widget's action, when one is required (Turnstile) */
+  action?: string;
+  timeoutMs: number;
+}
+
+/**
+ * Asks the provider whether the token is good. The token and the secret go to the provider only; neither is recorded,
+ * and a redirect is never followed, since it would resend both to the Location's host. `success` is not enough: the
+ * token must have been issued on one of the site's own hostnames, and for the configured action, or a token solved on
+ * another site with this site key, or for another widget, would pass.
+ */
+export async function verifyChallengeToken(check: ChallengeCheck, f: typeof fetch): Promise<ArrivalChallenge> {
+  const { provider } = check;
+  const body = new URLSearchParams({ secret: check.secret, response: check.token, ...(check.remoteIp ? { remoteip: check.remoteIp } : {}) });
   try {
-    const res = await f(CHALLENGE_VERIFY_URL[provider], { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body, signal: AbortSignal.timeout(timeoutMs) });
+    const res = await f(CHALLENGE_VERIFY_URL[provider], { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body, redirect: "manual", signal: AbortSignal.timeout(check.timeoutMs) });
+    if (res.status >= 300 && res.status < 400) return { provider, outcome: "unavailable", error: `the provider answered a redirect (${res.status}); the secret is not resent` };
     if (!res.ok) return { provider, outcome: "unavailable", error: `the provider answered ${res.status}` };
-    const answer = (await res.json()) as { success?: boolean; "error-codes"?: string[] };
-    if (answer.success === true) return { provider, outcome: "passed" };
-    return { provider, outcome: "failed", error: (answer["error-codes"] ?? []).join(", ") || "the provider refused the token" };
+    const answer = (await res.json()) as { success?: boolean; "error-codes"?: string[]; hostname?: unknown; action?: unknown };
+    if (answer.success !== true) return { provider, outcome: "failed", error: (answer["error-codes"] ?? []).join(", ") || "the provider refused the token" };
+    const host = typeof answer.hostname === "string" ? answer.hostname.toLowerCase() : undefined;
+    if (!host || !check.hostnames.includes(host)) return { provider, outcome: "failed", error: `the token was issued on ${host ?? "no hostname"}, not a hostname this door serves` };
+    if (check.action !== undefined && answer.action !== check.action) return { provider, outcome: "failed", error: `the token was issued for action ${typeof answer.action === "string" ? answer.action : "(none)"}, not ${check.action}` };
+    return { provider, outcome: "passed" };
   } catch (e) {
     return { provider, outcome: "unavailable", error: e instanceof Error ? e.message : String(e) };
   }
@@ -329,6 +352,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   const challengeSecret = cfg.challenge ? process.env[cfg.challenge.secretEnv] : undefined;
   if (cfg.challenge && !challengeSecret) throw new Error(`challenge: environment variable ${cfg.challenge.secretEnv} is not set`);
   const challengeHeader = cfg.challenge?.header.toLowerCase();
+  let challengesInFlight = 0;
   const sink = options.log ?? openLog(cfg, key);
   const issuer = createIssuer(key, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
   const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework: "http" };
@@ -384,10 +408,20 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     const by = delegation ? "agent" : "remote";
     arrival.rate = { by, ...rates.hit(`${by}:${delegation ? arrival.subject : arrival.remote}`) };
     if (cfg.challenge && challengeHeader) {
+      const c = cfg.challenge;
       const token = req.headers[challengeHeader];
-      arrival.challenge = typeof token === "string" && token.trim()
-        ? await verifyChallengeToken(cfg.challenge.provider, challengeSecret!, token.trim(), arrival.remote, f, cfg.challenge.timeoutMs)
-        : { provider: cfg.challenge.provider, outcome: "absent" };
+      if (typeof token !== "string" || !token.trim()) arrival.challenge = { provider: c.provider, outcome: "absent" };
+      // every arrival with a token waits on the provider, so the checks at once are bounded; past that, unavailable
+      else if (challengesInFlight >= c.maxInFlight) arrival.challenge = { provider: c.provider, outcome: "unavailable", error: `${c.maxInFlight} challenge checks are already waiting on the provider` };
+      else {
+        challengesInFlight++;
+        try {
+          // without trustProxy the socket's address may be a proxy's, and the provider would refuse the client's token on it
+          arrival.challenge = await verifyChallengeToken({ provider: c.provider, secret: challengeSecret!, token: token.trim(), ...(cfg.trustProxy ? { remoteIp: arrival.remote } : {}), hostnames: c.hostnames, ...(c.action ? { action: c.action } : {}), timeoutMs: c.timeoutMs }, f);
+        } finally {
+          challengesInFlight--;
+        }
+      }
     }
     const { text: policyText, digest: pDigest } = currentPolicy();
 

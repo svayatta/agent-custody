@@ -20,7 +20,7 @@ A reverse proxy in front of your own website, API, or forms. Where the [gateway]
   "policyFile": "policy.cedar",
   "mode": "enforce",
   "trustProxy": false,
-  "challenge": { "provider": "turnstile", "siteKey": "0x4AAA...", "secretEnv": "TURNSTILE_SECRET" },
+  "challenge": { "provider": "turnstile", "siteKey": "0x4AAA...", "secretEnv": "TURNSTILE_SECRET", "hostnames": ["shop.example"] },
   "maxBodyBytes": 10485760,
   "receiptsDir": "receipts",
   "logFile": "log.jsonl"
@@ -40,7 +40,7 @@ A reverse proxy in front of your own website, API, or forms. Where the [gateway]
 | `mode` | `enforce` (default) or `observe` | observe relays everything and records `enforced: false` |
 | `trustProxy` | boolean, optional | one trusted proxy in front: the arrival's address is the last in `X-Forwarded-For`; the proxy's `X-Forwarded-*` are kept on the relay |
 | `maxBodyBytes` | integer, default 10 MiB | a larger request body the policy allowed is refused with 413 and receipted as `withheld`; one the policy refuses is `denied` as any other |
-| `challenge` | `{ provider, siteKey, secretEnv, header?, timeoutMs? }`, optional | `provider`: `turnstile` or `hcaptcha`. A token in `header` (default `x-agent-custody-challenge`) is posted with the secret from `secretEnv` and the arrival's address to the provider's `siteverify`, within `timeoutMs` (default 5000), and the answer is the arrival's `challenge` signal. The secret is read at startup; missing is a startup error. The token is stripped before relay and never recorded |
+| `challenge` | `{ provider, siteKey, secretEnv, hostnames, action?, header?, timeoutMs?, maxInFlight? }`, optional | `provider`: `turnstile` or `hcaptcha`. A token in `header` (default `x-agent-custody-challenge`) is posted with the secret from `secretEnv` to the provider's `siteverify`, with the arrival's address as `remoteip` only under `trustProxy`, within `timeoutMs` (default 5000), never following a redirect, and the answer is the arrival's `challenge` signal. It passes only when the provider confirms it and reports one of `hostnames` (required) and, when set, `action` (Turnstile only). At most `maxInFlight` (default 64) checks wait at once; past that the outcome is `unavailable`. The secret is read at startup; missing is a startup error. The token is stripped before relay and never recorded |
 | `precommit` | strings, default `[]` | route names whose arrivals are committed to the log before they are relayed whatever their method, or `["*"]`. Every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless |
 | `receiptsDir`, `logFile` or `log`, `otel`, `splunk`, `capture`, `captureKeyEnv` | | as for the [gateway](./gateway#the-config-file). Capture rules are keyed by route name. A remote `log` needs `log.keys` |
 
@@ -53,7 +53,7 @@ agent-custody door --config door.json [--port 8780] [--host 127.0.0.1]
 
 Plain HTTP; bind to loopback or put TLS in front. `check` on a door config reports unknown keys, the key, the principal keys, the policy (and warns on a permit that names an agent without requiring `context.facts.arrival.class == "verified"`), the routes, what is precommitted, the challenge provider or its absence, the origin's scheme, every credential variable the door reads at startup (origin headers, log, Splunk, OTel, capture key, challenge secret), and the paths; exit 1 on an error.
 
-In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `normalizePath(pathname)`, `matchRoute(routes, unmatched, method, path)`, `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` (which leaves `rate` unset), `createRateTracker(now?, { maxSources?, maxKeyLength? })`, which returns `{ hit(source), size(), close() }`, keeps at most `maxSources` (10000) sources, keeps a key longer than `maxKeyLength` (256) as its sha256, and drops stale sources every minute, and `verifyChallengeToken(provider, secret, token, remote, fetch, timeoutMs)` are exported for embedding the door in a server of your own.
+In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `normalizePath(pathname)`, `matchRoute(routes, unmatched, method, path)`, `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` (which leaves `rate` unset), `createRateTracker(now?, { maxSources?, maxKeyLength? })`, which returns `{ hit(source), size(), close() }`, keeps at most `maxSources` (10000) sources, keeps a key longer than `maxKeyLength` (256) as its sha256, and drops stale sources every minute, and `verifyChallengeToken({ provider, secret, token, remoteIp?, hostnames, action?, timeoutMs }, fetch)` are exported for embedding the door in a server of your own.
 
 ## What an arrival presents
 
