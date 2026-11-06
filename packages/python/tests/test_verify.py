@@ -106,16 +106,23 @@ def test_merkle_leaf_hashes_and_roots():
         assert v.tree_root(hashes[:size]).hex() == root
 
 
+def _hex32(value):
+    """A hash as a tree head or proof carries it: 64 lowercase hex digits, read as the bundle verifier reads them."""
+    return bytes.fromhex(value) if isinstance(value, str) and v.HEX64.fullmatch(value) else None
+
+
 @pytest.mark.parametrize("case", MERKLE["inclusion"], ids=lambda c: f"{c['leafIndex']}-of-{c['treeSize']}")
 def test_merkle_inclusion(case):
-    leaf = bytes.fromhex(MERKLE["leafHashes"][case["leafIndex"]])
-    root = v.root_from_inclusion(case["leafIndex"], case["treeSize"], leaf, [bytes.fromhex(h) for h in case["hashes"]])
-    assert (root is not None and root.hex() == case["root"]) is case["expected"]
+    leaf = bytes.fromhex(case["leafHash"] if "leafHash" in case else MERKLE["leafHashes"][case["leafIndex"]])
+    hashes = v._hashes(case["hashes"])
+    root = None if hashes is None else v.root_from_inclusion(case["leafIndex"], case["treeSize"], leaf, hashes)
+    assert (root is not None and _hex32(case["root"]) == root) is case["expected"]
 
 
 @pytest.mark.parametrize("case", MERKLE["consistency"], ids=lambda c: f"{c['oldSize']}-to-{c['newSize']}")
 def test_merkle_consistency(case):
-    ok = v.verify_consistency(case["oldSize"], case["newSize"], bytes.fromhex(case["oldRoot"]), bytes.fromhex(case["newRoot"]), [bytes.fromhex(h) for h in case["hashes"]])
+    old_root, new_root, hashes = _hex32(case["oldRoot"]), _hex32(case["newRoot"]), v._hashes(case["hashes"])
+    ok = None not in (old_root, new_root, hashes) and v.verify_consistency(case["oldSize"], case["newSize"], old_root, new_root, hashes)
     assert ok is case["expected"]
 
 

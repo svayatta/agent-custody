@@ -23,11 +23,14 @@ export function leafHash(data: string): Buffer {
 
 const nodeHash = (l: Buffer, r: Buffer) => h(Buffer.from([0x01]), l, r);
 
-// Every hash a proof check reads is 32 bytes. A proof hash is 64 lowercase hex digits, as the Python verifier requires;
-// a root is compared as bytes, so either case names it. Checked before the loop: with children of other widths,
-// sha256(0x01 || left || right) no longer fixes where one child ends and the other begins.
+// Every hash a proof check reads is 32 bytes: a proof hash and a root are each a string of 64 lowercase hex digits, as
+// the Python verifier requires. Checked before the loop: with children of other widths, sha256(0x01 || left || right)
+// no longer fixes where one child ends and the other begins.
 const HASH_HEX = /^[0-9a-f]{64}$/;
-const ROOT_HEX = /^[0-9a-f]{64}$/i;
+const isHash = (x: unknown): x is string => typeof x === "string" && HASH_HEX.test(x);
+const EMPTY_ROOT = createHash("sha256").digest("hex");
+// Sizes and indices are integers. The loops halve them with Math.floor, so a fraction such as 6.5 can walk a real path.
+const isSize = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
 
 /** largest power of two strictly less than n (n >= 2) */
 function split(n: number): number {
@@ -91,16 +94,14 @@ export function consistencyProof(leafHashes: Buffer[], oldSize: number, newSize 
 
 /** RFC 9162 section 2.1.4.2. Pure: needs only the two sizes, the two roots, and the proof. */
 export function verifyConsistency(oldSize: number, oldRoot: string, newSize: number, newRoot: string, proofHex: string[]): boolean {
-  if (oldSize < 0 || oldSize > newSize) return false;
-  if (!ROOT_HEX.test(oldRoot) || !ROOT_HEX.test(newRoot) || !proofHex.every((x) => HASH_HEX.test(x))) return false;
-  const oldRootHex = oldRoot.toLowerCase();
-  const newRootHex = newRoot.toLowerCase();
-  if (oldSize === newSize) return proofHex.length === 0 && oldRootHex === newRootHex;
-  // the empty tree has one root, sha256 of nothing; any other old root at size 0 is a head no log could have signed
-  if (oldSize === 0) return proofHex.length === 0 && oldRootHex === createHash("sha256").digest("hex");
+  if (!isSize(oldSize) || !isSize(newSize) || oldSize > newSize) return false;
+  if (!isHash(oldRoot) || !isHash(newRoot) || !Array.isArray(proofHex) || !proofHex.every(isHash)) return false;
+  // the empty tree has one root, sha256 of nothing; any other root at size 0, old or new, is a head no log could have signed
+  if (oldSize === 0) return proofHex.length === 0 && oldRoot === EMPTY_ROOT && (newSize > 0 || newRoot === EMPTY_ROOT);
+  if (oldSize === newSize) return proofHex.length === 0 && oldRoot === newRoot;
   if (proofHex.length === 0) return false;
   const proof = proofHex.map((x) => Buffer.from(x, "hex"));
-  if ((oldSize & (oldSize - 1)) === 0) proof.unshift(Buffer.from(oldRootHex, "hex"));
+  if ((oldSize & (oldSize - 1)) === 0) proof.unshift(Buffer.from(oldRoot, "hex"));
   let fn = oldSize - 1;
   let sn = newSize - 1;
   while (fn % 2 === 1) {
@@ -124,7 +125,7 @@ export function verifyConsistency(oldSize: number, oldRoot: string, newSize: num
     fn = Math.floor(fn / 2);
     sn = Math.floor(sn / 2);
   }
-  return sn === 0 && fr.toString("hex") === oldRootHex && sr.toString("hex") === newRootHex;
+  return sn === 0 && fr.toString("hex") === oldRoot && sr.toString("hex") === newRoot;
 }
 
 export function rootOf(leafHashes: Buffer[], size = leafHashes.length): string {
@@ -138,10 +139,11 @@ export function inclusionProof(leafHashes: Buffer[], leafIndex: number, treeSize
 
 /** RFC 9162 section 2.1.3.2 verification. Pure function: needs only the leaf hash, proof and claimed root. */
 export function verifyInclusion(leaf: Buffer, proof: InclusionProof, rootHex: string): boolean {
+  if (!isSize(proof.leafIndex) || !isSize(proof.treeSize)) return false;
   let fn = proof.leafIndex;
   let sn = proof.treeSize - 1;
   if (fn < 0 || sn < 0 || fn > sn) return false;
-  if (leaf.length !== 32 || !ROOT_HEX.test(rootHex) || !proof.hashes.every((x) => HASH_HEX.test(x))) return false;
+  if (leaf.length !== 32 || !isHash(rootHex) || !Array.isArray(proof.hashes) || !proof.hashes.every(isHash)) return false;
   let r = leaf;
   for (const hex of proof.hashes) {
     if (sn === 0) return false;
@@ -160,7 +162,7 @@ export function verifyInclusion(leaf: Buffer, proof: InclusionProof, rootHex: st
     fn = Math.floor(fn / 2);
     sn = Math.floor(sn / 2);
   }
-  return sn === 0 && r.toString("hex") === rootHex.toLowerCase();
+  return sn === 0 && r.toString("hex") === rootHex;
 }
 
 const LOCK_STALE_MS = 60_000;
