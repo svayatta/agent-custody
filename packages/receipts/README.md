@@ -22,6 +22,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [Verifying a receipt](docs/verification.md): what each check means and what a verified receipt does and does not prove
 - [What the evidence satisfies](docs/compliance.md): the receipts, packs, and certificates mapped to SOC 2, ISO 27001, UK GDPR, the EU AI Act, FINRA, MAS, Colorado, DORA, the CSA AI Controls Matrix, the OWASP agentic guidance, and ISO/IEC 42001. Each regulation has a primary source, an "as of" date, and a list of what a receipt does not supply
 - [Anchoring the log on a chain](docs/anchoring.md): the log's checkpoints committed to Ethereum mainnet, or another EVM chain the installation picks, from a published address, what that proves and what it does not, running the anchor, and `log-check` against the chain
+- [Receipts on a pull request](docs/github-action.md): the GitHub Action that verifies a directory of receipt bundles and posts one table on the pull request, the workflow file to copy, the `export` command that copies the receipts into the branch, and why a committed receipt publishes the call unless a capture rule withholds it
 - [Completeness](docs/completeness.md): an auditor's read-only key lists the provider's objects and matches each to a verified receipt, so an action taken outside the gateway shows up
 - [Payment mandates and agent identity](docs/mandates.md): the design for fitting grants and receipts to Google's AP2 mandates, Visa's Trusted Agent Protocol and Mastercard Agent Pay; not yet built
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
@@ -56,7 +57,7 @@ const bundle = JSON.parse(readFileSync("receipts/<id>.json", "utf8"));
 verifyBundle(bundle, { issuerKeys: [loadPublicKey("keys/app.pub")], logFile: "log.jsonl" }).ok;   // true
 ```
 
-For your own Claude Code sessions, one command does the whole setup (key, config in observe mode, starter deny policy, hooks), and `agent-custody report` lists the calls the policy would have denied: `npx @agent-custody/receipts init claude-code`, then see [docs/sdk.md](docs/sdk.md#claude-code).
+For your own Claude Code sessions, one command does the whole setup (key, config in observe mode, starter deny policy, hooks), and `agent-custody report` lists the calls the policy would have denied: `npm install -g @agent-custody/receipts`, then `agent-custody init claude-code`, then see [docs/sdk.md](docs/sdk.md#claude-code).
 
 Framework hooks and adapters, including Claude Code, the OpenAI Agents SDK, the Vercel AI SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes and Google ADK, are in [docs/sdk.md](docs/sdk.md). To enforce rather than record, put the gateway between the agent and its tools: `npx @agent-custody/receipts gateway --config gateway.json`, set up in [docs/usage.md](docs/usage.md); between an agent and the agents it delegates to over A2A, `--a2a` serves the gateway as an A2A agent itself. The gateway is listed in the [MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.svayatta/agent-custody`; its entry is [server.json](server.json), published after each npm release by running the `mcp-registry` workflow from the Actions tab (GitHub OIDC, no token).
 
@@ -246,7 +247,8 @@ If a vendor tells you their receipts prove more than the first five rows, ask th
 ```
 src/config.ts      gateway and SDK config schemas, path resolution
 src/crypto.ts      canonical JSON, sha256, Ed25519 keys, DSSE sign/verify
-src/log.ts         Merkle log: append, root, inclusion and consistency proofs, verify, JSONL persistence; an O_EXCL lock file makes an append safe when several processes share one log file
+src/log.ts         Merkle log: append, root, inclusion and consistency proofs, verify, JSONL persistence; a lock file makes an append safe when several processes share one log file, and a partial last line from a killed writer is moved to `<file>.torn`
+src/lock.ts        the one lock file design (owner token, liveness check, rename to break a stale lock) that the local log, prune, and the gateway outbox share
 src/log-check.ts   the outside monitor: verifies the head, checkpoints, witness, and anchor of a running log
 src/portal.ts      the tenant portal: register, first key, usage against plan, keys, Stripe billing, export, member roles, TOTP MFA, single sign-on, on the log's Postgres
 src/sso.ts         enterprise sign-in for the portal: OIDC (code and PKCE, id_token checked against the IdP's key set) and SAML 2.0 (signed assertions only, through @node-saml/node-saml)
@@ -255,6 +257,8 @@ src/witness.ts     the witness: countersigns the log's checkpoints from another 
 src/anchor.ts      the anchor: commits a Merkle root over new checkpoints to a chain, or refuses with an alarm; checks a record against JSON-RPC
 src/anchor-evm.ts  the anchor's transactions on Ethereum or another EVM chain, through the optional dependency viem
 src/completeness.ts  completeness from the provider's side: the provider's own list, matched against verified receipts
+src/pr-summary.ts  `verify --markdown`: a directory of bundles verified into one Markdown table, for the GitHub Action
+src/export.ts      `export`: verified receipt bundles that keep their values private, copied byte for byte into a directory for a pull request
 src/signer.ts      the signer: the log's key in its own process, the key document verifiers fetch
 src/checkpoints.ts signed heads published on a schedule, to files and to Postgres
 src/log-store.ts   the log server's backends: the file, and Postgres with tenants, hashed tokens, one writer per tenant, rate limits
@@ -302,6 +306,8 @@ The design is two producers feeding one verifier. The SDK is the top of the funn
 
 - An incident replay: `node examples/38-incident-replay.ts` plays a Claude Code session against the starter deny set in enforce mode. `terraform destroy` and `rm -rf ~` are denied before they run, and the denial receipts verify offline with the public key only. The site page [An incident replay](../../site/guide/incident-replay.md) shows the output and the limit: a credential in the agent's environment goes around the hook (tutorial 38).
 - One command for Claude Code (issue #204): `agent-custody init claude-code` makes the agent key, writes `sdk.json` in observe mode with no log, writes a starter deny policy, and merges the three hooks into `.claude/settings.local.json` or `~/.claude/settings.json` with absolute paths, safe to run two times. `agent-custody report` verifies the receipts and prints the calls the policy would have denied, with the reason, the rule, and the receipt id; removing the `mode` line enforces. The default local log takes a lock for each append, so hooks that run at the same time keep one log; `--log-url` needs `--log-key`; a second run keeps the pinned log key and warns about log flags it does not apply; `init` warns when git does not ignore the project settings file ([sdk.md](docs/sdk.md#claude-code), tutorial 36).
+- `agent-custody export`: copies the receipt bundles of a session into a directory for a pull request, byte for byte. It verifies each receipt against the issuer key, refuses one that carries plain arguments, results, or facts (unless `--allow-clear`), reads only `<id>.json` at the top level (never `salts/`, `outbox/`, or `*.authorization.json`), and keeps only the receipts issued at or after `--since`; [guide](docs/github-action.md), tutorial 39.
+- A GitHub Action (`action.yml` at the repository root) that runs `verify --markdown` on a directory of receipt bundles, posts one table as a pull request comment that it edits on each push, writes the same table to the job summary, and fails when a receipt does not verify or none exists; [guide](docs/github-action.md). [Issue #205](https://github.com/svayatta/agent-custody/issues/205).
 - Strict mode: `"strict": true` refuses a local log, a log that is not hash-only, and a log without pinned keys; precommits every tool, in observe mode too; and turns the outbox off. No call the agent makes is forwarded before its authorization is in a log the operator does not run, every receipt says `issuer.strict`, and `verify --require-strict` requires it ([usage](docs/usage.md#strict-mode), tutorial 34). [Issue #177](https://github.com/svayatta/agent-custody/issues/177).
 - Policy reload: the gateway re-reads `policy.cedar` whenever it changes and applies it from the next call, with no restart and no dropped session; a policy that does not parse is refused and the one in force stays, and every change or refusal is recorded in `receipts/policy-reloads.jsonl` ([usage](docs/usage.md)).
 - Live Codex support recovery demo: model-selected MCP calls, incorrect CRM memory, a reviewed recovery plan, simulated credit compensation, and verified evidence; [guide](docs/codex-recovery.md), with offline regression coverage.
