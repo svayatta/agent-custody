@@ -84,7 +84,7 @@ An arrival whose method is not GET, HEAD, or OPTIONS, or whose route is in `prec
 
 | outcome | status | body | headers | receipt `execution` |
 | --- | --- | --- | --- | --- |
-| relayed | the origin's | the origin's | the origin's, minus hop-by-hop, plus the door's; a `Location` at the origin's own address becomes a path | `executed`; `failed` on an origin 5xx. `result` is `{ status, contentType?, bodyBytes, bodyDigest }` |
+| relayed | the origin's | the origin's | the origin's, minus hop-by-hop, plus the door's; a `Location` on the origin's host, on any scheme or port, becomes a path on the door: under the origin's path it loses that prefix, and any other path is kept as it is | `executed`; `failed` on an origin 5xx. `result` is `{ status, contentType?, bodyBytes, bodyDigest }` |
 | denied, whatever the body's size | 403 | `{ "error": "refused by the door's policy", "reason", "receipt" }` | the door's | `denied` |
 | origin unreachable | 502 | `{ "error", "detail", "receipt" }` | the door's | `error` |
 | allowed, body too large | 413 | `{ "error": "not relayed", "reason", "receipt" }` | the door's | `withheld` |

@@ -395,12 +395,17 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         // every cookie the origin set, not the last one: `forEach` gives them one at a time under the same name
         const cookies = upstream.headers.getSetCookie();
         if (cookies.length) back["set-cookie"] = cookies;
-        // A redirect to the origin's own address would take the client's next request around the door: it is rewritten
-        // to a path under the door, which the client follows back through it.
+        // A redirect to the origin's own host would take the client's next request around the door: it is rewritten to a
+        // path on the door, which the client follows back through it, whatever the scheme or port. A path under the
+        // origin's path loses that prefix; any other path, including one the parser normalised out of it (`/shop/../admin`),
+        // is kept as it is, so the request still arrives at the door and meets its route and policy there.
         if (typeof back.location === "string") {
           try {
             const loc = new URL(back.location, target);
-            if (loc.origin === origin.origin && (loc.pathname === originPath || loc.pathname.startsWith(`${originPath}/`))) back.location = (loc.pathname.slice(originPath.length) || "/") + loc.search + loc.hash;
+            if (loc.hostname === origin.hostname) {
+              const inside = loc.pathname === originPath || loc.pathname.startsWith(`${originPath}/`);
+              back.location = (inside ? loc.pathname.slice(originPath.length) || "/" : loc.pathname) + loc.search + loc.hash;
+            }
           } catch { /* not a URL: relayed as the origin sent it */ }
         }
         const contentType = typeof back["content-type"] === "string" ? { contentType: back["content-type"] } : {};
