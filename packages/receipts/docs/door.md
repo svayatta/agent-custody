@@ -129,7 +129,7 @@ A request that can change something at the origin, any method but GET, HEAD, and
 | policy allows, the origin's response above 32 MiB | 502 | `{ error, receipt }`, and "do not retry" | `executed` or `failed`: the origin acted; `result` carries the status and `bodyOversized: true`, no digest |
 | the receipt could not be written | 500 | `{ error, outcome, receipt }` | none on disk; `outcome` says whether the origin acted, so that a refund is not retried on the strength of a 500 |
 
-A redirect from the origin to its own address is rewritten to a path, so the client's next request comes back through the door and is classified again; a redirect elsewhere is relayed as sent. Every `Set-Cookie` the origin sent reaches the client. An `Expect: 100-continue` is the client's conversation with the door, which answers it; the origin does not see the header.
+A redirect from the origin to its own host, on any scheme or port, is rewritten to a path, so the client's next request comes back through the door and is classified again. A path under the origin's path loses that prefix; any other path, including one that `..` takes out of it, is kept as it is. A redirect to another host is relayed as sent. Every `Set-Cookie` the origin sent reaches the client. An `Expect: 100-continue` is the client's conversation with the door, which answers it; the origin does not see the header.
 
 Every answer carries `X-Agent-Custody-Receipt` and `X-Agent-Custody-Class`. When the log did not take the receipt, it waits in `receipts/outbox/` and the answer also carries `X-Agent-Custody-Log-Pending: true`; a serving door appends the outbox every 30 seconds, as the gateway does.
 

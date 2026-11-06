@@ -95,20 +95,53 @@ export interface ArrivalRate {
 export const RATE_BURST_MS = 10_000;
 export const RATE_MINUTE_MS = 60_000;
 
-/** Counts arrivals per source over the two windows. `now` is for tests. */
-export function createRateTracker(now: () => number = Date.now): { hit(source: string): { burst: number; minute: number } } {
+export interface RateTrackerLimits {
+  /** sources kept at once; past this the least recently seen is forgotten. Default 10000 */
+  maxSources?: number;
+  /** a source key longer than this is kept as its sha256. Default 256 */
+  maxKeyLength?: number;
+}
+
+export interface RateTracker {
+  hit(source: string): { burst: number; minute: number };
+  /** sources kept now */
+  size(): number;
+  /** stops the sweep */
+  close(): void;
+}
+
+/**
+ * Counts arrivals per source over the two windows. The source key comes from the arrival, and with `trustProxy` the
+ * client may choose it, so the map bounds itself: at most `maxSources` keys, none longer than `maxKeyLength`, and a
+ * source with no arrival in the last minute is dropped every minute whether or not traffic goes on. A source forgotten
+ * early counts again from 1, which only lowers what a pace rule sees for a client that floods the map. `now` is for tests.
+ */
+export function createRateTracker(now: () => number = Date.now, limits: RateTrackerLimits = {}): RateTracker {
+  const maxSources = limits.maxSources ?? 10_000;
+  const maxKeyLength = limits.maxKeyLength ?? 256;
+  // least recently seen first: a hit moves its key to the end
   const seen = new Map<string, number[]>();
-  let hits = 0;
+  const sweep = () => {
+    const cutoff = now() - RATE_MINUTE_MS;
+    for (const [k, v] of seen) if (v[v.length - 1]! <= cutoff) seen.delete(k);
+  };
+  const timer = setInterval(sweep, RATE_MINUTE_MS);
+  timer.unref();
   return {
     hit(source) {
+      const key = source.length > maxKeyLength ? `sha256:${sha256Hex(source)}` : source;
       const t = now();
       const cutoff = t - RATE_MINUTE_MS;
-      const times = (seen.get(source) ?? []).filter((x) => x > cutoff);
+      const times = (seen.get(key) ?? []).filter((x) => x > cutoff);
       times.push(t);
-      seen.set(source, times);
-      if (++hits % 1000 === 0) for (const [k, v] of seen) if (v[v.length - 1]! <= cutoff) seen.delete(k);
+      seen.delete(key);
+      seen.set(key, times);
+      if (seen.size > maxSources) sweep();
+      while (seen.size > maxSources) seen.delete(seen.keys().next().value!);
       return { burst: times.filter((x) => x > t - RATE_BURST_MS).length, minute: times.length };
     },
+    size: () => seen.size,
+    close: () => clearInterval(timer),
   };
 }
 
@@ -470,12 +503,17 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         // every cookie the origin set, not the last one: `forEach` gives them one at a time under the same name
         const cookies = upstream.headers.getSetCookie();
         if (cookies.length) back["set-cookie"] = cookies;
-        // A redirect to the origin's own address would take the client's next request around the door: it is rewritten
-        // to a path under the door, which the client follows back through it.
+        // A redirect to the origin's own host would take the client's next request around the door: it is rewritten to a
+        // path on the door, which the client follows back through it, whatever the scheme or port. A path under the
+        // origin's path loses that prefix; any other path, including one the parser normalised out of it (`/shop/../admin`),
+        // is kept as it is, so the request still arrives at the door and meets its route and policy there.
         if (typeof back.location === "string") {
           try {
             const loc = new URL(back.location, target);
-            if (loc.origin === origin.origin && (loc.pathname === originPath || loc.pathname.startsWith(`${originPath}/`))) back.location = (loc.pathname.slice(originPath.length) || "/") + loc.search + loc.hash;
+            if (loc.hostname === origin.hostname) {
+              const inside = loc.pathname === originPath || loc.pathname.startsWith(`${originPath}/`);
+              back.location = (inside ? loc.pathname.slice(originPath.length) || "/" : loc.pathname) + loc.search + loc.hash;
+            }
           } catch { /* not a URL: relayed as the origin sent it */ }
         }
         const contentType = typeof back["content-type"] === "string" ? { contentType: back["content-type"] } : {};
@@ -545,6 +583,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     pendingReceipts: () => issuer.pending(),
     async close() {
       if (timer) clearInterval(timer);
+      rates.close();
     },
   };
 }

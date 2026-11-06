@@ -53,7 +53,7 @@ agent-custody door --config door.json [--port 8780] [--host 127.0.0.1]
 
 Plain HTTP; bind to loopback or put TLS in front. `check` on a door config reports unknown keys, the key, the principal keys, the policy (and warns on a permit that names an agent without requiring `context.facts.arrival.class == "verified"`), the routes, what is precommitted, the challenge provider or its absence, the origin's scheme, every credential variable the door reads at startup (origin headers, log, Splunk, OTel, capture key, challenge secret), and the paths; exit 1 on an error.
 
-In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `normalizePath(pathname)`, `matchRoute(routes, unmatched, method, path)`, `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` (which leaves `rate` unset), `createRateTracker(now?)`, and `verifyChallengeToken(provider, secret, token, remote, fetch, timeoutMs)` are exported for embedding the door in a server of your own.
+In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `normalizePath(pathname)`, `matchRoute(routes, unmatched, method, path)`, `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` (which leaves `rate` unset), `createRateTracker(now?, { maxSources?, maxKeyLength? })`, which returns `{ hit(source), size(), close() }`, keeps at most `maxSources` (10000) sources, keeps a key longer than `maxKeyLength` (256) as its sha256, and drops stale sources every minute, and `verifyChallengeToken(provider, secret, token, remote, fetch, timeoutMs)` are exported for embedding the door in a server of your own.
 
 ## What an arrival presents
 
@@ -86,7 +86,7 @@ An arrival whose method is not GET, HEAD, or OPTIONS, or whose route is in `prec
 
 | outcome | status | body | headers | receipt `execution` |
 | --- | --- | --- | --- | --- |
-| relayed | the origin's | the origin's | the origin's, minus hop-by-hop, plus the door's; a `Location` at the origin's own address becomes a path | `executed`; `failed` on an origin 5xx. `result` is `{ status, contentType?, bodyBytes, bodyDigest }` |
+| relayed | the origin's | the origin's | the origin's, minus hop-by-hop, plus the door's; a `Location` on the origin's host, on any scheme or port, becomes a path on the door: under the origin's path it loses that prefix, and any other path is kept as it is | `executed`; `failed` on an origin 5xx. `result` is `{ status, contentType?, bodyBytes, bodyDigest }` |
 | denied, whatever the body's size | 403 | `{ "error": "refused by the door's policy", "reason", "receipt" }`, plus `"challenge": { provider, siteKey, header }` when a challenge is configured and this arrival has not passed it | the door's | `denied` |
 | origin unreachable | 502 | `{ "error", "detail", "receipt" }` | the door's | `error` |
 | allowed, body too large | 413 | `{ "error": "not relayed", "reason", "receipt" }` | the door's | `withheld` |

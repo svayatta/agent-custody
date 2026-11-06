@@ -11,12 +11,12 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { checkDoorConfig, isDoorConfig } from "../src/check.ts";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey, sha256Hex } from "../src/crypto.ts";
 import { createDelegation } from "../src/delegation.ts";
-import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, createRateTracker, matchRoute, normalizePath, remoteOf, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
+import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, createRateTracker, matchRoute, RATE_MINUTE_MS, normalizePath, remoteOf, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
@@ -79,6 +79,43 @@ describe("rate", () => {
     expect(tracker.hit("remote:1.2.3.4")).toEqual({ burst: 2, minute: 3 });
     t += 55_000;
     expect(tracker.hit("remote:1.2.3.4")).toEqual({ burst: 1, minute: 2 });
+    tracker.close();
+  });
+
+  it("bounds itself: a client choosing a new key on every request cannot grow the map, nor make a key of any length", () => {
+    const t = 1_000_000;
+    const tracker = createRateTracker(() => t, { maxSources: 3, maxKeyLength: 16 });
+    try {
+      for (let i = 0; i < 100; i++) tracker.hit(`remote:10.0.0.${i}`);
+      expect(tracker.size()).toBe(3);
+      // the least recently seen go first: a source still arriving keeps its count
+      tracker.hit("remote:keep");
+      tracker.hit("remote:a");
+      tracker.hit("remote:b");
+      expect(tracker.hit("remote:keep")).toEqual({ burst: 2, minute: 2 });
+      tracker.hit("remote:c");
+      expect(tracker.hit("remote:keep")).toEqual({ burst: 3, minute: 3 });
+      // a key past the length limit is kept as its digest, and still counts as one source
+      const long = `remote:${"x".repeat(10_000)}`;
+      tracker.hit(long);
+      expect(tracker.hit(long)).toEqual({ burst: 2, minute: 2 });
+    } finally {
+      tracker.close();
+    }
+  });
+
+  it("drops a source with no arrival in the last minute even when no more traffic comes", () => {
+    vi.useFakeTimers();
+    try {
+      const tracker = createRateTracker(() => Date.now());
+      for (let i = 0; i < 50; i++) tracker.hit(`remote:10.0.1.${i}`);
+      expect(tracker.size()).toBe(50);
+      vi.advanceTimersByTime(2 * RATE_MINUTE_MS);
+      expect(tracker.size()).toBe(0);
+      tracker.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -494,6 +531,38 @@ describe("the door", () => {
       expect(res.status).toBe(302);
       expect(targets).toEqual([`${origin.url}/api/v1/catalogue/shoes?size=9`]);
       expect(res.headers.get("location")).toBe("/catalogue/after?x=1");
+    } finally {
+      await d.close();
+      await h.close();
+    }
+  });
+
+  it("every redirect to the origin's host becomes a door path, so the client never follows it around the door", async () => {
+    const based = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-escape-")), `${origin.url}/api/v1/`);
+    const host = new URL(origin.url);
+    let location = "";
+    const stub: typeof fetch = async () => new Response("{}", { status: 302, headers: { location, "content-type": "application/json" } });
+    const h = await createDoorHost(loadDoorConfig(based.configFile), { fetch: stub });
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      const cases: [string, string][] = [
+        // outside the origin's path: before, left absolute, and the browser went straight to the origin
+        [`${origin.url}/admin`, "/admin"],
+        // normalised out of the prefix by the URL parser
+        [`${origin.url}/api/v1/../../admin?x=1`, "/admin?x=1"],
+        // the same host on another scheme or port
+        [`https://${host.hostname}:1/api/v1/x`, "/x"],
+        // relative forms resolve against the origin, then come back as door paths
+        ["/admin", "/admin"],
+        ["after", "/catalogue/after"],
+        // another host is not the origin: relayed as sent
+        ["https://elsewhere.example/x", "https://elsewhere.example/x"],
+      ];
+      for (const [sent, want] of cases) {
+        location = sent;
+        const res = await fetch(`${d.url}/catalogue/shoes`, { redirect: "manual" });
+        expect(res.headers.get("location"), sent).toBe(want);
+      }
     } finally {
       await d.close();
       await h.close();
