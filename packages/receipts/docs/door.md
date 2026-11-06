@@ -42,9 +42,10 @@ agent-custody door --config door.json --port 8780
 | `trustProxy` | behind one reverse proxy you run: the arrival's address is the last in `X-Forwarded-For`, the one your proxy appended; everything before it is what the client sent. The proxy's `X-Forwarded-For`, `-Proto`, and `-Host` are kept on the relay, with the door's own socket address appended; without `trustProxy` whatever the client wrote in them is replaced |
 | `maxBodyBytes` | the largest request body the door relays; a larger one gets 413 and a `withheld` receipt once the policy has allowed it. Default 10 MiB |
 | `precommit` | route names whose arrivals are committed to the log before they are relayed whatever their method, or `["*"]`. Every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless; see [before the origin hears of it](#before-the-origin-hears-of-it). Default `[]` |
+| `challenge` | the human branch: `{ provider: "turnstile" or "hcaptcha", siteKey, secretEnv, hostnames, action?, header?, timeoutMs?, maxInFlight? }`. `hostnames` lists the hosts of the pages that render the widget, `action` (Turnstile only) the widget's action, and `maxInFlight` (default 64) how many checks may wait on the provider at once. A token an arrival sends in `header` (default `x-agent-custody-challenge`) is verified with the provider, and the outcome is the arrival's `challenge` signal; see [challenging a human](#challenging-a-human). The secret comes from the environment variable, read at startup; missing is a startup error |
 | `receiptsDir`, `logFile` or `log`, `otel`, `splunk`, `capture`, `captureKeyEnv` | as for the [gateway](configuration.md): where receipts and the log go, exporters, and private evidence per route. A remote `log` needs `log.keys`, because its answer is checked before a request is relayed |
 
-`agent-custody check --config door.json` reads a door config the way the door would: unknown keys, the key, the principal keys, the policy (including a permit that names an agent without requiring a verified arrival, see below), the routes, what is precommitted, the origin's scheme, every credential variable the door reads at startup (origin headers, the log, Splunk, OTel, the capture key), and the paths. It exits 1 on an error.
+`agent-custody check --config door.json` reads a door config the way the door would: unknown keys, the key, the principal keys, the policy (including a permit that names an agent without requiring a verified arrival, see below), the routes, what is precommitted, the challenge provider or its absence, the origin's scheme, every credential variable the door reads at startup (origin headers, the log, Splunk, OTel, the capture key, the challenge secret), and the paths. It exits 1 on an error.
 
 ## What the door knows about an arrival
 
@@ -58,14 +59,24 @@ The door records one fact for every arrival, `arrival`, observed by the door its
 | `signature` | boolean | an RFC 9421 `Signature-Input` header was present. **Not checked yet.** It is a claim |
 | `declared` | string | the `x-agent-custody-agent` header, when sent. A claim |
 | `remote` | string | the arrival's address |
+| `challenge` | `{ provider, outcome, error? }` | only when `challenge` is configured. `passed`: the provider confirmed the token the arrival sent. `failed`: the provider refused it, `error` carries its codes, or it confirmed a token issued on another hostname or for another action. `unavailable`: the provider did not answer in time, answered with a redirect, or `maxInFlight` checks were already waiting. `absent`: no token. A passed challenge leaves `class` as it was: it says a provider's test was passed in front of this arrival, not who the arrival is |
 | `rate` | `{ by, burst, minute }` | arrivals from the same source in the last 10 and 60 seconds, this one included, whatever was decided about them, counted by this door process alone. `by` is `agent` for a verified arrival (counted by the agent's name across addresses) or `remote` (by address). A pace, not a verdict |
 | `method`, `path`, `route` | strings | what arrived, and the route it fell under |
 
 [Door signals](door-signals.md) says, for each field, what it establishes and what it does not, and how a policy should read it.
 
-There is no `human` class. The door cannot tell a person from a program that presents nothing, and it does not pretend to. A challenge step (a CAPTCHA or passkey integration) will add that branch; until then a policy that lets `unknown` through on a route is letting everything through on that route, and should say so.
+There is no `human` class. The door cannot tell a person from a program that presents nothing, and it does not pretend to. With `challenge` configured, a policy can require a passed challenge on a route instead; without it, a policy that lets `unknown` through on a route is letting everything through on that route, and should say so.
 
 **Presenting a passport.** An agent presents its grant exactly as it does to the HTTP gateway: the DSSE envelope as base64url in `Authorization: Bearer <value>` or in `X-Agent-Custody-Grant`. The scopes of the grant are route names. A grant that travelled in `Authorization` is stripped before the request is relayed, so the origin never sees it; one in the custom header is stripped too. The door's own headers are added to the relayed request: `X-Agent-Custody-Receipt` (the receipt id), `X-Agent-Custody-Class`, and `X-Forwarded-For`, `-Host`, `-Proto`.
+
+**Challenging a human.** The door builds no CAPTCHA. With `challenge` configured, a page in front of a protected route renders the provider's widget (Cloudflare Turnstile or hCaptcha) with `siteKey`, and sends the token the widget produced in the `challenge.header` header of its request. The door posts the token and the secret from `secretEnv` to the provider's `siteverify` endpoint, with a timeout, and records the answer as `challenge.outcome`. It adds the arrival's address as `remoteip` only with `trustProxy`, where that address is the client's; without it the socket's address may be a proxy's, and the provider would refuse a token the client solved. It never follows a redirect, which would resend the secret and the token elsewhere. `success` alone does not pass: the token must have been issued on one of `hostnames`, and for `action` when one is set, or a token solved on another site that uses this site key, or for another widget, would count. At most `maxInFlight` checks wait on the provider at once; an arrival past that is `unavailable`. The token is stripped before the request is relayed, and neither the token nor the secret is recorded. A policy admits a person on a form route with
+
+```cedar
+permit(principal, action == Action::"refund", resource)
+when { context.facts.arrival.challenge.outcome == "passed" };
+```
+
+and a refused arrival that has not passed is told how in the 403 body: `challenge: { provider, siteKey, header }`, so a page can render the widget and try again. The outcome is a signal, not a class: a `verified` agent that also passes a challenge is still the agent its grant names, and an `unknown` arrival that passes is still `unknown`, with `challenge.outcome: "passed"` beside it. What the provider's pass means, and what it does not, is in [door signals](door-signals.md). Passkeys are not a provider here: a passkey proves possession of a credential the site registered, which is a login, not a challenge, and belongs to the origin.
 
 ## How an arrival becomes a Cedar request
 
@@ -110,7 +121,7 @@ A request that can change something at the origin, any method but GET, HEAD, and
 | the door's decision | HTTP | body | receipt `execution.status` |
 | --- | --- | --- | --- |
 | policy allows, origin answered | the origin's status and body, plus the door's headers | the origin's | `executed`, or `failed` when the origin answered 5xx |
-| policy denies, whatever the body's size | 403 | `{ error, reason, receipt }` | `denied` |
+| policy denies, whatever the body's size | 403 | `{ error, reason, receipt }`, plus `challenge: { provider, siteKey, header }` when a challenge is configured and this arrival has not passed it | `denied` |
 | origin unreachable or timed out | 502 | `{ error, detail, receipt }` | `error` |
 | policy allows, body above `maxBodyBytes` | 413 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
 | policy allows, the log refused the authorization | 503 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
@@ -134,7 +145,7 @@ The verifier runs `door receipt carries a policy decision` in place of the gatew
 
 - Detect agents in web or API traffic. The only signals are the ones in the arrival fact: `signature` and `declared` are claims, and `rate` is a pace ([door signals](door-signals.md)).
 - Check RFC 9421 HTTP message signatures, Web Bot Auth directories, or AP2 mandates. The grant is the only passport today.
-- Challenge an arrival. There is no human branch.
+- Challenge an arrival with a passkey. Turnstile and hCaptcha are the providers; see [challenging a human](#challenging-a-human).
 - Revoke a grant by a revocation list; a grant stands until it expires.
 - Stream a request body: the body is read whole, up to `maxBodyBytes`, so that the policy can read it and the receipt can commit to it.
 - Relay a response larger than 32 MiB, or stream one: the body is relayed whole so that its digest can be recorded. A larger one is not held: reading stops at the limit, the client gets 502, and the receipt records that the origin answered.
