@@ -8,7 +8,8 @@
 // a response too large to relay is still recorded as the origin's act. Every receipt the door writes verifies with
 // public keys, the right principal and agent provenance, and the arrival fact the policy decided on.
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { request } from "node:http";
+import { createServer, request, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -16,7 +17,8 @@ import { checkDoorConfig, isDoorConfig } from "../src/check.ts";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey, sha256Hex } from "../src/crypto.ts";
 import { createDelegation } from "../src/delegation.ts";
-import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, createRateTracker, matchRoute, RATE_MINUTE_MS, normalizePath, remoteOf, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
+import { isCommitment } from "../src/capture.ts";
+import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, cedarArgs, createDoorHost, createRateTracker, matchRoute, RATE_BURST_MS, RATE_MINUTE_MS, normalizePath, queryOf, remoteOf, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
@@ -41,6 +43,27 @@ const call = async (method: string, path: string, init: { headers?: Record<strin
   return { res, text, id, bundle, st, p: st.predicate, arrival: st.predicate.facts[ARRIVAL_FACT]!.value as Arrival };
 };
 
+/** A local origin that answers each request the way `respond` says, for the failures the stand-in shop cannot produce. */
+const rawOrigin = async (respond: (res: import("node:http").ServerResponse) => void): Promise<{ url: string; hits: () => number; close: () => Promise<void> }> => {
+  let hits = 0;
+  const server: Server = createServer((req, res) => {
+    hits += 1;
+    req.resume();
+    respond(res);
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, hits: () => hits, close: () => { server.closeAllConnections(); return new Promise<void>((r) => server.close(() => r())); } };
+};
+/** A port nothing listens on: bound once and released. */
+const closedPort = async (): Promise<number> => {
+  const s = createServer();
+  await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
+  const { port } = s.address() as AddressInfo;
+  await new Promise<void>((r) => s.close(() => r()));
+  return port;
+};
+const bundleAt = (dir: string, res: Response) => JSON.parse(readFileSync(join(dir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle;
+
 beforeAll(async () => {
   origin = await startOrigin();
   fx = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-")), origin.url);
@@ -64,6 +87,39 @@ describe("routes", () => {
     expect(matchRoute(routes, "other", "POST", "/refunds/1")).toBe("other");
     expect(matchRoute(routes, "other", "DELETE", "/api/orders/1")).toBe("api");
     expect(matchRoute(routes, "other", "GET", "/")).toBe("other");
+  });
+
+  // An origin that merges slashes or ignores a trailing slash reads these as the paths beside them. If the door matched
+  // them as something else, `//admin/users` would reach the admin page under the route for the rest of the site.
+  it("empty segments are merged and a trailing slash matches as none, so the door and the origin read one path", () => {
+    expect(normalizePath("//admin/users")).toEqual({ path: "/admin/users", relay: "/admin/users" });
+    expect(normalizePath("/admin//users")).toEqual({ path: "/admin/users", relay: "/admin/users" });
+    expect(normalizePath("/refunds/")).toEqual({ path: "/refunds/", relay: "/refunds/" });
+    expect(normalizePath("//")).toEqual({ path: "/", relay: "/" });
+    const site = [{ name: "admin", path: "/admin/*" }, { name: "site", path: "*" }];
+    expect(matchRoute(site, "other", "GET", (normalizePath("//admin/users") as { path: string }).path)).toBe("admin");
+    expect(matchRoute(site, "other", "GET", (normalizePath("/admin//x") as { path: string }).path)).toBe("admin");
+    expect(matchRoute(site, "other", "GET", "/admin/")).toBe("admin");
+    expect(matchRoute(routes, "other", "POST", "/refunds/")).toBe("refund");
+    expect(matchRoute(routes, "other", "GET", "/catalogue/")).toBe("catalogue");
+    expect(matchRoute(routes, "other", "GET", "/cataloguex")).toBe("other");
+    expect(matchRoute([{ name: "root", path: "/*" }], "other", "GET", "/x")).toBe("root");
+  });
+
+  it("a query parameter named after an Object member is a parameter: no inherited value, no prototype change", () => {
+    const q = queryOf(new URL("http://door/x?constructor=acme&toString=1&__proto__=x&hasOwnProperty=2&a=1&a=2"));
+    expect(Object.getPrototypeOf(q)).toBe(Object.prototype);
+    expect(Object.keys(q).sort()).toEqual(["__proto__", "a", "constructor", "hasOwnProperty", "toString"]);
+    expect(q.constructor).toBe("acme");
+    expect(Object.getOwnPropertyDescriptor(q, "__proto__")?.value).toBe("x");
+    expect(q.a).toEqual(["1", "2"]);
+  });
+
+  it("the policy reads a copy of the arguments Cedar accepts: nulls dropped, numbers that are not safe integers as strings", () => {
+    expect(cedarArgs({ a: null, b: 1.5, c: 7, d: [1, null, 2.5], e: { f: null, g: 12345678901234567890 } })).toEqual({ b: "1.5", c: 7, d: [1, "2.5"], e: { g: "12345678901234567000" } });
+    const own = cedarArgs(JSON.parse('{"__proto__":{"x":1}}')) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(own)).toBe(Object.prototype);
+    expect(Object.hasOwn(own, "__proto__")).toBe(true);
   });
 });
 
@@ -104,6 +160,85 @@ describe("rate", () => {
     }
   });
 
+  it("an arrival exactly 10 s old is outside the burst window, and one exactly 60 s old outside the minute", () => {
+    let t = 1_000_000;
+    const tracker = createRateTracker(() => t);
+    tracker.hit("remote:a");
+    t += RATE_BURST_MS;
+    expect(tracker.hit("remote:a")).toEqual({ burst: 1, minute: 2 });
+    t += RATE_MINUTE_MS - RATE_BURST_MS;
+    expect(tracker.hit("remote:a")).toEqual({ burst: 1, minute: 2 });
+    t += 1;
+    expect(tracker.hit("remote:a")).toEqual({ burst: 2, minute: 3 });
+    tracker.close();
+  });
+
+  // One flooding address must not make each of its arrivals cost more than the last: the door counts before it reads
+  // the body or asks the policy, on the event loop every other arrival shares.
+  it("one arrival costs the same however many came before it in the window, and the counts stay exact", () => {
+    let t = 1_000_000;
+    const tracker = createRateTracker(() => t);
+    const timed = (n: number) => {
+      const start = performance.now();
+      for (let i = 0; i < n; i++) {
+        t += 0.5;
+        tracker.hit("remote:flood");
+      }
+      return (performance.now() - start) / n;
+    };
+    const early = timed(20_000);
+    const late = timed(200_000);
+    // 2000 arrivals a second for 110 s: the minute holds 120 000 of them, the burst 20 000, and this one at the same instant
+    expect(tracker.hit("remote:flood")).toEqual({ burst: 20_001, minute: 120_001 });
+    expect(late).toBeLessThan(Math.max(early * 5, 0.01));
+    tracker.close();
+  });
+
+  // A step of the wall clock (NTP, a VM resume) must not keep an hour-old burst inside the windows: a source that paused
+  // would be refused for the length of the step.
+  it("the default clock is monotonic: after the wall clock steps back an hour, a source that paused a minute counts from 1", () => {
+    // the sweep's timer stays real, so the count below is the windows' and not the sweep's
+    vi.useFakeTimers({ toFake: ["Date", "performance"] });
+    const tracker = createRateTracker();
+    try {
+      for (let i = 0; i < 31; i++) tracker.hit("remote:paused");
+      vi.advanceTimersByTime(RATE_MINUTE_MS + 1_000);
+      vi.setSystemTime(Date.now() - 3600_000);
+      expect(tracker.hit("remote:paused")).toEqual({ burst: 1, minute: 1 });
+    } finally {
+      tracker.close();
+      vi.useRealTimers();
+    }
+    // an injected clock that goes back is held at the last time seen, so the windows never run backwards
+    let t = 1_000_000;
+    const held = createRateTracker(() => t);
+    held.hit("remote:b");
+    t -= 3600_000;
+    expect(held.hit("remote:b")).toEqual({ burst: 2, minute: 2 });
+    t = 1_000_000 + RATE_MINUTE_MS;
+    expect(held.hit("remote:b")).toEqual({ burst: 1, minute: 1 });
+    held.close();
+  });
+
+  it("the minute sweep keeps a source still arriving and drops the quiet ones, which then count from 1", () => {
+    vi.useFakeTimers();
+    try {
+      const tracker = createRateTracker(() => Date.now());
+      for (let i = 0; i < 1500; i++) tracker.hit(`remote:10.0.2.${i}`);
+      tracker.hit("remote:active");
+      // 40 s on, only the active source arrives; the sweep runs at 60 s, when its first arrival and the quiet ones are 60 s old
+      vi.advanceTimersByTime(40_000);
+      for (let i = 0; i < 3; i++) tracker.hit("remote:active");
+      vi.advanceTimersByTime(30_000);
+      expect(tracker.size()).toBe(1);
+      expect(tracker.hit("remote:active")).toEqual({ burst: 1, minute: 4 });
+      expect(tracker.hit("remote:10.0.2.7")).toEqual({ burst: 1, minute: 1 });
+      tracker.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("drops a source with no arrival in the last minute even when no more traffic comes", () => {
     vi.useFakeTimers();
     try {
@@ -138,6 +273,14 @@ describe("the door", () => {
       const agent = await fetch(`${d.url}/api/orders`, { headers: { authorization: `Bearer ${grantHeader(grantFor("shopping-agent", ["api"], paced.principalKey))}` } });
       expect(agent.status).toBe(200);
       expect(arrivalOf(agent)).toMatchObject({ class: "verified", rate: { by: "agent", burst: 1, minute: 1 } });
+      // The count is keyed on the agent only when a grant verified. A declared name or a grant from an untrusted key
+      // counts by address, so nobody can spend, or reset, a verified agent's count by naming it.
+      const declared = await fetch(`${d.url}/catalogue/x`, { headers: { [AGENT_HEADER]: "crawler-9" } });
+      const forged = await fetch(`${d.url}/api/orders`, { headers: { authorization: `Bearer ${grantHeader(grantFor("crawler-9", ["api"], generateKeyPair()))}` } });
+      expect(arrivalOf(declared).rate?.by).toBe("remote");
+      expect(arrivalOf(forged).rate?.by).toBe("remote");
+      const real = await fetch(`${d.url}/api/orders`, { headers: { authorization: `Bearer ${grantHeader(grantFor("crawler-9", ["api"], paced.principalKey))}` } });
+      expect(arrivalOf(real)).toMatchObject({ class: "verified", rate: { by: "agent", burst: 1, minute: 1 } });
     } finally {
       await d.close();
       await h.close();
@@ -380,15 +523,17 @@ describe("the door", () => {
     }
   });
 
-  it("the origin down is an error receipt and a 502", async () => {
-    const dead = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-dead-")), "http://127.0.0.1:9", { origin: { url: "http://127.0.0.1:9", timeoutMs: 2000 } });
+  it("the origin down is an error receipt and a 502 that says it could not be reached", async () => {
+    const url = `http://127.0.0.1:${await closedPort()}`;
+    const dead = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-dead-")), url, { origin: { url, timeoutMs: 2000 } });
     const h = await createDoorHost(loadDoorConfig(dead.configFile));
     const d = await serveDoor(h, { port: 0, log: () => {} });
     try {
       const res = await fetch(`${d.url}/catalogue/x`);
       expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({ error: "the origin could not be reached" });
       const bundle = JSON.parse(readFileSync(join(dead.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle;
-      expect(decode(bundle).predicate.execution).toMatchObject({ status: "error" });
+      expect(decode(bundle).predicate.execution).toMatchObject({ status: "error", error: expect.stringContaining("could not be reached") });
       expect(verifyBundle(bundle, { issuerKeys: [loadPublicKey(dead.doorPub)], principalKeys: [] }).ok).toBe(true);
     } finally {
       await d.close();
@@ -449,6 +594,109 @@ describe("the door", () => {
     expect(findings.filter((f) => f.level === "warn").map((f) => f.check)).toEqual(expect.arrayContaining(["principal keys", "origin"]));
   });
 
+  // The request may have left: a client told "could not be reached" retries, and a refund the origin booked runs twice.
+  it("a timeout or a body that stops after the headers is an unknown outcome: 504, do not retry, and the receipt says the origin may have acted", async () => {
+    const stalls = await rawOrigin((res) => { res.writeHead(200, { "content-type": "text/plain" }); res.write("partial"); });
+    const silent = await rawOrigin(() => {});
+    try {
+      for (const o of [stalls, silent]) {
+        const f = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-stall-")), o.url, { origin: { url: o.url, timeoutMs: 300 } });
+        const h = await createDoorHost(loadDoorConfig(f.configFile));
+        const d = await serveDoor(h, { port: 0, log: () => {} });
+        try {
+          const res = await fetch(`${d.url}/catalogue/x`);
+          expect(res.status).toBe(504);
+          expect(await res.json()).toMatchObject({ error: expect.stringContaining("may have acted on the request") });
+          const p = decode(bundleAt(f.receiptsDir, res)).predicate;
+          expect(p.execution).toMatchObject({ status: "error", error: expect.stringContaining("the origin may have acted on the request") });
+          expect(p.execution).not.toMatchObject({ error: expect.stringContaining("could not be reached") });
+          expect(o.hits()).toBe(1);
+        } finally {
+          await d.close();
+          await h.close();
+        }
+      }
+    } finally {
+      await stalls.close();
+      await silent.close();
+    }
+  });
+
+  it("past maxInFlight the next arrival is answered 503 before its body is read, with no receipt; the slot frees when the first is answered", async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    const slow = await rawOrigin((res) => { void held.then(() => res.end("ok")); });
+    const f = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-busy-")), slow.url, { origin: { url: slow.url }, maxInFlight: 1 });
+    const h = await createDoorHost(loadDoorConfig(f.configFile));
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      const first = fetch(`${d.url}/catalogue/a`);
+      while (slow.hits() === 0) await new Promise((r) => setTimeout(r, 10));
+      const busy = await fetch(`${d.url}/catalogue/b`);
+      expect(busy.status).toBe(503);
+      expect(busy.headers.get("retry-after")).toBe("1");
+      expect(busy.headers.get(RECEIPT_HEADER)).toBeNull();
+      expect(slow.hits()).toBe(1);
+      release();
+      expect((await first).status).toBe(200);
+      expect((await fetch(`${d.url}/catalogue/c`)).status).toBe(200);
+    } finally {
+      release();
+      await d.close();
+      await h.close();
+      await slow.close();
+    }
+  });
+
+  it("the defaults bound what an arrival holds: a 1 MiB body, a 32 MiB response, 256 at once", () => {
+    const cfg = loadDoorConfig(fx.configFile);
+    expect([cfg.maxBodyBytes, cfg.maxResponseBytes, cfg.maxInFlight]).toEqual([1024 * 1024, 32 * 1024 * 1024, 256]);
+  });
+
+  it("an arrival at `//api/orders` falls under the API route and the origin is sent `/api/orders`; `/catalogue//shoes/` under the catalogue", async () => {
+    const api = await call("GET", "//api/orders");
+    expect(api.p.tool.name).toBe("api");
+    expect(api.res.status).toBe(403);
+    const obs = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-merge-")), origin.url, { mode: "observe" });
+    const h = await createDoorHost(loadDoorConfig(obs.configFile));
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      const res = await fetch(`${d.url}//api//orders`);
+      expect(decode(bundleAt(obs.receiptsDir, res)).predicate.tool.name).toBe("api");
+      expect(origin.seen.at(-1)?.path).toBe("/api/orders");
+      const shoes = await fetch(`${d.url}/catalogue//shoes/`);
+      expect(decode(bundleAt(obs.receiptsDir, shoes)).predicate.tool.name).toBe("catalogue");
+      expect(origin.seen.at(-1)?.path).toBe("/catalogue/shoes/");
+    } finally {
+      await d.close();
+      await h.close();
+    }
+  });
+
+  it("a parameter named `constructor` or `__proto__` is recorded and decided as a parameter: a permitted read stays permitted", async () => {
+    const r = await call("GET", "/catalogue/shoes?constructor=acme&__proto__=x&toString=1");
+    expect(r.res.status).toBe(200);
+    expect(r.p.policy).toMatchObject({ decision: "allow", errors: [] });
+    expect(r.p.request.args).toMatchObject({ query: { constructor: "acme", toString: "1" } });
+    expect(Object.getOwnPropertyDescriptor((r.p.request.args as { query: object }).query, "__proto__")?.value).toBe("x");
+    expect(origin.seen.at(-1)?.path).toBe("/catalogue/shoes?constructor=acme&__proto__=x&toString=1");
+  });
+
+  it("a body with a null or a non-integer number is decided by the policy, not refused by Cedar; the receipt keeps the body as sent", async () => {
+    const passport = { authorization: `Bearer ${grantHeader(grantFor("shopping-agent", ["api", "refund"]))}` };
+    const order = { order: "o_9", coupon: null, price: 9.99, big: 1.5e300 };
+    const r = await call("POST", "/api/orders", { headers: passport, body: order });
+    expect(r.res.status).toBe(200);
+    expect(r.p.policy).toMatchObject({ decision: "allow", errors: [] });
+    expect(r.p.request.args).toMatchObject({ body: order });
+    // a rule that compares a non-integer as a number errors, and that rule's deny is the answer
+    const half = await call("POST", "/refunds", { headers: passport, body: { order: "o_10", amount: 45.5 } });
+    expect(half.res.status).toBe(403);
+    const errors = JSON.stringify(half.p.policy?.errors);
+    expect(errors).not.toContain("null");
+    expect(errors).not.toContain("RawCedarValueJson");
+  });
+
   it("the path cannot move the relay: `/.//host/x` reaches the origin as a path and the other host hears nothing", async () => {
     const other = await startOrigin();
     const obs = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-escape-")), origin.url, { mode: "observe", origin: { url: origin.url, headers: { "x-door-secret": "s3cret" } } });
@@ -461,8 +709,8 @@ describe("the door", () => {
       expect(res.status).toBe(200);
       expect(other.seen).toEqual([]);
       expect(origin.seen.length).toBe(before + 1);
-      expect(origin.seen.at(-1)).toMatchObject({ path: `//${evil}/steal`, headers: { "x-door-secret": "s3cret", cookie: "session=1" } });
-      expect(decode(JSON.parse(readFileSync(join(obs.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle).predicate.request.args).toMatchObject({ path: `//${evil}/steal` });
+      expect(origin.seen.at(-1)).toMatchObject({ path: `/${evil}/steal`, headers: { "x-door-secret": "s3cret", cookie: "session=1" } });
+      expect(decode(JSON.parse(readFileSync(join(obs.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle).predicate.request.args).toMatchObject({ path: `/${evil}/steal` });
     } finally {
       await d.close();
       await h.close();
@@ -597,18 +845,23 @@ describe("the door", () => {
 
   it("with trustProxy the arrival's address is the last one the proxy appended, and the proxy's chain and scheme are kept on the relay; without it the client's headers are replaced", async () => {
     const headers = { "x-forwarded-for": "6.6.6.6, 203.0.113.9", "x-forwarded-proto": "https", "x-forwarded-host": "shop.example" };
-    const direct = await call("GET", "/catalogue/x", { headers });
+    // an origin that reads the client's address from any of these would otherwise trust what the client wrote
+    const spoofed = { forwarded: "for=10.0.0.5", "x-real-ip": "10.0.0.5", "true-client-ip": "10.0.0.5", "cf-connecting-ip": "10.0.0.5", "x-forwarded-port": "443", "x-forwarded-prefix": "/admin" };
+    const direct = await call("GET", "/catalogue/x", { headers: { ...headers, ...spoofed } });
     expect(direct.arrival.remote).toBe("127.0.0.1");
-    expect(origin.seen.at(-1)?.headers).toMatchObject({ "x-forwarded-for": "127.0.0.1", "x-forwarded-proto": "http", "x-forwarded-host": `127.0.0.1:${new URL(door.url).port}` });
+    const seenDirect = origin.seen.at(-1)!.headers;
+    expect(seenDirect).toMatchObject({ "x-forwarded-for": "127.0.0.1", "x-forwarded-proto": "http", "x-forwarded-host": `127.0.0.1:${new URL(door.url).port}`, "x-real-ip": "127.0.0.1" });
+    for (const name of ["forwarded", "true-client-ip", "cf-connecting-ip", "x-forwarded-port", "x-forwarded-prefix"]) expect(seenDirect[name]).toBeUndefined();
 
     const behind = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-proxied-")), origin.url, { trustProxy: true });
     const h = await createDoorHost(loadDoorConfig(behind.configFile));
     const d = await serveDoor(h, { port: 0, log: () => {} });
     try {
-      const res = await fetch(`${d.url}/catalogue/x`, { headers });
+      const res = await fetch(`${d.url}/catalogue/x`, { headers: { ...headers, ...spoofed } });
       const arrival = decode(JSON.parse(readFileSync(join(behind.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")) as ReceiptBundle).predicate.facts[ARRIVAL_FACT]!.value as Arrival;
       expect(arrival.remote).toBe("203.0.113.9");
-      expect(origin.seen.at(-1)?.headers).toMatchObject({ "x-forwarded-for": "6.6.6.6, 203.0.113.9, 127.0.0.1", "x-forwarded-proto": "https", "x-forwarded-host": "shop.example" });
+      // behind the proxy you run, these are that proxy's to set, and they are relayed as it sent them
+      expect(origin.seen.at(-1)?.headers).toMatchObject({ "x-forwarded-for": "6.6.6.6, 203.0.113.9, 127.0.0.1", "x-forwarded-proto": "https", "x-forwarded-host": "shop.example", ...spoofed });
     } finally {
       await d.close();
       await h.close();
@@ -656,6 +909,37 @@ describe("the door", () => {
     } finally {
       chmodSync(stuck.receiptsDir, 0o700);
       console.error = stderr;
+      await d.close();
+      await h.close();
+    }
+  });
+
+  // A query can carry an API key and a form body a password. A config that sets no rule still keeps them out of the
+  // receipt file and the log, and the receipt still verifies.
+  it("without a capture rule the receipt withholds the query and the body, keeps the method, path, headers, and size in clear, and verifies", async () => {
+    const secret = `sk_live_${Date.now()}`;
+    const plain = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-default-capture-")), origin.url, { capture: undefined });
+    const h = await createDoorHost(loadDoorConfig(plain.configFile));
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      const read = await fetch(`${d.url}/catalogue/shoes?api_key=${secret}`);
+      expect(read.status).toBe(200);
+      const login = await fetch(`${d.url}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "a@b.c", password: secret }) });
+      expect(login.status).toBe(403);
+      for (const res of [read, login]) {
+        const bundle = bundleAt(plain.receiptsDir, res);
+        const args = decode(bundle).predicate.request.args as Record<string, unknown>;
+        expect(args).toMatchObject({ method: expect.any(String), path: expect.any(String), headers: expect.any(Object), bodyBytes: expect.any(Number) });
+        // the withheld fields leave one salted commitment, `$rest`, in their place
+        expect(args.query).toBeUndefined();
+        expect(args.body).toBeUndefined();
+        expect(isCommitment(args.$rest)).toBe(true);
+        expect(JSON.stringify(bundle)).not.toContain(secret);
+        expect(Buffer.from(bundle.envelope.payload, "base64").toString()).not.toContain(secret);
+        expect(verifyBundle(bundle, { issuerKeys: [loadPublicKey(plain.doorPub)], principalKeys: [loadPublicKey(plain.principalPub)], logFile: plain.logFile }).checks.filter((c) => !c.ok)).toEqual([]);
+      }
+      expect(readFileSync(plain.logFile, "utf8")).not.toContain(secret);
+    } finally {
       await d.close();
       await h.close();
     }
