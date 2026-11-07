@@ -8,6 +8,7 @@ This file holds the rules for one area of the code at a time. The rules for ever
 - The `_meta` keys `agent-custody/receipt`, `agent-custody/agent`, and `agent-custody/observed` are in both packages. The state package duplicates them on purpose, to avoid a runtime import. Keep the strings identical.
 - The console's routes in `packages/receipts/src/console.ts` and its page in `console-page.ts`: every `/api/` route is behind the token, the page writes data with `textContent` only, and `test/console.test.ts` checks both and compiles the page's script. A new route is added to `docs/console.md`.
 - The tenant path regex in `packages/receipts/src/log-sink.ts` lists the permitted tenant operations. Add each new tenant route there.
+- `packages/receipts/src/log.ts`, the WebCrypto copy of its checks in `packages/state/src/verify-web.ts`, and the Lean model in `spec/lean`: a change to what `verifyInclusion` or `verifyConsistency` accepts also changes `spec/lean/AgentCustodySpec/Merkle.lean` or `Log.lean`, and `lake build`, `./check-axioms.sh`, and `lake exe vectors` must pass.
 - A new public module goes into the package's `src/index.ts`. A new adapter gets its own `./sdk/<name>` subpath in the `exports` map.
 - The portal and admin pages are TypeScript template literals. Inside the page's own JavaScript strings, write a quote as `\\"` in the source. Their tests compile every inline `<script>` with `node:vm`, because one unescaped `\"` makes the page blank.
 
@@ -112,6 +113,7 @@ Web pages and the hosted log:
 
 - A startup migration (the log, signer, and portal create or alter tables when they start) must be backward compatible for one release: add a column or a table, never drop or rename one in the release that stops using it. A rollback puts the previous image back on the new schema, and `upgrade.sh` does exactly that.
 - Pin third-party GitHub Actions to a commit SHA with the tag in a trailing comment, and base images in a Dockerfile or compose file to a digest. Dependabot proposes both updates weekly; do not replace a pin with a moving tag.
+- Pin every npm dependency and devDependency in the three `package.json` files to one exact version, the one `bun.lock` resolves, never a caret or tilde range: an image build installs the packed package with npm, which resolves a range afresh and once pulled in a release of `@cedar-policy/cedar-wasm` that shipped without its files. Peer ranges stay ranges, since they describe what a consumer may bring. To move a dependency, change both the manifest and the lockfile in one commit.
 - A change under `deploy/` must pass `deploy/test-upgrade.sh` and `deploy/smoke-log.sh`, which the `image` workflow runs on the pull request. A change under `deploy/gateway` must pass its `smoke.sh`, which the `gateway-image` workflow runs.
 
 ## Release and publish
