@@ -256,10 +256,14 @@ export const DoorConfigSchema = z.object({
   policyFile: z.string(),
   /** "enforce" (default) refuses what the policy denies; "observe" forwards everything and records the decision with `enforced: false` */
   mode: z.enum(["enforce", "observe"]).optional(),
-  /** behind a reverse proxy you run: the arrival's address is the first in X-Forwarded-For */
+  /** behind a reverse proxy you run: the arrival's address is the last in X-Forwarded-For, the one that proxy appended, and the client-address headers are relayed as it sent them */
   trustProxy: z.boolean().optional(),
-  /** the largest request body the door relays; a larger one is refused with 413 and receipted. Default 10 MiB */
-  maxBodyBytes: z.number().int().positive().default(10 * 1024 * 1024),
+  /** the largest request body the door relays; a larger one is refused with 413 and receipted. Default 1 MiB */
+  maxBodyBytes: z.number().int().positive().default(1024 * 1024),
+  /** the largest origin response the door relays; a larger one is recorded by size and the client gets 502. Default 32 MiB */
+  maxResponseBytes: z.number().int().positive().default(32 * 1024 * 1024),
+  /** arrivals handled at once; past this the next is answered 503 before its body is read, and not receipted. Default 256 */
+  maxInFlight: z.number().int().positive().default(256),
   /** routes whose arrivals are committed to the log before they are relayed whatever the method, or ["*"]; every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless */
   precommit: z.array(z.string().min(1)).default([]),
   /** the human branch: a Turnstile or hCaptcha token an arrival sends in `header` is verified with the provider, and the outcome is the arrival's `challenge` signal */
