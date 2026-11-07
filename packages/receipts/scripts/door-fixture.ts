@@ -56,6 +56,8 @@ export function buildDoorFixture(dir: string, originUrl: string, extra: Record<s
     policyFile: "policy.cedar",
     receiptsDir: "receipts",
     logFile: "log.jsonl",
+    // the tests, the example, and the vectors read the arguments; a door config without a rule withholds the query and the body
+    capture: { "*": { args: { mode: "clear" } } },
     ...extra,
   };
   const configFile = join(dir, "door.json");

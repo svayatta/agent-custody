@@ -60,16 +60,51 @@ const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "p
 const RECORDED_HEADERS = ["user-agent", "content-type", "accept", "host"];
 /** a JSON body up to this size is recorded in the receipt's arguments; a larger or non-JSON body is recorded by digest and size only */
 const RECORDED_BODY_BYTES = 64 * 1024;
-const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+/**
+ * Headers that name the client's address or the scheme and host it used. Without trustProxy the client wrote them, and an
+ * origin that reads one (an allowlist on `X-Real-IP`, a rate limit on `Forwarded`) would trust the client's word: they
+ * are dropped, and the door sets `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Real-IP` itself.
+ */
+const CLIENT_ADDRESS_HEADERS = new Set(["forwarded", "x-real-ip", "true-client-ip", "cf-connecting-ip", "x-client-ip", "x-cluster-client-ip", "fastly-client-ip"]);
+/** connection failures in which the request never left the door: the origin cannot have acted on it */
+const UNREACHED_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN"]);
 
 /**
- * The path as the origin will read it: each segment percent-decoded once, so that `/%61dmin` falls under `/admin/*`.
- * Refused when a segment does not decode, or decodes to a slash, a backslash, or a dot segment: the origin would then
- * read a path the door did not match. `relay` is the decoded path encoded once more, the form the origin is sent.
+ * The record of the call keeps what arrived; the policy reads a copy Cedar accepts. Cedar has no `null` and no
+ * non-integer number, and refuses the whole request on either, so a body with `"coupon": null` or `"price": 9.99` would
+ * be denied whatever the policy says. In the copy a `null` is dropped and a number that is not a safe integer becomes its
+ * string; a rule that compares `price` as a number then errors, and the call is denied by that rule rather than by Cedar.
+ */
+export function cedarArgs(value: unknown): unknown {
+  if (Array.isArray(value)) return value.filter((v) => v !== null).map(cedarArgs);
+  if (typeof value === "number") return Number.isSafeInteger(value) ? value : String(value);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) if (v !== null) Object.defineProperty(out, k, { value: cedarArgs(v), enumerable: true, writable: true, configurable: true });
+    return out;
+  }
+  return value;
+}
+
+/**
+ * What a receipt records of an arrival when the config gives its route no capture rule: the method, the path, the
+ * recorded headers, and the body's size in clear; the query and the body withheld, each a salted commitment. A query can
+ * carry an API key and a form body a password. Set a rule for the route (or `"*"`) to record more in clear.
+ */
+export const DOOR_DEFAULT_CAPTURE = { args: { mode: "digest" as const, clear: ["method", "path", "headers", "bodyBytes", "bodyOversized"] }, result: { mode: "clear" as const }, facts: { mode: "clear" as const } };
+
+/**
+ * The path as the origin will read it: each segment percent-decoded once, so that `/%61dmin` falls under `/admin/*`, and
+ * empty segments merged, so that `//admin/users` and `/admin//users` fall under it too (nginx, Apache, and many
+ * frameworks merge them, and the origin would serve the admin page to an arrival the door matched as something else).
+ * A trailing slash is kept. Refused when a segment does not decode, or decodes to a slash, a backslash, or a dot
+ * segment: the origin would then read a path the door did not match. `relay` is the merged, decoded path encoded once
+ * more, the form the origin is sent, so the door and the origin read one path.
  */
 export function normalizePath(pathname: string): { path: string; relay: string } | { problem: string } {
   const segments: string[] = [];
   for (const raw of pathname.split("/")) {
+    if (raw === "") continue;
     let segment: string;
     try {
       segment = decodeURIComponent(raw);
@@ -78,9 +113,11 @@ export function normalizePath(pathname: string): { path: string; relay: string }
     }
     if (segment.includes("/") || segment.includes("\\")) return { problem: `the path segment "${raw}" decodes to a slash` };
     if (segment === "." || segment === "..") return { problem: `the path segment "${raw}" decodes to a dot segment` };
+    if (segment === "") return { problem: `the path segment "${raw}" decodes to nothing` };
     segments.push(segment);
   }
-  return { path: segments.join("/"), relay: segments.map(encodeSegment).join("/") };
+  const tail = segments.length > 0 && pathname.endsWith("/") ? "/" : "";
+  return { path: `/${segments.join("/")}${tail}`, relay: `/${segments.map(encodeSegment).join("/")}${tail}` };
 }
 
 /** A path segment encoded once: what `encodeURIComponent` does, except that the characters a path segment may carry in clear stay in clear. */
@@ -94,11 +131,19 @@ function requestUrl(req: IncomingMessage): URL {
   return raw.startsWith("/") ? new URL(`http://door${raw}`) : new URL(raw, "http://door");
 }
 
-/** The route an arrival falls under: the first configured route whose methods and decoded path match, else the unmatched name. */
+/** A path without its trailing slash: `/refunds/` and `/refunds` are one route. */
+const bare = (p: string) => (p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p);
+
+/** The route an arrival falls under: the first configured route whose methods and decoded path match, else the unmatched name. A trailing slash matches as no trailing slash. */
 export function matchRoute(routes: DoorRouteConfig[], unmatched: string, method: string, pathname: string): string {
+  const path = bare(pathname);
   for (const r of routes) {
     if (r.methods && !(r.methods as string[]).includes(method)) continue;
-    if (r.path === "*" || r.path === pathname || (r.path.endsWith("/*") && (pathname === r.path.slice(0, -2) || pathname.startsWith(r.path.slice(0, -1))))) return r.name;
+    if (r.path === "*") return r.name;
+    if (r.path.endsWith("/*")) {
+      const prefix = bare(r.path.slice(0, -2)) || "/";
+      if (path === prefix || path.startsWith(prefix === "/" ? "/" : `${prefix}/`)) return r.name;
+    } else if (bare(r.path) === path) return r.name;
   }
   return unmatched;
 }
@@ -205,13 +250,24 @@ async function readResponse(upstream: Response, max: number): Promise<{ body: Bu
   }
 }
 
-function queryOf(url: URL): Record<string, string | string[]> {
-  const out: Record<string, string | string[]> = {};
+/** The query as own properties: a parameter named `constructor` or `__proto__` is a parameter, never an inherited member or the prototype. */
+export function queryOf(url: URL): Record<string, string | string[]> {
+  const pairs = new Map<string, string | string[]>();
   for (const [k, v] of url.searchParams) {
-    const prior = out[k];
-    out[k] = prior === undefined ? v : Array.isArray(prior) ? [...prior, v] : [prior, v];
+    const prior = pairs.get(k);
+    pairs.set(k, prior === undefined ? v : Array.isArray(prior) ? [...prior, v] : [prior, v]);
   }
-  return out;
+  return Object.fromEntries(pairs);
+}
+
+/** Whether a failed fetch never left the door: a refused or unresolved connection. Anything else (a timeout, a reset) may have reached the origin. */
+function unreached(e: unknown): boolean {
+  const cause = (e as { cause?: { code?: unknown; message?: unknown; errors?: { code?: unknown }[] } } | undefined)?.cause;
+  if (!cause) return false;
+  if (typeof cause.code === "string") return UNREACHED_CODES.has(cause.code);
+  // fetch refuses a port on its blocked list before it connects
+  if (cause.message === "bad port") return true;
+  return Array.isArray(cause.errors) && cause.errors.length > 0 && cause.errors.every((x) => typeof x?.code === "string" && UNREACHED_CODES.has(x.code));
 }
 
 export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {}): Promise<DoorHost> {
@@ -231,7 +287,9 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   const originPath = origin.pathname.replace(/\/$/, "");
   const f = options.fetch ?? fetch;
   const sink = options.log ?? openLog(cfg, key);
-  const issuer = createIssuer(key, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
+  // a route the config gives no rule falls to "*", and without a "*" rule of the config's own, to the door's default
+  const rules = cfg.capture && Object.hasOwn(cfg.capture, "*") ? cfg.capture : { ...(cfg.capture ?? {}), "*": DOOR_DEFAULT_CAPTURE };
+  const issuer = createIssuer(key, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules, key: captureKey } });
   const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework: "http" };
   const precommit = new Set(cfg.precommit);
 
@@ -270,7 +328,26 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     res.end(JSON.stringify(body));
   };
 
+  // Each arrival holds its body (up to maxBodyBytes) and the origin's answer (up to maxResponseBytes) in memory until it
+  // is answered. Past maxInFlight arrivals at once, the next is answered 503 before its body is read: it is not decided,
+  // relayed, or receipted.
+  let inFlight = 0;
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (inFlight >= cfg.maxInFlight) {
+      req.resume();
+      res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "1" });
+      res.end(JSON.stringify({ error: `the door is handling ${cfg.maxInFlight} requests; this one was not read, decided, or relayed. Retry` }));
+      return;
+    }
+    inFlight += 1;
+    try {
+      await decideAndAnswer(req, res);
+    } finally {
+      inFlight -= 1;
+    }
+  }
+
+  async function decideAndAnswer(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const receiptId = randomUUID();
     const timestamp = new Date().toISOString();
     res.setHeader(RECEIPT_HEADER, receiptId);
@@ -315,7 +392,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
       policy = evaluate(policyText, {
         agentId: delegation ? delegation.grant.agent : "unknown",
         tool: route,
-        context: { args, facts: { [ARRIVAL_FACT]: arrival }, ...(delegation ? { grant: { principal: delegation.grant.principal, scopes: delegation.grant.scopes } } : {}) },
+        context: { args: cedarArgs(args), facts: { [ARRIVAL_FACT]: arrival }, ...(delegation ? { grant: { principal: delegation.grant.principal, scopes: delegation.grant.scopes } } : {}) },
       });
     } catch (e) {
       policy = { decision: "deny", reasons: [], errors: [String(e instanceof Error ? e.message : e)], policyDigest: pDigest };
@@ -340,6 +417,8 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     let authorization: AuthorizationBundle | undefined;
     let answer: { status: number; headers: Record<string, string | string[]>; body: Buffer } | undefined;
     let withheldStatus = 503;
+    // set when the relay failed before the request left the door; any other relay failure leaves the outcome unknown
+    let notSent = false;
     if (!forward) {
       execution = { status: "denied", reason: [...policy.reasons, ...policy.errors].join("; ") || "no permit policy matched", provenance: "observed" };
     } else if ("problem" in norm) {
@@ -362,6 +441,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
       }
     }
     if (!execution) {
+      let upstream: Response | undefined;
       try {
         // The path is set on a copy of the origin's URL, never resolved against it: resolving `//evil.example/x` would
         // move the relay, with the origin's credentials, to another host.
@@ -372,6 +452,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         for (const [name, value] of Object.entries(req.headers)) {
           // `expect` is the client's conversation with the door, which Node answered; fetch refuses to carry it
           if (value === undefined || HOP_BY_HOP.has(name) || name === "host" || name === "expect" || name === GRANT_HEADER || name === AGENT_HEADER || name === "accept-encoding") continue;
+          if (!cfg.trustProxy && (CLIENT_ADDRESS_HEADERS.has(name) || name.startsWith("x-forwarded-"))) continue;
           // the grant travelled in Authorization: it is the door's credential, not the origin's
           if (name === "authorization" && arrival.grant !== "absent" && !req.headers[GRANT_HEADER]) continue;
           out.set(name, Array.isArray(value) ? value.join(", ") : value);
@@ -385,11 +466,12 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         out.set("x-forwarded-for", chain ? `${chain}, ${socketAddress}` : socketAddress);
         out.set("x-forwarded-host", inbound("x-forwarded-host") || req.headers.host || "");
         out.set("x-forwarded-proto", inbound("x-forwarded-proto") || "http");
+        if (!cfg.trustProxy) out.set("x-real-ip", socketAddress);
         out.set(RECEIPT_HEADER, receiptId);
         out.set(CLASS_HEADER, arrival.class);
         for (const [h, v] of Object.entries(originHeaders)) out.set(h, v);
-        const upstream = await f(target, { method, headers: out, ...(method === "GET" || method === "HEAD" ? {} : { body: new Uint8Array(body!) }), redirect: "manual", signal: AbortSignal.timeout(cfg.origin.timeoutMs) });
-        const got = await readResponse(upstream, MAX_RESPONSE_BYTES);
+        upstream = await f(target, { method, headers: out, ...(method === "GET" || method === "HEAD" ? {} : { body: new Uint8Array(body!) }), redirect: "manual", signal: AbortSignal.timeout(cfg.origin.timeoutMs) });
+        const got = await readResponse(upstream, cfg.maxResponseBytes);
         const back: Record<string, string | string[]> = {};
         upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k) && k !== "content-length" && k !== "content-encoding" && k !== "set-cookie") back[k] = v; });
         // every cookie the origin set, not the last one: `forEach` gives them one at a time under the same name
@@ -417,7 +499,12 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         if ("body" in got) answer = { status: upstream.status, headers: back, body: got.body };
         execution = { status: upstream.status >= 500 ? "failed" : "executed", result, resultDigest: digestOf(result), provenance: "observed" };
       } catch (e) {
-        execution = { status: "error", error: String(e instanceof Error ? e.message : e), provenance: "observed" };
+        // The request may have reached the origin unless the connection was refused or the host did not resolve: a
+        // timeout while the origin works, a reset, or a body that stops after the headers all leave the outcome unknown,
+        // and the client is told not to retry rather than that the origin could not be reached.
+        const message = String(e instanceof Error ? e.message : e);
+        notSent = !upstream && unreached(e);
+        execution = { status: "error", error: notSent ? `the origin could not be reached: ${message}` : `the origin may have acted on the request${upstream ? ` (it answered ${upstream.status} and its body did not arrive)` : ""}: ${message}`, provenance: "observed" };
       }
     }
 
@@ -435,7 +522,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         // The decision was carried out and the receipt of it could not be written. The client is told what happened at
         // the origin rather than "not relayed", which would invite a retry of a refund that went through.
         console.error(`agent-custody door: receipt ${receiptId} was not written: ${e instanceof Error ? e.message : String(e)}`);
-        const outcome = execution!.status === "executed" || execution!.status === "failed" ? "the origin acted on the request; its answer is not relayed because there is no receipt of it. Do not retry" : execution!.status === "error" ? "the origin could not be reached" : "nothing was relayed";
+        const outcome = execution!.status === "executed" || execution!.status === "failed" ? "the origin acted on the request; its answer is not relayed because there is no receipt of it. Do not retry" : execution!.status === "error" ? (notSent ? "the origin could not be reached" : "the origin may have acted on the request. Do not retry") : "nothing was relayed";
         return json(res, 500, { [CLASS_HEADER]: arrival.class }, { error: "the door could not record this request", outcome, receipt: receiptId });
       }
       console.error(`agent-custody door: ${e.message}`);
@@ -449,9 +536,11 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
       case "withheld":
         return json(res, withheldStatus, mark, { error: "not relayed", reason: execution!.reason, receipt: receiptId });
       case "error":
-        return json(res, 502, mark, { error: "the origin could not be reached", detail: execution!.error, receipt: receiptId });
+        return notSent
+          ? json(res, 502, mark, { error: "the origin could not be reached", detail: execution!.error, receipt: receiptId })
+          : json(res, 504, mark, { error: "the origin may have acted on the request; its answer did not arrive. Do not retry", detail: execution!.error, receipt: receiptId });
       default: {
-        if (!answer) return json(res, 502, mark, { error: `the origin answered, but its response is larger than ${MAX_RESPONSE_BYTES} bytes and was not relayed. Do not retry`, receipt: receiptId });
+        if (!answer) return json(res, 502, mark, { error: `the origin answered, but its response is larger than ${cfg.maxResponseBytes} bytes and was not relayed. Do not retry`, receipt: receiptId });
         res.writeHead(answer.status, { ...answer.headers, ...mark });
         res.end(answer.body);
       }
