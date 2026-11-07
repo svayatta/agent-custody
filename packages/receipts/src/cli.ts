@@ -44,6 +44,7 @@ import { auditExtends, formatReport, verifyBundle, type VerifyOptions } from "./
 import { CLEAR_WARNING, exportReceipts, formatReceiptExport as formatExportLines } from "./export.ts";
 import { formatSummaryMarkdown, receiptFiles, summarizeReceipts } from "./pr-summary.ts";
 import { formatSimulation, simulatePolicy, verifyOrphanAuthorization, type SimulationSkip } from "./simulate.ts";
+import { isRegoFile } from "./policy-rego.ts";
 
 /**
  * Resolves on SIGINT or SIGTERM: a container runtime and systemd stop a service with SIGTERM, which PID 1 ignores unless
@@ -118,7 +119,7 @@ const USAGE = `agent-custody <command>
   export  --receipts <dir> --out <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--since <ISO time>] [--allow-clear]
                                                    copies the verified receipt bundles that keep their values private into a directory for a pull request, byte for byte.
                                                    Reads only <id>.json at the top level; never salts/, outbox/, or *.authorization.json. Exits 1 when it refuses a receipt, and when it copies none
-  policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
+  policy simulate --policy <proposed.cedar|.rego> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
   completeness --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--log-id <id>]
                --provider stripe --object refunds|payouts|transfers --key-env NAME --tool <name>... --since <ISO> --until <ISO>
                [--id-path id] [--amount-field amount] [--currency-field currency] [--beneficiary <arg>=<field>]... [--json]
@@ -834,7 +835,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case "policy": {
       const [subcommand, ...args] = rest;
-      if (subcommand !== "simulate") throw new Error("policy needs the simulate subcommand: policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>");
+      if (subcommand !== "simulate") throw new Error("policy needs the simulate subcommand: policy simulate --policy <proposed.cedar|.rego> --receipts <dir> --issuer-key <pub>");
       const { values } = parseArgs({
         args,
         options: {
@@ -850,7 +851,7 @@ async function main(argv: string[]): Promise<number> {
           out: { type: "string" },
         },
       });
-      if (!values.policy || !values.receipts || !values["issuer-key"]?.length) throw new Error("policy simulate needs --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>");
+      if (!values.policy || !values.receipts || !values["issuer-key"]?.length) throw new Error("policy simulate needs --policy <proposed.cedar|.rego> --receipts <dir> --issuer-key <pub>");
       const policy = readFileSync(values.policy, "utf8");
       const keys = {
         issuerKeys: values["issuer-key"].map(loadPublicKey),
@@ -907,7 +908,7 @@ async function main(argv: string[]): Promise<number> {
           }
         }
       }
-      const report = simulatePolicy(policy, verified(), { unreplayable, ...(captureKey ? { captureKey } : {}), disclosures });
+      const report = simulatePolicy(policy, verified(), { unreplayable, ...(captureKey ? { captureKey } : {}), disclosures, language: isRegoFile(values.policy) ? "rego" : "cedar" });
       const json = JSON.stringify(report, null, 2);
       if (values.out) {
         // Reports name calls and decisions: keep them owner-only, including when replacing an existing file.
