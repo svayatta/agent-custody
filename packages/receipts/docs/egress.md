@@ -7,7 +7,7 @@ The gateway holds an agent's tool credentials and receipts every call made throu
 - relays the connection or refuses it;
 - signs a receipt either way, with `issuer.kind: "egress"`. The receipt goes to the log like any other.
 
-**It needs lockdown.** A proxy alone is advice: an agent can ignore `HTTPS_PROXY` and connect directly. The witness means something only when the agent's network reaches nothing but the gateway and the witness. The witness runs anywhere Node 22 runs, but the lockdown belongs to the platform the agent runs on. `deploy/gateway/lockdown` ships it for Kubernetes (a NetworkPolicy) and docker compose (an internal network). On a VM, bare metal, a cloud task, or a laptop, you build the default-deny egress with that platform's own firewall. [Credential custody and lockdown](../../../site/guide/credential-custody.md) explains each.
+**It needs lockdown.** A proxy alone is advice: an agent can ignore `HTTPS_PROXY` and connect directly. The witness means something only when the agent's network reaches nothing but the gateway and the witness. The witness runs anywhere Node 22 runs, but the lockdown belongs to the platform the agent runs on. `deploy/gateway/lockdown` ships it for Kubernetes (a NetworkPolicy), docker compose (an internal network), and a Linux VM or bare metal (`lockdown/vm`: an nftables rule on the agent's Unix user, a systemd drop-in for the agent's unit, a unit for the witness, and a script that runs the lockdown checks). On a cloud task or a laptop, you build the default-deny egress with that platform's own firewall. [Credential custody and lockdown](../../../site/guide/credential-custody.md) explains each.
 
 **What it cannot see.** Every page about the witness repeats this list:
 

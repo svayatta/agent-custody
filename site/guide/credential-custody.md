@@ -46,13 +46,32 @@ docker compose -f docker-compose.yaml -f lockdown/docker-compose.yaml --profile 
 
 On Docker, the witness sits on the default network, so it can reach the host, the other services, the private ranges, and the metadata address, which the agent cannot. Compose has no equivalent of the Kubernetes exception list. The witness itself refuses an internal address for a host name before it connects. It dials an IP literal only when the policy names that address, so do not permit internal addresses. On a cloud VM, also block the metadata address for the witness's container in the host firewall.
 
-**Other setups.** The witness itself runs anywhere: `agent-custody egress` is a Node 22 process, from npm or the gateway image. The lockdown is the part that depends on the platform. This repository ships it only for Kubernetes and docker compose. Anywhere else, build the same default-deny egress with the platform's own controls. The rule is always the same: from the agent, allow only the gateway, the witness, and DNS, and drop everything else.
+**A VM or bare metal** (`lockdown/vm`): each agent runs as its own Unix user, and the gateway and the witness run beside it as systemd services.
 
-- **A VM or bare metal.** Run the agent as its own Unix user, and give that user a host firewall rule that rejects every outbound connection except the gateway's and the witness's address and port. With nftables or iptables, match on the user (`meta skuid`, or `-m owner --uid-owner`). Under systemd, `IPAddressDeny=any` plus `IPAddressAllow=` for the two addresses and the resolver does the same per unit, by address.
-- **Cloud tasks and instances** (ECS, Cloud Run, EC2, GCE, Azure). Give the agent a security group or firewall rule with no general egress, only the gateway and the witness. On a serverless function in a VPC, the agent must have no NAT route out.
+- `agent-lockdown.nft` is an nftables table that matches the agent's user (`meta skuid`). Whatever that user runs may reach only the gateway on 8790, the witness on 8791, and the DNS resolver. Everything else, loopback included, is logged and refused. Packets from every other user, the gateway and the witness among them, are not touched.
+- `agent-lockdown.conf` is a systemd drop-in for the agent's own unit. It runs the agent as that user with `NoNewPrivileges`, loads its proxy settings from a root-only file, and sets `IPAddressDeny=any` plus `IPAddressAllow=` for the gateway, the witness, and the resolver.
+- `agent-custody-egress.service` runs the witness under a user of its own, with the same `egress.json` as the other recipes. The gateway uses the existing `deploy/gateway/agent-custody-gateway.service`.
+- `check-lockdown.sh` runs the three tests below as the agent user. With `--unit`, it runs them inside the agent unit's IP filter.
+
+Use the nftables rule and the drop-in together. The nftables rule covers everything the user runs, a cron job or a shell included, and it matches ports. The drop-in holds even if the host firewall is flushed. But `IPAddressAllow=` takes addresses, not ports, so allowing `127.0.0.1` allows every service on loopback. Neither can hold an agent that changes user, so give the agent user no sudo and keep it out of the docker group. CI installs this recipe on a fresh Ubuntu runner and runs the checks with the nftables rule alone, then with the drop-in alone.
+
+```bash
+sudo useradd --system --home /var/lib/agent --create-home --shell /usr/sbin/nologin agent
+sudo install -D -m 0644 deploy/gateway/lockdown/vm/agent-lockdown.nft /etc/agent-custody/agent-lockdown.nft  # edit the addresses
+sudo nft -f /etc/agent-custody/agent-lockdown.nft
+sudo install -D -m 0644 deploy/gateway/lockdown/vm/agent-lockdown.conf /etc/systemd/system/my-agent.service.d/lockdown.conf
+sudo systemctl daemon-reload && sudo systemctl restart my-agent
+sudo EGRESS_SECRET=... deploy/gateway/lockdown/vm/check-lockdown.sh --unit my-agent.service
+```
+
+The header of each file lists the remaining steps: the witness's user and key, and loading the table at boot.
+
+**Other setups.** The witness itself runs anywhere: `agent-custody egress` is a Node 22 process, from npm or the gateway image. The lockdown is the part that depends on the platform. Anywhere else, build the same default-deny egress with the platform's own controls. The rule is always the same: from the agent, allow only the gateway, the witness, and DNS, and drop everything else.
+
+- **Cloud tasks and instances** (ECS, Cloud Run, EC2, GCE, Azure). Give the agent a security group or firewall rule with no general egress, only the gateway and the witness. On a serverless function in a VPC, the agent must have no NAT route out. On an instance you manage yourself, the VM recipe above applies inside it too.
 - **A developer laptop.** An agent that runs as you, with your network, cannot be locked down, and the witness is only advice there. Run the agent in a container with the compose override instead.
 
-These are mechanisms, not recipes. We have not shipped or tested a file for them. Whatever you build, run the three tests below before you rely on it.
+These two are mechanisms, not recipes. We have not shipped or tested a file for them. Whatever you build, run the three tests below before you rely on it.
 
 **The agent's settings:**
 
@@ -60,7 +79,7 @@ These are mechanisms, not recipes. We have not shipped or tested a file for them
 - `NO_PROXY`: the gateway's host.
 - Give each agent its own secret. Each agent's receipts then name that agent, and you can revoke one agent without the others.
 
-**Test it.** Do not assume it works. From an agent container:
+**Test it.** Do not assume it works. From the agent's container or user:
 
 - a direct connection that ignores the proxy must fail to connect;
 - a connection through the witness to a destination the policy does not permit must get `403` and leave a receipt;
