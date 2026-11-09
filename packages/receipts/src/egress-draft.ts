@@ -1,6 +1,6 @@
 // A first egress policy, drafted from what the agents did while the witness observed them. It is a record of the
 // window, not a judgment: a destination an agent should never have reached is permitted like any other.
-import { readdirSync, readFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { internalAddress, isAddressLiteral } from "./addresses.ts";
 import { DESTINATION_FACT, type Destination } from "./egress.ts";
@@ -10,6 +10,8 @@ import { verifyBundle, type VerifyOptions } from "./verify.ts";
 export interface DraftDestination {
   /** `host:port`, the Cedar action */
   name: string;
+  /** `connect` (a tunnel) or `http` (a plain request): the same action covers both, so the draft keeps them apart */
+  scheme: Destination["scheme"];
   count: number;
   first: string;
   last: string;
@@ -27,11 +29,12 @@ export interface DraftAgent {
 
 export interface DraftSkip {
   file: string;
-  kind: "unverified" | "not-egress" | "no-agent" | "not-relayed" | "unsafe-name";
+  kind: "not-a-file" | "unverified" | "not-egress" | "no-agent" | "not-relayed" | "unsafe-name";
   reason: string;
 }
 
 const SKIP_LABEL: Record<DraftSkip["kind"], string> = {
+  "not-a-file": "not a regular file (a symlink is not followed)",
   unverified: "did not verify",
   "not-egress": "not an egress receipt",
   "no-agent": "no verified agent",
@@ -72,13 +75,16 @@ function notUsed(p: ReceiptPredicate): Omit<DraftSkip, "file"> | null {
 }
 
 /**
- * Reads every receipt bundle in `receiptsDir`, verifies each with `keys`, and drafts one `permit` per verified agent
- * over the `host:port` destinations of the connections the witness relayed for it. A receipt that does not verify,
- * names no verified agent, or was not relayed is skipped and listed with its reason. Agents and destinations are sorted.
+ * Reads every regular receipt file in `receiptsDir`, verifies each with `keys`, and drafts one `permit` per verified
+ * agent and scheme over the `host:port` destinations of the connections the witness relayed for it. A symlink, a
+ * receipt that does not verify, names no verified agent, or was not relayed is skipped and listed with its reason.
+ * Agents and destinations are sorted.
  */
 export function draftEgressPolicy(receiptsDir: string, keys: Pick<VerifyOptions, "issuerKeys" | "logKeys" | "logFile">): EgressPolicyDraft {
+  // Symlinks are listed so that they are reported, and never followed: one could lead outside the directory, to a
+  // receipt the listing does not show, or to a fifo that stalls the read.
   const files = readdirSync(receiptsDir, { withFileTypes: true })
-    .filter((e) => (e.isFile() || e.isSymbolicLink()) && e.name.endsWith(".json") && !e.name.endsWith(AUTHORIZATION))
+    .filter((e) => !e.isDirectory() && e.name.endsWith(".json") && !e.name.endsWith(AUTHORIZATION))
     .map((e) => e.name)
     .sort();
   const skipped: DraftSkip[] = [];
@@ -86,8 +92,24 @@ export function draftEgressPolicy(receiptsDir: string, keys: Pick<VerifyOptions,
   let used = 0;
   for (const file of files) {
     let p: ReceiptPredicate;
+    let text: string | null = null;
     try {
-      const result = verifyBundle(JSON.parse(readFileSync(join(receiptsDir, file), "utf8")) as ReceiptBundle, { ...keys, principalKeys: [] });
+      // O_NOFOLLOW refuses a symlink, also one swapped in after the listing; O_NONBLOCK keeps a fifo from stalling the open
+      const fd = openSync(join(receiptsDir, file), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      try {
+        if (fstatSync(fd).isFile()) text = readFileSync(fd, "utf8");
+      } finally {
+        closeSync(fd);
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ELOOP") throw e;
+    }
+    if (text === null) {
+      skipped.push({ file, kind: "not-a-file", reason: "a symlink or a special file; only regular files in the directory are read" });
+      continue;
+    }
+    try {
+      const result = verifyBundle(JSON.parse(text) as ReceiptBundle, { ...keys, principalKeys: [] });
       if (!result.ok || !result.statement) {
         skipped.push({ file, kind: "unverified", reason: `failed ${result.checks.filter((c) => !c.ok).map((c) => c.name).join("; ")}` });
         continue;
@@ -103,21 +125,24 @@ export function draftEgressPolicy(receiptsDir: string, keys: Pick<VerifyOptions,
       continue;
     }
     used++;
-    const host = (p.facts[DESTINATION_FACT]?.value as Destination | undefined)?.host ?? "";
+    const observed = p.facts[DESTINATION_FACT]?.value as Destination | undefined;
+    const host = observed?.host ?? "";
+    const scheme = observed?.scheme === "http" ? "http" : "connect";
     const dests = byAgent.get(p.agent.id) ?? new Map<string, DraftDestination>();
     byAgent.set(p.agent.id, dests);
-    const d = dests.get(p.tool.name);
+    const key = `${scheme} ${p.tool.name}`;
+    const d = dests.get(key);
     if (d) {
       d.count++;
       if (p.timestamp < d.first) d.first = p.timestamp;
       if (p.timestamp > d.last) d.last = p.timestamp;
     } else {
-      dests.set(p.tool.name, { name: p.tool.name, count: 1, first: p.timestamp, last: p.timestamp, internal: isAddressLiteral(host) && internalAddress(host) });
+      dests.set(key, { name: p.tool.name, scheme, count: 1, first: p.timestamp, last: p.timestamp, internal: isAddressLiteral(host) && internalAddress(host) });
     }
   }
   const order = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
   const agents: DraftAgent[] = [...byAgent].map(([id, dests]) => {
-    const destinations = [...dests.values()].sort((a, b) => order(a.name, b.name));
+    const destinations = [...dests.values()].sort((a, b) => order(a.scheme, b.scheme) || order(a.name, b.name));
     return {
       id,
       count: destinations.reduce((n, d) => n + d.count, 0),
@@ -137,14 +162,21 @@ function formatDraft(agents: DraftAgent[], read: number, used: number, skipped: 
     const n = skipped.filter((s) => s.kind === kind).length;
     if (n) lines.push(`//   skipped, ${SKIP_LABEL[kind]}: ${n}`);
   }
+  // One permit per agent and scheme: the action is host:port for a tunnel and a plain request alike, so a permit that
+  // left the scheme open would turn an observed plain GET into a permitted CONNECT tunnel to the same host and port.
   for (const a of agents) {
-    lines.push("", `// ${a.id}: ${times(a.count, a.first, a.last)}`);
-    lines.push(`permit(principal == Agent::"${a.id}", action in [`);
-    a.destinations.forEach((d, i) => {
-      const note = d.internal ? "; INTERNAL ADDRESS: the witness dials an IP literal a rule names, and only the platform's deny list refuses it" : "";
-      lines.push(`  Action::"${d.name}"${i < a.destinations.length - 1 ? "," : ""} // ${times(d.count, d.first, d.last)}${note}`);
-    });
-    lines.push("], resource);");
+    for (const scheme of ["connect", "http"] as const) {
+      const ds = a.destinations.filter((d) => d.scheme === scheme);
+      if (!ds.length) continue;
+      const n = ds.reduce((k, d) => k + d.count, 0);
+      lines.push("", `// ${a.id}, ${scheme === "connect" ? "CONNECT tunnels" : "plain HTTP requests"}: ${times(n, ds.map((d) => d.first).sort()[0]!, ds.map((d) => d.last).sort().at(-1)!)}`);
+      lines.push(`permit(principal == Agent::"${a.id}", action in [`);
+      ds.forEach((d, i) => {
+        const note = d.internal ? "; INTERNAL ADDRESS: the witness dials an IP literal a rule names, and only the platform's deny list refuses it" : "";
+        lines.push(`  Action::"${d.name}"${i < ds.length - 1 ? "," : ""} // ${times(d.count, d.first, d.last)}${note}`);
+      });
+      lines.push(`], resource) when { context.facts.destination.scheme == "${scheme}" };`);
+    }
   }
   if (!agents.length) lines.push("", "// No relayed connection from a verified agent: nothing to permit.");
   return lines.join("\n") + "\n";

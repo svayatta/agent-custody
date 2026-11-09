@@ -111,8 +111,8 @@ const USAGE = `agent-custody <command>
                                                    locked-down agent's calls that do not go to the gateway. Each agent proves itself with its own
                                                    Proxy-Authorization; the Cedar policy decides per host:port; every connection is receipted
   egress draft-policy --receipts <dir> --issuer-key <witness.pub>... [--log-key <pub>]... [--log <log.jsonl>]
-                                                   a first egress policy from observe-mode receipts: one permit per verified agent over the host:port
-                                                   destinations the witness relayed for it, each with its count and first and last time. It permits
+                                                   a first egress policy from observe-mode receipts: one permit per verified agent and scheme over the
+                                                   host:port destinations the witness relayed for it, each with its count and first and last time. It permits
                                                    whatever the agents did, bad destinations included: review it. Receipts that do not verify are skipped
   init claude-code [--dir <dir>] [--user] [--enforce] [--log-url <url> [--log-id <id>] [--log-token-env NAME] [--log-key <pub>]]
                                                    one command for your own Claude Code sessions: an agent key, sdk.json in observe mode, a starter deny

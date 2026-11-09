@@ -3,7 +3,8 @@
 // anyone could have written it; and the output says it must be reviewed, because it permits bad destinations too.
 // The draft is run by a real witness in enforce mode, so the test fails if the text stops meaning what it claims.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer, request as httpRequest, type Server } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,6 +46,23 @@ async function visit(fx: EgressFixture, port: number, target: string, auth?: str
   return { status: a.status, file };
 }
 
+/** A plain HTTP GET through the witness, in absolute form; resolves with the status once the receipt is on disk. */
+async function get(fx: EgressFixture, port: number, target: string, auth: string) {
+  const { status, id } = await new Promise<{ status: number; id: string }>((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path: `http://${target}/`, headers: { host: target, "proxy-authorization": auth }, agent: false }, (res) => {
+      res.resume();
+      res.on("end", () => resolve({ status: res.statusCode!, id: String(res.headers[RECEIPT_HEADER]) }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  const file = join(fx.receiptsDir, `${id}.json`);
+  for (let i = 0; i < 200; i++) {
+    try { readFileSync(file); break; } catch { await new Promise((r) => setTimeout(r, 25)); }
+  }
+  return status;
+}
+
 const closedPort = () => new Promise<number>((resolve) => {
   const s = createServer();
   s.listen(0, "127.0.0.1", () => { const p = (s.address() as AddressInfo).port; s.close(() => resolve(p)); });
@@ -52,6 +70,8 @@ const closedPort = () => new Promise<number>((resolve) => {
 
 describe("egress draft-policy", () => {
   let docs: EchoServer, registry: EchoServer, exfil: EchoServer;
+  let web: Server;
+  let webAt: string;
   let observed: Awaited<ReturnType<typeof witness>>;
   let draft: EgressPolicyDraft;
   let anonymous: string, forgedFile: string;
@@ -59,6 +79,9 @@ describe("egress draft-policy", () => {
 
   beforeAll(async () => {
     [docs, registry, exfil] = await Promise.all([startEcho(), startEcho(), startEcho()]);
+    web = createHttpServer((_req, res) => res.end("ok"));
+    await new Promise<void>((r) => web.listen(0, "127.0.0.1", () => r()));
+    webAt = `127.0.0.1:${(web.address() as AddressInfo).port}`;
     // observe mode under a policy that permits nothing: every verified connection is relayed and recorded as a deny
     observed = await witness(mkdtempSync(join(tmpdir(), "egress-draft-")), { mode: "observe" }, "forbid(principal, action, resource);\n");
     const { fx, port } = observed;
@@ -69,23 +92,30 @@ describe("egress draft-policy", () => {
     expect(anon.status).toBe(407);
     anonymous = anon.file.split("/").at(-1)!;
     expect((await visit(fx, port, `127.0.0.1:${await closedPort()}`, research)).status).toBe(502);
+    // a plain GET: the action is host:port as for a tunnel, so only the scheme tells them apart
+    expect(await get(fx, port, webAt, build)).toBe(200);
     // a receipt someone rewrote: research-agent "reached" the exfiltration host
     const forged = await visit(fx, port, at(exfil), research);
     forgedFile = forged.file.split("/").at(-1)!;
     const bundle = JSON.parse(readFileSync(forged.file, "utf8")) as ReceiptBundle;
-    const payload = Buffer.from(bundle.envelope.payload, "base64").toString().replaceAll(`:${exfil.port}`, `:${exfil.port + 1}`);
+    const payload = Buffer.from(bundle.envelope.payload, "base64").toString().replaceAll(`:${exfil.port}`, ":9");
     writeFileSync(forged.file, JSON.stringify({ ...bundle, envelope: { ...bundle.envelope, payload: Buffer.from(payload).toString("base64") } }));
     await observed.stop();
+    // a symlink to a copy of a real receipt outside the directory, and a fifo: neither is read, and the draft does not stall
+    const outside = join(mkdtempSync(join(tmpdir(), "egress-draft-outside-")), "copy.json");
+    copyFileSync(join(fx.receiptsDir, anonymous), outside);
+    symlinkSync(outside, join(fx.receiptsDir, "linked.json"));
+    expect(spawnSync("mkfifo", [join(fx.receiptsDir, "fifo.json")]).status).toBe(0);
     draft = draftEgressPolicy(fx.receiptsDir, { issuerKeys: [loadPublicKey(fx.witnessPub)], logFile: fx.logFile });
   });
-  afterAll(async () => { await Promise.all([docs, registry, exfil].map((e) => e.close())); });
+  afterAll(async () => { await Promise.all([docs, registry, exfil].map((e) => e.close())); await new Promise((r) => web.close(r)); });
 
   it("starts with the review warning, because it permits whatever the agents did", () => {
     expect(draft.policy.startsWith(DRAFT_WARNING.join("\n") + "\n")).toBe(true);
     expect(draft.policy).toContain("including any they should not have reached");
   });
 
-  it("drafts one permit per verified agent over the destinations it was relayed to, sorted, de-duplicated, and counted", () => {
+  it("drafts one permit per verified agent and scheme over the destinations it was relayed to, sorted, de-duplicated, and counted", () => {
     expect(policyParseErrors(draft.policy)).toEqual([]);
     expect(draft.agents.map((a) => a.id)).toEqual([BUILD, EGRESS_AGENT]);
     const r = draft.agents[1]!;
@@ -93,25 +123,27 @@ describe("egress draft-policy", () => {
     expect(r.destinations.find((d) => d.name === at(docs))!.count).toBe(2);
     expect(r.count).toBe(3);
     for (const d of r.destinations) expect(d.first <= d.last).toBe(true);
-    expect(draft.agents[0]!.destinations.map((d) => d.name)).toEqual([at(registry)]);
-    expect(draft.policy.match(/^permit\(/gm)).toHaveLength(2);
+    // research-agent: tunnels; build-agent: tunnels and plain HTTP, each in its own permit
+    expect(draft.policy.match(/^permit\(/gm)).toHaveLength(3);
+    expect(draft.agents[0]!.destinations.map((d) => [d.scheme, d.name])).toEqual([["connect", at(registry)], ["http", webAt]]);
     expect(draft.policy).toMatch(new RegExp(`Action::"${at(docs)}"[,]? // 2 connections, first \\S+, last \\S+`));
     // 127.0.0.1 is internal: the comment says only the platform refuses a literal a rule names
     expect(draft.policy).toContain("INTERNAL ADDRESS");
   });
 
   it("skips a receipt that does not verify, a connection with no verified agent, and one that was not relayed, and says so", () => {
-    expect(draft.read).toBe(7);
-    expect(draft.used).toBe(4);
+    expect(draft.read).toBe(10);
+    expect(draft.used).toBe(5);
+    expect(draft.skipped.filter((s) => s.kind === "not-a-file").map((s) => s.file).sort()).toEqual(["fifo.json", "linked.json"]);
     expect(draft.skipped.find((s) => s.file === forgedFile)?.kind).toBe("unverified");
     expect(draft.skipped.filter((s) => s.kind === "not-relayed").map((s) => s.reason)).toEqual(["error"]);
     // An observe-mode 407 keeps the policy's unenforced deny beside a denied status, which the verifier refuses today,
     // so it is skipped as unverified rather than as no verified agent. Either way no anonymous connection is permitted.
     expect(["no-agent", "unverified"]).toContain(draft.skipped.find((s) => s.file === anonymous)?.kind);
-    expect(draft.skipped).toHaveLength(3);
+    expect(draft.skipped).toHaveLength(5);
     expect(draft.policy).not.toContain('"unknown"');
-    expect(draft.policy).not.toContain(`:${exfil.port}`);
-    expect(draft.policy).not.toContain(`:${exfil.port + 1}`);
+    expect(draft.policy).not.toContain(`"${at(exfil)}"`);
+    expect(draft.policy).not.toContain(`"127.0.0.1:9"`);
     expect(draft.policy).toMatch(/^\/\/   skipped, did not verify: \d$/m);
   });
 
@@ -123,10 +155,13 @@ describe("egress draft-policy", () => {
       expect((await visit(w.fx, w.port, at(docs), build)).status).toBe(403);
       expect((await visit(w.fx, w.port, at(exfil), research)).status).toBe(403);
       expect((await visit(w.fx, w.port, at(docs))).status).toBe(407);
+      // the observed plain GET is permitted as a plain GET, never as a tunnel to the same host and port
+      expect(await get(w.fx, w.port, webAt, build)).toBe(200);
+      expect((await visit(w.fx, w.port, webAt, build)).status).toBe(403);
     } finally { await w.stop(); }
     const again = draftEgressPolicy(w.fx.receiptsDir, { issuerKeys: [loadPublicKey(w.fx.witnessPub)], logFile: w.fx.logFile });
-    expect(again.skipped.map((s) => s.kind).sort()).toEqual(["no-agent", "not-relayed", "not-relayed"]);
-    expect(again.agents.map((a) => [a.id, a.destinations.map((d) => d.name)])).toEqual([[BUILD, [at(registry)]], [EGRESS_AGENT, [at(docs)]]]);
+    expect(again.skipped.map((s) => s.kind).sort()).toEqual(["no-agent", "not-relayed", "not-relayed", "not-relayed"]);
+    expect(again.agents.map((a) => [a.id, a.destinations.map((d) => `${d.scheme} ${d.name}`)])).toEqual([[BUILD, [`connect ${at(registry)}`, `http ${webAt}`]], [EGRESS_AGENT, [`connect ${at(docs)}`]]]);
   });
 
   it("the command prints the draft, names the receipt it skipped, and exits 1 when there is nothing to permit", () => {

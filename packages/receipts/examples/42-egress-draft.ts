@@ -3,7 +3,7 @@
 //
 // Writing an allow list from nothing means guessing. Run the witness with "mode": "observe" for a while instead: it
 // relays every connection from a verified agent and receipts it. `agent-custody egress draft-policy` then turns those
-// receipts into one permit per agent. The draft permits whatever happened in the window, a bad destination included,
+// receipts into one permit per agent and scheme. The draft permits whatever happened in the window, a bad destination included,
 // so a person reviews it before it is enforced. This tutorial shows the review catching one.
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
