@@ -12,7 +12,7 @@
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
 import { createServer as createTcpServer, type AddressInfo, type LookupFunction } from "node:net";
-import { internalAddress, sameAddress } from "../src/addresses.ts";
+import { internalAddress, isAddressLiteral, sameAddress } from "../src/addresses.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,9 +48,14 @@ describe("parsing what the agent asked for", () => {
   it("reads a CONNECT authority and refuses anything that is not host:port", () => {
     expect(parseAuthority("API.Stripe.com.:443")).toEqual({ host: "api.stripe.com", port: 443 });
     expect(parseAuthority("[::1]:8443")).toEqual({ host: "::1", port: 8443 });
-    for (const bad of ["api.stripe.com", "api.stripe.com:0", "api.stripe.com:70000", "a b:443", "[nothost]:443", "user@host:443", "host:443/path", ":443", "a..b:443"]) expect(parseAuthority(bad), bad).toBeNull();
+    // an IPv4 address written another way is decided on as the address getaddrinfo would dial, as a plain request's URL is
+    expect(parseAuthority("010.0.0.1:443")).toEqual({ host: "8.0.0.1", port: 443 });
+    expect(parseAuthority("2130706433:443")).toEqual({ host: "127.0.0.1", port: 443 });
+    expect(parseAuthority("0x7f.1:443")).toEqual({ host: "127.0.0.1", port: 443 });
+    for (const bad of ["api.stripe.com", "api.stripe.com:0", "api.stripe.com:70000", "a b:443", "[nothost]:443", "user@host:443", "host:443/path", ":443", "a..b:443", "a%2eb:443", "example.123:443", "1.2.3.256:443"]) expect(parseAuthority(bad), bad).toBeNull();
     expect(destinationName("::1", 443)).toBe("[::1]:443");
     expect(normalizeHost("Example.COM")).toBe("example.com");
+    expect(normalizeHost("2130706433")).toBeNull();
   });
 
   it("classes loopback, private, shared, link-local, and metadata addresses as internal, in IPv4, IPv6, mapped, and NAT64 form", () => {
@@ -62,6 +67,9 @@ describe("parsing what the agent asked for", () => {
     expect(sameAddress("::1", "0:0:0:0:0:0:0:1")).toBe(true);
     expect(sameAddress("10.0.0.1", "::ffff:10.0.0.1")).toBe(true);
     expect(sameAddress("8.8.8.8", "169.254.169.254")).toBe(false);
+    // leading zeros are not an address, in all three verifiers: Python's ipaddress refuses them too
+    expect(isAddressLiteral("010.0.0.1")).toBe(false);
+    expect(internalAddress("010.0.0.1")).toBe(true);
   });
 
   it("names an agent only when its secret matches; a guessed id is a claim", () => {
@@ -275,6 +283,25 @@ describe("the witness's limits and modes", () => {
       expect(p.execution).toMatchObject({ status: "error", error: "the witness stopped before the connection opened" });
       expect(p.authorization).toBeDefined();
     } finally { await w.running.close(); }
+  });
+
+  it("decides a numeric host on the address it names, so a forbid on that address cannot be dodged by spelling it differently", async () => {
+    const echo = await startEcho();
+    const w = await start({}, `${ANY}forbid(principal, action, resource) when { context.facts.destination.host == "127.0.0.1" || context.facts.destination.host == "8.0.0.1" };\n`);
+    try {
+      for (const spelled of ["2130706433", "0x7f.1", "127.0.0.1"]) {
+        const a = await connectThrough(w.port, `${spelled}:${echo.port}`, good);
+        expect(a.status, spelled).toBe(403);
+        a.socket.destroy();
+        const p = decode(await waitForReceipt(w.fx, a.headers[RECEIPT_HEADER]!)).predicate;
+        expect(p.tool.name).toBe(`127.0.0.1:${echo.port}`);
+      }
+      const octal = await connectThrough(w.port, "010.0.0.1:443", good);
+      // refused by the forbid on 8.0.0.1, so nothing leaves this machine: tests never use the network
+      expect(octal.status).toBe(403);
+      octal.socket.destroy();
+      expect(decode(await waitForReceipt(w.fx, octal.headers[RECEIPT_HEADER]!)).predicate.tool.name).toBe("8.0.0.1:443");
+    } finally { await w.stop(); await echo.close(); }
   });
 
   it("relays nothing when the log will not commit the connection first", async () => {

@@ -59,7 +59,7 @@ Nothing the agent writes in a header names it. The connection's source address i
 ## How a connection becomes a Cedar request
 
 - **Principal:** `Agent::"<id>"` when the credential verified, otherwise `Agent::"unknown"`.
-- **Action:** the destination as `host:port`, for example `Action::"api.stripe.com:443"`. An IPv6 address is in brackets. Host names are lowercase, without a final dot.
+- **Action:** the destination as `host:port`, for example `Action::"api.stripe.com:443"`. An IPv6 address is in brackets. Host names are lowercase, without a final dot. A CONNECT host goes through the same URL parser as a plain request's. So an IPv4 address written another way is decided on as the address it names: `2130706433` and `0x7f.1` become `127.0.0.1`, and `010.0.0.1` becomes `8.0.0.1`, the address `getaddrinfo` would dial. A rule on an address cannot be dodged by spelling it differently.
 - **Resource:** the same as the action.
 - **Context:** `context.args` holds `{ method, host, port }` as the agent asked for them. `context.facts.destination` holds the witness's own observation: `host`, `port`, `scheme` (`connect` or `http`), `credential` (`verified`, `invalid`, or `absent`), `remote` (the socket's address), and, after a failed credential, `declared`.
 

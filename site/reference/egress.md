@@ -40,7 +40,7 @@ const running = await serveEgress(host, { port: 8791, host: "0.0.0.0" });
 
 ## Requests
 
-- `CONNECT host:port`: a tunnel. The port is required. A host is a DNS name or an IP address, and an IPv6 address is in brackets.
+- `CONNECT host:port`: a tunnel. The port is required. A host is a DNS name or an IP address, and an IPv6 address is in brackets. The host is made canonical by the URL parser, as a plain request's is, so `2130706433:443` is decided on as `127.0.0.1:443`. A name whose last label is all digits or starts with `0x`, and an IPv4 part with a leading zero in the verifiers, is never treated as a name for an address.
 - A plain request in absolute form, `GET http://host[:port]/path`. It is relayed without hop-by-hop headers, `Proxy-Authorization`, or `Expect`, and with `Host` set to the target. An `https://` URL, or credentials in the URL, gets 400.
 - A request in origin form is for the witness itself. `GET /.well-known/agent-custody-egress` answers `{ keyid, policyDigest, version, pendingReceipts }`. Any other path gets 404.
 - `Proxy-Authorization: Basic base64(id:secret)` identifies the agent. Nothing else does.

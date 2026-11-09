@@ -23,7 +23,8 @@ function v4(ip: string): number | null {
   if (parts.length !== 4) return null;
   let n = 0;
   for (const p of parts) {
-    if (!/^\d{1,3}$/.test(p) || Number(p) > 255) return null;
+    // no leading zeros: `010` is octal to getaddrinfo and an error to Python's ipaddress, so it is not an address here either
+    if (!/^(0|[1-9]\d{0,2})$/.test(p) || Number(p) > 255) return null;
     n = n * 256 + Number(p);
   }
   return n;
