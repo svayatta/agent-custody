@@ -602,6 +602,19 @@ try {
       ex.result = { ...ex.result, peer: "169.254.169.254" };
       ex.resultDigest = digestOf(ex.result);
     }), ...E, log: elog });
+    addCase({ name: "resigned-egress-noncanonical-host", description: "The executed tunnel re-signed as a connection to the host 010.0.0.1 whose peer is 8.0.0.1, every digest recomputed. A part with a leading zero is not an IPv4 address in any of the three verifiers (Python's ipaddress refuses it too), so the host is read as a name and its public peer passes `egress peer matches the destination` everywhere; the verifiers must agree. The authorization still names the original destination, so `authorization names this call` fails.", bundle: resigned(tunnel, egressKey, (st) => {
+      const p = st.predicate;
+      const port = (p.facts.destination!.value as { port: number }).port;
+      const dest = { ...(p.facts.destination!.value as Record<string, unknown>), host: "010.0.0.1" };
+      p.facts.destination = { ...p.facts.destination!, value: dest, resultDigest: digestOf(dest) };
+      p.tool = { name: `010.0.0.1:${port}`, provenance: "observed" };
+      p.request = { ...p.request, args: { ...p.request.args, host: "010.0.0.1" } };
+      p.request.argsDigest = digestOf(p.request.args);
+      st.subject[0]!.digest.sha256 = p.request.argsDigest;
+      const ex = p.execution as { result: Record<string, unknown>; resultDigest: string };
+      ex.result = { ...ex.result, peer: "8.0.0.1" };
+      ex.resultDigest = digestOf(ex.result);
+    }), ...E, log: elog });
     addCase({ name: "resigned-egress-destination-mismatch", description: "The refused provider call re-signed to name another destination than the one the witness observed: `egress destination observed` fails.", bundle: resigned(refusedProvider, egressKey, (st) => { st.predicate.tool = { name: "registry.npmjs.org:443", provenance: "observed" }; }), ...E, log: elog });
   } finally { await ehost.close(); await witness.close(); await echo.close(); }
 }

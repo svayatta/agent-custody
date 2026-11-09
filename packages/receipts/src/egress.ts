@@ -58,7 +58,11 @@ export interface EgressResult {
   status?: number;
 }
 
-/** Lowercase, without a final dot or IPv6 brackets; refused unless it is an IP address or a DNS name. */
+/**
+ * Lowercase, without a final dot or IPv6 brackets; refused unless it is an IP address or a DNS name. A name whose last
+ * label is all digits or starts with `0x` is refused: the URL parser and `getaddrinfo` read it as an IPv4 address
+ * (`2130706433`, `0x7f.1`), so the policy would decide on a string that is not the address dialled.
+ */
 export function normalizeHost(raw: string): string | null {
   let h = raw.toLowerCase();
   if (h.startsWith("[") && h.endsWith("]")) {
@@ -68,6 +72,8 @@ export function normalizeHost(raw: string): string | null {
   if (h.endsWith(".")) h = h.slice(0, -1);
   if (isIP(h)) return h;
   if (h.length === 0 || h.length > 253) return null;
+  const last = h.slice(h.lastIndexOf(".") + 1);
+  if (/^\d+$/.test(last) || last.startsWith("0x")) return null;
   return h.split(".").every((label) => /^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$/.test(label)) ? h : null;
 }
 
@@ -77,11 +83,21 @@ function parsePort(raw: string): number | null {
   return n >= 1 && n <= 65535 ? n : null;
 }
 
-/** A CONNECT authority, `host:port` or `[v6]:port`; the port is required. */
+/**
+ * A CONNECT authority, `host:port` or `[v6]:port`; the port is required. The host goes through the same URL parser as a
+ * plain request's, so both paths decide on one canonical string: `010.0.0.1` is `8.0.0.1` and `2130706433` is
+ * `127.0.0.1`, the addresses `getaddrinfo` would dial.
+ */
 export function parseAuthority(authority: string): { host: string; port: number } | null {
-  const m = /^(\[[^\]]+\]|[^:[\]]+):(\d+)$/.exec(authority);
+  const m = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+):(\d+)$/.exec(authority);
   if (!m) return null;
-  const host = normalizeHost(m[1]!);
+  let canonical: string;
+  try {
+    canonical = new URL(`http://${m[1]!}/`).hostname;
+  } catch {
+    return null;
+  }
+  const host = normalizeHost(canonical);
   const port = parsePort(m[2]!);
   return host && port ? { host, port } : null;
 }
