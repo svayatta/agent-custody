@@ -16,7 +16,7 @@ const V4: [string, number][] = [
   ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12],
   ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 4], ["240.0.0.0", 4],
 ];
-const V6: [string, number][] = [["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8]];
+const V6: [string, number][] = [["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["64:ff9b:1::", 48]];
 
 function v4(ip: string): number | null {
   const parts = ip.split(".");
@@ -63,9 +63,38 @@ function internalAddress(ip: string): boolean {
   if (n !== null) return V4.some(([base, bits]) => Math.floor(n / 2 ** (32 - bits)) === Math.floor(v4(base)! / 2 ** (32 - bits)));
   const g = v6(ip.replace(/^\[|\]$/g, "").replace(/%.*$/, ""));
   if (!g) return true;
-  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return internalAddress(`${g[6]! >> 8}.${g[6]! & 255}.${g[7]! >> 8}.${g[7]! & 255}`);
+  const embedded = embeddedV4(g);
+  if (embedded) return internalAddress(embedded);
   return V6.some(([base, bits]) => inV6(g, v6(base)!, bits));
 }
+
+/** The IPv4 address inside an IPv4-mapped (::ffff:0:0/96) or NAT64 (64:ff9b::/96) address, else null: a DNS64 answer can wrap an internal IPv4 address. */
+function embeddedV4(g: number[]): string | null {
+  const mapped = g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff;
+  const nat64 = g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0);
+  return mapped || nat64 ? `${g[6]! >> 8}.${g[6]! & 255}.${g[7]! >> 8}.${g[7]! & 255}` : null;
+}
+
+/** The address in a canonical form (IPv4 dotted, or eight IPv6 groups; a mapped IPv4 address as IPv4), or null when it is not one. */
+function canonicalAddress(ip: string): string | null {
+  if (v4(ip) !== null) return ip.split(".").map(Number).join(".");
+  const g = v6(ip.replace(/^\[|\]$/g, "").replace(/%.*$/, ""));
+  if (!g) return null;
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return embeddedV4(g);
+  return g.map((x) => x.toString(16)).join(":");
+}
+
+/** True when `a` and `b` are the same address, written however (::1 and 0:0::1; 10.0.0.1 and ::ffff:10.0.0.1). */
+function sameAddress(a: string, b: string): boolean {
+  const x = canonicalAddress(a);
+  return x !== null && x === canonicalAddress(b);
+}
+
+/** True when `host` is an IP address rather than a name. */
+function isAddressLiteral(host: string): boolean {
+  return canonicalAddress(host) !== null;
+}
+
 const DELEGATION_TYPE = "application/vnd.agent-custody.delegation+json";
 const UPSTREAM_TYPE = "application/vnd.agent-custody.upstream+json";
 const AUTHORIZATION_TYPE = "https://agent-custody.dev/authorization/v0.1";
@@ -442,12 +471,13 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
     const relayed = p.execution.status === "executed" || p.execution.status === "failed" || p.execution.status === "error";
     add("egress relayed only for a checked agent", !relayed || p.agent.provenance === "observed", p.agent.provenance === "observed" ? `${p.agent.id}, by the proxy credential the witness checked` : relayed ? `the connection was ${p.execution.status} for an agent the witness did not check` : "no agent was checked and nothing was relayed");
     add("egress open committed before relaying", !relayed || !!p.authorization, relayed ? (p.authorization ? "the connection was in the log before any byte moved" : `the connection was ${p.execution.status} with nothing committed first`) : "nothing was relayed");
-    // The policy decided on a host name; the witness must not have dialled an internal address for it. An IP literal is the action itself.
+    // An IP literal is the action itself: the peer must be that very address. A host name must have led to a public address.
     const host = typeof seen?.host === "string" ? seen.host : "";
-    const literal = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":");
-    const peer = (p.execution.status === "executed" || p.execution.status === "failed") ? (p.execution.result as { peer?: unknown } | null)?.peer : undefined;
+    const literal = isAddressLiteral(host);
     const reached = p.execution.status === "executed" || p.execution.status === "failed";
-    add("egress peer is public for a host name", !reached || literal || (typeof peer === "string" && !internalAddress(peer)), !reached ? "no connection was made" : literal ? `${host} is an address the policy named` : `${host} reached ${typeof peer === "string" ? peer : "no recorded peer"}`);
+    const peer = p.execution.status === "executed" || p.execution.status === "failed" ? (p.execution.result as { peer?: unknown } | null)?.peer : undefined;
+    const peerOk = typeof peer === "string" && (literal ? sameAddress(peer, host) : !internalAddress(peer));
+    add("egress peer matches the destination", !reached || peerOk, !reached ? "no connection was made" : literal ? `${host}, an address the policy named, reached ${typeof peer === "string" ? peer : "no recorded peer"}` : `${host} reached ${typeof peer === "string" ? peer : "no recorded peer"}${peerOk ? ", a public address" : ""}`);
   }
   if (p.delegation) {
     const del = await verifyDelegationChain(p.delegation.envelope, opts.principalKeys);

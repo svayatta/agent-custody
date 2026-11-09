@@ -42,17 +42,30 @@ FORWARDED = ("executed", "failed", "error")
 # Addresses that are not the public internet; the same list as packages/receipts/src/addresses.ts.
 _INTERNAL_NETWORKS = [ipaddress.ip_network(n) for n in (
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
-    "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8")]
+    "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
+    "64:ff9b:1::/48")]
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _address(ip: str):
+    """The address, with an IPv4-mapped one as IPv4, or None when it is not an address."""
+    try:
+        addr = ipaddress.ip_address(ip.strip("[]").split("%")[0])
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
 
 
 def _internal_address(ip: str) -> bool:
     """True when ip is not a public address, or not an address at all."""
-    try:
-        addr = ipaddress.ip_address(ip.strip("[]").split("%")[0])
-    except ValueError:
+    addr = _address(ip)
+    if addr is None:
         return True
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
+    if addr.version == 6 and addr in _NAT64:
+        # a DNS64 answer can wrap an internal IPv4 address
+        addr = ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
     return any(addr.version == n.version and addr in n for n in _INTERNAL_NETWORKS)
 STATUSES = ("executed", "failed", "denied", "error", "withheld")
 MAX_CHAIN_DEPTH = 3
@@ -796,10 +809,15 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
         add("egress open committed before relaying", not forwarded or isinstance(p.get("authorization"), dict))
         reached = status in ("executed", "failed")
         host_s = host if isinstance(host, str) else ""
-        literal = bool(re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host_s)) or ":" in host_s
+        literal = _address(host_s)
         result = p["execution"].get("result") if reached else None
         peer = result.get("peer") if isinstance(result, dict) else None
-        add("egress peer is public for a host name", not reached or literal or (isinstance(peer, str) and not _internal_address(peer)), f"{host_s} reached {peer}")
+        if literal is not None:
+            # an IP literal is the action itself: the peer must be that very address
+            peer_ok = isinstance(peer, str) and _address(peer) == literal
+        else:
+            peer_ok = isinstance(peer, str) and not _internal_address(peer)
+        add("egress peer matches the destination", not reached or peer_ok, f"{host_s} reached {peer}")
 
     _delegation_checks(p, trust, add, forwarded and not reconciliation)
     approval_withheld = ["approval", "envelope"] in paths

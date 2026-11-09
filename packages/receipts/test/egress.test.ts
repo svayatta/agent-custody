@@ -12,7 +12,7 @@
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
 import { createServer as createTcpServer, type AddressInfo, type LookupFunction } from "node:net";
-import { internalAddress } from "../src/addresses.ts";
+import { internalAddress, sameAddress } from "../src/addresses.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,9 +53,15 @@ describe("parsing what the agent asked for", () => {
     expect(normalizeHost("Example.COM")).toBe("example.com");
   });
 
-  it("classes loopback, private, shared, link-local, and metadata addresses as internal, in IPv4, IPv6, and mapped form", () => {
+  it("classes loopback, private, shared, link-local, and metadata addresses as internal, in IPv4, IPv6, mapped, and NAT64 form", () => {
     for (const a of ["127.0.0.1", "10.1.2.3", "172.31.255.255", "192.168.0.1", "169.254.169.254", "192.0.0.192", "100.64.0.1", "0.0.0.0", "224.0.0.1", "::1", "::", "fd00::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:7f00:1", "not-an-address"]) expect(internalAddress(a), a).toBe(true);
     for (const a of ["1.1.1.1", "104.16.1.1", "172.32.0.1", "100.128.0.1", "2606:4700::1111", "::ffff:1.1.1.1"]) expect(internalAddress(a), a).toBe(false);
+    // a DNS64 answer can wrap an internal IPv4 address in the NAT64 prefix
+    for (const a of ["64:ff9b::a9fe:a9fe", "64:ff9b::169.254.169.254", "64:ff9b::7f00:1", "64:ff9b:1::1"]) expect(internalAddress(a), a).toBe(true);
+    expect(internalAddress("64:ff9b::808:808")).toBe(false);
+    expect(sameAddress("::1", "0:0:0:0:0:0:0:1")).toBe(true);
+    expect(sameAddress("10.0.0.1", "::ffff:10.0.0.1")).toBe(true);
+    expect(sameAddress("8.8.8.8", "169.254.169.254")).toBe(false);
   });
 
   it("names an agent only when its secret matches; a guessed id is a claim", () => {
