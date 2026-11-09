@@ -41,7 +41,8 @@ case "${1:-serve}" in
     ;;
   egress)
     # the egress witness: the same image, a container of its own that holds only the agents' proxy secrets, never a tool
-    # credential. Its key is not the gateway's: verifiers trust it separately.
+    # credential. Its key is not the gateway's: verifiers trust it separately. The key is created at EGRESS_KEY and the
+    # healthcheck probes EGRESS_PORT, so a config whose identity.keyFile differs, or your own arguments, need both set to match.
     shift
     if [ "$#" -eq 0 ] && [ ! -f "$EGRESS_CONFIG" ]; then
       echo "gateway: $EGRESS_CONFIG not found. Mount the witness config there, or set EGRESS_CONFIG" >&2
