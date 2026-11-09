@@ -12,7 +12,7 @@ It sees the destination, the times, and the byte counts. It never sees payloads.
 | --- | --- | --- | --- |
 | `identity.keyFile` | path | required | the witness's signing key |
 | `agents` | `{ id, secretEnv }[]` | required, at least one | each agent and the environment variable holding its proxy secret; ids are unique, with no colon or whitespace |
-| `policyFile` | path | required | Cedar, or Rego when the name ends in `.rego` (compiled by `opa build`, which must be on `PATH` when it loads); re-read when it changes, and a file that does not parse or compile leaves the policy in force |
+| `policyFile` | path | required | Cedar, or Rego when the name ends in `.rego` (compiled by `opa build`, which must be on `PATH` when it loads); re-read when it changes, and a file that does not parse or compile leaves the policy in force. A changed Rego file is compiled on the first connection after the change, synchronously: the whole witness waits for `opa build`, typically a few hundred milliseconds, so every other connection waits too. The compile has no deadline, so an `opa` that hangs stalls the witness until it exits or the process is killed. A file that does not compile is compiled once, not again until it changes |
 | `mode` | `enforce` \| `observe` | `enforce` | `observe` relays every connection from a verified agent and records `enforced: false`; it also relays when the log refuses the commit, and that receipt fails `egress open committed before relaying` |
 | `connectTimeoutMs` | integer | 10000 | wait for the destination to accept |
 | `idleTimeoutMs` | integer | 300000 | close a relayed connection idle this long |
