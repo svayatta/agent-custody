@@ -1,0 +1,29 @@
+# The witness itself: only locked-down agents may connect to it, and it may not reach the cloud metadata address or the
+# cluster's private ranges on their behalf. Widen `except` to your own internal networks; the Cedar policy decides by
+# host name, and a permitted name could resolve to an internal address.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-custody-egress-witness
+  namespace: agent-custody-gateway
+spec:
+  podSelector:
+    matchLabels: { app: agent-custody-egress }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { agent-custody.dev/agents: "true" } }
+          podSelector: { matchLabels: { agent-custody.dev/egress: locked } }
+      ports:
+        - { port: 8791, protocol: TCP }
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10]
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }

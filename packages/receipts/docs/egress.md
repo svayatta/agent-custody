@@ -1,0 +1,127 @@
+# The egress witness: receipts for calls that go around the gateway
+
+The gateway holds an agent's tool credentials and receipts every call made through it. An agent that has a credential of its own, or that calls a public API with none, can go around it. The egress witness is for those connections. It is an HTTP forward proxy in the agent's network path, the [door](door.md) turned around to face outbound traffic. For each connection that does not go to the gateway, it:
+
+- identifies the agent by a proxy credential it checks;
+- lets a Cedar policy decide per destination (host and port);
+- relays the connection or refuses it;
+- signs a receipt either way, with `issuer.kind: "egress"`. The receipt goes to the log like any other.
+
+**It needs lockdown.** A proxy alone is advice: an agent can ignore `HTTPS_PROXY` and connect directly. The witness means something only when the agent's network reaches nothing but the gateway and the witness. [Credential custody and lockdown](../../../site/guide/credential-custody.md) explains the setup, and `deploy/gateway/lockdown` has the manifests: a Kubernetes NetworkPolicy, and an internal network for docker compose.
+
+**What it cannot see.** Every page about the witness repeats this list:
+
+- **Payloads.** CONNECT is relayed as an opaque tunnel, with no TLS interception. The witness records where traffic went, when, and how many bytes went each way. It never records what was sent or received. For plain HTTP it records the method, host, and port, not the path, the headers, or the body.
+- **Traffic that skips it.** With lockdown off, an agent that ignores `HTTPS_PROXY` leaves no receipt at all. With lockdown on, DNS to the cluster resolver stays open, and a resolver that forwards to the internet can still carry data in its queries.
+- **Protocols other than HTTP.** The witness relays HTTP requests and CONNECT tunnels. Under lockdown, other protocols cannot leave. Without lockdown they are invisible to it.
+
+Each receipt is an **observed bypass**: evidence that the agent connected to a destination around the gateway. It is not a record of what the agent did there.
+
+## The config file
+
+`egress.json`, paths relative to the file:
+
+```json
+{
+  "identity": { "keyFile": "keys/egress.key" },
+  "agents": [{ "id": "research-agent", "secretEnv": "EGRESS_SECRET_RESEARCH_AGENT" }],
+  "policyFile": "egress-policy.cedar",
+  "mode": "enforce",
+  "connectTimeoutMs": 10000,
+  "idleTimeoutMs": 300000,
+  "maxInFlight": 256,
+  "receiptsDir": "receipts",
+  "logFile": "log.jsonl"
+}
+```
+
+- `agents`: each agent the witness knows, and the environment variable that holds its proxy secret. The secret is never in the file. An agent id has no colon or whitespace, because Basic credentials split at the first colon. The witness refuses to start if a variable is unset.
+- `mode`: `enforce` (the default) refuses what the policy denies. `observe` relays every connection from a known agent and records the decision with `enforced: false`, so you can see what your agents call before you block anything. A connection without a valid credential is refused in both modes.
+- `connectTimeoutMs`: how long the witness waits for the destination to accept the connection. `idleTimeoutMs`: a relayed connection with no bytes in either direction for this long is closed.
+- `maxInFlight`: connections handled at once. Past this, the next one gets 503 and is not decided, relayed, or receipted. The door has the same rule.
+- `log`, `otel`, `splunk`: as for the gateway.
+
+Run it with `agent-custody egress --config egress.json [--port 8791] [--host 127.0.0.1]`.
+
+## How an agent uses it
+
+The agent sets `HTTPS_PROXY` and `HTTP_PROXY` to `http://<agent id>:<secret>@<witness>:8791`, and `NO_PROXY` to the gateway's host, because the gateway receipts its own calls. Most HTTP clients send the credential from the URL as `Proxy-Authorization: Basic`. Node's `fetch` reads these variables when `NODE_USE_ENV_PROXY=1` is set, on versions that support it. Other clients need their own proxy setting.
+
+## How the witness knows the agent
+
+Only from the proxy credential. The witness compares a sha256 of the presented secret with the one it holds for that id, in constant time. An id that is not known is compared against a stand-in, so the answer time does not reveal which ids exist.
+
+- **Verified:** the agent is that id, with provenance `observed`. This means the witness checked a secret it holds. Anyone who has the secret can act as that agent, so give each agent its own secret and keep it in that agent's environment only.
+- **Invalid or absent:** the agent is `unknown`, with provenance `claimed`. An id that came with a wrong secret stays in the destination fact as `declared`, a claim. The connection is refused with `407 Proxy Authentication Required`, whatever the policy says.
+
+Nothing the agent writes in a header names it. The connection's source address is the socket's own. A forward proxy has nothing in front of it, so the witness never reads `X-Forwarded-For` (the door's `trustProxy` rule, with nothing to trust).
+
+## How a connection becomes a Cedar request
+
+- **Principal:** `Agent::"<id>"` when the credential verified, otherwise `Agent::"unknown"`.
+- **Action:** the destination as `host:port`, for example `Action::"api.stripe.com:443"`. An IPv6 address is in brackets. Host names are lowercase, without a final dot.
+- **Resource:** the same as the action.
+- **Context:** `context.args` holds `{ method, host, port }` as the agent asked for them. `context.facts.destination` holds the witness's own observation: `host`, `port`, `scheme` (`connect` or `http`), `credential` (`verified`, `invalid`, or `absent`), `remote` (the socket's address), and, after a failed credential, `declared`.
+
+```cedar
+// The research agent may read the package registry over TLS.
+permit(principal == Agent::"research-agent", action == Action::"registry.npmjs.org:443", resource);
+
+// Any known agent may reach hosts under example.com on 443.
+permit(principal, action, resource)
+when { context.facts.destination.credential == "verified" && context.facts.destination.port == 443 && context.facts.destination.host like "*.example.com" };
+```
+
+Do not permit a provider whose calls belong in the gateway. The point of the gateway is that it holds the provider's key and decides each call on its arguments. The witness sees only a host name. The policy decides on that name, and the witness then resolves it itself. A permitted name could resolve to an internal address, so the witness's own network policy should refuse private ranges and the cloud metadata address. `deploy/gateway/lockdown/k8s/egress-networkpolicy.yaml` does this.
+
+`agent-custody policy simulate` replays egress receipts like any other.
+
+## What the agent gets back
+
+| case | answer | receipt |
+| --- | --- | --- |
+| allowed, CONNECT | `200 Connection Established`, then the tunnel | `executed` when the tunnel closes |
+| allowed, plain HTTP | the destination's answer, without hop-by-hop headers | `executed` when the answer ends |
+| policy refuses | `403`, JSON with the reason | `denied` |
+| no valid credential | `407`, with `Proxy-Authenticate: Basic realm="agent-custody egress"` | `denied` |
+| destination unreachable | `502` (plain HTTP: `504` if the request may have arrived) | `error` |
+| past `maxInFlight` | `503`, `Retry-After: 1` | none |
+| malformed target, or `https://` in a plain request | `400` | none |
+
+Every answer that has a receipt carries `x-agent-custody-receipt`. A plain HTTP request is relayed without `Proxy-Authorization`, so the agent's secret never reaches the destination. The `Host` header is set to the destination the policy decided on, whatever the agent wrote. A request in origin form (`GET /…`) is for the witness itself: `GET /.well-known/agent-custody-egress` answers the key id, the policy digest, and the number of receipts waiting for the log.
+
+## The receipt
+
+The same in-toto statement and v0.2 predicate as every other receipt, signed by the witness's key:
+
+- `issuer`: `{ kind: "egress", framework: "connect" | "http" }`.
+- `principal`: `null`, claimed. The witness checks no grant.
+- `agent`: as above.
+- `tool`: `{ name: "host:port", provenance: "observed" }`.
+- `request.args`: `{ method, host, port }`, claimed, as the agent asked.
+- `facts.destination`: the observation the policy decided on, observed.
+- `execution`:
+  - for a relayed connection, `executed` with `result`: `peer`, `openedAt`, `closedAt`, `bytesUp`, `bytesDown`, `end`, and for plain HTTP `status`. `peer` is the address the witness connected to. `end` is `closed`, `reset`, `idle-timeout`, or `witness-stopped`.
+  - otherwise `denied` with the reason, or `error`.
+
+For a tunnel, the bytes are the tunnel's payload, which is ciphertext for HTTPS. For plain HTTP, they are the request body and the response body.
+
+The receipt of a relayed connection is written when the connection ends. A witness that is stopped normally closes its open connections and receipts each one as `witness-stopped`. A witness that is killed writes no receipt for the connections that were open at that moment.
+
+## What a verifier checks
+
+[Verifying a receipt](verification.md) lists the common checks. On an egress receipt, all three verifiers (TypeScript, the browser page, Python) also run these:
+
+- `egress receipt carries a policy decision`: the witness decides every connection.
+- `egress destination observed`: the tool name is observed, and it equals the host and port in the observed destination fact.
+- `egress relayed only for a checked agent`: a connection that was relayed (`executed`, `failed`, or `error`) has an agent with provenance `observed`.
+
+Vectors `egress-*` and `resigned-egress-*` in `vectors/receipts.json` cover them.
+
+## What it does not do yet
+
+- Write a receipt before a long connection ends. A precommit at open, as the door does for unsafe methods, would close the gap left when a witness is killed.
+- Identify an agent by its source address or by a signed grant. Today only per-agent proxy credentials identify an agent.
+- `agent-custody check` does not read an egress config yet.
+
+Tutorial: [41-egress.ts](../examples/41-egress.ts).

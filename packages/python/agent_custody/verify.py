@@ -753,13 +753,28 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
     forwarded = status in FORWARDED
 
     kind = p["issuer"].get("kind")
-    add("issuer kind is known", kind in ("gateway", "sdk", "door"), str(kind))
+    add("issuer kind is known", kind in ("gateway", "sdk", "door", "egress"), str(kind))
     add("issuer keyid matches signer", p["issuer"]["keyid"] in signers, p["issuer"]["keyid"][:12])
     if kind == "gateway":
         add("gateway receipt carries a delegation", "delegation" in p)
         add("gateway receipt carries a policy decision", isinstance(p.get("policy"), dict))
     if kind == "door":
         add("door receipt carries a policy decision", isinstance(p.get("policy"), dict))
+    if kind == "egress":
+        # where a connection around the gateway went and how much, never what was sent; the agent is only as good as
+        # the proxy credential the witness checked
+        add("egress receipt carries a policy decision", isinstance(p.get("policy"), dict))
+        facts = p.get("facts") if isinstance(p.get("facts"), dict) else {}
+        dest = facts.get("destination") if isinstance(facts.get("destination"), dict) else {}
+        seen = dest.get("value") if isinstance(dest.get("value"), dict) else {}
+        host, port = seen.get("host"), seen.get("port")
+        name = None
+        if isinstance(host, str) and isinstance(port, int) and not isinstance(port, bool):
+            name = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        tool = p.get("tool") if isinstance(p.get("tool"), dict) else {}
+        add("egress destination observed", tool.get("provenance") == "observed" and dest.get("provenance") == "observed" and name == tool.get("name"), str(tool.get("name")))
+        agent = p.get("agent") if isinstance(p.get("agent"), dict) else {}
+        add("egress relayed only for a checked agent", not forwarded or agent.get("provenance") == "observed", str(agent.get("id")))
 
     _delegation_checks(p, trust, add, forwarded and not reconciliation)
     approval_withheld = ["approval", "envelope"] in paths
