@@ -233,11 +233,15 @@ export async function createEgressHost(cfg: EgressConfig, options: EgressOptions
   if (!first.policy) throw new Error(`policy ${cfg.policyFile} does not ${rego ? "compile" : "parse"}: ${first.errors.join("; ")}`);
   if (!rego && !hasPermitRule(first.policy.text)) console.error(`agent-custody egress: ${cfg.policyFile} has no permit rule, so every connection is refused`);
   let policyNow: Policy = first.policy;
+  // A file that failed to load is not tried again until it changes: a Rego compile runs opa build on the event loop, so
+  // retrying it on every connection would stall every tunnel until the file is fixed.
+  let failedKey = "";
   const currentPolicy = () => {
     try {
       const next = readPolicy();
-      if (next.key !== policyNow.key) {
+      if (next.key !== policyNow.key && next.key !== failedKey) {
         const loaded = loadPolicy(next);
+        failedKey = loaded.policy ? "" : next.key;
         if (!loaded.policy) console.error(`agent-custody egress: POLICY NOT RELOADED: ${cfg.policyFile} ${loaded.errors.join("; ")}; policy ${policyNow.digest} stays in force`);
         else policyNow = loaded.policy;
       }

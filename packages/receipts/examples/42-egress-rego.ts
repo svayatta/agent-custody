@@ -26,7 +26,7 @@ allow if {
 }
 
 # Payments go through the gateway, which holds the Stripe key.
-deny contains "payments go through the gateway" if endswith(input.action, "stripe.com:443")
+deny contains "payments go through the gateway" if endswith(input.action, ".stripe.com:443")
 `;
 
 step(1, "egress.json names policy.rego; the witness compiles it with opa build when it loads");

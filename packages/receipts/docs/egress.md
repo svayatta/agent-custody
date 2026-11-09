@@ -75,7 +75,7 @@ when { context.facts.destination.credential == "verified" && context.facts.desti
 
 ### The same policy in Rego
 
-Give `policyFile` a name ending in `.rego`, and the witness compiles it with `opa build`, exactly as the gateway does ([Rego](policies.md#rego)). The policy declares `package agentcustody`, with an `allow` boolean and a `deny` set of strings. The input is the Cedar request above with plain strings: `input.principal` is the agent id, or `"unknown"` when the credential did not verify, `input.action` and `input.resource` are `host:port`, and `input.context` holds `args` and `facts.destination`. The `opa` binary must be on `PATH` when the policy loads or changes, never on a connection. The gateway image includes it.
+Give `policyFile` a name ending in `.rego`, and the witness compiles it with `opa build`, exactly as the gateway does ([Rego](policies.md#rego)). The policy declares `package agentcustody`, with an `allow` boolean and a `deny` set of strings. The input is the Cedar request above with plain strings: `input.principal` is the agent id, or `"unknown"` when the credential did not verify, `input.action` and `input.resource` are `host:port`, and `input.context` holds `args` and `facts.destination`. The `opa` binary must be on `PATH` when the policy loads or changes. The witness notices a change on the first connection after it and compiles the file then, so that connection waits for `opa build`, typically a few hundred milliseconds. A file that does not compile is compiled once, not again on each connection, until it changes. The gateway image includes `opa`.
 
 This is `deploy/gateway/lockdown/config/egress-policy.cedar` in Rego:
 

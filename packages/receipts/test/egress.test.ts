@@ -19,7 +19,7 @@ import { internalAddress, isAddressLiteral, sameAddress } from "../src/addresses
 import type { LogSink } from "../src/log-sink.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadEgressConfig } from "../src/config.ts";
 import { loadPublicKey, sha256Hex } from "../src/crypto.ts";
 import { RECEIPT_HEADER } from "../src/door.ts";
@@ -340,7 +340,7 @@ allow if {
 	input.context.facts.destination.host == "127.0.0.1"
 }
 
-deny contains "payments go through the gateway" if endswith(input.action, "stripe.com:443")
+deny contains "payments go through the gateway" if endswith(input.action, ".stripe.com:443")
 `;
   const startRego = (policy = REGO, extra: Record<string, unknown> = {}) => start({ policyFile: "policy.rego", ...extra }, policy);
 
@@ -369,6 +369,11 @@ deny contains "payments go through the gateway" if endswith(input.action, "strip
       const other = await connectThrough(w.port, "8.8.8.8:443", good);
       expect(other.status).toBe(403);
       other.socket.destroy();
+      // the deny rule names stripe.com's hosts, not a lookalike that only ends in the same letters
+      const lookalike = await connectThrough(w.port, "evilstripe.com:443", good);
+      expect(lookalike.status).toBe(403);
+      expect(JSON.parse(lookalike.body).reason).toBe("no permit policy matched");
+      lookalike.socket.destroy();
     } finally { await w.stop(); await echo.close(); }
   });
 
@@ -397,10 +402,17 @@ deny contains "payments go through the gateway" if endswith(input.action, "strip
     const replace = (text: string) => { writeFileSync(`${file}.new`, text); renameSync(`${file}.new`, file); };
     try {
       replace(broken);
-      const a = await connectThrough(w.port, `127.0.0.1:${echo.port}`, good);
-      expect(a.status).toBe(200);
-      a.socket.end();
-      expect(decode(await waitForReceipt(w.fx, a.headers[RECEIPT_HEADER]!)).predicate.policy!.policyDigest).toBe(policyDigest(REGO));
+      // the broken file is compiled once, not again on each connection: opa build blocks every tunnel while it runs
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        for (let i = 0; i < 3; i++) {
+          const a = await connectThrough(w.port, `127.0.0.1:${echo.port}`, good);
+          expect(a.status).toBe(200);
+          a.socket.end();
+          expect(decode(await waitForReceipt(w.fx, a.headers[RECEIPT_HEADER]!)).predicate.policy!.policyDigest).toBe(policyDigest(REGO));
+        }
+        expect(errors.mock.calls.filter(([m]) => String(m).includes("POLICY NOT RELOADED"))).toHaveLength(1);
+      } finally { errors.mockRestore(); }
       expect(w.host.policyDigest()).toBe(policyDigest(REGO));
 
       // a valid file replaces it from the next connection
