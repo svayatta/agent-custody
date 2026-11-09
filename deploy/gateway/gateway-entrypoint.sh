@@ -18,6 +18,13 @@ config_dir=$(dirname "$GATEWAY_CONFIG")
 
 case "${1:-serve}" in
   serve)
+    # An agent's proxy secret for the egress witness (left in .env, which the gateway loads) would let the gateway connect
+    # through the witness as that agent. Names only: the value never goes to the log.
+    leftover=$(env | sed -n 's/^\(EGRESS_SECRET_[A-Za-z0-9_]*\)=.*/\1/p' | tr '\n' ' ')
+    if [ -n "$leftover" ]; then
+      echo "gateway: ${leftover}is in the gateway's environment, so the gateway is not starting. A proxy secret belongs only to the egress witness and its agent: move it from .env to lockdown/agents/<agent>.env" >&2
+      exit 1
+    fi
     if [ ! -f "$GATEWAY_CONFIG" ]; then
       echo "gateway: $GATEWAY_CONFIG not found. Mount your config at $config_dir, or write a starter one with: init" >&2
       exit 1

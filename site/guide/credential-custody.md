@@ -37,11 +37,15 @@ kubectl apply -k deploy/gateway/lockdown/k8s
 
 - The agent sits on an internal network (`internal: true`), which has no route out.
 - The gateway and the witness sit on that network and on the default one. They are the only way out.
-- The agent's proxy secret goes in `lockdown/egress.env`, which only the witness and the agent load. It does not go in `.env`: the gateway loads that file, and a gateway that held the witness password could connect through the witness as the agent. `lockdown/agent-proxy.env` builds the agent's `HTTPS_PROXY` from it.
+- Each agent's proxy secret goes in a file of its own, `lockdown/agents/<agent>.env`. The witness loads every agent's file, and each agent loads only its own, so no agent holds another's password.
+- No proxy secret goes in `.env`. The gateway loads that file, and a gateway that held a witness password could connect through the witness as that agent. The gateway image refuses to start when any `EGRESS_SECRET_*` variable is in its environment, and names the variable without printing its value.
+- The agent builds its `HTTPS_PROXY` from its own secret when it starts (the stand-in's entrypoint shows how), so compose never interpolates the secret from the shell or `.env`. A blank secret stops the agent.
+- The compose files use the long form of `env_file` (`path`, `required`), which needs Docker Compose 2.24 or later.
 
 ```bash
 cd deploy/gateway
-cp lockdown/egress.env.example lockdown/egress.env && chmod 600 lockdown/egress.env   # set the secret: openssl rand -hex 32
+cp lockdown/agents/research-agent.env.example lockdown/agents/research-agent.env   # set the secret: openssl rand -hex 32
+chmod 600 lockdown/agents/research-agent.env
 docker compose -f docker-compose.yaml -f lockdown/docker-compose.yaml --profile demo-agent up -d
 ```
 

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Smoke test for the gateway image: init writes a config, the container becomes healthy, a connection with no grant is
+# Smoke test for the gateway image: init writes a config, the gateway refuses to start with a witness proxy secret in
+# its environment (without logging the value), the container becomes healthy, a connection with no grant is
 # refused and one with the demo grant gets a session, and `docker stop` closes the gateway (exit 0, not SIGKILL). Then the
 # same image in egress mode: the witness creates its key, becomes healthy, refuses a connection with no proxy credential
 # (407) and one its policy does not permit (403) before connecting anywhere, relays one its policy permits (to a listener
@@ -14,7 +15,8 @@ eport=18791
 ename="egress-smoke-$$"
 uname="egress-upstream-$$"
 net="egress-smoke-$$"
-cleanup() { docker rm -f "$name" "$ename" "$uname" > /dev/null 2>&1 || true; docker network rm "$net" > /dev/null 2>&1 || true; rm -rf "$work"; }
+lname="gateway-leftover-$$"
+cleanup() { docker rm -f "$name" "$ename" "$uname" "$lname" > /dev/null 2>&1 || true; docker network rm "$net" > /dev/null 2>&1 || true; rm -rf "$work"; }
 trap cleanup EXIT
 fail() { echo "smoke: $*" >&2; docker logs "$name" >&2 2>&1 || true; docker logs "$ename" >&2 2>&1 || true; exit 1; }
 
@@ -22,6 +24,17 @@ mkdir "$work/config"
 docker run --rm -u "$(id -u):$(id -g)" -v "$work/config:/config" "$image" init > /dev/null 2>&1 || fail "init failed"
 [ -f "$work/config/gateway.json" ] || fail "init wrote no config"
 [ -f "$work/config/demo/grant.json" ] || fail "init wrote no demo grant"
+# a witness proxy secret left in the gateway's environment stops the gateway, and its value is not logged
+docker run -d --name "$lname" -v "$work/config:/config:ro" -e EGRESS_SECRET_SMOKE_LEFTOVER=leftover-value "$image" > /dev/null
+i=0
+while [ "$(docker inspect -f '{{.State.Running}}' "$lname")" = true ]; do
+  i=$((i + 1)); [ "$i" -le 15 ] || fail "the gateway started with an EGRESS_SECRET_ variable in its environment"
+  sleep 1
+done
+[ "$(docker inspect -f '{{.State.ExitCode}}' "$lname")" != 0 ] || fail "the gateway exited 0 with an EGRESS_SECRET_ variable in its environment"
+leftover=$(docker logs "$lname" 2>&1)
+echo "$leftover" | grep -q "EGRESS_SECRET_SMOKE_LEFTOVER is in the gateway's environment" || fail "a leftover proxy secret did not stop the gateway: $leftover"
+echo "$leftover" | grep -q "leftover-value" && fail "the gateway logged the value of a leftover proxy secret"
 
 docker run -d --name "$name" -v "$work/config:/config:ro" -p "127.0.0.1:$port:8790" "$image" > /dev/null
 i=0
@@ -43,7 +56,7 @@ elapsed=$(( $(date +%s) - start ))
 code=$(docker inspect -f '{{.State.ExitCode}}' "$name")
 [ "$code" = 0 ] || fail "stopped with exit code $code, not 0 (SIGKILL is 137)"
 [ "$elapsed" -le 8 ] || fail "docker stop took ${elapsed}s: the gateway ignored SIGTERM"
-echo "smoke: ok (healthy, no-grant refused, demo grant accepted, stopped in ${elapsed}s with exit 0)"
+echo "smoke: ok (a leftover proxy secret refused, healthy, no-grant refused, demo grant accepted, stopped in ${elapsed}s with exit 0)"
 
 mkdir "$work/egress"
 # the permitted destination: a TCP listener in a container on a network of its own, named by its address, because the
@@ -73,14 +86,14 @@ via() { target="$1"; shift; curl -s -m 10 -o /dev/null -w '%{http_connect}' -x "
 [ "$(via api.stripe.com -U "smoke-agent:$secret")" = 403 ] || fail "a destination the policy does not permit was not refused with 403"
 # the tunnel opens (200) and the listener closes it; curl's TLS handshake then fails, which is not part of the test
 [ "$(via "$upstream" -U "smoke-agent:$secret")" = 200 ] || fail "the destination the policy permits ($upstream) was not relayed with 200"
-# Each receipt as "<destination> <status>". The relay is receipted when its tunnel closes, so wait for it.
+# Each receipt as "<destination> <status>[ <reason>]". The relay is receipted when its tunnel closes, so wait for it.
 receipts() {
   docker exec "$ename" node -e '
     const fs = require("fs"), dir = "/data/receipts";
     for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".json") && !f.endsWith(".authorization.json"))) {
       const b = JSON.parse(fs.readFileSync(`${dir}/${f}`, "utf8"));
       const p = JSON.parse(Buffer.from(b.envelope.payload, "base64").toString()).predicate;
-      console.log(`${p.tool.name} ${p.execution.status}`);
+      console.log([p.tool.name, p.execution.status, p.execution.reason].filter(Boolean).join(" "));
     }'
 }
 i=0
@@ -88,8 +101,9 @@ until receipts | grep -qx "$upstream executed"; do
   i=$((i + 1)); [ "$i" -le 10 ] || fail "no executed receipt for $upstream; receipts: $(receipts | tr '\n' ',')"
   sleep 1
 done
-receipts | grep -qx "api.stripe.com:443 denied" || fail "no denied receipt for api.stripe.com:443; receipts: $(receipts | tr '\n' ',')"
+# the 407 is receipted as denied too, so require the 403's own reason
+receipts | grep -qx "api.stripe.com:443 denied no permit policy matched" || fail "no receipt of the policy refusing api.stripe.com:443; receipts: $(receipts | tr '\n' ',')"
 docker stop "$ename" > /dev/null
 code=$(docker inspect -f '{{.State.ExitCode}}' "$ename")
 [ "$code" = 0 ] || fail "the witness stopped with exit code $code, not 0"
-echo "smoke: ok (egress mode: key created, healthy, 407 without a credential, 403 and a denied receipt for a refused destination, 200 and an executed receipt for a permitted one, stopped with exit 0)"
+echo "smoke: ok (egress mode: key created, healthy, 407 without a credential, 403 and a policy-refusal receipt for a refused destination, 200 and an executed receipt for a permitted one, stopped with exit 0)"
