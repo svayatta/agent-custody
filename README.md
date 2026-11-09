@@ -62,7 +62,7 @@ cd agent-custody && bun install && bun run demo
 
 The demo needs Node 22 and Bun. The [refund demo](site/advanced.md#the-refund-demo) shows the output step by step. For production payments, read [safe financial operations](packages/receipts/docs/financial-operations.md) (budgets, idempotency, and reconciliation with the provider), [human approvals](packages/receipts/docs/approvals.md) (one or two people approve the exact payment), and [completeness](packages/receipts/docs/completeness.md) (the provider's records matched against the receipts, so an action that went around the gateway shows up).
 
-The gateway covers only the calls that go through it. A credential in the agent's own environment goes around it. The [threat model](packages/receipts/docs/threat-model.md) lists the other limits.
+The gateway covers only the calls that go through it. A credential in the agent's own environment goes around it: [the egress witness](#calls-that-go-around-the-gateway-the-egress-witness) and lockdown close that route. The [threat model](packages/receipts/docs/threat-model.md) lists the other limits.
 
 ## Start with a coding agent
 
@@ -130,6 +130,37 @@ The hook stops a shell command, a file edit, or an MCP tool call that the agent 
 - **The record is the agent's own report.** Every field is `claimed`. The signature shows that the record did not change after the hook wrote it. It does not show that the hook saw every call.
 
 To cover more, keep production credentials out of the agent's environment, and put a gateway between the agent and the tools that touch production. The [threat model](packages/receipts/docs/threat-model.md) lists what each part defends, and what it does not. No independent witness runs yet, and the hosted log is not anchored on mainnet yet.
+
+## Calls that go around the gateway: the egress witness
+
+The gateway receipts the calls that go through it. An agent that holds a credential of its own, or can reach the internet directly, can call a provider around it. The egress witness closes that route. It is a forward proxy in the agent's network path, and lockdown makes it the agent's only way out other than the gateway.
+
+![The egress witness, animated: a locked-down agent pod reaches the outside only through the gateway or the witness. A direct call to Stripe is refused and receipted, a permitted host is relayed and receipted by bytes and times, a connection with no proxy credential is refused, and one that ignores the proxy is dropped by the network policy with no receipt.](site/public/egress-witness.svg)
+
+1. **Lockdown.** The agent's pod or container gets default-deny egress. It can reach only the gateway, the witness, and DNS.
+2. **Credential custody.** Tool credentials live only in the gateway. Calls that need a credential go there and are receipted as before.
+3. **The witness.** Everything else must go through `agent-custody egress`, set as the agent's `HTTPS_PROXY`:
+   - it identifies the agent by that agent's own proxy credential;
+   - a Cedar policy decides per destination (`host:port`);
+   - it commits the connection to the log before any byte moves;
+   - it relays or refuses the connection, and signs a receipt either way.
+
+| case | what happens | receipt |
+| --- | --- | --- |
+| a tool call through the gateway | the gateway decides it on its arguments | the gateway's, as before |
+| a direct call to a provider, such as `CONNECT api.stripe.com:443` | refused with 403; nothing is opened | `denied` |
+| a host the policy permits | relayed as an opaque tunnel | `executed`: destination, address, times, bytes each way |
+| no valid proxy credential | refused with 407, whatever the destination | `denied`, agent `unknown` |
+| an agent that ignores the proxy | dropped by the network policy | none: the witness never sees it |
+
+**What it cannot see.**
+- Payloads: there is no TLS interception, so a receipt records where traffic went, not what was sent.
+- Traffic when lockdown is off: an agent can simply ignore `HTTPS_PROXY`.
+- Protocols other than HTTP.
+
+Each receipt is an observed bypass, not a record of what was done. A permitted host name is never dialled at an internal address such as the cloud metadata service.
+
+**Where it runs.** The witness runs anywhere Node 22 runs. Lockdown depends on the platform: `deploy/gateway/lockdown` ships it for Kubernetes (a NetworkPolicy) and docker compose (an internal network). On a VM, bare metal, or a cloud task, build the same default-deny egress with that platform's firewall. [Credential custody and lockdown](site/guide/credential-custody.md) shows how. [The egress witness](packages/receipts/docs/egress.md) has the config, the policy, and the receipt. Tutorial 41 runs it end to end.
 
 ## Advanced
 

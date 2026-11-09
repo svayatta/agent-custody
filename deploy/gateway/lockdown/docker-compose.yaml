@@ -12,6 +12,12 @@
 #
 # What this does not cover: a connection the witness relays is opaque to it (no TLS interception), so it records where
 # traffic went and how much, never what was sent. Docker's embedded DNS still answers on the internal network.
+#
+# Internal destinations: the witness sits on `default`, so it has a route to the host, the other compose services, the
+# private ranges, and the cloud metadata address, which the agent does not. Compose has no equivalent of the Kubernetes
+# exception list. The witness itself refuses to dial a loopback, private, link-local, or metadata address for a host
+# name, before it connects; an IP literal is dialled only when the policy names that address as the action. Do not
+# permit internal addresses, and on a cloud VM block the metadata address for this container in the host firewall too.
 
 services:
   gateway:

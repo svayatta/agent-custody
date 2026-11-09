@@ -7,7 +7,7 @@ The gateway holds an agent's tool credentials and receipts every call made throu
 - relays the connection or refuses it;
 - signs a receipt either way, with `issuer.kind: "egress"`. The receipt goes to the log like any other.
 
-**It needs lockdown.** A proxy alone is advice: an agent can ignore `HTTPS_PROXY` and connect directly. The witness means something only when the agent's network reaches nothing but the gateway and the witness. [Credential custody and lockdown](../../../site/guide/credential-custody.md) explains the setup, and `deploy/gateway/lockdown` has the manifests: a Kubernetes NetworkPolicy, and an internal network for docker compose.
+**It needs lockdown.** A proxy alone is advice: an agent can ignore `HTTPS_PROXY` and connect directly. The witness means something only when the agent's network reaches nothing but the gateway and the witness. The witness runs anywhere Node 22 runs, but the lockdown belongs to the platform the agent runs on. `deploy/gateway/lockdown` ships it for Kubernetes (a NetworkPolicy) and docker compose (an internal network). On a VM, bare metal, a cloud task, or a laptop, you build the default-deny egress with that platform's own firewall. [Credential custody and lockdown](../../../site/guide/credential-custody.md) explains each.
 
 **What it cannot see.** Every page about the witness repeats this list:
 
@@ -72,7 +72,9 @@ permit(principal, action, resource)
 when { context.facts.destination.credential == "verified" && context.facts.destination.port == 443 && context.facts.destination.host like "*.example.com" };
 ```
 
-Do not permit a provider whose calls belong in the gateway. The point of the gateway is that it holds the provider's key and decides each call on its arguments. The witness sees only a host name. The policy decides on that name, and the witness then resolves it itself. A permitted name could resolve to an internal address, so the witness's own network policy should refuse private ranges and the cloud metadata address. `deploy/gateway/lockdown/k8s/egress-networkpolicy.yaml` does this.
+Do not permit a provider whose calls belong in the gateway. The point of the gateway is that it holds the provider's key and decides each call on its arguments. The witness sees only a host name.
+
+**Internal addresses.** The policy decides on a host name, and the witness then resolves it. A name the agent chose, or a DNS answer someone else chose, could point a permit for a public host at the metadata service or the private network. So the witness drops every internal address from the answer before it connects: loopback, private and shared ranges, link-local (the cloud metadata address `169.254.169.254`), `192.0.0.0/24` (Oracle's metadata at `192.0.0.192`), multicast, reserved space, and their IPv6 and IPv4-mapped forms. A name with nothing left fails with an `error` receipt, and no connection is made. The check is in the resolver the socket connects with, so there is no second lookup to rebind. An IP literal is not looked up: it is the Cedar action itself, so it is dialled only when a rule names that address. On Kubernetes, `deploy/gateway/lockdown/k8s/egress-networkpolicy.yaml` refuses the same ranges a second time, at the network.
 
 `agent-custody policy simulate` replays egress receipts like any other.
 
@@ -84,7 +86,9 @@ Do not permit a provider whose calls belong in the gateway. The point of the gat
 | allowed, plain HTTP | the destination's answer, without hop-by-hop headers | `executed` when the answer ends |
 | policy refuses | `403`, JSON with the reason | `denied` |
 | no valid credential | `407`, with `Proxy-Authenticate: Basic realm="agent-custody egress"` | `denied` |
-| destination unreachable | `502` (plain HTTP: `504` if the request may have arrived) | `error` |
+| destination unreachable, or a host name that resolves only to internal addresses | `502` (plain HTTP: `504` if the request may have arrived) | `error` |
+| the log will not commit the connection first | `503` | `withheld` |
+| the witness stops before the connection opens | `503` | `error` |
 | past `maxInFlight` | `503`, `Retry-After: 1` | none |
 | malformed target, or `https://` in a plain request | `400` | none |
 
@@ -106,7 +110,7 @@ The same in-toto statement and v0.2 predicate as every other receipt, signed by 
 
 For a tunnel, the bytes are the tunnel's payload, which is ciphertext for HTTPS. For plain HTTP, they are the request body and the response body.
 
-The receipt of a relayed connection is written when the connection ends. A witness that is stopped normally closes its open connections and receipts each one as `witness-stopped`. A witness that is killed writes no receipt for the connections that were open at that moment.
+**Committed before relaying.** Before any byte of the agent's moves, the witness commits the connection to the log as an authorization: the agent, the destination, and the decision. This is what the door does for a request that can change something. If the log will not take it, nothing is relayed and the agent gets 503, except in observe mode, which relays and prints the gap. The receipt, written when the connection ends, embeds that authorization and adds the times, the byte counts, and how it ended. So the bypass is on record before it happens, even if the closing receipt is never written. A witness that is stopped normally closes its open connections, including those still connecting, and receipts each one. A witness that is killed leaves the committed authorization in the log, but not the closing receipt with the byte counts.
 
 ## What a verifier checks
 
@@ -115,12 +119,14 @@ The receipt of a relayed connection is written when the connection ends. A witne
 - `egress receipt carries a policy decision`: the witness decides every connection.
 - `egress destination observed`: the tool name is observed, and it equals the host and port in the observed destination fact.
 - `egress relayed only for a checked agent`: a connection that was relayed (`executed`, `failed`, or `error`) has an agent with provenance `observed`.
+- `egress open committed before relaying`: a relayed connection carries the authorization the witness committed before any byte moved. The usual authorization checks then confirm that it names this call and that it sits in the log before the receipt.
+- `egress peer is public for a host name`: when the destination is a host name, the recorded `peer` is a public address. An IP literal is exempt, since the policy named it.
 
 Vectors `egress-*` and `resigned-egress-*` in `vectors/receipts.json` cover them.
 
 ## What it does not do yet
 
-- Write a receipt before a long connection ends. A precommit at open, as the door does for unsafe methods, would close the gap left when a witness is killed.
+- Record the byte counts of a connection open when the witness is killed: the committed authorization is in the log, the closing receipt is not.
 - Identify an agent by its source address or by a signed grant. Today only per-agent proxy credentials identify an agent.
 - `agent-custody check` does not read an egress config yet.
 

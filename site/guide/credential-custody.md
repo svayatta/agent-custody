@@ -44,6 +44,16 @@ docker compose -f docker-compose.yaml -f lockdown/docker-compose.yaml run --rm e
 docker compose -f docker-compose.yaml -f lockdown/docker-compose.yaml --profile demo-agent up -d
 ```
 
+On Docker, the witness sits on the default network, so it can reach the host, the other services, the private ranges, and the metadata address, which the agent cannot. Compose has no equivalent of the Kubernetes exception list. The witness itself refuses an internal address for a host name before it connects. It dials an IP literal only when the policy names that address, so do not permit internal addresses. On a cloud VM, also block the metadata address for the witness's container in the host firewall.
+
+**Other setups.** The witness itself runs anywhere: `agent-custody egress` is a Node 22 process, from npm or the gateway image. The lockdown is the part that depends on the platform. This repository ships it only for Kubernetes and docker compose. Anywhere else, build the same default-deny egress with the platform's own controls. The rule is always the same: from the agent, allow only the gateway, the witness, and DNS, and drop everything else.
+
+- **A VM or bare metal.** Run the agent as its own Unix user, and give that user a host firewall rule that rejects every outbound connection except the gateway's and the witness's address and port. With nftables or iptables, match on the user (`meta skuid`, or `-m owner --uid-owner`). Under systemd, `IPAddressDeny=any` plus `IPAddressAllow=` for the two addresses and the resolver does the same per unit, by address.
+- **Cloud tasks and instances** (ECS, Cloud Run, EC2, GCE, Azure). Give the agent a security group or firewall rule with no general egress, only the gateway and the witness. On a serverless function in a VPC, the agent must have no NAT route out.
+- **A developer laptop.** An agent that runs as you, with your network, cannot be locked down, and the witness is only advice there. Run the agent in a container with the compose override instead.
+
+These are mechanisms, not recipes. We have not shipped or tested a file for them. Whatever you build, run the three tests below before you rely on it.
+
 **The agent's settings:**
 
 - `HTTPS_PROXY` and `HTTP_PROXY`: `http://<agent id>:<secret>@<witness>:8791`.

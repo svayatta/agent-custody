@@ -36,7 +36,7 @@ const running = await serveEgress(host, { port: 8791, host: "0.0.0.0" });
 // on shutdown: host.close() receipts each open connection as witness-stopped, then running.close()
 ```
 
-`createEgressHost(cfg, { log?, exporter?, autoFlush? })` returns `{ keyid, policyDigest(), handleRequest(req, res), handleConnect(req, socket, head), flushOutbox(), pendingReceipts(), close() }`. Also exported: `checkProxyCredential(header, agents)`, `parseAuthority(authority)`, `normalizeHost(host)`, `destinationName(host, port)`, `DESTINATION_FACT`, `EGRESS_VERSION`, `PROXY_REALM`.
+`createEgressHost(cfg, { log?, exporter?, autoFlush?, lookup? })` returns `{ keyid, policyDigest(), handleRequest(req, res), handleConnect(req, socket, head), flushOutbox(), pendingReceipts(), close() }`. Also exported: `checkProxyCredential(header, agents)`, `parseAuthority(authority)`, `normalizeHost(host)`, `destinationName(host, port)`, `DESTINATION_FACT`, `EGRESS_VERSION`, `PROXY_REALM`.
 
 ## Requests
 
@@ -63,8 +63,10 @@ Without a verified credential, the connection is refused with 407 in every mode.
 | 403 | the policy refused | `denied` |
 | 407 | no valid credential (`Proxy-Authenticate: Basic realm="agent-custody egress"`) | `denied` |
 | 500 | the receipt of a refusal could not be written; nothing was relayed | none |
-| 502 | the destination could not be reached | `error` |
-| 503 | past `maxInFlight`, or the witness is stopping | none |
+| 502 | the destination could not be reached, or a host name resolved only to internal addresses | `error` |
+| 503 | the log would not commit the connection first | `withheld` |
+| 503 | the witness stopped before the connection opened | `error` |
+| 503 | past `maxInFlight`, or the witness is stopping when the request arrives | none |
 | 504 | plain HTTP: the request may have reached the destination and no answer came | `error` |
 
 Answers with a receipt carry `x-agent-custody-receipt`. If the log did not take the receipt yet, the answer also carries `x-agent-custody-log-pending: true`.
@@ -82,10 +84,14 @@ Answers with a receipt carry `x-agent-custody-receipt`. If the log did not take 
   - `denied`, with `reason`
   - `error`, with `error`
 
-The verifier checks are `egress receipt carries a policy decision`, `egress destination observed`, and `egress relayed only for a checked agent`.
+- `authorization`: on every relayed connection, the statement committed to the log before any byte moved
+
+The verifier checks are `egress receipt carries a policy decision`, `egress destination observed`, `egress relayed only for a checked agent`, `egress open committed before relaying`, and `egress peer is public for a host name`.
+
+A host name is never dialled at an internal address: the resolver drops loopback, private, shared, link-local, metadata, multicast, and reserved addresses before the connection is made. An IP literal is dialled only when the policy names it. `publicOnlyLookup(resolve?)` and `internalAddress(ip)` are exported.
 
 ## Not yet
 
-- A receipt before a long connection ends: a witness that is killed writes none for its open connections.
+- The byte counts of a connection open when the witness is killed: the committed authorization is in the log, the closing receipt is not.
 - Agent identity by source address or by signed grant.
 - `agent-custody check` for an egress config.

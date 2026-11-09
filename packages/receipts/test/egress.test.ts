@@ -4,17 +4,23 @@
 // relayed byte for byte and its receipt says where it went and how much, never what; a plain HTTP request never carries
 // the agent's proxy secret to the destination; observe mode relays and records the deny; an unreachable destination, the
 // in-flight limit, the idle timeout, and a witness that stops each end in a receipt or say plainly why there is none.
+// A relayed connection is committed to the log before any byte moves, so the bypass is on record even if the witness dies;
+// a log that refuses means nothing is relayed. A permit for a host name never becomes a request to an internal address,
+// because a name the agent chose, or a DNS answer someone else chose, would otherwise reach the metadata service. A
+// connection still committing or connecting when the witness stops cannot outlive close().
 // Every receipt verifies with public keys alone.
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
-import { createServer as createTcpServer, type AddressInfo } from "node:net";
+import { createServer as createTcpServer, type AddressInfo, type LookupFunction } from "node:net";
+import { internalAddress } from "../src/addresses.ts";
+import type { LogSink } from "../src/log-sink.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadEgressConfig } from "../src/config.ts";
 import { loadPublicKey, sha256Hex } from "../src/crypto.ts";
 import { RECEIPT_HEADER } from "../src/door.ts";
-import { DESTINATION_FACT, checkProxyCredential, createEgressHost, destinationName, normalizeHost, parseAuthority, serveEgress, type Destination, type EgressResult } from "../src/egress.ts";
+import { DESTINATION_FACT, checkProxyCredential, createEgressHost, type EgressOptions, destinationName, normalizeHost, parseAuthority, serveEgress, type Destination, type EgressResult } from "../src/egress.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { verifyBundle } from "../src/verify.ts";
 import { EGRESS_AGENT, EGRESS_SECRET, buildEgressFixture, connectThrough, proxyAuth, startEcho, type EchoServer, type EgressFixture } from "../scripts/egress-fixture.ts";
@@ -30,9 +36,9 @@ async function waitForReceipt(fx: EgressFixture, id: string): Promise<ReceiptBun
 const verified = (fx: EgressFixture, b: ReceiptBundle) => verifyBundle(b, { issuerKeys: [loadPublicKey(fx.witnessPub)], principalKeys: [], logFile: fx.logFile });
 const failing = (r: ReturnType<typeof verifyBundle>) => r.checks.filter((c) => !c.ok).map((c) => c.name);
 
-async function start(extra: Record<string, unknown> = {}, policy?: string) {
+async function start(extra: Record<string, unknown> = {}, policy?: string, options: EgressOptions = {}) {
   const fx = buildEgressFixture(mkdtempSync(join(tmpdir(), "egress-")), extra, policy);
-  const host = await createEgressHost(loadEgressConfig(fx.configFile));
+  const host = await createEgressHost(loadEgressConfig(fx.configFile), options);
   const running = await serveEgress(host, { port: 0, log: () => {} });
   const port = Number(new URL(running.url).port);
   return { fx, host, running, port, async stop() { await host.close(); await running.close(); } };
@@ -45,6 +51,11 @@ describe("parsing what the agent asked for", () => {
     for (const bad of ["api.stripe.com", "api.stripe.com:0", "api.stripe.com:70000", "a b:443", "[nothost]:443", "user@host:443", "host:443/path", ":443", "a..b:443"]) expect(parseAuthority(bad), bad).toBeNull();
     expect(destinationName("::1", 443)).toBe("[::1]:443");
     expect(normalizeHost("Example.COM")).toBe("example.com");
+  });
+
+  it("classes loopback, private, shared, link-local, and metadata addresses as internal, in IPv4, IPv6, and mapped form", () => {
+    for (const a of ["127.0.0.1", "10.1.2.3", "172.31.255.255", "192.168.0.1", "169.254.169.254", "192.0.0.192", "100.64.0.1", "0.0.0.0", "224.0.0.1", "::1", "::", "fd00::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:7f00:1", "not-an-address"]) expect(internalAddress(a), a).toBe(true);
+    for (const a of ["1.1.1.1", "104.16.1.1", "172.32.0.1", "100.128.0.1", "2606:4700::1111", "::ffff:1.1.1.1"]) expect(internalAddress(a), a).toBe(false);
   });
 
   it("names an agent only when its secret matches; a guessed id is a claim", () => {
@@ -92,6 +103,8 @@ describe("the witness, enforcing", () => {
     const result = (p.execution as { result: EgressResult }).result;
     expect(result).toMatchObject({ peer: "127.0.0.1", bytesUp: 5, bytesDown: 10, end: "closed" });
     expect(JSON.stringify(p)).not.toContain("hello");
+    // committed to the log before the 200, so the open is on record whatever happens to the closing receipt
+    expect(p.authorization?.inclusion.leafIndex).toBeLessThan(b.inclusion.leafIndex);
     expect(failing(verified(w.fx, b))).toEqual([]);
   });
 
@@ -205,6 +218,69 @@ describe("the witness's limits and modes", () => {
       const p = decode(JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle).predicate;
       expect((p.execution as { result: EgressResult }).result.end).toBe("witness-stopped");
     } finally { await w.running.close(); await echo.close(); }
+  });
+
+  const ANY = `permit(principal == Agent::"${EGRESS_AGENT}", action, resource);\n`;
+  const resolver = (answers: Record<string, string>): LookupFunction => ((name: string, _o: unknown, cb: (e: Error | null, a?: { address: string; family: number }[]) => void) => {
+    const address = answers[name];
+    if (address === undefined) return; // never answers: a destination that is still connecting
+    cb(null, [{ address, family: address.includes(":") ? 6 : 4 }]);
+  }) as unknown as LookupFunction;
+
+  it("a permitted host name that resolves to an internal address is never dialled", async () => {
+    let reached = 0;
+    const inside = createTcpServer((s) => { reached += 1; s.destroy(); });
+    const port = await new Promise<number>((r) => inside.listen(0, "127.0.0.1", () => r((inside.address() as AddressInfo).port)));
+    const w = await start({}, ANY, { lookup: resolver({ "docs.example": "127.0.0.1", "metadata.example": "169.254.169.254" }) });
+    try {
+      for (const name of ["docs.example", "metadata.example"]) {
+        const a = await connectThrough(w.port, `${name}:${port}`, good);
+        expect(a.status, name).toBe(502);
+        a.socket.destroy();
+        const b = await waitForReceipt(w.fx, a.headers[RECEIPT_HEADER]!);
+        expect(decode(b).predicate.execution).toMatchObject({ status: "error" });
+        expect(String((decode(b).predicate.execution as { error: string }).error)).toContain("internal addresses");
+        expect(failing(verified(w.fx, b))).toEqual([]);
+      }
+      const plain = await new Promise<number>((resolve) => {
+        request({ host: "127.0.0.1", port: w.port, path: `http://docs.example:${port}/`, headers: { "proxy-authorization": good } }, (res) => { res.resume(); resolve(res.statusCode!); }).end();
+      });
+      expect(plain).toBe(502);
+      expect(reached).toBe(0);
+      // an address the policy names is the action itself, and is dialled
+      const literal = await connectThrough(w.port, `127.0.0.1:${port}`, good);
+      expect(literal.status).toBe(200);
+      literal.socket.destroy();
+    } finally { await w.stop(); await new Promise<void>((r) => inside.close(() => r())); }
+  });
+
+  it("a connection still connecting when the witness stops is answered and receipted, and close() does not wait for it", async () => {
+    const w = await start({ connectTimeoutMs: 60_000 }, ANY, { lookup: resolver({}) });
+    try {
+      const pending = connectThrough(w.port, "slow.example:443", good);
+      await new Promise((r) => setTimeout(r, 200));
+      const t0 = Date.now();
+      await w.host.close();
+      expect(Date.now() - t0).toBeLessThan(2_000);
+      const a = await pending;
+      expect(a.status).toBe(503);
+      a.socket.destroy();
+      const p = decode(await waitForReceipt(w.fx, a.headers[RECEIPT_HEADER]!)).predicate;
+      expect(p.execution).toMatchObject({ status: "error", error: "the witness stopped before the connection opened" });
+      expect(p.authorization).toBeDefined();
+    } finally { await w.running.close(); }
+  });
+
+  it("relays nothing when the log will not commit the connection first", async () => {
+    const echo = await startEcho();
+    const refusing: LogSink = { kind: "file", where: "refusing", append: async () => { throw new Error("the log is full"); } };
+    const w = await start({}, undefined, { log: refusing });
+    try {
+      const a = await connectThrough(w.port, `127.0.0.1:${echo.port}`, good);
+      expect(a.status).toBe(503);
+      expect(JSON.parse(a.body).reason).toContain("the log did not commit the connection");
+      a.socket.destroy();
+    } finally { await w.stop(); await echo.close(); }
   });
 
   it("refuses to start without an agent's secret in the environment", async () => {

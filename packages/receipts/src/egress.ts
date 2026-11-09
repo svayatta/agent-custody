@@ -8,16 +8,18 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { createServer, request as httpRequest, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
-import { connect, isIP, type AddressInfo, type Socket } from "node:net";
+import { lookup as dnsLookup } from "node:dns";
+import { connect, isIP, type AddressInfo, type LookupFunction, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import type { EgressConfig } from "./config.ts";
+import { internalAddress } from "./addresses.ts";
 import { digestOf, loadPrivateKey } from "./crypto.ts";
 import { RECEIPT_HEADER } from "./door.ts";
 import { createIssuer, ReceiptPending, type FlushResult } from "./issue.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
-import type { FactRecord, ReceiptPredicate } from "./receipt.ts";
+import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
 
 export const EGRESS_VERSION = "0.1.0";
 /** the fact every egress receipt carries, and the policy reads as `context.facts.destination` */
@@ -93,11 +95,13 @@ export interface AgentCredential {
 }
 
 const sha = (s: string) => createHash("sha256").update(s).digest();
+/** compared against on every unknown id, so a miss costs what a hit costs: one hash of the presented secret and one compare */
+const STAND_IN = sha(`stand-in:${randomUUID()}`);
 
 /**
  * Checks `Proxy-Authorization: Basic base64(id:secret)` against the secrets the witness holds. The comparison is over
- * sha256 digests in constant time, and runs against a stand-in when the id is unknown, so the answer time does not say
- * which ids exist.
+ * sha256 digests in constant time, and runs against one stand-in, hashed once, when the id is unknown, so the answer
+ * time does not say which ids exist.
  */
 export function checkProxyCredential(header: string | undefined, agents: ReadonlyMap<string, Buffer>): { credential: Destination["credential"]; agent?: string; declared?: string } {
   if (!header) return { credential: "absent" };
@@ -109,8 +113,28 @@ export function checkProxyCredential(header: string | undefined, agents: Readonl
   const id = decoded.slice(0, colon);
   const presented = sha(decoded.slice(colon + 1));
   const expected = agents.get(id);
-  const match = timingSafeEqual(presented, expected ?? sha(`unknown:${randomUUID()}`)) && expected !== undefined;
+  const match = timingSafeEqual(presented, expected ?? STAND_IN) && expected !== undefined;
   return match ? { credential: "verified", agent: id } : { credential: "invalid", declared: id.slice(0, 200) };
+}
+
+/**
+ * Wraps a resolver so that a host name never leads to an internal address: the policy decided on the name, and a name
+ * the agent chose (or a DNS answer someone else chose) must not turn a permit for a public host into a request to the
+ * metadata service, loopback, or the private network. Addresses that are internal are dropped before any connection is
+ * made; a name with none left fails. An IP literal is never looked up: it is the Cedar action itself, so a rule permits
+ * it by name. The check sits in the resolver the socket connects with, so there is no second lookup to rebind.
+ */
+export function publicOnlyLookup(resolve: LookupFunction = dnsLookup as unknown as LookupFunction): LookupFunction {
+  return ((hostname: string, options: { all?: boolean }, callback: (err: NodeJS.ErrnoException | null, address?: string | { address: string; family: number }[], family?: number) => void) => {
+    resolve(hostname, { ...options, all: true }, ((err: NodeJS.ErrnoException | null, found: { address: string; family: number }[]) => {
+      if (err) return callback(err);
+      const list = Array.isArray(found) ? found : [];
+      const usable = list.filter((a) => !internalAddress(a.address));
+      if (!usable.length) return callback(Object.assign(new Error(`${hostname} resolves only to internal addresses (${list.map((a) => a.address).join(", ") || "none"}); the witness does not dial them for a host name`), { code: "EGRESS_INTERNAL" }));
+      if (options.all) callback(null, usable);
+      else callback(null, usable[0]!.address, usable[0]!.family);
+    }) as never);
+  }) as LookupFunction;
 }
 
 /** Headers that belong to the connection to the witness, never relayed to the destination. Proxy-Authorization is the agent's secret. */
@@ -122,6 +146,8 @@ export interface EgressOptions {
   exporter?: ReceiptExporter;
   /** appends the outbox at start and every 30 seconds; only a serving witness sets it */
   autoFlush?: boolean;
+  /** the resolver for host names, before the internal-address filter; for tests */
+  lookup?: LookupFunction;
 }
 
 export interface EgressHost {
@@ -147,7 +173,9 @@ interface Decided {
   forward: boolean;
   /** why the connection is refused, when it is */
   refusal?: { status: 403 | 407; reason: string };
-  head: Omit<ReceiptPredicate, "execution">;
+  head: Omit<ReceiptPredicate, "execution" | "session" | "model">;
+  /** the open, committed to the log before any byte of the agent's moved */
+  authorization?: AuthorizationBundle;
 }
 
 export async function createEgressHost(cfg: EgressConfig, options: EgressOptions = {}): Promise<EgressHost> {
@@ -222,14 +250,12 @@ export async function createEgressHost(cfg: EgressConfig, options: EgressOptions
         ? undefined
         : { status: 403 as const, reason: [...policy.reasons, ...policy.errors].join("; ") || "no permit policy matched" };
     const facts: Record<string, FactRecord> = { [DESTINATION_FACT]: { tool: "egress.destination", args: {}, value: destination, resultDigest: digestOf(destination), provenance: "observed" } };
-    const head: Omit<ReceiptPredicate, "execution"> = {
+    const head: Omit<ReceiptPredicate, "execution" | "session" | "model"> = {
       receiptId,
       timestamp,
       issuer: { kind: "egress", keyid: issuer.keyid, version: EGRESS_VERSION, framework: scheme },
       principal: { id: null, provenance: "claimed" },
       agent: { id: checked.agent ?? "unknown", provenance: checked.agent ? "observed" : "claimed" },
-      session: { id: null, toolUseId: null, provenance: "claimed" },
-      model: { id: null, provenance: "claimed" },
       tool: { name, provenance: "observed" },
       request: { args, argsDigest: digestOf(args), provenance: "claimed" },
       facts,
@@ -241,7 +267,7 @@ export async function createEgressHost(cfg: EgressConfig, options: EgressOptions
   /** Signs, logs, and writes the receipt. A log that does not answer leaves it in the outbox; any other failure is printed and returns false. */
   async function record(d: Decided, execution: ReceiptPredicate["execution"]): Promise<{ written: boolean; logPending: boolean }> {
     try {
-      await issuer.issue({ ...d.head, execution }, undefined, undefined, { deferLog: true });
+      await issuer.issue({ ...d.head, session: { id: null, toolUseId: null, provenance: "claimed" }, model: { id: null, provenance: "claimed" }, ...(d.authorization ? { authorization: d.authorization } : {}), execution }, undefined, undefined, { deferLog: true });
       return { written: true, logPending: false };
     } catch (e) {
       if (e instanceof ReceiptPending) {
@@ -252,6 +278,28 @@ export async function createEgressHost(cfg: EgressConfig, options: EgressOptions
       return { written: false, logPending: false };
     }
   }
+
+  /**
+   * Commits the connection to the log before any byte of the agent's moves, as the door commits a request that can change
+   * something: the bypass is on record even if the witness dies while the tunnel is open, or the closing receipt is never
+   * written. If the log will not take it, nothing is relayed; in observe mode it is relayed and the gap is printed.
+   */
+  async function commitOpen(d: Decided): Promise<string | undefined> {
+    try {
+      d.authorization = await issuer.authorize(d.head);
+      return undefined;
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      if (cfg.mode === "observe") {
+        console.error(`agent-custody egress (observe mode): the log did not commit connection ${d.receiptId} to ${d.head.tool.name}; it was relayed without it: ${why}`);
+        return undefined;
+      }
+      return `the log did not commit the connection, so it was not relayed: ${why}`;
+    }
+  }
+
+  const lookup = publicOnlyLookup(options.lookup);
+  const STOPPED = "the witness stopped before the connection opened";
 
   const tracked = <T>(p: Promise<T>): Promise<T> => {
     pending.add(p);
@@ -298,21 +346,48 @@ export async function createEgressHost(cfg: EgressConfig, options: EgressOptions
       if (!r.written) return answerSocket(client, 500, "Internal Server Error", {}, { error: "the witness could not record this connection; nothing was relayed", receipt: d.receiptId });
       return answerSocket(client, d.refusal!.status, d.refusal!.status === 407 ? "Proxy Authentication Required" : "Forbidden", refusalHeaders(d, r.logPending), { error: d.refusal!.status === 407 ? "the witness needs a proxy credential it can check" : "refused by the egress policy", reason: d.refusal!.reason, receipt: d.receiptId });
     }
-    const upstream = connect({ host: target.host, port: target.port });
-    upstream.on("error", () => undefined);
-    const connected = await new Promise<{ ok: true } | { ok: false; error: string }>((resolve) => {
-      const timer = setTimeout(() => { upstream.destroy(); resolve({ ok: false, error: `no connection within ${cfg.connectTimeoutMs} ms` }); }, cfg.connectTimeoutMs);
-      upstream.once("connect", () => { clearTimeout(timer); resolve({ ok: true }); });
-      upstream.once("error", (e) => { clearTimeout(timer); resolve({ ok: false, error: e.message }); });
-      client.once("close", () => { clearTimeout(timer); upstream.destroy(); resolve({ ok: false, error: "the agent closed the connection before the destination answered" }); });
-    });
-    if (!connected.ok) {
-      // the tunnel never opened, so no byte of the agent's reached the destination
-      const r = await record(d, { status: "error", error: `the destination could not be reached: ${connected.error}`, provenance: "observed" });
-      return answerSocket(client, 502, "Bad Gateway", { [RECEIPT_HEADER]: d.receiptId, ...(r.logPending ? { "x-agent-custody-log-pending": "true" } : {}) }, { error: "the destination could not be reached", detail: connected.error, receipt: d.receiptId });
+    // Registered before anything is awaited: close() must reach a connection that is still committing or connecting,
+    // or it would open after shutdown began and outlive it.
+    let stopped = false;
+    let upstream: Socket | undefined;
+    let wake: (() => void) | undefined;
+    const stopEarly = () => { stopped = true; upstream?.destroy(); wake?.(); };
+    open.add(stopEarly);
+    let connected: { ok: true } | { ok: false; error: string };
+    try {
+      const withheld = await commitOpen(d);
+      if (withheld) {
+        const r = await record(d, { status: "withheld", reason: withheld, provenance: "observed" });
+        return answerSocket(client, 503, "Service Unavailable", { [RECEIPT_HEADER]: d.receiptId, ...(r.logPending ? { "x-agent-custody-log-pending": "true" } : {}) }, { error: "not relayed", reason: withheld, receipt: d.receiptId });
+      }
+      const socket = connect({ host: target.host, port: target.port, lookup });
+      upstream = socket;
+      socket.on("error", () => undefined);
+      if (stopped) socket.destroy();
+      connected = stopped ? { ok: false, error: STOPPED } : await new Promise<{ ok: true } | { ok: false; error: string }>((resolve) => {
+        const timer = setTimeout(() => { socket.destroy(); resolve({ ok: false, error: `no connection within ${cfg.connectTimeoutMs} ms` }); }, cfg.connectTimeoutMs);
+        const done = (v: { ok: true } | { ok: false; error: string }) => { clearTimeout(timer); resolve(v); };
+        wake = () => done({ ok: false, error: STOPPED });
+        socket.once("connect", () => done({ ok: true }));
+        socket.once("error", (e) => done({ ok: false, error: e.message }));
+        client.once("close", () => { socket.destroy(); done({ ok: false, error: "the agent closed the connection before the destination answered" }); });
+      });
+    } finally {
+      open.delete(stopEarly);
     }
+    if (!connected.ok || stopped) {
+      // the tunnel never opened, so no byte of the agent's reached the destination
+      upstream?.destroy();
+      const error = stopped ? STOPPED : (connected as { error: string }).error;
+      const r = await record(d, { status: "error", error: stopped ? STOPPED : `the destination could not be reached: ${error}`, provenance: "observed" });
+      const mark = { [RECEIPT_HEADER]: d.receiptId, ...(r.logPending ? { "x-agent-custody-log-pending": "true" } : {}) };
+      return stopped
+        ? answerSocket(client, 503, "Service Unavailable", mark, { error: STOPPED, receipt: d.receiptId })
+        : answerSocket(client, 502, "Bad Gateway", mark, { error: "the destination could not be reached", detail: error, receipt: d.receiptId });
+    }
+    const tunnelTo = upstream!;
     const openedAt = new Date().toISOString();
-    const peer = upstream.remoteAddress ?? "unknown";
+    const peer = tunnelTo.remoteAddress ?? "unknown";
     let bytesUp = head.length;
     let bytesDown = 0;
     let end: EgressEnd = "closed";
@@ -324,24 +399,24 @@ export async function createEgressHost(cfg: EgressConfig, options: EgressOptions
         done = true;
         open.delete(stop);
         client.destroy();
-        upstream.destroy();
+        tunnelTo.destroy();
         resolve();
       };
       const stop = () => finish("witness-stopped");
       open.add(stop);
-      for (const s of [client, upstream as Socket | Duplex]) {
+      for (const s of [client, tunnelTo as Socket | Duplex]) {
         s.on("error", () => finish("reset"));
         s.on("close", () => finish());
       }
-      upstream.setTimeout(cfg.idleTimeoutMs, () => finish("idle-timeout"));
+      tunnelTo.setTimeout(cfg.idleTimeoutMs, () => finish("idle-timeout"));
       // a socket's timeout counts reads and writes, so either direction keeps the tunnel open
       client.on("data", (c: Buffer) => { bytesUp += c.length; });
-      upstream.on("data", (c: Buffer) => { bytesDown += c.length; });
+      tunnelTo.on("data", (c: Buffer) => { bytesDown += c.length; });
     });
     client.write(`HTTP/1.1 200 Connection Established\r\n${RECEIPT_HEADER}: ${d.receiptId}\r\n\r\n`);
-    if (head.length) upstream.write(head);
-    client.pipe(upstream);
-    upstream.pipe(client);
+    if (head.length) tunnelTo.write(head);
+    client.pipe(tunnelTo);
+    tunnelTo.pipe(client);
     await ended;
     const result: EgressResult = { peer, openedAt, closedAt: new Date().toISOString(), bytesUp, bytesDown, end };
     await record(d, { status: "executed", result, resultDigest: digestOf(result), provenance: "observed" });
@@ -380,6 +455,20 @@ export async function createEgressHost(cfg: EgressConfig, options: EgressOptions
       if (!r.written) return json(500, {}, { error: "the witness could not record this connection; nothing was relayed", receipt: d.receiptId });
       return json(d.refusal!.status, refusalHeaders(d, r.logPending), { error: d.refusal!.status === 407 ? "the witness needs a proxy credential it can check" : "refused by the egress policy", reason: d.refusal!.reason, receipt: d.receiptId });
     }
+    let stoppedEarly = false;
+    const stopEarly = () => { stoppedEarly = true; };
+    open.add(stopEarly);
+    let withheld: string | undefined;
+    try {
+      withheld = await commitOpen(d);
+    } finally {
+      open.delete(stopEarly);
+    }
+    if (withheld || stoppedEarly) {
+      req.resume();
+      const r = await record(d, withheld ? { status: "withheld", reason: withheld, provenance: "observed" } : { status: "error", error: STOPPED, provenance: "observed" });
+      return json(503, { [RECEIPT_HEADER]: d.receiptId, ...(r.logPending ? { "x-agent-custody-log-pending": "true" } : {}) }, { error: withheld ? "not relayed" : STOPPED, ...(withheld ? { reason: withheld } : {}), receipt: d.receiptId });
+    }
     const headers: Record<string, string | string[]> = {};
     for (const [name, value] of Object.entries(req.headers)) if (value !== undefined && !HOP_BY_HOP.has(name) && name !== "host" && name !== "expect") headers[name] = value;
     // the destination the policy decided on is the one the request names, whatever Host the agent wrote
@@ -394,7 +483,7 @@ export async function createEgressHost(cfg: EgressConfig, options: EgressOptions
     const outcome = await new Promise<{ ok: true } | { ok: false; error: string }>((resolve) => {
       let settled = false;
       const settle = (v: { ok: true } | { ok: false; error: string }) => { if (!settled) { settled = true; open.delete(stop); resolve(v); } };
-      const up = httpRequest({ host, port, method: req.method, path: `${url.pathname}${url.search}`, headers, agent: false, setHost: false });
+      const up = httpRequest({ host, port, method: req.method, path: `${url.pathname}${url.search}`, headers, agent: false, setHost: false, lookup });
       const stop = () => { end = "witness-stopped"; up.destroy(); res.destroy(); settle({ ok: true }); };
       open.add(stop);
       const connectTimer = setTimeout(() => up.destroy(new Error(`no connection within ${cfg.connectTimeoutMs} ms`)), cfg.connectTimeoutMs);

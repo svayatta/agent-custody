@@ -15,6 +15,7 @@ import binascii
 import calendar
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -36,6 +37,23 @@ APPROVAL = "application/vnd.agent-custody.approval+json"
 UPSTREAM = "application/vnd.agent-custody.upstream+json"
 
 FORWARDED = ("executed", "failed", "error")
+
+
+# Addresses that are not the public internet; the same list as packages/receipts/src/addresses.ts.
+_INTERNAL_NETWORKS = [ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
+    "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8")]
+
+
+def _internal_address(ip: str) -> bool:
+    """True when ip is not a public address, or not an address at all."""
+    try:
+        addr = ipaddress.ip_address(ip.strip("[]").split("%")[0])
+    except ValueError:
+        return True
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return any(addr.version == n.version and addr in n for n in _INTERNAL_NETWORKS)
 STATUSES = ("executed", "failed", "denied", "error", "withheld")
 MAX_CHAIN_DEPTH = 3
 STRIPE_TOLERANCE_SECONDS = 300
@@ -775,6 +793,13 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
         add("egress destination observed", tool.get("provenance") == "observed" and dest.get("provenance") == "observed" and name == tool.get("name"), str(tool.get("name")))
         agent = p.get("agent") if isinstance(p.get("agent"), dict) else {}
         add("egress relayed only for a checked agent", not forwarded or agent.get("provenance") == "observed", str(agent.get("id")))
+        add("egress open committed before relaying", not forwarded or isinstance(p.get("authorization"), dict))
+        reached = status in ("executed", "failed")
+        host_s = host if isinstance(host, str) else ""
+        literal = bool(re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host_s)) or ":" in host_s
+        result = p["execution"].get("result") if reached else None
+        peer = result.get("peer") if isinstance(result, dict) else None
+        add("egress peer is public for a host name", not reached or literal or (isinstance(peer, str) and not _internal_address(peer)), f"{host_s} reached {peer}")
 
     _delegation_checks(p, trust, add, forwarded and not reconciliation)
     approval_withheld = ["approval", "envelope"] in paths

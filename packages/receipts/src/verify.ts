@@ -1,4 +1,5 @@
 // Independent verification of a receipt bundle. Needs only public keys, and optionally a copy of the log.
+import { internalAddress } from "./addresses.ts";
 import { canonicalize, digestOf, dsseVerifiers, dsseVerify, type Envelope, type PublicKeyRef } from "./crypto.ts";
 import { isApprovalTime, verifyApproval, verifyApprovalStatement } from "./approval.ts";
 import { digestSaltFor, getAt, isCommitment, pathKey, pathText, restorePaths, under, type How } from "./capture.ts";
@@ -225,6 +226,13 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     add("egress destination observed", p.tool.provenance === "observed" && dest?.provenance === "observed" && name === p.tool.name, name === p.tool.name ? `${p.tool.name}; an observed bypass of the gateway, not a record of what was sent` : `the destination fact names ${name ?? "nothing"}, the receipt ${p.tool.name}`);
     const relayed = p.execution.status === "executed" || p.execution.status === "failed" || p.execution.status === "error";
     add("egress relayed only for a checked agent", !relayed || p.agent.provenance === "observed", p.agent.provenance === "observed" ? `${p.agent.id}, by the proxy credential the witness checked` : relayed ? `the connection was ${p.execution.status} for an agent the witness did not check` : "no agent was checked and nothing was relayed");
+    add("egress open committed before relaying", !relayed || !!p.authorization, relayed ? (p.authorization ? "the connection was in the log before any byte moved" : `the connection was ${p.execution.status} with nothing committed first`) : "nothing was relayed");
+    // The policy decided on a host name; the witness must not have dialled an internal address for it. An IP literal is the action itself.
+    const host = typeof seen?.host === "string" ? seen.host : "";
+    const literal = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":");
+    const peer = (p.execution.status === "executed" || p.execution.status === "failed") ? (p.execution.result as { peer?: unknown } | null)?.peer : undefined;
+    const reached = p.execution.status === "executed" || p.execution.status === "failed";
+    add("egress peer is public for a host name", !reached || literal || (typeof peer === "string" && !internalAddress(peer)), !reached ? "no connection was made" : literal ? `${host} is an address the policy named` : `${host} reached ${typeof peer === "string" ? peer : "no recorded peer"}`);
   }
 
   if (p.delegation) {
