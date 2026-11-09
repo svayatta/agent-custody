@@ -1,5 +1,5 @@
 // Aspect: an OWASP Agent Control Standard (ACS) Guardian whose decisions land in a transparency log. Source: src/acs.ts, src/config.ts
-// Run:    node examples/42-acs-guardian.ts
+// Run:    node examples/43-acs-guardian.ts
 //
 // ACS is a wire contract: before it acts, an agent's instrumentation sends a JSON-RPC hook such as steps/toolCallRequest
 // to a Guardian, which answers allow or deny. ACS's baseline signature is an HMAC both sides hold, so a decision is not
@@ -20,7 +20,7 @@ import { out, step } from "./_out.ts";
 
 const acs = resolve(import.meta.dirname, "acs");
 const cli = resolve(import.meta.dirname, "..", "src", "cli.ts");
-const dir = out("42-acs-guardian");
+const dir = out("43-acs-guardian");
 // asynchronous, so the log served in this process can answer the child
 const run = (args: string[], input?: string) => new Promise<{ status: number | null; stdout: string; stderr: string }>((done) => {
   const child = spawn(process.execPath, [cli, ...args]);
