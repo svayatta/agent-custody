@@ -1272,6 +1272,24 @@ const PORTAL_PAGE = `<!doctype html>
   .auth { --pad: 2.25rem; position: relative; max-width: 27rem; margin: 3.5rem auto 4rem; padding: var(--pad) var(--pad) 1.75rem; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 1px 2px rgb(0 0 0 / .05), 0 18px 40px -18px rgb(0 0 0 / .25); }
   .auth::before { content: ""; position: absolute; top: -1px; left: -1px; right: -1px; height: 4px; border-radius: 14px 14px 0 0; background: var(--accent); }
   #onboard { max-width: 31rem; } .auth.wide { max-width: 44rem; }
+  .auth.split { padding: 0; } .auth.split > .pane { padding: var(--pad) var(--pad) 1.75rem; } .pitch { display: none; }
+  .pitch .eyebrow { color: #f59e0b; }
+  .pitch h2 { margin: 0 0 1rem; font: 700 2rem/1.15 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -.025em; text-transform: none; color: #fff; }
+  .pitch > p { margin: 0 0 2rem; max-width: 30rem; color: #9fb0bd; }
+  .flow { list-style: none; counter-reset: flow; display: grid; gap: 1.1rem; margin: 0; padding: 0; }
+  .flow li { counter-increment: flow; display: grid; grid-template-columns: 2rem 1fr; gap: .1rem .85rem; }
+  .flow li::before { content: counter(flow); grid-row: span 2; display: grid; place-items: center; width: 2rem; height: 2rem; border: 1px solid rgb(255 255 255 / .2); border-radius: 50%; color: #9fb0bd; font: 700 .8rem var(--mono); }
+  .flow li.now::before { background: #f59e0b; border-color: #f59e0b; color: #1c1917; }
+  .flow b { color: #fff; font-weight: 600; } .flow span { color: #9fb0bd; font-size: .9rem; }
+  @media (min-width: 60rem) {
+    .auth.split { display: grid; grid-template-columns: minmax(0, 1fr) 27rem; max-width: 64rem; overflow: hidden; }
+    #onboard.split { grid-template-columns: minmax(0, 1fr) 31rem; max-width: 68rem; }
+    .pitch { display: flex; flex-direction: column; justify-content: center; padding: 3rem; background: radial-gradient(circle at 1px 1px, rgb(255 255 255 / .07) 1px, transparent 0) 0 0 / 22px 22px, linear-gradient(160deg, #1f2a35, #0e1418); }
+    #onboard .pitch { justify-content: flex-start; padding-top: 4.5rem; }
+    .split .fine { border-radius: 0; }
+    .auth.wide { display: grid; grid-template-columns: 21rem minmax(0, 1fr); gap: 0 2.5rem; align-items: start; max-width: 72rem; }
+    .wide .side { position: sticky; top: 1.5rem; } .wide #firstSetup > .step:first-child { border-top: 0; padding-top: 0; }
+  }
   .auth .mark { display: block; width: 40px; height: 40px; margin: 0 0 1rem; } .mark .tile { fill: var(--accent); } .mark .ink { stroke: var(--accent); }
   .auth .eyebrow { margin: 0 0 .3rem; font: 600 .7rem/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
   .auth h1 { font-size: 1.6rem; line-height: 1.2; letter-spacing: -.02em; margin: 0 0 1.5rem; }
@@ -1294,7 +1312,7 @@ const PORTAL_PAGE = `<!doctype html>
   .auth .msg.err:not(:empty), .auth .msg.ok:not(:empty) { padding: .55rem .8rem; border-radius: 8px; border: 1px solid; }
   .auth .msg.err:not(:empty) { border-color: color-mix(in srgb, var(--bad) 40%, var(--panel)); background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
   .auth .msg.ok:not(:empty) { border-color: color-mix(in srgb, var(--ok) 40%, var(--panel)); background: color-mix(in srgb, var(--ok) 8%, var(--panel)); }
-  @media (max-width: 30rem) { .top { flex-wrap: wrap; row-gap: .4rem; } .brand, button.theme { white-space: nowrap; } button.theme { margin-left: auto; } .top .links { order: 1; flex-basis: 100%; margin-left: 0; } .auth { --pad: 1.25rem; margin: 1rem .75rem 2rem; border-radius: 12px; } .auth::before { border-radius: 12px 12px 0 0; } .auth .fine { border-radius: 0 0 12px 12px; } .auth h1 { font-size: 1.4rem; } }
+  @media (max-width: 30rem) { .top { flex-wrap: wrap; row-gap: .4rem; } .brand, button.theme { white-space: nowrap; } button.theme { margin-left: auto; } .top .links { order: 1; flex-basis: 100%; margin-left: 0; font-size: .85rem; } .top .who, #planTag { display: none !important; } .auth { --pad: 1.25rem; margin: 1rem .75rem 2rem; border-radius: 12px; } .auth::before { border-radius: 12px 12px 0 0; } .auth .fine { border-radius: 0 0 12px 12px; } .auth h1 { font-size: 1.4rem; } }
   .step { display: grid; grid-template-columns: 2rem 1fr; gap: .2rem .8rem; padding: 1rem 0; border-top: 1px solid var(--line); }
   .step .n { font: 700 .85rem/1.6 var(--mono); color: var(--accent); }
   .step h3 { margin: 0 0 .3rem; font-size: 1rem; } .step p { margin: 0 0 .5rem; color: var(--ink2); font-size: .92rem; }
@@ -1306,11 +1324,30 @@ const PORTAL_PAGE = `<!doctype html>
   .msg { min-height: 1.4rem; margin: .6rem 0; color: var(--ink2); } .panel > .msg:empty { display: none; } .msg.err { color: var(--bad); } .msg.ok { color: var(--ok); }
   .muted { color: var(--ink2); }
   [hidden] { display: none !important; }
-  @media (max-width: 48rem) { .layout { grid-template-columns: 1fr; } nav { display: flex; overflow-x: auto; padding: 0 .3rem; border-right: 0; border-bottom: 1px solid var(--line); } nav .group { display: none; } nav a { flex: none; white-space: nowrap; border-left: 0; border-bottom: 3px solid transparent; } main { padding: 1.25rem 1rem 2rem; } nav a.on { border-bottom-color: var(--accent); } }
+  @media (max-width: 48rem) { .layout { grid-template-columns: 1fr; } nav { display: flex; overflow-x: auto; padding: 0 .3rem; border-right: 0; border-bottom: 1px solid var(--line); } nav .group { display: none; } nav a { flex: none; white-space: nowrap; border-left: 0; border-bottom: 3px solid transparent; } main { padding: 1.25rem 1rem 2rem; } nav a.on { border-bottom-color: var(--accent); }
+    .cards { grid-template-columns: 1fr 1fr; gap: .6rem; } .card { padding: .75rem .85rem; } .card .k { font-size: .6rem; letter-spacing: .06em; } .card .v { font-size: 1.4rem; } .card .s { font-size: .8rem; line-height: 1.35; }
+    table:has(#urls), #urls, table:has(#audit), #audit { display: block; } table:has(#audit) thead { display: none; }
+    #urls tr { display: grid; gap: .15rem; padding: .55rem 0; border-bottom: 1px solid var(--line); } #urls tr:last-child { border-bottom: 0; }
+    #urls th, #urls td { padding: 0; border: 0; } #urls td { overflow-wrap: anywhere; font-size: .8rem; }
+    #audit tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .15rem .75rem; padding: .65rem 0; border-bottom: 1px solid var(--line); } #audit tr:last-child { border-bottom: 0; }
+    #audit td { min-width: 0; padding: 0; border: 0; white-space: normal; }
+    #audit td:nth-child(3) { grid-area: 1 / 1; font-weight: 600; } #audit td:nth-child(1) { grid-area: 1 / 2; color: var(--ink2); font-size: .8rem; white-space: nowrap; }
+    #audit td:nth-child(2), #audit td:nth-child(4), #audit td[colspan] { grid-column: 1 / -1; font-size: .8rem; } #audit td:nth-child(2) { color: var(--ink2); } }
 </style>
 <div class="top"><a class="brand" href="https://agent-custody.dev/"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links"><a href="https://agent-custody.dev/guide/getting-started">Guide</a><a href="https://docs.agent-custody.dev/reference/">Docs</a><a href="https://agent-custody.dev/verify">Verify a receipt</a></span><span class="who" id="who"></span><button class="theme" id="themeToggle" type="button">Dark mode</button></div>
 <div id="notice" class="notice" hidden></div>
-<section id="auth" class="auth" hidden>
+<section id="auth" class="auth split" hidden>
+  <aside class="pitch">
+    <p class="eyebrow">agent-custody hosted log</p>
+    <h2>Proof of what your AI agents did.</h2>
+    <p>Your gateway signs a receipt for each tool call that it checks. This log keeps the hash of each receipt in a Merkle tree with signed heads, so a changed or removed receipt shows.</p>
+    <ol class="flow">
+      <li><b>Your agent calls a tool</b><span>The gateway checks the call against your policy before it runs.</span></li>
+      <li><b>The gateway signs a receipt</b><span>The receipt stays on your machines.</span></li>
+      <li><b>Its hash comes to this log</b><span>Anyone with the public keys can verify the receipt and its place in the log.</span></li>
+    </ol>
+  </aside>
+  <div class="pane">
   ${MARK}
   <p class="eyebrow">Hosted log</p>
   <h1 id="authTitle">Sign in</h1>
@@ -1334,8 +1371,20 @@ const PORTAL_PAGE = `<!doctype html>
   </form>
   <p class="muted swap"><button class="link" id="authSwap" type="button">Create an account instead</button></p>
   <p class="muted fine">The free plan is ten thousand appends a month, no card. Your gateway sends only hashes; nothing you log here can be read by us.</p>
+  </div>
 </section>
-<section id="onboard" class="auth" hidden>
+<section id="onboard" class="auth split" hidden>
+  <aside class="pitch">
+    <p class="eyebrow">Setup, step 1 of 4</p>
+    <h2>Your own log, in about two minutes.</h2>
+    <ol class="flow">
+      <li class="now"><b>Create your tenant</b><span>Name your organisation. The tenant id becomes the path of your log.</span></li>
+      <li><b>Copy your first API key</b><span>We show it once and keep only its hash.</span></li>
+      <li><b>Point your gateway at the log</b><span>One config entry and one environment variable.</span></li>
+      <li><b>Send your first receipt</b><span>The dashboard shows the append within seconds.</span></li>
+    </ol>
+  </aside>
+  <div class="pane">
   ${MARK}
   <h1>Set up your tenant</h1>
   <p class="muted">Signed in as <b id="onboardWho"></b>. A tenant is your own log on this service, with its own keys and its own path.</p>
@@ -1351,14 +1400,17 @@ const PORTAL_PAGE = `<!doctype html>
     <p class="msg" id="onboardMsg" aria-live="polite"></p>
   </form>
   <p class="muted"><a href="#" id="signoutOnboard">Sign out</a></p>
+  </div>
 </section>
 <section id="welcome" class="auth wide" hidden>
+  <div class="side">
   ${MARK}
   <h1>Your tenant is ready</h1>
   <p class="muted">Three steps to your first receipt in this log. Everything here is under <b>Setup</b> in the dashboard whenever you need it again.</p>
   <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst">Copy key</button></div>
-  <div id="firstSetup"></div>
   <p><button id="toDash">Go to the dashboard</button></p>
+  </div>
+  <div id="firstSetup"></div>
 </section>
 <div class="layout" id="app" hidden>
   <nav>
@@ -1518,7 +1570,7 @@ const PORTAL_PAGE = `<!doctype html>
   const step = (n, title, body) => "<div class=step><span class=n>" + n + "</span><div><h3>" + title + "</h3>" + body + "</div></div>";
   const renderSetup = (el, s, atRegistration) => {
     el.innerHTML =
-      step(1, "Keep the key where your gateway runs", (atRegistration ? "<p>The key above is shown once; we keep only its hash. Put it in the environment of the machine that runs your gateway or SDK:</p>" : "<p>Your key was shown once at registration. If it is gone, mint another under <a href=\\"#keys\\" data-view=\\"keys\\">API keys</a>. It lives in the environment of the machine that runs your gateway or SDK:</p>") + snip(s.env)) +
+      step(1, "Keep the key where your gateway runs", (atRegistration ? "<p>Your first key is shown once; we keep only its hash. Put it in the environment of the machine that runs your gateway or SDK:</p>" : "<p>Your key was shown once at registration. If it is gone, mint another under <a href=\\"#keys\\" data-view=\\"keys\\">API keys</a>. It lives in the environment of the machine that runs your gateway or SDK:</p>") + snip(s.env)) +
       step(2, "Point your gateway or SDK at your log", "<p>Add this to <code>gateway.json</code> or <code>sdk.json</code>. <code>hashOnly</code> means this log receives the hash of each receipt and never the receipt.</p>" + snip(s.config)) +
       step(3, "Send the first receipt", "<p>Run your agent through the gateway once. The <a href=\\"#overview\\" data-view=\\"overview\\">Overview</a> shows the append within seconds, and the first signed checkpoint follows within minutes. New to the gateway? <a href=\\"https://agent-custody.dev/guide/getting-started\\">Getting started</a> takes ten minutes.</p>") +
       step(4, "Hand this to whoever verifies your receipts", "<p>Both commands fetch this log's published keys and pin them; <code>--log-id</code> makes sure the tree heads are this log's.</p>" + snip(s.verify) + snip(s.audit)) +
