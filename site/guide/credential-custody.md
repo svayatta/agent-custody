@@ -40,9 +40,10 @@ kubectl apply -k deploy/gateway/lockdown/k8s
 
 ```bash
 cd deploy/gateway
-docker compose -f docker-compose.yaml -f lockdown/docker-compose.yaml run --rm egress keygen --dir /data/keys --name egress
 docker compose -f docker-compose.yaml -f lockdown/docker-compose.yaml --profile demo-agent up -d
 ```
+
+On Kubernetes and in compose alike, the witness runs from the gateway image in `egress` mode. It creates its own signing key on first start and prints the public half in its log. Give that key to whoever verifies its receipts; it is not the gateway's key.
 
 On Docker, the witness sits on the default network, so it can reach the host, the other services, the private ranges, and the metadata address, which the agent cannot. Compose has no equivalent of the Kubernetes exception list. The witness itself refuses an internal address for a host name before it connects. It dials an IP literal only when the policy names that address, so do not permit internal addresses. On a cloud VM, also block the metadata address for the witness's container in the host firewall.
 

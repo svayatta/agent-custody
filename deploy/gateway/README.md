@@ -89,6 +89,8 @@ For evidence a customer or auditor will accept, point `log` in `gateway.json` at
 - **`lockdown/docker-compose.yaml`**: an override for this compose file. The agent sits on an internal network with no route out, and the gateway and the witness are the only services on both networks. Check with `docker compose -f docker-compose.yaml -f lockdown/docker-compose.yaml --profile demo-agent config -q`.
 - **`lockdown/config`**: a starter `egress.json` and `egress-policy.cedar`. Each agent's proxy secret comes from the environment.
 
+The witness runs from this image in `egress` mode: `docker run ... <image> egress`, with the config at `EGRESS_CONFIG` (default `/config/egress.json`) and the port at `EGRESS_PORT` (default 8791). On first start it creates its own signing key at `EGRESS_KEY` (default `/data/keys/egress.key`) and prints the public half in its log; verifiers check its receipts with that key, never the gateway's. Arguments after `egress` replace the default `--config`, `--host`, and `--port`. The image's healthcheck passes when either the gateway or the witness answers, so one image serves both containers. A witness container holds only the agents' proxy secrets, never a tool credential. `smoke.sh` starts the image in both modes.
+
 The witness records where each connection went and how many bytes went each way. It never records what was sent, because there is no TLS interception. It sees nothing without lockdown, since an agent can ignore `HTTPS_PROXY`, and it relays no protocol other than HTTP. A NetworkPolicy has no effect unless the cluster's network plugin enforces it. The witness needs a release that has `agent-custody egress` ([the egress witness](../../packages/receipts/docs/egress.md)).
 
 ## What a shared gateway means, and its limits
