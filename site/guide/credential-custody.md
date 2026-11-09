@@ -37,9 +37,11 @@ kubectl apply -k deploy/gateway/lockdown/k8s
 
 - The agent sits on an internal network (`internal: true`), which has no route out.
 - The gateway and the witness sit on that network and on the default one. They are the only way out.
+- The agent's proxy secret goes in `lockdown/egress.env`, which only the witness and the agent load. It does not go in `.env`: the gateway loads that file, and a gateway that held the witness password could connect through the witness as the agent. `lockdown/agent-proxy.env` builds the agent's `HTTPS_PROXY` from it.
 
 ```bash
 cd deploy/gateway
+cp lockdown/egress.env.example lockdown/egress.env && chmod 600 lockdown/egress.env   # set the secret: openssl rand -hex 32
 docker compose -f docker-compose.yaml -f lockdown/docker-compose.yaml --profile demo-agent up -d
 ```
 
