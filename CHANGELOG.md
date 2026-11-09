@@ -2,6 +2,10 @@
 
 All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agent-custody` on PyPI, move in lockstep. The receipt format has stayed at v0.2 throughout; every addition to it is an optional field, so earlier receipts and the published conformance vectors remain valid.
 
+## Unreleased
+
+- **Test coverage in CI, and a pull request template.** `bun run coverage` runs the receipts and state tests with v8 coverage (`@vitest/coverage-v8` 5.0.0) and the Python tests with `pytest-cov`, then prints the totals per package and the least covered files. The new `coverage` job in the test workflow runs it on every pull request and on main, writes the summary to the job summary, and uploads the HTML reports as an artifact. It is not a required check. Coverage counts only code that runs in the test process, so the CLI, which tests run as a child process, shows as uncovered. Every pull request now uses `.github/pull_request_template.md` (what and why, how it was tested, a checklist of the repository's rules, notes for the reviewer), and the `pr-template` workflow fails while a section is missing or empty.
+
 ## 0.16.1 — 2026-11-09
 
 - **CI: the action self-test no longer comments on pull requests.** The `action` workflow verifies two fixed `stripe.refund` receipts from the test vectors to prove the action still verifies and still catches a changed byte. It posted that result as a comment on every pull request that touched the receipts source, which read as if the pull request had produced those receipts. Both runs now write to the job summary only, and the workflow no longer asks for `pull-requests: write`.

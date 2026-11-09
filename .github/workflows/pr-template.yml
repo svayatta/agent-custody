@@ -1,0 +1,35 @@
+# Checks that a pull request description follows .github/pull_request_template.md: every section is present and
+# none is left empty. The description is read from the event payload through an environment variable, never
+# interpolated into the script.
+name: pr-template
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  pr-template:
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: The description fills in every section of the template
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          # drop HTML comments, so the template's own guidance does not count as an answer
+          body=$(printf '%s' "$BODY" | tr -d '\r' | perl -0pe 's/<!--.*?-->//gs')
+          missing=0
+          for heading in "What and why" "How it was tested" "Checklist" "Notes for the reviewer"; do
+            section=$(printf '%s\n' "$body" | awk -v h="## $heading" '$0==h{f=1;next} /^## /{f=0} f')
+            if ! printf '%s\n' "$body" | grep -qxF "## $heading"; then
+              echo "::error::The description has no \"## $heading\" section. Use the pull request template."
+              missing=1
+            elif [ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]; then
+              echo "::error::The \"## $heading\" section is empty."
+              missing=1
+            fi
+          done
+          exit "$missing"
