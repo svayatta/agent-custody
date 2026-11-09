@@ -75,8 +75,10 @@ jobs:
           python-version: "3.12"
       - run: bun install --frozen-lockfile
       - run: bun run coverage
+      # a failed upload (for example under a fork's token) never fails the job: the summary is already in the log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
+        continue-on-error: true
         with:
           name: coverage
           path: |
