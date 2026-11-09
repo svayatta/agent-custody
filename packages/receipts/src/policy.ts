@@ -84,16 +84,54 @@ export function reservedCedarForm(value: unknown, path = "args"): string | null 
   return null;
 }
 
+interface ParsedPolicy {
+  /** the id the policy set is preparsed under in cedar-wasm; unused when parseErrors is non-empty */
+  slot: string;
+  digest: string;
+  parseErrors: string[];
+}
+
+/** Policy sets kept parsed, most recently used last. A reload or a second gateway in the process takes another slot. */
+const PARSED_SLOTS = 8;
+const parsed = new Map<string, ParsedPolicy>();
+
+/**
+ * The policy set parsed once per text, so a decision no longer parses the whole file. Keyed by the text itself: an
+ * edited file is a new key, a new parse, and a new digest. Evicting reuses the slot id, which replaces the set held in
+ * cedar-wasm, so neither side grows past PARSED_SLOTS. A failed preparse leaves the slot's previous set in place, so
+ * an entry with parse errors must never be evaluated.
+ */
+function parsedPolicy(policyText: string): ParsedPolicy {
+  const hit = parsed.get(policyText);
+  if (hit) {
+    parsed.delete(policyText);
+    parsed.set(policyText, hit);
+    return hit;
+  }
+  let slot = `agent-custody-policy-${parsed.size}`;
+  if (parsed.size >= PARSED_SLOTS) {
+    const [oldest, entry] = parsed.entries().next().value!;
+    parsed.delete(oldest);
+    slot = entry.slot;
+  }
+  const answer = cedar.preparsePolicySet(slot, { staticPolicies: policyText });
+  const entry = { slot, digest: policyDigest(policyText), parseErrors: answer.type === "success" ? [] : answer.errors.map((e) => e.message) };
+  parsed.set(policyText, entry);
+  return entry;
+}
+
 export function evaluate(policyText: string, req: PolicyRequest): PolicyDecision {
-  const digest = policyDigest(policyText);
+  const policy = parsedPolicy(policyText);
+  const digest = policy.digest;
   const reserved = reservedCedarForm(req.context.args);
   if (reserved) return { decision: "deny", reasons: [], errors: [`argument ${reserved} uses a reserved Cedar form; arguments are data, never entities or extension values`], policyDigest: digest };
-  const answer = cedar.isAuthorized({
+  if (policy.parseErrors.length > 0) return { decision: "deny", reasons: [], errors: [...policy.parseErrors], policyDigest: digest };
+  const answer = cedar.statefulIsAuthorized({
     principal: { type: "Agent", id: req.agentId },
     action: { type: "Action", id: req.tool },
     resource: { type: "Tool", id: req.tool },
     context: req.context as cedar.Context,
-    policies: { staticPolicies: policyText },
+    preparsedPolicySetId: policy.slot,
     entities: [],
   });
   if (answer.type === "failure") {
