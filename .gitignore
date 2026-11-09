@@ -15,3 +15,4 @@ deploy/gateway/lockdown/agents/*.env
 
 # test coverage reports (bun run coverage)
 coverage/
+.coverage
