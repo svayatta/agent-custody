@@ -1,7 +1,8 @@
 #!/bin/sh
 # End-to-end test of the VM egress lockdown (deploy/gateway/lockdown/vm) on a throwaway Linux host with systemd: installs
 # the gateway, the witness, a stand-in upstream, and a stand-in agent as the file headers describe, then runs
-# check-lockdown.sh with the nftables rule alone, with the systemd drop-in alone, and with neither (which must fail).
+# check-lockdown.sh with no lockdown (which must fail), with the whole recipe, and with the systemd drop-in alone. It also
+# checks that loading the table leaves another table alone, and that the agent does not start when the load fails.
 # Usage: sudo test-vm-lockdown.sh <@agent-custody/receipts tarball>     needs node 22, nft, curl, python3, openssl
 set -eu
 pkg="${1:?usage: test-vm-lockdown.sh <package tarball>}"
@@ -61,8 +62,8 @@ printf '[Service]\nExecStart=/bin/sleep infinity\n' > /etc/systemd/system/demo-a
 install -d /etc/systemd/system/demo-agent.service.d
 sed "s/^IPAddressAllow=127.0.0.53/IPAddressAllow=$resolver/" "$vm/agent-lockdown.conf" > /etc/systemd/system/demo-agent.service.d/lockdown.conf
 install -m 0600 /dev/null /etc/agent-custody/agent.env
+cp "$vm/agent-custody-lockdown.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl start demo-agent
 
 i=0
 until curl -fsS http://127.0.0.1:8790/health > /dev/null 2>&1 && curl -fsS http://127.0.0.1:8791/.well-known/agent-custody-egress > /dev/null 2>&1; do
@@ -73,10 +74,26 @@ done
 export EGRESS_SECRET="$secret"
 echo "== no lockdown: the checks must fail"
 if "$vm/check-lockdown.sh"; then fail "check-lockdown.sh passed with no lockdown in place"; fi
-echo "== the nftables rule"
-nft -f /etc/agent-custody/agent-lockdown.nft
+echo "== the whole recipe: starting the agent loads the table, and leaves another table alone"
+nft add table inet another_firewall
+systemctl start demo-agent
+systemctl is-active --quiet agent-custody-lockdown || fail "starting the agent did not start agent-custody-lockdown"
+nft list table inet another_firewall > /dev/null || fail "loading the lockdown deleted another table"
 "$vm/check-lockdown.sh"
+"$vm/check-lockdown.sh" --unit demo-agent.service
 echo "== the systemd drop-in alone"
 nft delete table inet agent_custody_lockdown
+if "$vm/check-lockdown.sh" --unit demo-agent.service; then fail "check-lockdown.sh passed with the table missing"; fi
+NFT_TABLE='' "$vm/check-lockdown.sh" --unit demo-agent.service
+echo "== a table that fails to load keeps the agent down"
+systemctl stop demo-agent agent-custody-lockdown
+cp /etc/agent-custody/agent-lockdown.nft "$work/agent-lockdown.nft"
+sed -i 's/^define AGENT_USERS = { agent }/define AGENT_USERS = { no-such-user }/' /etc/agent-custody/agent-lockdown.nft
+if systemctl start demo-agent 2> /dev/null; then fail "the agent started although its firewall table did not load"; fi
+systemctl is-active --quiet demo-agent && fail "the agent is running although its firewall table did not load"
+echo "test-vm-lockdown: the agent stayed down when the table failed to load"
+cp "$work/agent-lockdown.nft" /etc/agent-custody/agent-lockdown.nft
+systemctl reset-failed agent-custody-lockdown
+systemctl start demo-agent
 "$vm/check-lockdown.sh" --unit demo-agent.service
 echo "test-vm-lockdown: ok"

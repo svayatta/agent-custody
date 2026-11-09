@@ -49,22 +49,24 @@ On Docker, the witness sits on the default network, so it can reach the host, th
 **A VM or bare metal** (`lockdown/vm`): each agent runs as its own Unix user, and the gateway and the witness run beside it as systemd services.
 
 - `agent-lockdown.nft` is an nftables table that matches the agent's user (`meta skuid`). Whatever that user runs may reach only the gateway on 8790, the witness on 8791, and the DNS resolver. Everything else, loopback included, is logged and refused. Packets from every other user, the gateway and the witness among them, are not touched.
-- `agent-lockdown.conf` is a systemd drop-in for the agent's own unit. It runs the agent as that user with `NoNewPrivileges`, loads its proxy settings from a root-only file, and sets `IPAddressDeny=any` plus `IPAddressAllow=` for the gateway, the witness, and the resolver.
+- `agent-custody-lockdown.service` loads that table at boot and replaces only that table. Do not load it through `nftables.service`: on Debian and Ubuntu that service runs `/etc/nftables.conf`, which starts with `flush ruleset` and deletes every other table on the host, docker's and ufw's included.
+- `agent-lockdown.conf` is a systemd drop-in for the agent's own unit. It requires `agent-custody-lockdown.service`, so an agent whose table fails to load stays down. It runs the agent as that user with `NoNewPrivileges`, loads the proxy settings from a root-only file, and sets `IPAddressDeny=any` plus `IPAddressAllow=` for the gateway, the witness, and the resolver.
 - `agent-custody-egress.service` runs the witness under a user of its own, with the same `egress.json` as the other recipes. The gateway uses the existing `deploy/gateway/agent-custody-gateway.service`.
-- `check-lockdown.sh` runs the three tests below as the agent user. With `--unit`, it runs them inside the agent unit's IP filter.
+- `check-lockdown.sh` runs the three tests below as the agent user. With `--unit`, it runs them inside the agent unit's IP filter. Before the direct probe, it makes the same connection as root, so a host with no route out cannot pass for a locked-down one. A fourth check confirms that the table is loaded.
 
-Use the nftables rule and the drop-in together. The nftables rule covers everything the user runs, a cron job or a shell included, and it matches ports. The drop-in holds even if the host firewall is flushed. But `IPAddressAllow=` takes addresses, not ports, so allowing `127.0.0.1` allows every service on loopback. Neither can hold an agent that changes user, so give the agent user no sudo and keep it out of the docker group. CI installs this recipe on a fresh Ubuntu runner and runs the checks with the nftables rule alone, then with the drop-in alone.
+Use the nftables rule and the drop-in together. The nftables rule covers everything the user runs, a cron job or a shell included, and it matches ports. The drop-in holds even if the host firewall is flushed. But `IPAddressAllow=` takes addresses, not ports, so allowing `127.0.0.1` allows every service on loopback. Neither can hold an agent that changes user, so give the agent user no sudo and keep it out of the docker group. CI installs this recipe on a fresh Ubuntu runner. It runs the checks with no lockdown, which must fail, then with the whole recipe, then with the drop-in alone. It also checks that a table that fails to load keeps the agent down.
 
 ```bash
 sudo useradd --system --home /var/lib/agent --create-home --shell /usr/sbin/nologin agent
 sudo install -D -m 0644 deploy/gateway/lockdown/vm/agent-lockdown.nft /etc/agent-custody/agent-lockdown.nft  # edit the addresses
-sudo nft -f /etc/agent-custody/agent-lockdown.nft
+sudo install -m 0644 deploy/gateway/lockdown/vm/agent-custody-lockdown.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now agent-custody-lockdown
 sudo install -D -m 0644 deploy/gateway/lockdown/vm/agent-lockdown.conf /etc/systemd/system/my-agent.service.d/lockdown.conf
 sudo systemctl daemon-reload && sudo systemctl restart my-agent
 sudo EGRESS_SECRET=... deploy/gateway/lockdown/vm/check-lockdown.sh --unit my-agent.service
 ```
 
-The header of each file lists the remaining steps: the witness's user and key, and loading the table at boot.
+The header of each file lists the remaining steps, such as the witness's user and key.
 
 **Other setups.** The witness itself runs anywhere: `agent-custody egress` is a Node 22 process, from npm or the gateway image. The lockdown is the part that depends on the platform. Anywhere else, build the same default-deny egress with the platform's own controls. The rule is always the same: from the agent, allow only the gateway, the witness, and DNS, and drop everything else.
 
