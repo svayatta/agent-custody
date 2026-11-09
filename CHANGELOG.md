@@ -5,6 +5,7 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 ## Unreleased
 
 - **CI: the action self-test no longer comments on pull requests.** The `action` workflow verifies two fixed `stripe.refund` receipts from the test vectors to prove the action still verifies and still catches a changed byte. It posted that result as a comment on every pull request that touched the receipts source, which read as if the pull request had produced those receipts. Both runs now write to the job summary only, and the workflow no longer asks for `pull-requests: write`.
+- **Fix: the GitHub Action failed on a pull request when `github-token` was empty.** The step runs under `bash -e -o pipefail`, and with no token the lookup of the earlier comment (`gh api`, exit 4) ended the step, after the receipts had verified, so a caller who turned comments off got a failed check. An empty token now skips the comment and says so, the step's result is the verifier's, and a failed lookup with a token falls through to posting a new comment. The action's own self-test hid this: its tampered run, which passes an empty token, was expected to fail anyway.
 
 ## 0.16.0 — 2026-11-09
 
