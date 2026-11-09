@@ -11,7 +11,7 @@ The agent chooses to ask, and nothing makes it honor the answer. A guardian rece
 | key | type | default | meaning |
 | --- | --- | --- | --- |
 | `identity.keyFile` | path | required | the Guardian's signing key |
-| `policyFile` | path | required | Cedar; read once at start, and a file that does not parse stops the start |
+| `policyFile` | path | required | Cedar; re-read when it changes, and a changed file that does not parse is refused while the policy in force stays; a file that does not parse at start stops the start |
 | `receiptsDir` | path | required | |
 | `logFile` or `log` | | exactly one | as for the gateway |
 
@@ -21,7 +21,7 @@ The agent chooses to ask, and nothing makes it honor the answer. A guardian rece
 agent-custody acs --config acs.json < request.json > answer.json
 ```
 
-`acs` reads one JSON document from stdin (one request, or a batch) and prints the answer. A document that is not JSON prints a `-32700` error and exits 1. Session state lives for the process.
+`acs` reads one JSON document from stdin (one request, or a batch) and prints the answer. It exits 1 when any answer is an error, including a document that is not JSON (`-32700`), and 0 otherwise, deny included. Session state lives for the process.
 
 In code:
 
@@ -31,7 +31,7 @@ const guardian = createAcsGuardian(loadAcsGuardianConfig("acs.json"));
 const answer = await guardian.handle(request); // one JSON-RPC message or a batch; never throws
 ```
 
-`createAcsGuardian(cfg, { log? })` returns `{ keyid, policyDigest, handle(message) }`. Also exported: `acsEntryHash(entry, previousHash)` (ACS §8.2), `ACS_ERROR`, `ACS_METHODS`, `ACS_RECEIPT_KEY` (`"agent-custody"`), `ACS_STEP_FACT` (`"acsStep"`), `ACS_VERSION` (`"0.1.0"`), `ACS_GUARDIAN_VERSION`, and the types `AcsGuardian`, `AcsGuardianConfig`, `AcsMethod`, `AcsResponse`.
+`createAcsGuardian(cfg, { log? })` returns `{ keyid, policyDigest, handle(message) }`; `policyDigest` is the digest of the policy in force now. Calls in one session are decided one at a time; a session belongs to the `agent_id` that opened it. Also exported: `acsEntryHash(entry, previousHash)` (ACS §8.2), `ACS_ERROR`, `ACS_METHODS`, `ACS_RECEIPT_KEY` (`"agent-custody"`), `ACS_STEP_FACT` (`"acsStep"`), `ACS_VERSION` (`"0.1.0"`), `ACS_GUARDIAN_VERSION`, and the types `AcsGuardian`, `AcsGuardianConfig`, `AcsMethod`, `AcsResponse`.
 
 ## The Cedar request
 
@@ -40,7 +40,7 @@ const answer = await guardian.handle(request); // one JSON-RPC message or a batc
 | principal | `Agent::"<params.metadata.agent_id>"`, a claim |
 | action, resource | `Action::"<payload.tool.name>"`, `Tool::"<payload.tool.name>"` |
 | `context.args` | toolCallRequest: each argument's `value`. toolCallResult: `{ exit_status, outputs: [value, …], duration_ms?, request_id_ref? }` |
-| `context.acs` | `{ method, capability?, operation?, requestRef?: { resolved, decision? } }`; `requestRef` is present on a result that names `request_id_ref`, with the decision this Guardian gave that request in the session |
+| `context.acs` | `{ method, capability?, operation?, requestRef?: { resolved, decision?, tool?, agent?, consumed? } }`; `requestRef` is present on a result that names `request_id_ref`: the decision this Guardian gave that request in the session, its tool and agent, and `consumed`, true once a result for it was allowed |
 
 ## The answer
 
@@ -65,11 +65,12 @@ Errors:
 | `-32600` | not JSON-RPC 2.0 with a method and an id, or an empty batch |
 | `-32601` | a method other than the two hooks and `system/ping`, including `handshake/hello` |
 | `-32602` | params or payload missing a required field |
+| `-32000` | the `session_id` was opened by another `agent_id`; `data.reason: "agent_mismatch"` |
 | `-32001` | `acs_version` of another major; `data.supported_versions` |
 | `-32005` | a `request_id` already decided in the session; no receipt is written |
 | `-32603` | the receipt could not be written; `data.reason: "receipt_not_written"`, and no decision is given |
 
-`system/ping` is always answered `allow` with `payload: { status: "ok", echo?, server_timestamp }`, and writes no receipt.
+`system/ping` is always answered `allow` with `payload: { status: "ok", echo?, server_timestamp }`, and writes no receipt. No error writes a receipt. The CLI exits 0 when every answer is a decision, and 1 when any is an error.
 
 ## The receipt
 

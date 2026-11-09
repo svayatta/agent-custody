@@ -48,10 +48,13 @@ Cedar, as everywhere else in agent-custody. The principal is `Agent::"<agent_id>
 context.args         the argument values (toolCallRequest), or {exit_status, outputs, duration_ms?, request_id_ref?} (toolCallResult)
 context.acs.method   "steps/toolCallRequest" | "steps/toolCallResult"
 context.acs.capability, context.acs.operation    when the payload carries them
-context.acs.requestRef   on a result with request_id_ref: {resolved, decision?}, the decision this Guardian gave that request in this session
+context.acs.requestRef   on a result with request_id_ref: {resolved, decision?, tool?, agent?, consumed?}: the decision this
+                         Guardian gave that request in this session, its tool and agent, and whether a result for it was already allowed
 ```
 
-`examples/acs/policy.cedar` allows `file_read` under `/reports/` and lets a result through only for a request this Guardian allowed. When a result names a `request_id_ref` the Guardian cannot resolve, the receipt records it as `resolved: false`, as ACS `hooks.md` (toolCallResult) requires, and the policy decides what that means. Everything else is denied: Cedar is default deny, and an evaluation error is a deny.
+`examples/acs/policy.cedar` allows `file_read` under `/reports/`, and refuses any path containing `..`, because `like` matches characters, not paths: `/reports/../etc/passwd` matches `/reports/*`. The tool should resolve the path as well. The policy lets one result through, and only for a `file_read` request this Guardian allowed. A policy that permits results for several tools should compare `context.acs.requestRef.tool` with the action, or a result for one tool could ride on a request allowed for another. When a result names a `request_id_ref` the Guardian cannot resolve, the receipt records it as `resolved: false`, as ACS `hooks.md` (toolCallResult) requires, and the policy decides what that means. Everything else is denied: Cedar is default deny, and an evaluation error is a deny.
+
+The policy file is re-read when it changes, and the next call is decided under the new one. A changed file that does not parse is refused with a message on stderr, and the policy in force stays. Each receipt names the digest of the policy it was decided under.
 
 ## Run it
 
@@ -68,7 +71,11 @@ agent-custody verify receipt.json --issuer-key keys/guardian.pub --log log.jsonl
 
 `examples/acs/tool-call-request.json` is the sample from the ACS README ("A hook, on the wire"), byte for byte. The answer is `allow`. The verifier reports `issuer kind is known (guardian / acs steps/toolCallRequest)`, `guardian receipt carries a policy decision`, `guardian decided, executed nothing`, the signature, and the log inclusion, then `RESULT: VERIFIED`. With the Guardian's own local log, as here, the tree head is signed by the Guardian's key too. For a verifier who should not have to trust the Guardian, point `log` at a log someone else runs and verify with `--log-key` as well. [Example 42](../examples/42-acs-guardian.ts) does that, then runs a denied read, a result let through, a result for an unknown request, and a consistency check of the log.
 
-`acs` reads one JSON document from stdin, either one request or a JSON-RPC batch evaluated in order, and prints the answer. In code, `createAcsGuardian(cfg).handle(message)` does the same with no transport, so it can sit behind any HTTP or stdio server.
+`acs` reads one JSON document from stdin, either one request or a JSON-RPC batch evaluated in order, and prints the answer. It exits 0 when every answer is a decision, deny included, and 1 when any answer is an error, such as `-32603` for a receipt that could not be written. In code, `createAcsGuardian(cfg).handle(message)` does the same with no transport, so it can sit behind any HTTP or stdio server. Calls in one session are decided one at a time, in arrival order, so concurrent calls cannot both pass the replay check or fork the chain. Calls in different sessions do not wait for each other.
+
+A session belongs to the agent that opened it. A call that names the same `session_id` with another `agent_id` is refused with `-32000` (`SESSION_REFUSED`, `data.reason: "agent_mismatch"`), so a second caller who knows a session id cannot extend its chain or ride on its allowed requests. That binds the claimed id, not the agent. Without ACS signatures, a caller who knows both ids can still speak for the agent.
+
+Only a decision gets a receipt. An invalid request, an unknown method, a version mismatch, a replay, an agent mismatch, and a receipt that could not be written are answered with a JSON-RPC error and leave no receipt. A `system/ping` leaves none either.
 
 ## What a verifier checks
 
@@ -78,6 +85,10 @@ Besides the checks every receipt gets (signature, structure, argument digest, lo
 - `guardian decided, executed nothing`: an allow is `withheld` and a deny is `denied`. A guardian receipt that says `executed` is one someone re-signed.
 
 The TypeScript, browser, and Python verifiers all run these. `vectors/receipts.json` carries `guardian-acs-allow`, `guardian-acs-deny`, and two re-signed cases that must fail.
+
+The verifiers do not read the `acsStep` fact. They do not recompute `chain_hash` from `previous_hash` and `request_hash`, and they do not check that one receipt's `previous_hash` is the previous receipt's `chain_hash`. The fields are signed, so nobody but the key holder can change them. But a verifier that holds a session's receipts could recompute the links itself (`acsEntryHash` does it, and the tests do it with an independent implementation). That check is not built.
+
+Trust is by key, not by kind. A verifier accepts a `guardian` receipt signed by any key it is given as an issuer key, so the holder of a gateway's or an SDK's trusted key could sign one. Give `--issuer-key` only the Guardian's key when checking Guardian decisions.
 
 ## What it does not implement
 

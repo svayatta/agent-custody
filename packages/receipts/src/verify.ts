@@ -238,7 +238,7 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
 
   // A Guardian decides and carries out nothing: an allow is withheld (nothing forwarded), a deny is denied.
   if (p.issuer.kind === "guardian") {
-    add("guardian receipt carries a policy decision", p.policy !== null);
+    add("guardian receipt carries a policy decision", !!p.policy && typeof p.policy === "object" && !Array.isArray(p.policy));
     const decided = p.execution.status === "denied" ? p.policy?.decision === "deny" : p.execution.status === "withheld" && p.policy?.decision === "allow";
     add("guardian decided, executed nothing", decided, decided ? `${p.policy?.decision}; the agent asked, reports the call itself, and is trusted to honor the answer` : `the receipt says ${p.execution.status} with a policy ${p.policy?.decision ?? "absent"}`);
   }

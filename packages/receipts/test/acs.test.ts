@@ -1,5 +1,6 @@
 // The ACS Guardian: an OWASP Agent Control Standard decision becomes a receipt a third party can check with the
 // Guardian's public key alone. ACS's own HMAC baseline cannot do that (ACS §8.6), which is the point of the adapter.
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -127,6 +128,68 @@ describe("ACS Guardian", () => {
     } finally {
       await server.close();
     }
+  });
+
+  it("decides two concurrent calls with one request_id once, so a replay cannot slip in while a receipt is being written", async () => {
+    const { cfg, guardian } = fixture();
+    const answers = await Promise.all([guardian.handle(SAMPLE), guardian.handle(SAMPLE)]);
+    const codes = answers.map((a) => (!Array.isArray(a) && "error" in a ? a.error.code : ok(a).decision)).sort();
+    expect(codes).toEqual([ACS_ERROR.replay, "allow"].sort());
+    expect(readdirSync(cfg.receiptsDir).filter((f) => f.endsWith(".json"))).toHaveLength(1);
+  });
+
+  it("keeps one chain per session under concurrent calls: each step links to the one before, never forks", async () => {
+    const { guardian } = fixture();
+    const answers = await Promise.all([1, 2, 3, 4].map((n) => guardian.handle(request({ path: `/reports/r${n}.md` }))));
+    const steps = answers.map((a) => decode(receiptOf(ok(a))).predicate.facts[ACS_STEP_FACT]!.value as { previous_hash: string | null; chain_hash: string });
+    const prevs = steps.map((x) => x.previous_hash);
+    expect(prevs.filter((x) => x === null)).toHaveLength(1);
+    expect(new Set(prevs).size).toBe(4);
+    for (const x of steps) if (x.previous_hash) expect(steps.map((y) => y.chain_hash)).toContain(x.previous_hash);
+  });
+
+  it("refuses another agent on a session it did not open, so a caller who knows a session id cannot extend its chain", async () => {
+    const { guardian } = fixture();
+    ok(await guardian.handle(SAMPLE));
+    const other = { ...result(SAMPLE.params.request_id as string), params: { ...result(SAMPLE.params.request_id as string).params, metadata: { ...SAMPLE.params.metadata, agent_id: "someone-else" } } };
+    expect(await guardian.handle(other)).toMatchObject({ error: { code: ACS_ERROR.sessionRefused, data: { reason: "agent_mismatch" } } });
+  });
+
+  it("gives the policy the request's tool and whether a result already went through, so one allowed request lets one result through", async () => {
+    const { guardian, verify } = fixture();
+    ok(await guardian.handle(SAMPLE));
+    const ref = SAMPLE.params.request_id as string;
+    expect(ok(await guardian.handle(result(ref))).decision).toBe("allow");
+    const again = ok(await guardian.handle(result(ref)));
+    expect(again.decision).toBe("deny");
+    const step = verify(receiptOf(again)).statement!.predicate.facts[ACS_STEP_FACT]!.value as { request_ref: Record<string, unknown> };
+    expect(step.request_ref).toMatchObject({ id: ref, resolved: true, decision: "allow", tool: "file_read", agent: "research-assistant", consumed: true });
+  });
+
+  it("the example policy refuses a path that climbs out of /reports", async () => {
+    const { guardian } = fixture();
+    expect(ok(await guardian.handle(request({ path: "/reports/../etc/passwd" }))).decision).toBe("deny");
+  });
+
+  it("re-reads the policy when the file changes, and keeps the one in force when the new file does not parse", async () => {
+    const { cfg, guardian } = fixture();
+    expect(ok(await guardian.handle(request({ path: "/reports/a.md" }))).decision).toBe("allow");
+    writeFileSync(cfg.policyFile, 'forbid (principal, action, resource);\n');
+    const tightened = guardian.policyDigest;
+    expect(ok(await guardian.handle(request({ path: "/reports/a.md" }))).decision).toBe("deny");
+    writeFileSync(cfg.policyFile, "permit (principal, action, resource) when {");
+    expect(ok(await guardian.handle(request({ path: "/reports/a.md" }))).decision).toBe("deny");
+    expect(guardian.policyDigest).toBe(tightened);
+  });
+
+  it("the CLI exits 1 when any answer is an error rather than a decision, so a wrapper reading the exit code is not misled", () => {
+    const { dir, cfg } = fixture();
+    const configFile = join(dir, "acs.json");
+    writeFileSync(configFile, JSON.stringify(cfg));
+    const cli = (input: unknown) => spawnSync(process.execPath, [resolve(import.meta.dirname, "..", "src", "cli.ts"), "acs", "--config", configFile], { input: JSON.stringify(input), encoding: "utf8" });
+    expect(cli(SAMPLE).status).toBe(0);
+    expect(cli(request({ path: "/etc/passwd" })).status).toBe(0);
+    expect(cli([request({ path: "/reports/x.md" }), { jsonrpc: "2.0", id: 9, method: "handshake/hello", params: {} }]).status).toBe(1);
   });
 
   it("refuses a replayed request_id in the session and writes no second receipt", async () => {

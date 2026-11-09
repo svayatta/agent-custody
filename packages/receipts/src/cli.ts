@@ -388,8 +388,10 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: `parse error: ${e instanceof Error ? e.message : String(e)}` } }, null, 2));
         return 1;
       }
-      console.log(JSON.stringify(await guardian.handle(message), null, 2));
-      return 0;
+      const answer = await guardian.handle(message);
+      console.log(JSON.stringify(answer, null, 2));
+      // a deny is a decision, so 0; an error (no decision, including a receipt that could not be written) is 1
+      return (Array.isArray(answer) ? answer : [answer]).some((a) => "error" in a) ? 1 : 0;
     }
     case "init": {
       const [target, ...args] = rest;
