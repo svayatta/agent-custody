@@ -70,6 +70,7 @@ jobs:
           unit="$RUNNER_TEMP/units"; mkdir -p "$unit/demo-agent.service.d"
           printf '[Service]\nExecStart=/bin/true\n' > "$unit/demo-agent.service"
           cp deploy/gateway/lockdown/vm/agent-lockdown.conf "$unit/demo-agent.service.d/"
+          cp deploy/gateway/lockdown/vm/agent-custody-lockdown.service "$unit/"
           SYSTEMD_UNIT_PATH="$unit:" systemd-analyze verify "$unit/demo-agent.service"
 
   vm-lockdown:
