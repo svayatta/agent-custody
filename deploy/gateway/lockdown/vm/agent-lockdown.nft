@@ -10,7 +10,8 @@
 #   sudo nft -c -f /etc/agent-custody/agent-lockdown.nft && sudo nft -f /etc/agent-custody/agent-lockdown.nft
 #   sudo ./check-lockdown.sh
 #
-# To load it at boot, install agent-custody-lockdown.service beside this file and enable it. Loading this file, by hand or
+# To load it at boot, install agent-custody-lockdown.service beside this file and enable it, and where nftables.service
+# is installed, its drop-in nftables-lockdown.conf, which loads the table again after that service flushes the ruleset. Loading this file, by hand or
 # by that unit, replaces only this table; other tables (ufw, docker, your own) are left alone. Do not add it to
 # /etc/nftables.conf and enable nftables.service instead: on Debian and Ubuntu that file starts with `flush ruleset`, so
 # every start of that service deletes every other table on the host.

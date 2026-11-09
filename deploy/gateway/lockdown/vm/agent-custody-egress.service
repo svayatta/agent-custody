@@ -31,9 +31,15 @@ ProtectHome=true
 PrivateTmp=true
 BindReadOnlyPaths=/etc/agent-custody/egress:/egress
 BindPaths=/var/lib/agent-custody-egress:/data
-# The witness already refuses internal addresses for a host name. This also keeps it off the link-local range, where
-# a cloud VM's metadata service answers (169.254.169.254), whatever the policy says.
-IPAddressDeny=link-local
+# The witness refuses internal addresses for a host name before it connects, but it dials an IP literal that the policy
+# names. These are the second layer, the same ranges as the Kubernetes recipe's egress-networkpolicy.yaml: this host's
+# own network, the private and shared ranges, link-local (169.254.169.254, the metadata service on most clouds), Oracle's
+# metadata at 192.0.0.192, Alibaba's at 100.100.100.200, multicast, and reserved space, for IPv4 and IPv6. Loopback stays
+# open, because the agents reach the witness there: do not permit a 127.0.0.0/8 literal in the policy. If the resolver
+# in /etc/resolv.conf (a VPC resolver, 169.254.169.253 on AWS) or the log is on one of these addresses, add an
+# IPAddressAllow= for that one address; it opens every port there.
+IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4
+IPAddressDeny=fc00::/7 fe80::/10 ff00::/8
 
 [Install]
 WantedBy=multi-user.target

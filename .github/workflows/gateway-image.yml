@@ -72,6 +72,10 @@ jobs:
           cp deploy/gateway/lockdown/vm/agent-lockdown.conf "$unit/demo-agent.service.d/"
           cp deploy/gateway/lockdown/vm/agent-custody-lockdown.service "$unit/"
           SYSTEMD_UNIT_PATH="$unit:" systemd-analyze verify "$unit/demo-agent.service"
+          mkdir -p "$unit/nftables.service.d"
+          cp /usr/lib/systemd/system/nftables.service "$unit/"
+          cp deploy/gateway/lockdown/vm/nftables-lockdown.conf "$unit/nftables.service.d/"
+          SYSTEMD_UNIT_PATH="$unit:" systemd-analyze verify --man=no "$unit/nftables.service"
 
   vm-lockdown:
     # the VM recipe end to end on this runner: gateway, witness, and an agent under the nftables rule, then the drop-in

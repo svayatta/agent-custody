@@ -7,8 +7,10 @@
 #
 # Do not load the table through nftables.service instead. That service runs /etc/nftables.conf, which on Debian and
 # Ubuntu starts with `flush ruleset` and so deletes every other table on the host (docker's, ufw's) when it starts.
-# This unit replaces only its own table. It runs after nftables.service and restarts with it (PartOf), so a flush by
-# that service is followed by a reload of this table, and the agent, which requires this unit, restarts too.
+# This unit replaces only its own table. It runs after nftables.service, and a stop or restart of that service stops or
+# restarts this unit and so the agent (PartOf). A start or a reload of nftables.service flushes the table too, without
+# reaching this unit: where nftables.service is installed, also install nftables-lockdown.conf, its drop-in that loads
+# the table again after each one.
 [Unit]
 Description=agent-custody egress lockdown for agent users (nftables)
 # the agent users in the file may come from a directory service (SSSD, LDAP)
