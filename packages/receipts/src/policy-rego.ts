@@ -1,6 +1,7 @@
 // Rego policies. A policy file ending in .rego is compiled once per change with `opa build -t wasm` and evaluated
 // in-process by the OPA WebAssembly SDK, so the opa binary is needed when the policy loads or changes, not to evaluate a
-// call; a gateway reloads on the first call after a change, and that call waits for the compile. An OPA
+// call. A gateway or witness reloads on the first call after a change, and the compile is synchronous with no timeout,
+// so the whole process waits for it (and an opa that hangs stalls it). An OPA
 // server the operator runs answers the same contract over HTTP (opa-server.ts). Either way, fails closed.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
