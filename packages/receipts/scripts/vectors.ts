@@ -585,7 +585,7 @@ try {
     addCase({ name: "resigned-egress-no-policy", description: "An egress receipt re-signed with its policy decision removed. The witness decides every connection by policy, so `egress receipt carries a policy decision` fails.", bundle: resigned(refusedProvider, egressKey, (st) => { st.predicate.policy = null; }), ...E, log: elog });
     addCase({ name: "resigned-egress-unchecked-agent-relayed", description: "The executed tunnel re-signed with the agent claimed: the witness relays only for an agent whose credential it checked, so `egress relayed only for a checked agent` fails; the committed authorization still names the checked agent, so `authorization names this call` fails too.", bundle: resigned(tunnel, egressKey, (st) => { st.predicate.agent = { id: "unknown", provenance: "claimed" }; }), ...E, log: elog });
     addCase({ name: "resigned-egress-open-not-committed", description: "The executed tunnel re-signed with its authorization removed: the witness commits every relayed connection to the log before any byte moves, so `egress open committed before relaying` fails.", bundle: resigned(tunnel, egressKey, (st) => { delete st.predicate.authorization; }), ...E, log: elog });
-    addCase({ name: "resigned-egress-internal-peer", description: "The executed tunnel re-signed as a connection to the host name registry.npmjs.org:443 whose recorded peer is 169.254.169.254, the cloud metadata address, with every digest recomputed. The witness never dials an internal address for a host name, so `egress peer is public for a host name` fails; the authorization still names the original destination, so `authorization names this call` fails too.", bundle: resigned(tunnel, egressKey, (st) => {
+    addCase({ name: "resigned-egress-internal-peer", description: "The executed tunnel re-signed as a connection to the host name registry.npmjs.org:443 whose recorded peer is 169.254.169.254, the cloud metadata address, with every digest recomputed. The witness never dials an internal address for a host name, so `egress peer matches the destination` fails; the authorization still names the original destination, so `authorization names this call` fails too.", bundle: resigned(tunnel, egressKey, (st) => {
       const p = st.predicate;
       const dest = { ...(p.facts.destination!.value as Record<string, unknown>), host: "registry.npmjs.org", port: 443 };
       p.facts.destination = { ...p.facts.destination!, value: dest, resultDigest: digestOf(dest) };
@@ -594,6 +594,11 @@ try {
       p.request.argsDigest = digestOf(p.request.args);
       st.subject[0]!.digest.sha256 = p.request.argsDigest;
       const ex = p.execution as { result: Record<string, unknown>; resultDigest: string };
+      ex.result = { ...ex.result, peer: "169.254.169.254" };
+      ex.resultDigest = digestOf(ex.result);
+    }), ...E, log: elog });
+    addCase({ name: "resigned-egress-literal-peer-mismatch", description: "The executed tunnel to the IP literal 127.0.0.1 re-signed with its recorded peer changed to 169.254.169.254, the result digest recomputed. An IP literal is the Cedar action itself, so the peer must be that very address: `egress peer matches the destination` fails.", bundle: resigned(tunnel, egressKey, (st) => {
+      const ex = st.predicate.execution as { result: Record<string, unknown>; resultDigest: string };
       ex.result = { ...ex.result, peer: "169.254.169.254" };
       ex.resultDigest = digestOf(ex.result);
     }), ...E, log: elog });

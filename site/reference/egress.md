@@ -13,7 +13,7 @@ It sees the destination, the times, and the byte counts. It never sees payloads.
 | `identity.keyFile` | path | required | the witness's signing key |
 | `agents` | `{ id, secretEnv }[]` | required, at least one | each agent and the environment variable holding its proxy secret; ids are unique, with no colon or whitespace |
 | `policyFile` | path | required | Cedar; re-read when it changes, and a file that does not parse leaves the policy in force |
-| `mode` | `enforce` \| `observe` | `enforce` | `observe` relays every connection from a verified agent and records `enforced: false` |
+| `mode` | `enforce` \| `observe` | `enforce` | `observe` relays every connection from a verified agent and records `enforced: false`; it also relays when the log refuses the commit, and that receipt fails `egress open committed before relaying` |
 | `connectTimeoutMs` | integer | 10000 | wait for the destination to accept |
 | `idleTimeoutMs` | integer | 300000 | close a relayed connection idle this long |
 | `maxInFlight` | integer | 256 | connections at once; past it, 503 with no receipt |
@@ -86,9 +86,9 @@ Answers with a receipt carry `x-agent-custody-receipt`. If the log did not take 
 
 - `authorization`: on every relayed connection, the statement committed to the log before any byte moved
 
-The verifier checks are `egress receipt carries a policy decision`, `egress destination observed`, `egress relayed only for a checked agent`, `egress open committed before relaying`, and `egress peer is public for a host name`.
+The verifier checks are `egress receipt carries a policy decision`, `egress destination observed`, `egress relayed only for a checked agent`, `egress open committed before relaying`, and `egress peer matches the destination`.
 
-A host name is never dialled at an internal address: the resolver drops loopback, private, shared, link-local, metadata, multicast, and reserved addresses before the connection is made. An IP literal is dialled only when the policy names it. `publicOnlyLookup(resolve?)` and `internalAddress(ip)` are exported.
+A host name is never dialled at an internal address: the resolver drops loopback, private, shared, link-local, metadata, multicast, and reserved addresses, and IPv4-mapped or NAT64 addresses that carry one, before the connection is made. An IP literal is dialled only when the policy names it. `publicOnlyLookup(resolve?)`, `internalAddress(ip)`, `sameAddress(a, b)`, and `isAddressLiteral(host)` are exported.
 
 ## Not yet
 
