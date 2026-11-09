@@ -1,6 +1,6 @@
 #!/bin/sh
-# Smoke test for the gateway image: init writes a config, the gateway refuses to start with a witness proxy secret in
-# its environment (without logging the value), the container becomes healthy, a connection with no grant is
+# Smoke test for the gateway image: init writes a config, the gateway and a CLI command refuse to run with a witness
+# proxy secret in their environment (without logging the value), the container becomes healthy, a connection with no grant is
 # refused and one with the demo grant gets a session, and `docker stop` closes the gateway (exit 0, not SIGKILL). Then the
 # same image in egress mode: the witness creates its key, becomes healthy, refuses a connection with no proxy credential
 # (407) and one its policy does not permit (403) before connecting anywhere, relays one its policy permits (to a listener
@@ -33,7 +33,10 @@ while [ "$(docker inspect -f '{{.State.Running}}' "$lname")" = true ]; do
 done
 [ "$(docker inspect -f '{{.State.ExitCode}}' "$lname")" != 0 ] || fail "the gateway exited 0 with an EGRESS_SECRET_ variable in its environment"
 leftover=$(docker logs "$lname" 2>&1)
-echo "$leftover" | grep -q "EGRESS_SECRET_SMOKE_LEFTOVER is in the gateway's environment" || fail "a leftover proxy secret did not stop the gateway: $leftover"
+echo "$leftover" | grep -q "EGRESS_SECRET_SMOKE_LEFTOVER is in this container's environment, so 'serve' is not running" || fail "a leftover proxy secret did not stop the gateway: $leftover"
+# the same for a command passed through to the CLI: every command but egress refuses
+cli=$(docker run --rm -v "$work/config:/config:ro" -e EGRESS_SECRET_SMOKE_LEFTOVER=leftover-value "$image" check --config /config/gateway.json 2>&1) && fail "a CLI command ran with an EGRESS_SECRET_ variable"
+echo "$cli" | grep -q "so 'check' is not running" || fail "a leftover proxy secret did not stop a CLI command: $cli"
 echo "$leftover" | grep -q "leftover-value" && fail "the gateway logged the value of a leftover proxy secret"
 
 docker run -d --name "$name" -v "$work/config:/config:ro" -p "127.0.0.1:$port:8790" "$image" > /dev/null

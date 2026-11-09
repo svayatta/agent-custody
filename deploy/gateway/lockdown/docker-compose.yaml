@@ -9,7 +9,7 @@
 #
 # Each agent's proxy secret goes in a file of its own, lockdown/agents/<agent>.env, never in .env: the gateway loads
 # .env, and a gateway that held a witness password could connect through the witness as that agent (the gateway image
-# refuses to start with an EGRESS_SECRET_* variable). The witness loads every agent's file; each agent loads only its own.
+# runs no command but egress with an EGRESS_SECRET_* variable). The witness loads every agent's file; each agent loads only its own.
 #
 #   cp lockdown/agents/research-agent.env.example lockdown/agents/research-agent.env   # then set the secret in it
 #   chmod 600 lockdown/agents/research-agent.env
