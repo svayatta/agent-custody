@@ -238,8 +238,16 @@ def tree_root(leaf_hashes: list[bytes]) -> bytes:
     return node_hash(tree_root(leaf_hashes[:k]), tree_root(leaf_hashes[k:]))
 
 
+def _digests(*values: Any) -> bool:
+    """Every value is 32 bytes. With children of other widths, sha256(0x01 || left || right) no longer fixes where one
+    child ends and the other begins, so a 16-byte leaf and a 48-byte sibling hash like the real 32-byte children."""
+    return all(isinstance(v, (bytes, bytearray)) and len(v) == 32 for v in values)
+
+
 def root_from_inclusion(index: int, size: int, leaf: bytes, proof: list[bytes]) -> Optional[bytes]:
-    if not 0 <= index < size:
+    if not (_is_size(index) and _is_size(size)) or not 0 <= index < size:
+        return None
+    if not isinstance(proof, list) or not _digests(leaf, *proof):
         return None
     fn, sn, r = index, size - 1, leaf
     for p in proof:
@@ -258,12 +266,16 @@ def root_from_inclusion(index: int, size: int, leaf: bytes, proof: list[bytes]) 
 
 
 def verify_consistency(old_size: int, new_size: int, old_root: bytes, new_root: bytes, proof: list[bytes]) -> bool:
-    if old_size < 0 or old_size > new_size:
+    if not (_is_size(old_size) and _is_size(new_size)) or old_size > new_size:
         return False
+    if not isinstance(proof, list) or not _digests(old_root, new_root, *proof):
+        return False
+    # the empty tree has one root, sha256 of nothing; any other root at size 0, old or new, is a head no log could have signed
+    empty = hashlib.sha256(b"").digest()
+    if old_size == 0:
+        return not proof and old_root == empty and (new_size > 0 or new_root == empty)
     if old_size == new_size:
         return not proof and old_root == new_root
-    if old_size == 0:
-        return not proof and old_root == hashlib.sha256(b"").digest()
     if not proof:
         return False
     path = list(proof)
@@ -291,7 +303,7 @@ def verify_consistency(old_size: int, new_size: int, old_root: bytes, new_root: 
 
 
 def _hashes(values: Any) -> Optional[list[bytes]]:
-    if not isinstance(values, list) or not all(isinstance(h, str) and HEX64.match(h) for h in values):
+    if not isinstance(values, list) or not all(isinstance(h, str) and HEX64.fullmatch(h) for h in values):
         return None
     return [bytes.fromhex(h) for h in values]
 
@@ -343,7 +355,7 @@ def is_commitment(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     kind = value.get("$custody")
-    if not isinstance(value.get("sha256"), str) or not HEX64.match(value["sha256"]):
+    if not isinstance(value.get("sha256"), str) or not HEX64.fullmatch(value["sha256"]):
         return False
     if kind == "withheld":
         return set(value) == {"$custody", "sha256"}
@@ -354,7 +366,7 @@ def is_commitment(value: Any) -> bool:
         return (
             value["alg"] == "A256GCM"
             and isinstance(value["keyid"], str)
-            and bool(HEX64.match(value["keyid"]))
+            and bool(HEX64.fullmatch(value["keyid"]))
             and iv is not None
             and len(iv) == 12
             and tag is not None
@@ -604,7 +616,7 @@ def _approval_payload_fault(payload: Any) -> str:
     for name in ("principal", "agent", "tool"):
         if not _is_str(payload.get(name)):
             return f"approval {name} is not a string"
-    if not (_is_str(payload.get("argsDigest")) and HEX64.match(payload["argsDigest"])):
+    if not (_is_str(payload.get("argsDigest")) and HEX64.fullmatch(payload["argsDigest"])):
         return "approval argsDigest is not a sha256"
     if "amount" in payload:
         amount = payload["amount"]
@@ -690,7 +702,7 @@ def _tree_head(env: Any, trust: Trust, report: Report, prefix: str = "") -> Opti
         log_signers = dsse_signers(env, trust.log)
         issuer_signers = [] if log_signers else dsse_signers(env, trust.issuer)
         signer = f"log key {log_signers[0][:12]}" if log_signers else f"issuer key {issuer_signers[0][:12]}" if issuer_signers else ""
-    ok = bool(signer) and _is_size(payload.get("treeSize")) and _is_str(payload.get("rootHash")) and bool(HEX64.match(payload["rootHash"]))
+    ok = bool(signer) and _is_size(payload.get("treeSize")) and _is_str(payload.get("rootHash")) and bool(HEX64.fullmatch(payload["rootHash"]))
     report.add(prefix + "tree head signature", ok, f"signed by the {signer}" if ok else "no trusted log or issuer key signed this tree head")
     return payload if ok else None
 
@@ -741,11 +753,13 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
     forwarded = status in FORWARDED
 
     kind = p["issuer"].get("kind")
-    add("issuer kind is known", kind in ("gateway", "sdk"), str(kind))
+    add("issuer kind is known", kind in ("gateway", "sdk", "door"), str(kind))
     add("issuer keyid matches signer", p["issuer"]["keyid"] in signers, p["issuer"]["keyid"][:12])
     if kind == "gateway":
         add("gateway receipt carries a delegation", "delegation" in p)
         add("gateway receipt carries a policy decision", isinstance(p.get("policy"), dict))
+    if kind == "door":
+        add("door receipt carries a policy decision", isinstance(p.get("policy"), dict))
 
     _delegation_checks(p, trust, add, forwarded and not reconciliation)
     approval_withheld = ["approval", "envelope"] in paths
@@ -761,7 +775,7 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
         if decision == "allow":
             consistent, detail = status != "denied", "allow"
         elif enforced:
-            consistent, detail = status in ("denied", "withheld"), "enforced deny"
+            consistent, detail = status == "denied", "enforced deny"
         else:
             consistent, detail = status != "denied", "observe mode, not enforced"
         add("policy decision consistent with execution", consistent, f"{detail}, {status}")
@@ -795,7 +809,7 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
 def _log_leaf(line: Any) -> Optional[bytes]:
     if isinstance(line, str):
         return leaf_hash(_utf8(line))
-    if isinstance(line, dict) and _is_str(line.get("hash")) and HEX64.match(line["hash"]):
+    if isinstance(line, dict) and _is_str(line.get("hash")) and HEX64.fullmatch(line["hash"]):
         return bytes.fromhex(line["hash"])
     return None
 
@@ -1107,7 +1121,7 @@ def _operation_fault(op: Any) -> str:
         return "operation id is not a UUID"
     if not (_is_str(op.get("originalReceiptId")) and UUID.match(op["originalReceiptId"])):
         return "operation originalReceiptId is not a UUID"
-    if not all(_is_str(op.get(k)) and HEX64.match(op[k]) for k in ("idempotencyKey", "lookupDigest")):
+    if not all(_is_str(op.get(k)) and HEX64.fullmatch(op[k]) for k in ("idempotencyKey", "lookupDigest")):
         return "operation idempotencyKey or lookupDigest is not a sha256"
     if op.get("status") not in OPERATION_STATUSES or op.get("provenance") != "observed":
         return "operation status or provenance is invalid"
@@ -1245,8 +1259,9 @@ def _verify_authorization_bundle(bundle: dict, trust: Trust, report: Report) -> 
         fault = fault or "the authorization has no tree head and inclusion proof"
     if not report.add("structural parts in clear", not fault, fault):
         return
-    report.add("authorization issued by the gateway", p["issuer"].get("kind") == "gateway" and p["issuer"]["keyid"] in signers)
-    report.add("authorization operation is submitted", _at(p, ("operation", "status")) == "submitted")
+    kind = p["issuer"].get("kind")
+    report.add("authorization issued by the gateway", kind in ("gateway", "door") and p["issuer"]["keyid"] in signers)
+    report.add("authorization operation is submitted", kind == "door" or _at(p, ("operation", "status")) == "submitted", "a door has no operations" if kind == "door" else "")
     policy = p.get("policy")
     permits = isinstance(policy, dict) and (
         (policy["decision"] == "allow" and isinstance(policy.get("errors"), list) and not policy["errors"])

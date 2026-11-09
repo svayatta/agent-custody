@@ -103,9 +103,19 @@ export async function verifyDelegationChain(env: Envelope, trusted: PublicKey[],
 // ---- RFC 6962 / 9162 ----
 const leafHash = (data: string) => sha256(concat(new Uint8Array([0]), enc.encode(data)));
 const nodeHash = (l: Bytes, r: Bytes) => sha256(concat(new Uint8Array([1]), l, r));
+// every hash a proof check reads is 32 bytes: a proof hash and a root are each a string of 64 lowercase hex digits;
+// sizes and indices are integers, since the loops halve them with Math.floor
+const HASH_HEX = /^[0-9a-f]{64}$/;
+const isHash = (x: unknown): x is string => typeof x === "string" && HASH_HEX.test(x);
+const isSize = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
+// exact for every safe integer: `(n & (n - 1)) === 0` reads only the low 32 bits of n
+const isPowerOfTwo = (n: number) => { let k = 1; while (k < n) k *= 2; return k === n; };
+const EMPTY_ROOT = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 export async function verifyInclusion(leaf: Bytes, proof: Bundle["inclusion"], rootHex: string): Promise<boolean> {
+  if (!isSize(proof.leafIndex) || !isSize(proof.treeSize)) return false;
   let fn = proof.leafIndex, sn = proof.treeSize - 1;
   if (fn < 0 || sn < 0 || fn > sn) return false;
+  if (leaf.length !== 32 || !isHash(rootHex) || !Array.isArray(proof.hashes) || !proof.hashes.every(isHash)) return false;
   let r = leaf;
   for (const h of proof.hashes) {
     if (sn === 0) return false;
@@ -117,12 +127,14 @@ export async function verifyInclusion(leaf: Bytes, proof: Bundle["inclusion"], r
   return sn === 0 && hex(r) === rootHex;
 }
 export async function verifyConsistency(oldSize: number, oldRoot: string, newSize: number, newRoot: string, proofHex: string[]): Promise<boolean> {
-  if (oldSize < 0 || oldSize > newSize) return false;
+  if (!isSize(oldSize) || !isSize(newSize) || oldSize > newSize) return false;
+  if (!isHash(oldRoot) || !isHash(newRoot) || !Array.isArray(proofHex) || !proofHex.every(isHash)) return false;
+  // the empty tree has one root, sha256 of nothing; any other root at size 0, old or new, is a head no log could have signed
+  if (oldSize === 0) return proofHex.length === 0 && oldRoot === EMPTY_ROOT && (newSize > 0 || newRoot === EMPTY_ROOT);
   if (oldSize === newSize) return proofHex.length === 0 && oldRoot === newRoot;
-  if (oldSize === 0) return proofHex.length === 0;
   if (proofHex.length === 0) return false;
   const proof = proofHex.map(unhex);
-  if ((oldSize & (oldSize - 1)) === 0) proof.unshift(unhex(oldRoot));
+  if (isPowerOfTwo(oldSize)) proof.unshift(unhex(oldRoot));
   let fn = oldSize - 1, sn = newSize - 1;
   while (fn % 2 === 1) { fn = Math.floor(fn / 2); sn = Math.floor(sn / 2); }
   let fr = proof[0]!, sr = proof[0]!;
@@ -138,6 +150,7 @@ export async function verifyConsistency(oldSize: number, oldRoot: string, newSiz
 const ISSUER_NOTE: Record<string, string> = {
   gateway: "enforced outside the agent's process; the agent could neither skip nor forge this receipt",
   sdk: "self-reported by the agent's own process; tamper-evident after issue, but nothing here was enforced outside the agent",
+  door: "enforced in front of the business's own HTTP surface; the arriving party could neither skip nor forge this receipt, and is attested only when it presented a grant",
 };
 const short = (s: string) => s.slice(0, 12);
 
@@ -206,8 +219,8 @@ async function verifyOriginalAuthorization(bundle: Bundle, opts: Options): Promi
   const problem = structuralProblem({ ...p, session: { id: null, toolUseId: null, provenance: "claimed" }, model: { id: null, provenance: "claimed" }, execution: { status: "withheld", provenance: "observed" } });
   add("structural parts in clear", !problem, problem ?? undefined);
   if (problem) return { ok: false, checks };
-  add("authorization issued by the gateway", p.issuer.kind === "gateway" && p.issuer.keyid === sig.keyid);
-  add("authorization operation is submitted", p.operation?.status === "submitted");
+  add("authorization issued by the gateway", (p.issuer.kind === "gateway" || p.issuer.kind === "door") && p.issuer.keyid === sig.keyid, p.issuer.kind === "door" ? "a door commits a request before relaying it, as a gateway commits a call" : undefined);
+  add("authorization operation is submitted", p.issuer.kind === "door" || p.operation?.status === "submitted", p.issuer.kind === "door" ? "a door has no operations" : undefined);
   add("authorization permits the original call", p.policy?.decision === "allow" ? Array.isArray(p.policy.errors) && p.policy.errors.length === 0 : p.policy?.decision === "deny" && p.policy.enforced === false);
   const del = p.delegation && await verifyDelegationChain(p.delegation.envelope, opts.principalKeys);
   add("delegation signature (principal key)", !!del?.ok);
@@ -336,7 +349,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   const broken = structuralProblem(st.predicate);
   if (!add("structural parts in clear", !broken, broken ?? undefined)) return done(null);
   const p = st.predicate;
-  add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
+  add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk" || p.issuer.kind === "door", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
   add("issuer keyid matches signer", p.issuer.keyid === sig.keyid);
   if (opts.requireStrict) {
     add("strict mode in force", p.issuer.kind === "gateway" && p.issuer.strict === true, p.issuer.strict === true ? undefined : "the issuer does not say it ran in strict mode");
@@ -360,6 +373,7 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
     add("gateway receipt carries a delegation", p.delegation !== undefined);
     add("gateway receipt carries a policy decision", p.policy !== null);
   }
+  if (p.issuer.kind === "door") add("door receipt carries a policy decision", p.policy !== null);
   if (p.delegation) {
     const del = await verifyDelegationChain(p.delegation.envelope, opts.principalKeys);
     const d = del.ok ? del.delegation : null;

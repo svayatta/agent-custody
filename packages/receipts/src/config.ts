@@ -158,7 +158,17 @@ export const GatewayConfigSchema = z.object({
   /** the one grant a stdio gateway serves; over HTTP each connection presents its own, and this is not needed */
   grantFile: z.string().optional(),
   trustedPrincipalKeys: z.array(z.string()).min(1),
-  policyFile: z.string(),
+  /** the policy file: Cedar, or Rego when it ends in .rego (compiled with the opa binary on PATH when it loads) */
+  policyFile: z.string().optional(),
+  /** an OPA server that decides each call instead of a local file; its package defines allow and deny, as a .rego file does */
+  opa: z.object({
+    url: z.string().url(),
+    /** the package path under /v1/data whose allow and deny rules decide; default agentcustody */
+    decision: z.string().min(1).regex(/^[A-Za-z_][A-Za-z0-9_]*([./][A-Za-z_][A-Za-z0-9_]*)*$/, "a package path such as agentcustody or authz/agents").optional(),
+    tokenEnv: z.string().min(1).optional(),
+    /** milliseconds one decision may take before the call is denied; default 2000 */
+    timeoutMs: z.number().int().positive().optional(),
+  }).optional(),
   facts: z.array(FactSchema).default([]),
   /**
    * Consequential tools, by name or "*" for all: before forwarding one of these, the gateway commits a signed
@@ -196,6 +206,7 @@ export const GatewayConfigSchema = z.object({
   otel: OtelSchema.optional(),
   splunk: SplunkSchema.optional(),
 }).refine(hasOneLog, oneLog).refine((c) => (c.upstream ? 1 : 0) + (c.upstreams ? 1 : 0) === 1, { message: "exactly one of upstream or upstreams is required" })
+  .refine((c) => (c.policyFile ? 1 : 0) + (c.opa ? 1 : 0) === 1, { message: "exactly one of policyFile or opa is required" })
   // a key fetched from the log itself proves nothing about a log that is dishonest from the start, so a remote log that
   // gates consequential calls must have its keys pinned in the config (issue #99)
   .refine((c) => !c.log || (!c.precommit.length && !c.operations) || !!c.log.keys?.length, { message: "precommit with a remote log needs log.keys: the log's public key files, pinned, to check its answer before a consequential call is forwarded" })
@@ -215,7 +226,7 @@ export function loadConfig(path: string): GatewayConfig {
     identity: { keyFile: r(cfg.identity.keyFile) },
     ...(cfg.grantFile ? { grantFile: r(cfg.grantFile) } : {}),
     trustedPrincipalKeys: cfg.trustedPrincipalKeys.map(r),
-    policyFile: r(cfg.policyFile),
+    ...(cfg.policyFile ? { policyFile: r(cfg.policyFile) } : {}),
     receiptsDir: r(cfg.receiptsDir),
     ...(cfg.logFile ? { logFile: r(cfg.logFile) } : {}),
     ...(cfg.log?.keys ? { log: { ...cfg.log, keys: cfg.log.keys.map(r) } } : {}),
@@ -225,12 +236,95 @@ export function loadConfig(path: string): GatewayConfig {
   };
 }
 
+/** One route of the door: a name the policy sees as the action, and what arrives there. `path` is exact, a prefix when it ends in `/*`, or `*` for anything. The first route that matches wins. */
+const DoorRouteSchema = z.object({
+  name: z.string().min(1),
+  /** methods this route covers; default every method */
+  methods: z.array(z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])).min(1).optional(),
+  path: z.string().min(1).regex(/^(\*|\/[^*]*(\/\*)?)$/, "a path is exact (/refunds), a prefix (/api/*), or *"),
+});
+export type DoorRouteConfig = z.infer<typeof DoorRouteSchema>;
+
+/**
+ * The door: a reverse proxy in front of a business's own website, API, or forms. Every arrival is classified (verified,
+ * claimed, or unknown), decided by the Cedar policy per route, forwarded to the origin or refused, and receipted either
+ * way. The origin's credentials, if any, come from the environment through headerEnv, never from the file or the caller.
+ */
+export const DoorConfigSchema = z.object({
+  identity: z.object({ keyFile: z.string() }),
+  /** where allowed requests go: the site or API the door stands in front of */
+  origin: z.object({
+    url: z.string().url(),
+    headers: z.record(z.string(), z.string()).optional(),
+    headerEnv: z.record(z.string(), z.string().min(1)).optional(),
+    timeoutMs: z.number().int().positive().default(30_000),
+  }),
+  routes: z.array(DoorRouteSchema).default([]),
+  /** the action name for an arrival no route matches; default "other" */
+  unmatchedRoute: z.string().min(1).default("other"),
+  /** principal keys whose grants the door accepts as a passport: an arrival carrying one of their grants, in scope for its route, is `verified` */
+  trustedPrincipalKeys: z.array(z.string()).default([]),
+  policyFile: z.string(),
+  /** "enforce" (default) refuses what the policy denies; "observe" forwards everything and records the decision with `enforced: false` */
+  mode: z.enum(["enforce", "observe"]).optional(),
+  /** behind a reverse proxy you run: the arrival's address is the last in X-Forwarded-For, the one that proxy appended, and the client-address headers are relayed as it sent them */
+  trustProxy: z.boolean().optional(),
+  /** the largest request body the door relays; a larger one is refused with 413 and receipted. Default 1 MiB */
+  maxBodyBytes: z.number().int().positive().default(1024 * 1024),
+  /** the largest origin response the door relays; a larger one is recorded by size and the client gets 502. Default 32 MiB */
+  maxResponseBytes: z.number().int().positive().default(32 * 1024 * 1024),
+  /** arrivals handled at once; past this the next is answered 503 before its body is read, and not receipted. Default 256 */
+  maxInFlight: z.number().int().positive().default(256),
+  /** routes whose arrivals are committed to the log before they are relayed whatever the method, or ["*"]; every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless */
+  precommit: z.array(z.string().min(1)).default([]),
+  /** the human branch: a Turnstile or hCaptcha token an arrival sends in `header` is verified with the provider, and the outcome is the arrival's `challenge` signal */
+  challenge: z.object({
+    provider: z.enum(["turnstile", "hcaptcha"]),
+    /** the public site key, given back to a refused arrival so a page can render the widget */
+    siteKey: z.string().min(1),
+    /** the environment variable holding the provider's secret key */
+    secretEnv: z.string().min(1),
+    header: z.string().min(1).default("x-agent-custody-challenge"),
+    timeoutMs: z.number().int().positive().default(5_000),
+    /** the hostnames of the pages that render the widget; a token the provider issued on any other host fails */
+    hostnames: z.array(z.string().min(1).transform((h) => h.toLowerCase())).min(1),
+    /** the widget's action (Turnstile only); when set, a token issued for another action fails */
+    action: z.string().min(1).optional(),
+    /** checks with the provider at once; an arrival past this is `unavailable`, never relayed on a pass it did not get. Default 64 */
+    maxInFlight: z.number().int().positive().default(64),
+  }).refine((c) => !c.action || c.provider === "turnstile", { message: "challenge.action is a Turnstile field; hCaptcha does not report an action" }).optional(),
+  receiptsDir: z.string(),
+  logFile: z.string().optional(),
+  log: LogSchema.optional(),
+  otel: OtelSchema.optional(),
+  splunk: SplunkSchema.optional(),
+  capture: CaptureSchema.optional(),
+  captureKeyEnv: z.string().min(1).optional(),
+}).refine(hasOneLog, oneLog).refine((c) => new Set(c.routes.map((r) => r.name)).size === c.routes.length, { message: "route names must be unique" })
+  .refine((c) => !c.log || !!c.log.keys?.length, { message: "a remote log needs log.keys: the log's public key files, pinned, to check its answer before a request is relayed" });
+export type DoorConfig = z.infer<typeof DoorConfigSchema>;
+
+export function loadDoorConfig(path: string): DoorConfig {
+  const cfg = DoorConfigSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+  const base = dirname(resolve(path));
+  const r = (p: string) => resolve(base, p);
+  return {
+    ...cfg,
+    identity: { keyFile: r(cfg.identity.keyFile) },
+    trustedPrincipalKeys: cfg.trustedPrincipalKeys.map(r),
+    policyFile: r(cfg.policyFile),
+    receiptsDir: r(cfg.receiptsDir),
+    ...(cfg.logFile ? { logFile: r(cfg.logFile) } : {}),
+    ...(cfg.log?.keys ? { log: { ...cfg.log, keys: cfg.log.keys.map(r) } } : {}),
+  };
+}
+
 export const SdkConfigSchema = z.object({
   /** identity the receipts will name; nothing checks it, so it is recorded as claimed */
   agentId: z.string().min(1),
   principalId: z.string().min(1).optional(),
   identity: z.object({ keyFile: z.string() }),
-  /** optional Cedar policy; when present, wrapped tools and PreToolUse hooks can deny */
+  /** optional policy, Cedar or Rego (.rego); when present, wrapped tools and PreToolUse hooks can deny */
   policyFile: z.string().optional(),
   /** "observe" records the policy's decision with `enforced: false` and never blocks; "enforce" (default) blocks a deny */
   mode: z.enum(["enforce", "observe"]).optional(),

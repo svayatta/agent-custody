@@ -237,7 +237,7 @@ This whole loop is one runnable file, [packages/state/examples/02-receipt-to-bel
 
 | package | what it is | status |
 | --- | --- | --- |
-| [`@agent-custody/receipts`](packages/receipts/README.md) | Signed receipts for tool calls: an MCP gateway with Cedar policy and a Merkle transparency log, an in-process SDK with framework adapters, and an offline verifier | working, with runnable tutorials |
+| [`@agent-custody/receipts`](packages/receipts/README.md) | Signed receipts for tool calls: an MCP gateway with Cedar or Rego policy (a file, or your OPA server) and a Merkle transparency log, an in-process SDK with framework adapters, and an offline verifier | working, with runnable tutorials |
 | [`agent-custody` on PyPI](packages/python/README.md) | The Python client of the sidecar: `decide`, `record`, `wrap`, and adapters for LangChain, the OpenAI Agents SDK, the Claude Agent SDK, CrewAI, Google ADK, and a Hermes Agent plugin, tested against the real packages | working; Go, Java, and Rust clients live in [examples/languages](packages/receipts/examples/languages) |
 | [`@agent-custody/state`](packages/state/README.md) | Governed memory: a fact ledger where every write cites the receipt that caused it, carries valid time and transaction time, and can be superseded or rolled back | ledger on JSONL, SQLite, or Postgres, memory server behind the gateway or shared over HTTP, quarantine and verified provenance, blast radius, certified forget, retention and legal holds, write-through to Mem0 and Zep, eval CLI with signed reports |
 
@@ -276,6 +276,7 @@ packages/receipts/    the receipts package: src, test, examples, scripts, docs
 packages/python/      the Python client package: agent_custody, tests run with uv against a real sidecar
 packages/state/       the state package: src, test, examples
 site/                 the website, generated from this repository's markdown by VitePress
+spec/lean/            a Lean 4 model of the verifier's core with machine-checked proofs and a differential fuzzer; not shipped
 ```
 
 ## Plan

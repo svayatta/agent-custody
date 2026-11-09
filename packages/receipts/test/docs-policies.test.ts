@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import { describe, expect, it } from "vitest";
 import { evaluate, policyReasons } from "../src/policy.ts";
+import { compileRego, evaluateRego } from "../src/policy-rego.ts";
 
 const doc = readFileSync(new URL("../docs/policies.md", import.meta.url), "utf8");
 const blocks = [...doc.matchAll(/```cedar\n([\s\S]*?)```/g)].map((m) => m[1]!);
@@ -18,7 +19,7 @@ const decide = (i: number, r: ReturnType<typeof req>) => evaluate(blocks[i]!, r)
 
 describe("docs/policies.md examples", () => {
   it("contains the expected number of examples", () => {
-    expect(blocks.length).toBe(16);
+    expect(blocks.length).toBe(17);
   });
 
   it("every block parses as a Cedar policy set", () => {
@@ -123,5 +124,38 @@ describe("docs/policies.md examples", () => {
   it("8: grant is reachable from context", () => {
     expect(decide(8, req("stripe.refund", {}))).toBe("allow");
     expect(evaluate(blocks[8]!, { ...req("stripe.refund", {}), context: { args: {}, facts: {}, grant: { ...grant, principal: "someone-else" } } }).decision).toBe("deny");
+  });
+
+  it("16: the door: the catalogue is open to anyone, a refund needs a verified arrival and a small amount", () => {
+    const arrival = (cls: string) => ({ arrival: { class: cls, subject: cls === "verified" ? "shopping-agent" : "unknown", grant: cls === "verified" ? "verified" : "absent", signature: false, remote: "127.0.0.1", method: "POST", path: "/refunds", route: "refund" } });
+    const door = (route: string, args: Record<string, unknown>, cls: string) => ({ agentId: cls === "verified" ? "shopping-agent" : "unknown", tool: route, context: { args, facts: arrival(cls), ...(cls === "verified" ? { grant: { principal: "shop-owner", scopes: ["refund"] } } : {}) } });
+    expect(evaluate(blocks[16]!, door("catalogue", { method: "GET", path: "/catalogue/shoes" }, "unknown")).decision).toBe("allow");
+    expect(evaluate(blocks[16]!, door("refund", { method: "POST", path: "/refunds", body: { amount: 1000 } }, "unknown")).decision).toBe("deny");
+    expect(evaluate(blocks[16]!, door("refund", { method: "POST", path: "/refunds", body: { amount: 4500 } }, "verified")).decision).toBe("allow");
+    expect(evaluate(blocks[16]!, door("refund", { method: "POST", path: "/refunds", body: { amount: 9000 } }, "verified")).decision).toBe("deny");
+    expect(evaluate(blocks[16]!, door("refund", { method: "POST", path: "/refunds", body: { amount: -1 } }, "verified")).decision).toBe("deny");
+    expect(evaluate(blocks[16]!, door("refund", { method: "POST", path: "/refunds", body: { amount: 0 } }, "verified")).decision).toBe("deny");
+    // no JSON body at all: the amount comparison errors, and an error is a deny
+    expect(evaluate(blocks[16]!, door("refund", { method: "POST", path: "/refunds" }, "verified")).decision).toBe("deny");
+  });
+
+  it("the Rego example compiles and keeps the promises its prose makes", () => {
+    const rego = [...doc.matchAll(/```rego\n([\s\S]*?)```/g)].map((m) => m[1]!);
+    expect(rego.length).toBe(1);
+    const { policy, errors } = compileRego(rego[0]!);
+    expect(errors).toEqual([]);
+    const d = (r: ReturnType<typeof req>) => evaluateRego(policy!, "d", r);
+    expect(d(req("customer.lookup", {})).decision).toBe("allow");
+    expect(d(req("stripe.refund", { amount: 100000 }, { customer: { verified: true } })).decision).toBe("allow");
+    expect(d(req("stripe.refund", { amount: 100001 }, { customer: { verified: true } })).decision).toBe("deny");
+    // a whole number of pence above 0: Rego has floats and negatives, and <= alone admits both
+    for (const amount of [0, -1, 0.5, 99999.5, "500"]) expect(d(req("stripe.refund", { amount }, { customer: { verified: true } })).decision, String(amount)).toBe("deny");
+    expect(d(req("stripe.refund", { amount: 1 }, { customer: { verified: true } })).decision).toBe("allow");
+    // a missing attribute is undefined, so the rule does not hold: a deny without an error
+    expect(d(req("stripe.refund", {}, { customer: { verified: true } }))).toMatchObject({ decision: "deny", errors: [] });
+    // the agent's own claim of verification is not the gateway's fact
+    expect(d(req("stripe.refund", { amount: 1, customer: { verified: true } })).decision).toBe("deny");
+    // deny wins over allow, with its string as the reason
+    expect(d(req("stripe.refund", { amount: 1 }, { customer: { verified: true, flagged: true } }))).toMatchObject({ decision: "deny", reasons: ["this customer is flagged for review"] });
   });
 });

@@ -1,0 +1,13 @@
+name = "agent-custody-spec"
+defaultTargets = ["AgentCustodySpec", "vectors", "oracle"]
+
+[[lean_lib]]
+name = "AgentCustodySpec"
+
+[[lean_exe]]
+name = "vectors"
+root = "Vectors"
+
+[[lean_exe]]
+name = "oracle"
+root = "Oracle"

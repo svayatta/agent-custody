@@ -6,7 +6,7 @@ import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
 import { closeSync, constants as fsConstants, existsSync, fchmodSync, openSync, readFileSync, readdirSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { loadConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
+import { loadConfig, loadDoorConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
 import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
 import type { Envelope } from "./crypto.ts";
 import { createDelegation, decodeDelegation, delegateFrom, grantDigest } from "./delegation.ts";
@@ -21,6 +21,7 @@ import { Anchor, ANCHOR_CHAINS, resolveAnchorChain } from "./anchor.ts";
 import { checkCompleteness, formatCompleteness, stripeSource, type StripeObject } from "./completeness.ts";
 import { evmChain } from "./anchor-evm.ts";
 import { serveHttp } from "./gateway-http.ts";
+import { createDoorHost, serveDoor } from "./door.ts";
 import { serveA2a } from "./a2a.ts";
 import { PortalStore, sendFollowUps, servePortal, type MailOptions, type OAuthOptions, type Role, type StripeOptions } from "./portal.ts";
 import type { OidcConfig, SamlConfig } from "./sso.ts";
@@ -30,7 +31,7 @@ import type { AdminOptions } from "./log-admin.ts";
 import { createRequire } from "node:module";
 import { pruneLog } from "./retention.ts";
 import { serveSidecar } from "./sidecar.ts";
-import { checkConfig, formatFindings } from "./check.ts";
+import { checkConfig, checkDoorConfig, formatFindings, isDoorConfig } from "./check.ts";
 import { serveConsole } from "./console.ts";
 import { TREEHEAD_TYPE, type AuthorizationBundle, type ReceiptBundle, type TreeHead, type ReceiptStatement } from "./receipt.ts";
 import { MerkleLog } from "./log.ts";
@@ -43,6 +44,7 @@ import { auditExtends, formatReport, verifyBundle, type VerifyOptions } from "./
 import { CLEAR_WARNING, exportReceipts, formatReceiptExport as formatExportLines } from "./export.ts";
 import { formatSummaryMarkdown, receiptFiles, summarizeReceipts } from "./pr-summary.ts";
 import { formatSimulation, simulatePolicy, verifyOrphanAuthorization, type SimulationSkip } from "./simulate.ts";
+import { isRegoFile } from "./policy-rego.ts";
 
 /**
  * Resolves on SIGINT or SIGTERM: a container runtime and systemd stop a service with SIGTERM, which PID 1 ignores unless
@@ -57,7 +59,7 @@ function untilStopped(): Promise<void> {
   });
   return stopped;
 }
-const SERVICES = new Set(["serve", "witness", "signer", "portal", "log", "console"]);
+const SERVICES = new Set(["serve", "witness", "signer", "portal", "log", "console", "door"]);
 /** a command that waits for untilStopped(); a stdio gateway runs until its input closes and keeps the default signal behaviour */
 const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && (SERVICES.has(cmd) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
 
@@ -98,6 +100,10 @@ const USAGE = `agent-custody <command>
   gateway --config <gateway.json> [--http [--port 8790] [--host 127.0.0.1] [--idle-minutes 30]]
                                                    stdio: one gateway for the grant the config names. --http: one shared gateway, MCP over
                                                    Streamable HTTP at /mcp, each connection presenting its own grant as Authorization: Bearer
+  door    --config <door.json> [--port 8780] [--host 127.0.0.1]
+                                                   a reverse proxy in front of your own site or API: every arrival classified (verified by a
+                                                   trusted grant, claimed, or unknown), decided by the Cedar policy for its route, relayed to the
+                                                   origin or refused with 403, and receipted either way; GET /.well-known/agent-custody-door
   init claude-code [--dir <dir>] [--user] [--enforce] [--log-url <url> [--log-id <id>] [--log-token-env NAME] [--log-key <pub>]]
                                                    one command for your own Claude Code sessions: an agent key, sdk.json in observe mode, a starter deny
                                                    policy, and the three hooks in .claude/settings.local.json (--user: ~/.claude/settings.json). Safe to run twice
@@ -113,7 +119,7 @@ const USAGE = `agent-custody <command>
   export  --receipts <dir> --out <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--since <ISO time>] [--allow-clear]
                                                    copies the verified receipt bundles that keep their values private into a directory for a pull request, byte for byte.
                                                    Reads only <id>.json at the top level; never salts/, outbox/, or *.authorization.json. Exits 1 when it refuses a receipt, and when it copies none
-  policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
+  policy simulate --policy <proposed.cedar|.rego> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
   completeness --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--log-id <id>]
                --provider stripe --object refunds|payouts|transfers --key-env NAME --tool <name>... --since <ISO> --until <ISO>
                [--id-path id] [--amount-field amount] [--currency-field currency] [--beneficiary <arg>=<field>]... [--json]
@@ -283,7 +289,7 @@ async function main(argv: string[]): Promise<number> {
     case "check": {
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, connect: { type: "boolean", default: false }, json: { type: "boolean", default: false } } });
       if (!values.config) throw new Error("check needs --config");
-      const findings = await checkConfig(values.config, { connect: values.connect });
+      const findings = isDoorConfig(values.config) ? checkDoorConfig(values.config) : await checkConfig(values.config, { connect: values.connect });
       console.log(values.json ? JSON.stringify(findings, null, 2) : formatFindings(findings));
       return findings.some((f) => f.level === "error") ? 1 : 0;
     }
@@ -333,6 +339,18 @@ async function main(argv: string[]): Promise<number> {
       console.error(`agent-custody gateway: agent=${gw.agentId} principal=${gw.delegation.principal} scopes=[${gw.delegation.scopes.join(", ")}]`);
       await serveStdio(gw);
       await gw.close();
+      return 0;
+    }
+    case "door": {
+      const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, port: { type: "string", default: "8780" }, host: { type: "string", default: "127.0.0.1" } } });
+      if (!values.config) throw new Error("door needs --config");
+      const cfg = loadDoorConfig(values.config);
+      const host = await createDoorHost(cfg, { autoFlush: true });
+      const running = await serveDoor(host, { port: Number(values.port), host: values.host });
+      console.error(`agent-custody door: ${running.url} keyid=${host.keyid} in front of ${cfg.origin.url}; ${cfg.routes.length} route(s), unmatched arrivals are "${cfg.unmatchedRoute}"`);
+      await untilStopped();
+      await running.close();
+      await host.close();
       return 0;
     }
     case "init": {
@@ -817,7 +835,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case "policy": {
       const [subcommand, ...args] = rest;
-      if (subcommand !== "simulate") throw new Error("policy needs the simulate subcommand: policy simulate --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>");
+      if (subcommand !== "simulate") throw new Error("policy needs the simulate subcommand: policy simulate --policy <proposed.cedar|.rego> --receipts <dir> --issuer-key <pub>");
       const { values } = parseArgs({
         args,
         options: {
@@ -833,7 +851,7 @@ async function main(argv: string[]): Promise<number> {
           out: { type: "string" },
         },
       });
-      if (!values.policy || !values.receipts || !values["issuer-key"]?.length) throw new Error("policy simulate needs --policy <proposed.cedar> --receipts <dir> --issuer-key <pub>");
+      if (!values.policy || !values.receipts || !values["issuer-key"]?.length) throw new Error("policy simulate needs --policy <proposed.cedar|.rego> --receipts <dir> --issuer-key <pub>");
       const policy = readFileSync(values.policy, "utf8");
       const keys = {
         issuerKeys: values["issuer-key"].map(loadPublicKey),
@@ -890,7 +908,7 @@ async function main(argv: string[]): Promise<number> {
           }
         }
       }
-      const report = simulatePolicy(policy, verified(), { unreplayable, ...(captureKey ? { captureKey } : {}), disclosures });
+      const report = simulatePolicy(policy, verified(), { unreplayable, ...(captureKey ? { captureKey } : {}), disclosures, language: isRegoFile(values.policy) ? "rego" : "cedar" });
       const json = JSON.stringify(report, null, 2);
       if (values.out) {
         // Reports name calls and decisions: keep them owner-only, including when replacing an existing file.
