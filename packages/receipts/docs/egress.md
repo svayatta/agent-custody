@@ -12,7 +12,7 @@ The gateway holds an agent's tool credentials and receipts every call made throu
 **What it cannot see.** Every page about the witness repeats this list:
 
 - **Payloads.** CONNECT is relayed as an opaque tunnel, with no TLS interception. The witness records where traffic went, when, and how many bytes went each way. It never records what was sent or received. For plain HTTP it records the method, host, and port, not the path, the headers, or the body.
-- **Traffic that skips it.** With lockdown off, an agent that ignores `HTTPS_PROXY` leaves no receipt at all. With lockdown on, DNS to the cluster resolver stays open, and a resolver that forwards to the internet can still carry data in its queries.
+- **Traffic that skips it.** With lockdown off, an agent that ignores `HTTPS_PROXY` leaves no receipt at all. With lockdown on Kubernetes, DNS to the cluster resolver stays open, and a resolver that forwards to the internet can still carry data in its queries. The VM recipe closes DNS to the agent.
 - **Protocols other than HTTP.** The witness relays HTTP requests and CONNECT tunnels. Under lockdown, other protocols cannot leave. Without lockdown they are invisible to it.
 
 Each receipt is an **observed bypass**: evidence that the agent connected to a destination around the gateway. It is not a record of what the agent did there.

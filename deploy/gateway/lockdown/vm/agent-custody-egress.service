@@ -32,14 +32,22 @@ PrivateTmp=true
 BindReadOnlyPaths=/etc/agent-custody/egress:/egress
 BindPaths=/var/lib/agent-custody-egress:/data
 # The witness refuses internal addresses for a host name before it connects, but it dials an IP literal that the policy
-# names. These are the second layer, the same ranges as the Kubernetes recipe's egress-networkpolicy.yaml: this host's
-# own network, the private and shared ranges, link-local (169.254.169.254, the metadata service on most clouds), Oracle's
-# metadata at 192.0.0.192, Alibaba's at 100.100.100.200, multicast, and reserved space, for IPv4 and IPv6. Loopback stays
-# open, because the agents reach the witness there: do not permit a 127.0.0.0/8 literal in the policy. If the resolver
-# in /etc/resolv.conf (a VPC resolver, 169.254.169.253 on AWS) or the log is on one of these addresses, add an
-# IPAddressAllow= for that one address; it opens every port there.
-IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4
-IPAddressDeny=fc00::/7 fe80::/10 ff00::/8
+# names, and for that literal these lines are the only layer. They are the witness's own list (src/addresses.ts) less
+# loopback: this host's own network, the private and shared ranges, link-local (169.254.169.254, the metadata service on
+# most clouds), Oracle's metadata at 192.0.0.192, Alibaba's at 100.100.100.200, the benchmarking range, multicast, and
+# reserved space, for IPv4 and IPv6. Loopback stays open, because the agents reach the witness there: do not permit a
+# 127.0.0.0/8 literal in the policy. NAT64 (64:ff9b::/96) stays open too, since on an IPv6-only host with DNS64 all
+# public traffic goes there, so a NAT64 literal that wraps an internal IPv4 address is not covered: do not permit one.
+#
+# The witness resolves names through /etc/resolv.conf. Where that names the systemd-resolved stub, 127.0.0.53 (Ubuntu,
+# Amazon Linux 2023), the witness talks only to loopback, and resolved queries the VPC resolver from its own unit, which
+# these lines do not filter. Where it names the VPC resolver directly (169.254.169.253 or the VPC base + 2, such as
+# 10.0.0.2, on AWS; 169.254.169.254 on GCP), the witness can resolve nothing until you add IPAddressAllow= for that one
+# address. It opens every port there; on GCP that is also the metadata service. Azure's 168.63.129.16 is public and not
+# denied. Do the same for a log on one of these addresses.
+IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15
+IPAddressDeny=224.0.0.0/4 240.0.0.0/4
+IPAddressDeny=fc00::/7 fe80::/10 ff00::/8 64:ff9b:1::/48
 
 [Install]
 WantedBy=multi-user.target

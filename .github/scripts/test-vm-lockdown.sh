@@ -3,8 +3,9 @@
 # the gateway, the witness, a stand-in upstream, and a stand-in agent as the file headers describe, then runs
 # check-lockdown.sh with no lockdown (which must fail), with the whole recipe, and with the systemd drop-in alone. It also
 # checks that loading the table leaves another table alone, that a reload or a start of nftables.service (which flushes
-# the ruleset) is followed by the table, that the agent stays down when the table fails to load, that the agent's unit
-# refuses vsock, and that the witness refuses a private address its policy permits.
+# the ruleset) is followed by the table, that the agent stays down when the table fails to load, that the agent gets no
+# answer from the DNS resolver, that the agent's unit refuses vsock, and that the witness refuses a private address its
+# policy permits.
 # It starts nftables.service, which flushes the host's ruleset (docker's included): run it on a throwaway host only.
 # Usage: sudo test-vm-lockdown.sh <@agent-custody/receipts tarball>     needs node 22, nft, curl, python3, openssl
 set -eu
@@ -63,14 +64,22 @@ esac
 systemctl daemon-reload
 systemctl start agent-custody-gateway agent-custody-egress
 
-# the agent: its user, the nftables rule with the resolver this host uses, and a service with the drop-in
+# the agent: its user, the nftables rule as shipped, and a service with the drop-in
 id agent > /dev/null 2>&1 || useradd --system --home /var/lib/agent --create-home --shell /usr/sbin/nologin agent
-sed "s/^define RESOLVERS = { 127.0.0.53 }/define RESOLVERS = { $resolver }/" "$vm/agent-lockdown.nft" > /etc/agent-custody/agent-lockdown.nft
+install -m 0644 "$vm/agent-lockdown.nft" /etc/agent-custody/agent-lockdown.nft
 nft -c -f /etc/agent-custody/agent-lockdown.nft
 printf '[Service]\nExecStart=/bin/sleep infinity\n' > /etc/systemd/system/demo-agent.service
 install -d /etc/systemd/system/demo-agent.service.d
 cp "$vm/agent-lockdown.conf" /etc/systemd/system/demo-agent.service.d/lockdown.conf
+# the agent's settings, as the drop-in's header lists them; check-lockdown.sh reads the proxy secret from here
 install -m 0600 /dev/null /etc/agent-custody/agent.env
+cat > /etc/agent-custody/agent.env << ENV
+HTTPS_PROXY=http://research-agent:$secret@127.0.0.1:8791
+HTTP_PROXY=http://research-agent:$secret@127.0.0.1:8791
+NO_PROXY=127.0.0.1
+NODE_USE_ENV_PROXY=1
+AGENT_CUSTODY_GATEWAY_URL=http://127.0.0.1:8790/mcp
+ENV
 cp "$vm/agent-custody-lockdown.service" /etc/systemd/system/
 install -D -m 0644 "$vm/nftables-lockdown.conf" /etc/systemd/system/nftables.service.d/agent-custody-lockdown.conf
 systemctl daemon-reload
@@ -81,7 +90,6 @@ until curl -fsS http://127.0.0.1:8790/health > /dev/null 2>&1 && curl -fsS http:
   sleep 1
 done
 
-export EGRESS_SECRET="$secret"
 echo "== no lockdown: the checks must fail"
 if "$vm/check-lockdown.sh"; then fail "check-lockdown.sh passed with no lockdown in place"; fi
 echo "== the whole recipe: starting the agent loads the table, and leaves another table alone"
@@ -94,7 +102,8 @@ nft list table inet another_firewall > /dev/null || fail "loading the lockdown d
 echo "== the systemd drop-in alone"
 nft delete table inet agent_custody_lockdown
 if "$vm/check-lockdown.sh" --unit demo-agent.service; then fail "check-lockdown.sh passed with the table missing"; fi
-PROBE_PORT='' "$vm/check-lockdown.sh" --unit demo-agent.service
+printf '%s\n' "$secret" > "$work/secret"
+PROBE_PORT='' EGRESS_SECRET_FILE="$work/secret" "$vm/check-lockdown.sh" --unit demo-agent.service
 systemctl restart agent-custody-lockdown
 
 table() { nft list table inet agent_custody_lockdown > /dev/null 2>&1; }
@@ -126,6 +135,14 @@ cp "$work/agent-lockdown.nft" /etc/agent-custody/agent-lockdown.nft
 systemctl reset-failed agent-custody-lockdown 2> /dev/null || true
 systemctl start demo-agent
 "$vm/check-lockdown.sh" --unit demo-agent.service
+
+echo "== DNS over IP is closed to the agent: a query to this host's resolver gets no answer"
+dns='import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(5); s.connect((sys.argv[1], 53))
+s.send(bytes.fromhex("123401000001000000000000076578616d706c6503636f6d0000010001")); s.recv(512)'
+python3 -c "$dns" "$resolver" || fail "cannot tell: root gets no answer from the resolver $resolver either"
+if runuser -u agent -- python3 -c "$dns" "$resolver" 2> /dev/null; then fail "the agent got an answer from the resolver $resolver"; fi
+echo "test-vm-lockdown: the resolver $resolver answered root and not the agent"
 
 echo "== the agent's unit refuses vsock"
 families=$(systemctl show -P RestrictAddressFamilies demo-agent)

@@ -11,13 +11,35 @@
 #   4. another port on loopback, over IPv4 and IPv6, is closed to the agent, where root reaches it. The script opens that
 #      port itself. The drop-in alone passes 1 to 3 but fails this, since it allows every port on 127.0.0.1.
 #
-# Usage: sudo EGRESS_SECRET=<the agent's proxy secret> ./check-lockdown.sh [--unit <agent>.service]
-# Settings (environment): AGENT_USER (agent), AGENT_ID (research-agent), GATEWAY (127.0.0.1:8790),
-# WITNESS (127.0.0.1:8791), RECEIPTS_DIR (/var/lib/agent-custody-egress/receipts), REFUSED_HOST (example.net, a
-# host the policy must not permit), DIRECT_HOST (example.com, a host root can reach), PROBE_PORT (18799, a free port;
-# set it empty only to test the drop-in alone). Needs curl, getent, base64, python3, runuser, and systemd-run with --unit.
+# Usage: sudo ./check-lockdown.sh [--unit <agent>.service]
+# The agent's proxy id and secret come from HTTPS_PROXY in AGENT_ENV (/etc/agent-custody/agent.env, the file the drop-in
+# loads), or the secret from the first line of EGRESS_SECRET_FILE. Do not pass it as EGRESS_SECRET=... on the command
+# line: ps and the shell history show it there. EGRESS_SECRET in the environment is still read first.
+# Settings (environment): AGENT_USER (agent), AGENT_ID (the id in HTTPS_PROXY, else research-agent),
+# GATEWAY (127.0.0.1:8790), WITNESS (127.0.0.1:8791), RECEIPTS_DIR (/var/lib/agent-custody-egress/receipts),
+# REFUSED_HOST (example.net, a host the policy must not permit), DIRECT_HOST (example.com, a host root can reach),
+# PROBE_PORT (18799, a free port; set it empty only to test the drop-in alone). Needs curl, getent, base64, python3,
+# runuser, and systemd-run with --unit.
 set -eu
 
+fail() { echo "check-lockdown: FAIL: $*" >&2; exit 1; }
+: "${AGENT_ENV:=/etc/agent-custody/agent.env}"
+if [ -z "${EGRESS_SECRET:-}" ]; then
+  if [ -n "${EGRESS_SECRET_FILE:-}" ]; then
+    EGRESS_SECRET=$(head -n 1 "$EGRESS_SECRET_FILE" | tr -d '\r\n') || fail "cannot read $EGRESS_SECRET_FILE"
+  elif [ -r "$AGENT_ENV" ]; then
+    # HTTPS_PROXY=http://<id>:<secret>@host:port, quoted or not
+    proxy=$(sed -n 's/^[[:space:]]*HTTPS_PROXY=//p' "$AGENT_ENV" | head -n 1 | tr -d "\"'")
+    case "$proxy" in
+      *://*:*@*)
+        userinfo=${proxy#*://}
+        userinfo=${userinfo%@*}
+        EGRESS_SECRET=${userinfo#*:}
+        : "${AGENT_ID:=${userinfo%%:*}}" ;;
+    esac
+  fi
+fi
+[ -n "${EGRESS_SECRET:-}" ] || fail "no proxy secret: put HTTPS_PROXY=http://<id>:<secret>@<witness> in $AGENT_ENV, or set EGRESS_SECRET_FILE"
 : "${AGENT_USER:=agent}"
 : "${AGENT_ID:=research-agent}"
 : "${GATEWAY:=127.0.0.1:8790}"
@@ -26,7 +48,6 @@ set -eu
 : "${REFUSED_HOST:=example.net}"
 : "${DIRECT_HOST:=example.com}"
 PROBE_PORT="${PROBE_PORT-18799}"
-: "${EGRESS_SECRET:?set EGRESS_SECRET to the agent proxy secret}"
 
 unit=""
 if [ "${1:-}" = --unit ]; then unit="${2:?--unit needs the agent service name}"; fi
@@ -35,7 +56,6 @@ work=$(mktemp -d)
 listener=""
 cleanup() { [ -z "$listener" ] || kill "$listener" 2> /dev/null || true; rm -rf "$work"; }
 trap cleanup EXIT
-fail() { echo "check-lockdown: FAIL: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || fail "run as root, so the probes can run as $AGENT_USER"
 id "$AGENT_USER" > /dev/null 2>&1 || fail "no user $AGENT_USER"
 
