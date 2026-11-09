@@ -1343,7 +1343,7 @@ const PORTAL_PAGE = `<!doctype html>
   <form id="onboardForm">
     <label>Your name<input id="name" autocomplete="name" maxlength="120" required></label>
     <label>Company or organisation<input id="company" autocomplete="organization" maxlength="160" required></label>
-    <label>Tenant id<input id="tenant" placeholder="acme" pattern="[a-z0-9][a-z0-9-]{1,38}[a-z0-9]" required><span class="hint">A short name for your organisation, filled in from the company name; change it if you like. It becomes the path of your log, which your gateway config and your auditors will use: <code id="tenantPreview">__LOG_BASE__t/&lt;tenant&gt;/</code></span></label>
+    <label>Tenant id<input id="tenant" placeholder="acme" pattern="[a-z0-9][a-z0-9\\-]{1,38}[a-z0-9]" required><span class="hint">A short name for your organisation, filled in from the company name; change it if you like. It becomes the path of your log, which your gateway config and your auditors will use: <code id="tenantPreview">__LOG_BASE__t/&lt;tenant&gt;/</code></span></label>
     <label>Your role <span class="opt">optional</span><input id="role" autocomplete="organization-title" maxlength="120" placeholder="Head of Platform"></label>
     <label>Phone <span class="opt">optional</span><input id="phone" type="tel" autocomplete="tel" maxlength="40" placeholder="+44 20 …"></label>
     <label>Telegram username <span class="opt">optional</span><input id="telegram" maxlength="40" placeholder="@yourname"><span class="hint">Your handle in Telegram, under Settings, if you would rather we reach you there than by email.</span></label>
