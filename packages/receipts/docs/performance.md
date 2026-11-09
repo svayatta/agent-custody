@@ -43,7 +43,7 @@ A second interleaved pair agreed: Cedar went from a mean of 178.1 µs to 91.8 µ
 
 What changed:
 
-- **Cedar parses each policy once.** `evaluate()` used to hand the policy text to Cedar on every call, so Cedar parsed the whole file for every decision, and the text was hashed for the digest every time. Each text is now parsed once with `preparsePolicySet`, and decided with `statefulIsAuthorized`. The cache is keyed by the text, so an edited file is parsed again and gets its new digest. It holds 8 policy sets and evicts the least recently used. A text that does not parse is a deny with Cedar's errors, as before.
+- **Cedar parses each policy once.** `evaluate()` used to hand the policy text to Cedar on every call, so Cedar parsed the whole file for every decision, and the text was hashed for the digest every time. Each text is now parsed once with `preparsePolicySet`, and decided with `statefulIsAuthorized`. The cache is keyed by the text, so an edited file is parsed again and gets its new digest. It holds 8 policy sets and evicts the least recently used, only after the new set is in place, and a new text never takes a slot that a live entry holds. A text that does not parse is a deny with Cedar's errors, as before.
 - **The log keeps its file open.** An append used to open and close the file. The log now keeps one descriptor open for append. It reopens the file when a prune has replaced it, when the file was removed, and after a failed write. On this machine the saving, about 20 µs, is smaller than the run-to-run spread of the lock, so the table cannot show it. The reference rows show the write itself.
 
 Rego needed no change: a `.rego` file is compiled once per change, and the gateway passes the digest it computed when the file loaded.
