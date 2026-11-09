@@ -11,7 +11,13 @@ export { GRANT_HEADER, grantHeader, parseGrantHeader, serveHttp } from "./gatewa
 export { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, DOOR_DEFAULT_CAPTURE, DOOR_VERSION, MAX_CHALLENGE_TOKEN, RECEIPT_HEADER, RATE_BURST_MS, RATE_MINUTE_MS, cedarArgs, classifyArrival, createDoorHost, createRateTracker, matchRoute, normalizePath, remoteOf, serveDoor, verifyChallengeToken } from "./door.ts";
 export { DESTINATION_FACT, EGRESS_VERSION, PROXY_REALM, checkProxyCredential, createEgressHost, destinationName, normalizeHost, parseAuthority, publicOnlyLookup, serveEgress } from "./egress.ts";
 export { internalAddress } from "./addresses.ts";
+export { DRAFT_WARNING, draftEgressPolicy } from "./egress-draft.ts";
+export type { DraftAgent, DraftDestination, DraftSkip, EgressPolicyDraft } from "./egress-draft.ts";
 export type { Destination, EgressEnd, EgressHost, EgressOptions, EgressResult, EgressServerOptions, RunningEgress } from "./egress.ts";
+export { ACS_ERROR, ACS_GUARDIAN_VERSION, ACS_METHODS, ACS_RECEIPT_KEY, ACS_STEP_FACT, ACS_VERSION, acsEntryHash, createAcsGuardian } from "./acs.ts";
+export type { AcsGuardian, AcsMethod, AcsResponse } from "./acs.ts";
+export { loadAcsGuardianConfig } from "./config.ts";
+export type { AcsGuardianConfig } from "./config.ts";
 export type { Arrival, ArrivalChallenge, ArrivalClass, ArrivalRate, ChallengeCheck, Classified, DoorHost, DoorOptions, DoorServerOptions, RateTracker, RateTrackerLimits, RunningDoor } from "./door.ts";
 export * from "./capture.ts";
 export { A2A_CARD_PATH, A2A_RECEIPT_METADATA_KEY, A2A_STREAM_META_KEY, a2aUpstream, fetchAgentCard, serveA2a, textOf } from "./a2a.ts";

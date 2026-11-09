@@ -1,5 +1,5 @@
 // Aspect: the egress witness deciding by a Rego policy in place of Cedar. Source: src/egress.ts, src/policy-rego.ts
-// Run:    node examples/42-egress-rego.ts   (needs the opa binary on PATH)
+// Run:    node examples/44-egress-rego.ts   (needs the opa binary on PATH)
 //
 // A team that already writes its policies in Rego points `policyFile` at a .rego file. The witness compiles it with
 // `opa build`, as the gateway does, and evaluates it in-process on every connection. The input is the same request as
@@ -30,7 +30,7 @@ deny contains "payments go through the gateway" if endswith(input.action, ".stri
 `;
 
 step(1, "egress.json names policy.rego; the witness compiles it with opa build when it loads");
-const fx = buildEgressFixture(out("42-egress-rego"), { policyFile: "policy.rego" }, REGO);
+const fx = buildEgressFixture(out("44-egress-rego"), { policyFile: "policy.rego" }, REGO);
 const policyFile = join(fx.dir, "policy.rego");
 console.log("   policy:\n" + readFileSync(policyFile, "utf8").split("\n").map((l) => "     " + l).join("\n"));
 const host = await createEgressHost(loadEgressConfig(fx.configFile));
