@@ -297,8 +297,8 @@ describe("completeness from the provider's side", () => {
   });
 
   it("calls a receipt unmatchable when the id path does not reach a string in its result", async () => {
-    const report = await checkCompleteness(opts(theProvider(), { idPath: "refund_id.value" }));
-    expect(report.unmatchable).toEqual(expect.arrayContaining(refunds.map((r) => ({ receiptId: r.receiptId, reason: 'the result has no string at "refund_id.value"' }))));
+    const report = await checkCompleteness(opts(theProvider(), { idPath: "refund_id.0" }));
+    expect(report.unmatchable).toEqual(expect.arrayContaining(refunds.map((r) => ({ receiptId: r.receiptId, reason: 'the result has no string at "refund_id.0"' }))));
     expect(report.unmatchable).toHaveLength(2);
     expect(report.matched).toEqual([]);
     expect(report.providerOnly.map((p) => p.providerId).sort()).toEqual(refunds.map((r) => r.refundId).sort());
