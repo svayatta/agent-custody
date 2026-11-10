@@ -4,6 +4,8 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **`report` lists calls made in the same millisecond in the order they were made.** `denyReport` in `packages/receipts/src/deny-report.ts` sorted the would-deny and denied calls by timestamp alone. Two receipts with the same timestamp then kept the order of their file names, which are random receipt ids, so `agent-custody report` could list them in either order, and the `report` test in `test/claude-init.test.ts` failed now and then under load. Ties now fall back to the receipt's leaf index in the log, which the inclusion proof has already verified. A new test freezes the clock, records eight denied calls, and fails if they come back in any order but the one they were made in.
+
 ## 0.16.4 — 2026-11-10
 
 - **`check` rejects a regular file in a configured path's parent directories** (#305). `writableAncestor` in `packages/receipts/src/check.ts` walks up from a configured path (`receiptsDir`, `logFile`, `operations.database`, `approvals.usedDir`, `revokedGrants`) to the nearest one that exists. When that is a parent of the path and it is a regular file, `check` now reports a `paths` error; it used to report `ok` when the file was writable, and the gateway then failed to create the path. A configured path that already exists, such as a log file the gateway has written, still passes.
