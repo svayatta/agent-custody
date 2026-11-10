@@ -59,3 +59,11 @@ def test_a_pretooluse_event_without_a_tool_name_denies_and_other_events_pass(cli
     assert "no receipt" in out["hookSpecificOutput"]["permissionDecisionReason"]
     assert handle_hook_event(client, {"hook_event_name": "Stop"}) == {}
     assert handle_hook_event(client, {"hook_event_name": "UserPromptSubmit", "prompt": "hi"}) == {}
+
+
+def test_posttoolusefailure_records_a_failed_receipt_with_the_error(client, recorded):
+    out = handle_hook_event(client, {"hook_event_name": "PostToolUseFailure", "session_id": "s1", "tool_use_id": "t3", "tool_name": "customer.lookup", "tool_input": "ls -la", "error": "exit 1"})
+    assert out == {}
+    (p,) = recorded
+    assert p["request"]["args"] == {"input": "ls -la"}
+    assert (p["execution"]["status"], p["execution"]["result"]) == ("failed", "exit 1")
