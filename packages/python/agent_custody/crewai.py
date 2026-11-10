@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Type
 from crewai.tools import BaseTool
 from pydantic import BaseModel, PrivateAttr
 
-from . import Client, denies, receipt_id_of
+from . import Client, denies, no_receipt, receipt_id_of
 
 
 def _result(v: Any) -> Any:
@@ -38,8 +38,11 @@ class CustodyTool(BaseTool):
         policy = self._client.decide(self.name, recorded)
         if denies(policy):
             reason = "; ".join(policy["reasons"] + policy["errors"]) or "no permit policy matched"
-            bundle = self._client.record(self.name, recorded, {"status": "denied", "reason": reason}, policy)
-            return f"Denied by policy: {reason} (receipt {receipt_id_of(bundle)})"
+            try:
+                bundle = self._client.record(self.name, recorded, {"status": "denied", "reason": reason}, policy)
+                return f"Denied by policy: {reason} (receipt {receipt_id_of(bundle)})"
+            except Exception as e:  # noqa: BLE001 - the call stays denied; the missing receipt is the message
+                return f"Denied by policy: {reason} ({no_receipt(e)})"
         try:
             result = self._inner._run(*args, **kwargs)
         except Exception as e:  # noqa: BLE001 - recorded, then re-raised as the tool raised it
