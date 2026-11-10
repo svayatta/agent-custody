@@ -44,7 +44,7 @@ Each receipt is an **observed bypass**: evidence that the agent connected to a d
 
 Run it with `agent-custody egress --config egress.json [--port 8791] [--host 127.0.0.1]`.
 
-`agent-custody check --config egress.json` reads an egress config the way the witness would: unknown keys, the key, the secret variable of each agent (by name, never its value), whether a Cedar policy parses (a Rego policy is compiled when the witness starts), and that exactly one of `logFile` and `log` is set. It exits 1 on an error.
+`agent-custody check --config egress.json` reports what it can find before the witness starts: unknown keys; a key file that is missing or does not load (the witness does not start without it); an unset secret variable of an agent, and an unset `log.tokenEnv`, `splunk.tokenEnv`, or `otel.headersEnv` variable (by name, never the value); a missing `log.keys` file; a policy that does not exist, a Cedar policy that does not parse, or a Rego policy that does not compile (this needs `opa` on PATH, as the witness does); and that exactly one of `logFile` and `log` is set. It warns on a key file that other users can read, a Cedar policy with no permit rule, and `mode: "observe"`. It exits 1 on an error.
 
 ## How an agent uses it
 

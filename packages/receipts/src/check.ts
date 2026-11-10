@@ -221,7 +221,7 @@ export function checkEgressConfig(configPath: string): CheckFinding[] {
   add("ok", "config", "the config parses");
   const cfg = loadEgressConfig(configPath);
   add("ok", "log", cfg.logFile ? `receipts are logged to ${cfg.logFile}` : `receipts are logged to ${cfg.log!.url}`);
-  if (!existsSync(cfg.identity.keyFile)) add("warn", "key", `${cfg.identity.keyFile} does not exist yet; \`agent-custody keygen\` creates it`);
+  if (!existsSync(cfg.identity.keyFile)) add("error", "key", `${cfg.identity.keyFile} does not exist, and the witness does not start without it; \`agent-custody keygen\` creates it, and the container creates it at EGRESS_KEY before it starts the witness`);
   else {
     try {
       loadPrivateKey(cfg.identity.keyFile);
@@ -235,14 +235,22 @@ export function checkEgressConfig(configPath: string): CheckFinding[] {
   for (const a of unset) add("error", "credentials", `agent ${a.id}: the secret variable ${a.secretEnv} is not set in this environment`);
   if (!unset.length) add("ok", "credentials", cfg.agents.length === 1 ? "the agent's secret variable is set" : `the secret variables of all ${cfg.agents.length} agents are set`);
   if (!existsSync(cfg.policyFile)) add("error", "policy", `${cfg.policyFile} does not exist`);
-  else if (isRegoFile(cfg.policyFile)) add("ok", "policy", `${cfg.policyFile} is not checked here: the witness compiles a Rego policy when it starts`);
-  else {
+  else if (isRegoFile(cfg.policyFile)) {
+    const errors = compileRego(readFileSync(cfg.policyFile, "utf8")).errors;
+    for (const e of errors) add("error", "policy", `${cfg.policyFile}: ${e}`);
+    if (!errors.length) add("ok", "policy", "the Rego policy compiles");
+  } else {
     const text = readFileSync(cfg.policyFile, "utf8");
     const r = cedar.checkParsePolicySet({ staticPolicies: text });
     if (r.type !== "success") for (const e of r.errors) add("error", "policy", `${cfg.policyFile}: ${e.message}`);
     else if (!hasPermitRule(text)) add("warn", "policy", `${cfg.policyFile} has no permit rule, so every connection is refused`);
     else add("ok", "policy", "the policy parses");
   }
+  if (cfg.mode === "observe") add("warn", "mode", "observe mode relays every connection from a known agent and records what the policy would have decided; nothing is refused by policy");
+  if (cfg.log?.tokenEnv && !process.env[cfg.log.tokenEnv]) add("error", "credentials", `log token variable ${cfg.log.tokenEnv} is not set in this environment`);
+  if (cfg.splunk?.tokenEnv && !process.env[cfg.splunk.tokenEnv]) add("error", "credentials", `splunk token variable ${cfg.splunk.tokenEnv} is not set in this environment`);
+  for (const v of Object.values(cfg.otel?.headersEnv ?? {})) if (!process.env[v]) add("error", "credentials", `otel header variable ${v} is not set in this environment`);
+  for (const f of cfg.log?.keys ?? []) if (!existsSync(f)) add("error", "log keys", `${f} does not exist`);
   return out;
 }
 

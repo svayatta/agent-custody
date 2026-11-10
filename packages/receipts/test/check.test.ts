@@ -2,7 +2,7 @@
 // that, left alone, is a gateway that exits at launch, runs without the protection the config seems to promise, or
 // offers a tool nobody can use.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -67,15 +67,77 @@ describe("agent-custody check on an egress witness config", () => {
     expect(JSON.stringify(set)).not.toContain("value-that-must-not-leak");
   });
 
-  it("a Cedar policy that does not parse is an error, and a Rego policy is left to the witness to compile", () => {
+  it("a Cedar policy that does not parse is an error, and one with no permit rule is a warning", () => {
     const bad = egress();
     writeFileSync(join(bad.dir, "policy.cedar"), "permit(principal");
     expect(find(withSecret("s3cret", () => checkEgressConfig(bad.configFile)), "policy").map((f) => f.level)).toEqual(["error"]);
-    const rego = egress((c) => { c.policyFile = "policy.rego"; });
-    writeFileSync(join(rego.dir, "policy.rego"), "this is not rego");
-    const r = find(withSecret("s3cret", () => checkEgressConfig(rego.configFile)), "policy");
-    expect(r.map((f) => f.level)).toEqual(["ok"]);
-    expect(r[0]!.message).toContain("compiles a Rego policy when it starts");
+    const deny = egress();
+    writeFileSync(join(deny.dir, "policy.cedar"), "forbid(principal, action, resource);\n");
+    const r = find(withSecret("s3cret", () => checkEgressConfig(deny.configFile)), "policy");
+    expect(r.map((f) => f.level)).toEqual(["warn"]);
+    expect(r[0]!.message).toContain("no permit rule");
+  });
+
+  it("a policy file that does not exist is an error", () => {
+    const r = find(withSecret("s3cret", () => checkEgressConfig(egress((c) => { c.policyFile = "missing.cedar"; }).configFile)), "policy");
+    expect(r.map((f) => f.level)).toEqual(["error"]);
+    expect(r[0]!.message).toContain("does not exist");
+  });
+
+  it("a Rego policy is compiled: one that does not compile is an error, and a good one is ok", () => {
+    const bad = egress((c) => { c.policyFile = "policy.rego"; });
+    writeFileSync(join(bad.dir, "policy.rego"), "this is not rego");
+    expect(find(withSecret("s3cret", () => checkEgressConfig(bad.configFile)), "policy").map((f) => f.level)).toEqual(["error"]);
+    const good = egress((c) => { c.policyFile = "policy.rego"; });
+    writeFileSync(join(good.dir, "policy.rego"), "package agentcustody\n\nallow if input.principal == \"research-agent\"\n");
+    expect(find(withSecret("s3cret", () => checkEgressConfig(good.configFile)), "policy")).toEqual([{ level: "ok", check: "policy", message: "the Rego policy compiles" }]);
+  });
+
+  it("a witness key that does not exist is an error, since the witness does not start without it", () => {
+    const r = find(withSecret("s3cret", () => checkEgressConfig(egress((c) => { c.identity = { keyFile: "keys/not-created-yet.key" }; }).configFile)), "key");
+    expect(r.map((f) => f.level)).toEqual(["error"]);
+    expect(r[0]!.message).toContain("does not exist");
+  });
+
+  it.skipIf(process.platform === "win32")("a witness key that other users can read is a warning", () => {
+    const { dir, configFile } = egress();
+    chmodSync(join(dir, "egress.key"), 0o644);
+    const r = find(withSecret("s3cret", () => checkEgressConfig(configFile)), "key");
+    expect(r.map((f) => f.level)).toEqual(["ok", "warn"]);
+    expect(r[1]!.message).toContain("0600");
+  });
+
+  it("observe mode is a warning", () => {
+    expect(find(withSecret("s3cret", () => checkEgressConfig(egress().configFile)), "mode")).toEqual([]);
+    const r = find(withSecret("s3cret", () => checkEgressConfig(egress((c) => { c.mode = "observe"; }).configFile)), "mode");
+    expect(r.map((f) => f.level)).toEqual(["warn"]);
+  });
+
+  it("an unset log, splunk, or otel variable is an error that names the variable, never its value", () => {
+    const names = ["EGRESS_CHECK_TEST_LOG", "EGRESS_CHECK_TEST_SPLUNK", "EGRESS_CHECK_TEST_OTEL"];
+    const { configFile } = egress((c) => {
+      delete c.logFile;
+      c.log = { url: "https://log.example", tokenEnv: names[0] };
+      c.splunk = { url: "https://splunk.example", tokenEnv: names[1] };
+      c.otel = { url: "https://otel.example", headersEnv: { authorization: names[2] } };
+    });
+    const before = names.map((n) => process.env[n]);
+    try {
+      for (const n of names) delete process.env[n];
+      const unset = withSecret("s3cret", () => checkEgressConfig(configFile)).filter((f) => f.level === "error" && f.check === "credentials");
+      expect(names.map((n) => unset.filter((f) => f.message.includes(n)).length)).toEqual([1, 1, 1]);
+      for (const n of names) process.env[n] = "value-that-must-not-leak";
+      const set = withSecret("s3cret", () => checkEgressConfig(configFile));
+      expect(errors(set)).toEqual([]);
+      expect(JSON.stringify(set)).not.toContain("value-that-must-not-leak");
+    } finally {
+      names.forEach((n, i) => { if (before[i] === undefined) delete process.env[n]; else process.env[n] = before[i]; });
+    }
+  });
+
+  it("a log key file that does not exist is an error", () => {
+    const r = withSecret("s3cret", () => checkEgressConfig(egress((c) => { delete c.logFile; c.log = { url: "https://log.example", keys: ["missing-log.pub"] }; }).configFile));
+    expect(find(r, "log keys").map((f) => f.level)).toEqual(["error"]);
   });
 
   it("both logFile and log, or neither, is a log error", () => {
@@ -103,6 +165,7 @@ describe("agent-custody check on an egress witness config", () => {
     expect(isEgressConfig(fresh().configFile)).toBe(false);
     const door = egress((c) => { delete c.agents; c.origin = { url: "http://127.0.0.1:1" }; c.trustedPrincipalKeys = []; });
     expect(isEgressConfig(door.configFile)).toBe(false);
+    for (const key of ["upstream", "upstreams", "origin"]) expect(isEgressConfig(egress((c) => { c[key] = {}; }).configFile)).toBe(false);
   });
 });
 
