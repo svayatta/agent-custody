@@ -4,6 +4,7 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **A quick start for a site owner** (part of #263). [docs/door-quickstart.md](packages/receipts/docs/door-quickstart.md) runs the door in front of a stand-in site with one policy for a sign-up form, sends four arrivals (a bot that is refused and told how to pass the challenge, a bot that claims to be an agent, a person who passes Turnstile with Cloudflare's test keys, an agent with a passport), and verifies the receipts. The output on the page is from a real run. The root README, the receipts README, the door guide, and the site's Guides menu link to it. The issue stays open until three people who have not seen the repository each finish it in under fifteen minutes.
 - **`verify` says what a door receipt proves.** The report's `ISSUER` line for a door receipt read `unknown issuer kind`, because the CLI verifier had no note for `door` (#303). It now says that the arriving party could not forge the receipt and is attested only when it presented a grant, and that a request that reached the origin some other way leaves no receipt. The browser verifier had a door note that said the party could not skip the door, which holds only when the origin is reachable through the door alone; both verifiers now print the same line. `test/vectors.test.ts` fails if a kind the verifier accepts prints `unknown issuer kind`, and `site/verifier/verify-web.test.ts` fails if the two verifiers print different `ISSUER` lines for any vector.
 
 ## 0.16.3 — 2026-11-10
