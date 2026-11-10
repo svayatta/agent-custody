@@ -244,6 +244,8 @@ describe("registrations", () => {
     const usageLines = (await usageCsv.text()).trim().split("\n");
     expect(usageLines[0]).toBe("month,tenant,log_id,plan,quota,appends,total_leaves,live_tokens,disabled");
     expect(usageLines).toContain(`${month},buyer,buyer-eu,team,1000000,3,3,1,false`);
+    // in a quiet month appends and total_leaves differ, so each column is told apart from the other
+    expect(await (await call("GET", "admin/usage.csv?month=2020-01")).text()).toContain("2020-01,buyer,buyer-eu,team,1000000,0,3,1,false\n");
     expect([401, 429]).toContain((await call("GET", "admin/registrations", undefined, null)).status); // no token: refused, or throttled by the earlier wrong attempts from this address
     // the page carries the section and its numbers come from the same route
     const html = await (await call("GET", "admin")).text();
