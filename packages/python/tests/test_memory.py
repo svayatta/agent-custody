@@ -63,16 +63,19 @@ def test_a_failed_handshake_is_a_memory_error(sidecar):
     async def go():
         async with MemoryClient(sidecar["url"] + "mcp") as memory:
             await memory.read()
-    # the sidecar answers the probe with 404, not 401, so the MCP handshake runs and fails
-    with pytest.raises(MemoryError, match="refused the connection") as e:
+    # the sidecar answers the probe with 404, not 401, so the MCP handshake runs and fails; the error names the status
+    with pytest.raises(MemoryError, match=r"refused the connection: HTTP 404 \(") as e:
         run(go())
     assert e.value.__cause__ is None
 
 
-@pytest.mark.xfail(strict=True, raises=httpx.ConnectError, reason="the probe runs outside the try, so a closed port raises httpx.ConnectError")
 def test_a_closed_port_is_a_memory_error():
+    # a caller catches MemoryError for "the memory server is not there"; a raw httpx error would escape that
+    port = closed_port()
+
     async def go():
-        async with MemoryClient(f"http://127.0.0.1:{closed_port()}/mcp") as memory:
+        async with MemoryClient(f"http://127.0.0.1:{port}/mcp") as memory:
             await memory.read()
-    with pytest.raises(MemoryError, match="refused the connection"):
+    with pytest.raises(MemoryError, match=rf"memory server at http://127\.0\.0\.1:{port}/mcp could not be reached: \S") as e:
         run(go())
+    assert e.value.__cause__ is None

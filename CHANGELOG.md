@@ -4,6 +4,7 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **The Python `MemoryClient` raises `MemoryError` when the server cannot be reached** (#304). The probe that `__aenter__` sends before the MCP handshake ran outside the `try`, so a closed port raised a raw `httpx.ConnectError` that a caller catching `MemoryError` did not expect. A transport error during the probe now raises `MemoryError("memory server at <url> could not be reached: <cause>")`. When the server answers the probe but the handshake fails, the error now names the probe's HTTP status, for example `refused the connection: HTTP 404 (Session terminated)`, instead of only the transport's text. The strict `xfail` in `tests/test_memory.py` is now a passing test, and the failed-handshake test checks the status; both fail against the old code.
 ## 0.16.4 — 2026-11-10
 
 - **`check` rejects a regular file in a configured path's parent directories** (#305). `writableAncestor` in `packages/receipts/src/check.ts` walks up from a configured path (`receiptsDir`, `logFile`, `operations.database`, `approvals.usedDir`, `revokedGrants`) to the nearest one that exists. When that is a parent of the path and it is a regular file, `check` now reports a `paths` error; it used to report `ok` when the file was writable, and the gateway then failed to create the path. A configured path that already exists, such as a log file the gateway has written, still passes.
