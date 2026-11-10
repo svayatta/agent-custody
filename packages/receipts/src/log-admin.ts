@@ -93,6 +93,14 @@ export async function registrations(tenancy: PostgresTenancy, portal: PortalStor
   });
   return { month: usage.month, rows, totals: { tenants: rows.length, registered: rows.filter((r) => r.email).length, appends: rows.reduce((n, r) => n + r.appends, 0), totalLeaves: rows.reduce((n, r) => n + r.totalLeaves, 0) } };
 }
+/** One CSV cell: RFC 4180 quoting, and a text cell a spreadsheet would read as a formula gets a leading `'`. */
+export function csvCell(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  let t = String(v);
+  if (typeof v === "string" && /^[=+\-@\t\r]/.test(t)) t = `'${t}`;
+  return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+}
+
 export interface RegistrationRow { tenant: string; logId: string; plan: Plan; email: string | null; name: string | null; company: string | null; role: string | null; phone: string | null; telegram: string | null; registeredAt: string | null; billing: string | null; appends: number; quota: number | null; totalLeaves: number; liveTokens: number; disabled: boolean }
 
 export function adminRoutes(opts: AdminOptions): (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean> {
@@ -146,15 +154,14 @@ export function adminRoutes(opts: AdminOptions): (req: IncomingMessage, res: Ser
         json(200, await t.usage(month));
       } else if (req.method === "GET" && parts.length === 2 && parts[1] === "usage.csv") {
         const u = await t.usage(month);
-        const csv = ["month,tenant,log_id,plan,quota,appends,total_leaves,live_tokens,disabled", ...u.tenants.map((x) => [u.month, x.id, x.logId, x.plan, x.quota ?? "", x.appends, x.totalLeaves, x.liveTokens, x.disabled].join(","))].join("\n") + "\n";
+        const csv = ["month,tenant,log_id,plan,quota,appends,total_leaves,live_tokens,disabled", ...u.tenants.map((x) => [u.month, x.id, x.logId, x.plan, x.quota ?? "", x.appends, x.totalLeaves, x.liveTokens, x.disabled].map(csvCell).join(","))].join("\n") + "\n";
         res.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="agent-custody-usage-${u.month}.csv"`, "cache-control": "no-store" });
         res.end(csv);
       } else if (req.method === "GET" && parts.length === 2 && parts[1] === "registrations") {
         json(200, await registrations(t, opts.portal, month));
       } else if (req.method === "GET" && parts.length === 2 && parts[1] === "registrations.csv") {
         const r = await registrations(t, opts.portal, month);
-        const cell = (v: unknown) => (v === null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
-        const csv = ["month,tenant,log_id,plan,email,name,company,role,phone,telegram,registered_at,billing,appends,quota,total_leaves,live_tokens,disabled", ...r.rows.map((x) => [r.month, x.tenant, x.logId, x.plan, x.email, x.name, x.company, x.role, x.phone, x.telegram, x.registeredAt, x.billing, x.appends, x.quota, x.totalLeaves, x.liveTokens, x.disabled].map(cell).join(","))].join("\n") + "\n";
+        const csv = ["month,tenant,log_id,plan,email,name,company,role,phone,telegram,registered_at,billing,appends,quota,total_leaves,live_tokens,disabled", ...r.rows.map((x) => [r.month, x.tenant, x.logId, x.plan, x.email, x.name, x.company, x.role, x.phone, x.telegram, x.registeredAt, x.billing, x.appends, x.quota, x.totalLeaves, x.liveTokens, x.disabled].map(csvCell).join(","))].join("\n") + "\n";
         res.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="agent-custody-registrations-${r.month}.csv"`, "cache-control": "no-store" });
         res.end(csv);
       } else if (req.method === "GET" && parts.length === 2 && parts[1] === "audit") {
@@ -170,6 +177,7 @@ export function adminRoutes(opts: AdminOptions): (req: IncomingMessage, res: Ser
       } else if (req.method === "POST" && parts.length === 2 && parts[1] === "tenants") {
         const b = await body();
         if (typeof b.id !== "string" || !/^[A-Za-z0-9_.-]+$/.test(b.id)) return json(400, { error: "id must be a plain identifier" }), true;
+        if (b.logId !== undefined && b.logId !== "" && (typeof b.logId !== "string" || !/^[A-Za-z0-9_.-]+$/.test(b.logId))) return json(400, { error: "logId must be a plain identifier" }), true;
         json(200, await t.addTenant(b.id, typeof b.logId === "string" && b.logId ? b.logId : b.id, actor));
       } else if (req.method === "POST" && parts.length === 4 && parts[1] === "tenants" && parts[3] === "plan") {
         const b = await body();
