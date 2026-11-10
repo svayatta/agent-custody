@@ -322,7 +322,9 @@ describe("verification and refusals, against plain fake clients", () => {
 
   it("zep verifyDeleted is false while an edge still cites the episode, and true once nothing does", async () => {
     let edges = [{ uuid: "edge-1", fact: "acct:1 is on pro", episodes: ["ep_0", "ep_1"] }];
-    const store = zepStore({ graph: { add: async () => ({ uuid: "x" }), episode: { delete: async () => ({}) }, search: async () => ({ edges }) } }, { graphId: "g1" });
+    // The graph g1 indexes the entry's text only. Any other graph, user, query or a zero limit finds nothing.
+    const search: NonNullable<ZepLike["graph"]["search"]> = async (r) => (r.graphId === "g1" && r.userId === undefined && r.query === entry.text ? { edges: edges.slice(0, r.limit) } : {});
+    const store = zepStore({ graph: { add: async () => ({ uuid: "x" }), episode: { delete: async () => ({}) }, search } }, { graphId: "g1" });
     expect(await store.verifyDeleted!(entry)).toBe(false);
     edges = [{ uuid: "edge-1", fact: "acct:1 is on pro", episodes: ["ep_0"] }];
     expect(await store.verifyDeleted!(entry)).toBe(true);

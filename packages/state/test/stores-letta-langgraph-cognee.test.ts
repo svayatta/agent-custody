@@ -15,7 +15,7 @@ import { Letta } from "@letta-ai/letta-client";
 import { InMemoryStore } from "@langchain/langgraph";
 import { Ledger, type Fact } from "../src/ledger.ts";
 import { createMemoryServer } from "../src/server.ts";
-import { cogneeStore, langgraphStore, lettaStore, type LangGraphStoreLike, type LettaLike } from "../src/stores.ts";
+import { cogneeStore, langgraphStore, lettaStore, type LettaLike } from "../src/stores.ts";
 
 interface Seen { method: string; path: string; body: string; headers: Record<string, string | string[] | undefined> }
 function fake(routes: (req: Seen) => { status: number; body: unknown } | undefined): Promise<{ url: string; seen: Seen[]; close(): void; fail: { on: boolean } }> {
@@ -335,12 +335,16 @@ describe("verifyDeleted and listing edges, against plain fake clients", () => {
   const letta = (passages: Partial<LettaLike["agents"]["passages"]>): LettaLike => ({ agents: { passages: { create: async () => [], delete: async () => ({}), ...passages } } });
 
   it("letta verifyDeleted is false while search returns the passage by id or by text, and true once it returns neither", async () => {
-    let results: { id: string; content: string }[] = [{ id: "id-1", content: "other" }];
-    const store = lettaStore(letta({ search: async () => ({ results }) }), { agentId: "a" });
+    let passages = [{ id: "id-1", content: "other", tags: ["fact:fact-1"] }, { id: "id-1", content: entry.text, tags: ["fact:fact-2"] }];
+    // Agent a indexes the entry's text only, and a passage matches by its tags.
+    const search: NonNullable<LettaLike["agents"]["passages"]["search"]> = async (agentId, q) => ({
+      results: agentId === "a" && q.query === entry.text ? passages.filter((p) => (q.tag_match_mode === "all" ? q.tags!.every((t) => p.tags.includes(t)) : q.tags!.some((t) => p.tags.includes(t)))) : [],
+    });
+    const store = lettaStore(letta({ search }), { agentId: "a" });
     expect(await store.verifyDeleted!(entry)).toBe(false);
-    results = [{ id: "id-9", content: entry.text }];
+    passages = [{ id: "id-9", content: entry.text, tags: ["fact:fact-1"] }];
     expect(await store.verifyDeleted!(entry)).toBe(false);
-    results = [{ id: "id-9", content: "other" }];
+    passages = [{ id: "id-9", content: "other", tags: ["fact:fact-1"] }, { id: "id-1", content: entry.text, tags: ["fact:fact-2"] }];
     expect(await store.verifyDeleted!(entry)).toBe(true);
   });
 
@@ -363,30 +367,40 @@ describe("verifyDeleted and listing edges, against plain fake clients", () => {
   });
 
   it("langgraph verifyDeleted is false while get or search finds the item, and true once neither does", async () => {
-    let item: Awaited<ReturnType<LangGraphStoreLike["get"]>> = { key: "id-1", value: {} };
-    let hits: Awaited<ReturnType<NonNullable<LangGraphStoreLike["search"]>>> = [];
-    const base = { put: async () => {}, get: async () => item, delete: async () => {} };
-    const store = langgraphStore({ ...base, search: async () => hits }, { namespace: ["m"] });
+    const mem = new InMemoryStore();
+    for (let i = 0; i < 12; i++) await mem.put(["m"], `other-${i}`, { factId: `fact-x${i}` });
+    await mem.put(["m"], "id-1", { factId: "fact-1" });
+    await mem.put(["n"], "id-1", { factId: "fact-1" });
+    const base = { put: mem.put.bind(mem), get: mem.get.bind(mem), delete: mem.delete.bind(mem) };
+    expect(await langgraphStore(base, { namespace: ["m"] }).verifyDeleted!(entry)).toBe(false);
+    // get lags behind the delete here, so only search can see the item.
+    const store = langgraphStore({ ...base, get: async () => null, search: mem.search.bind(mem) }, { namespace: ["m"] });
     expect(await store.verifyDeleted!(entry)).toBe(false);
-    item = null;
-    hits = [{ key: "id-1", namespace: ["m"], value: {} }];
-    expect(await store.verifyDeleted!(entry)).toBe(false);
-    hits = [{ key: "id-2", namespace: ["m"], value: {} }];
+    await mem.delete(["m"], "id-1");
     expect(await store.verifyDeleted!(entry)).toBe(true);
-    expect(await langgraphStore(base, { namespace: ["m"] }).verifyDeleted!(entry)).toBe(true);
+    expect(await langgraphStore({ ...base, get: async () => null }, { namespace: ["m"] }).verifyDeleted!(entry)).toBe(true);
   });
 
   const cognee = (items: unknown[], env: Record<string, string | undefined> = {}, tokenEnv?: string) => {
     const seen: RequestInit[] = [];
-    const fetch = (async (_url: URL, init: RequestInit) => {
+    const fetch = (async (url: URL, init: RequestInit) => {
       seen.push(init);
-      return new Response(init.method === "GET" ? JSON.stringify(items) : "");
+      if (init.method !== "GET") return new Response("");
+      return url.pathname === "/api/v1/datasets/ds-1/data" ? new Response(JSON.stringify(items)) : new Response("not found", { status: 404 });
     }) as typeof globalThis.fetch;
     return { seen, store: cogneeStore({ url: "http://cognee.invalid", datasetId: "ds-1", fetch, env, ...(tokenEnv ? { tokenEnv } : {}) }) };
   };
 
   it("cognee verifyDeleted is false while the dataset lists an item with the fact id under another id, and true once it is gone", async () => {
     const items = [{ id: "data-7", external_metadata: { source: "agent-custody", factId: "fact-1" } }];
+    const { store } = cognee(items);
+    expect(await store.verifyDeleted!(entry)).toBe(false);
+    items.length = 0;
+    expect(await store.verifyDeleted!(entry)).toBe(true);
+  });
+
+  it("cognee verifyDeleted is false while the dataset lists an item under the same id, and true once it is gone", async () => {
+    const items = [{ id: "id-1", external_metadata: { source: "agent-custody", factId: "fact-other" } }];
     const { store } = cognee(items);
     expect(await store.verifyDeleted!(entry)).toBe(false);
     items.length = 0;
