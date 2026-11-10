@@ -4,6 +4,7 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **The portal and the A2A gateway keep internal error text from the client** (#302). The portal's catch-all answered every exception with `500 { error: e.message }`, so a body that was too large or not JSON got a 500, and server-side text, database errors included, reached the browser. The gateway's A2A server put the exception text into its JSON-RPC error the same way. The portal now answers a body over 64 KB with 413, a write without the JSON content type or with a body that does not parse with 400, and any other failure with `500 { "error": "internal error" }`, logging the method, path, and stack. The A2A server answers `-32603` with the message `internal error` and logs the cause, as it already did. `test/portal.test.ts` and `test/a2a.test.ts` replace the tests that pinned the old answers; they fail against the old code.
 ## 0.16.4 — 2026-11-10
 
 - **`check` rejects a regular file in a configured path's parent directories** (#305). `writableAncestor` in `packages/receipts/src/check.ts` walks up from a configured path (`receiptsDir`, `logFile`, `operations.database`, `approvals.usedDir`, `revokedGrants`) to the nearest one that exists. When that is a parent of the path and it is a regular file, `check` now reports a `paths` error; it used to report `ok` when the file was writable, and the gateway then failed to create the path. A configured path that already exists, such as a log file the gateway has written, still passes.
