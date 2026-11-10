@@ -249,6 +249,8 @@ execution       observed    denied: (reason withheld under the capture rule)
 
 The pass run's receipt records `challenge.outcome: "passed"`, and the door relayed the request. The fail run's receipt records `challenge.outcome: "failed"` with Cloudflare's code `invalid-input-response`, and the policy refused the request. The token does not appear in either receipt.
 
+**What this run shows, and what it does not.** Test keys prove the wire path, not bot detection. The door reaches the real `siteverify`, sends the secret and the token, and records the answer. A test secret gives a fixed answer and no widget runs, so the run says nothing about how well Turnstile tells a person from a bot. The run did not exercise the `unavailable` outcome, a hostname mismatch, an action mismatch, the `timeout-or-duplicate` code, or `remoteip` (the config sets no `trustProxy`, so the door sent none). `test/door.test.ts` covers those against a stubbed `siteverify`. In the output above, the two `sha256` digests are shortened to eight characters and `…`. Nothing else is changed. The CLI was `agent-custody` 0.16.2, run from this repository at commit `64285ef`.
+
 ## How an arrival becomes a Cedar request
 
 | Cedar slot | value |
