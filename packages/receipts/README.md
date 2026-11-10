@@ -35,6 +35,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [Receipts on a pull request](docs/github-action.md): the GitHub Action that verifies a directory of receipt bundles and posts one table on the pull request, the workflow file to copy, the `export` command that copies the receipts into the branch, and why a committed receipt publishes the call unless a capture rule withholds it
 - [Completeness](docs/completeness.md): an auditor's read-only key lists the provider's objects and matches each to a verified receipt, so an action taken outside the gateway shows up
 - [Payment mandates and agent identity](docs/mandates.md): the design for fitting grants and receipts to Google's AP2 mandates, Visa's Trusted Agent Protocol and Mastercard Agent Pay; not yet built
+- [Attested gateway keys](docs/attestation.md): the gateway's key made in memory and bound by platform evidence to the measured image, the `attested build` check from a receipt to a release digest, the simulated provider for local tests, Confidential Space as the first real provider and why, and what this first slice does not prove yet
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
 - [What a receipt costs](docs/performance.md): each step of the issuer's hot path in microseconds, measured with `bun run bench`, what is and is not fsynced, and where the time goes
 - [Aligning with IETF SCITT](docs/scitt.md): the receipt as a SCITT signed statement, the log as a transparency service, our RFC 9162 proofs as COSE Receipts (RFC 9942), what differs and the options for each, an agent-action profile, and the steps toward the working group
@@ -247,7 +248,7 @@ const refund = issuer.wrap("stripe.refund", async (args: { amount: number }) => 
 | facts the policy relied on were not asserted by the agent | anyone reading the receipt | agent | facts fetched by the gateway, recorded with their own digests, labelled `observed` | done |
 | the side effect was committed to the log before it happened | anyone with a log copy | operator, log outage | for tools in `precommit`, or every tool under `strict`, a signed authorization logged first, embedded in the receipt with its leaf position, checked to precede the receipt | done |
 | the upstream system actually executed the action | anyone with the upstream's key or the provider's secret | operator | the upstream signs its result for the receipt, or the provider's own delivery signature (Stripe, GitHub) is embedded and checked | done, for upstreams that sign |
-| the operator itself cannot mint a false receipt | regulator, counterparty | operator | needs a TEE gateway with an attested build ([#179](https://github.com/svayatta/agent-custody/issues/179)), and the provider's own records to catch actions outside the gateway ([#178](https://github.com/svayatta/agent-custody/issues/178)) | **not done** |
+| the operator itself cannot mint a false receipt | regulator, counterparty | operator | needs a TEE gateway with an attested build ([#179](https://github.com/svayatta/agent-custody/issues/179)), and the provider's own records to catch actions outside the gateway ([#178](https://github.com/svayatta/agent-custody/issues/178)). A first slice, an attested key and the `attested build` check ([docs/attestation.md](docs/attestation.md)), has not yet run on hardware, and TLS does not end in the enclave | **not done** |
 | which model produced the call | anyone | operator | no hosted provider signs model identity | **not possible today**, labelled `claimed` |
 | an SDK receipt reflects what the tool really did | anyone | agent's own process | none; the SDK shares a process with the agent | **by design not claimed**; issuer kind `sdk` says so |
 
@@ -280,6 +281,7 @@ src/opa-server.ts  an OPA server's Data API as the policy, with bundle revisions
 src/simulate.ts    replay recorded policy decisions against a proposed Cedar or Rego policy, grouped changes and run digest
 src/delegation.ts  signed delegation grants
 src/approval.ts    exact-action human approvals, distinct trusted signatures, persistent single-use consumption
+src/attestation.ts attested gateway keys: the provider interface, the simulated and Confidential Space providers, the logged attestation statement, and the checks from a receipt key to a release digest
 src/receipt.ts     receipt and authorization statement types and provenance labels
 src/issue.ts       sign, log, and write a receipt, or commit an authorization first; shared by every producer
 src/gateway.ts     the MCP proxy: a host (key, policy, upstreams, log) and a session per grant; scope check, facts, policy, forward, receipt
@@ -299,7 +301,7 @@ src/rest.ts        the REST connector: an HTTP API described as tools, standing 
 src/a2a.ts         agents delegating to agents: a remote A2A agent as an upstream, and the gateway serving A2A itself in front of it
 src/upstream.ts    attested execution: an upstream signs its result for the receipt; the verifier checks it with the upstream key
 src/capture.ts     private evidence: per-tool capture rules applied by the issuer to the whole statement, withheld values as salted commitments or encrypted under the customer's key, restore and reveal
-vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them
+vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them, and `bun run vectors:attestation` regenerates attestation.json
 src/verify.ts      offline verification, the human-readable report, and the audit that a later log extends an earlier one
 src/claude-init.ts `init claude-code`: the agent key, the observe-mode config, the starter policy, and the three hooks merged into the settings file with absolute paths
 src/deny-report.ts `report`: verifies the receipts of an SDK config and lists the calls the policy would have denied
@@ -308,11 +310,11 @@ src/cli.ts         keygen, grant, gateway, door, egress, egress draft-policy, ac
 src/retention.ts   pruning the log: leaves become their hashes, bundles are removed, proofs survive
 src/index.ts       the package's public surface; adapters are exported on ./sdk/<framework> subpaths
 tsconfig.build.json  emits dist/ (JavaScript plus declarations) for consumers; the repo itself runs the .ts directly
-scripts/           fake Stripe upstream (signs its results with --key), a second fake upstream, fixture builders for gateway, SDK, door (with a stand-in origin), and the egress witness (with a stand-in destination), the replay builder (`replay.ts`: example 27 and state example 07 as a folder of receipts and public keys anyone can verify with the published packages), demo, the site's numbers (`bench.ts`), and the per-step hot-path benchmark (`hot-path-bench.ts`, `bun run bench`)
+scripts/           fake Stripe upstream (signs its results with --key), a second fake upstream, fixture builders for gateway, SDK, door (with a stand-in origin), and the egress witness (with a stand-in destination), the replay builder (`replay.ts`: example 27 and state example 07 as a folder of receipts and public keys anyone can verify with the published packages), demo, the site's numbers (`bench.ts`), the per-step hot-path benchmark (`hot-path-bench.ts`, `bun run bench`), a TEST certificate chain and tokens for the attestation checks (`test-pki.ts`, `attestation-vectors.ts`), and the call that `deploy/gateway/tee/local-simulated.sh` makes (`tee-local-call.ts`)
 examples/          runnable tutorials, plus examples/languages/: Python, Go, Java, and Rust clients of the sidecar, run by the test suite, one per aspect; each is run by the test suite
 test/              unit tests per module, end-to-end gateway test, SDK and hook tests,
                    adapter tests against the real packages, and tests that run every policy in docs/policies.md and site/guide/egress-policies.md
-docs/              tutorials, usage (gateway), codex-recovery (live demo), approvals, sdk, policies, verification, performance
+docs/              tutorials, usage (gateway), codex-recovery (live demo), approvals, sdk, policies, verification, performance, attestation
 ```
 
 ## Plan
@@ -384,7 +386,7 @@ The first three close the gap between a log the operator cannot rewrite and a re
 
 1. Run the anchor for log.agent-custody.dev on mainnet: a funded key held only by the anchor service on the host, its records served beside the checkpoints, its address and each tenant's log id published in the welcome sheet and on the security page, and the monitor checking it. The code is done. [Issue #176](https://github.com/svayatta/agent-custody/issues/176).
 2. Completeness beyond Stripe: the same check over GitHub's actions, and over on-chain transfers out of an agent's wallet, where the chain itself lists every transfer. [Issue #178](https://github.com/svayatta/agent-custody/issues/178).
-3. A TEE gateway: a confidential container with a reproducible, attested build, the signing key generated and kept in the enclave, TLS ending inside it, and both verifiers checking the path from the receipt key, through the attestation, to the release. It replaces the TEE-hosted signer planned before. [Issue #179](https://github.com/svayatta/agent-custody/issues/179).
+3. A TEE gateway: a confidential container with a reproducible, attested build, the signing key generated and kept in the enclave, TLS ending inside it, and both verifiers checking the path from the receipt key, through the attestation, to the release. It replaces the TEE-hosted signer planned before. A first slice is written: the attested key, the simulated and Confidential Space providers, and the `attested build` check in the reference and browser verifiers ([docs/attestation.md](docs/attestation.md)). Still to do: a first run on a Confidential Space VM, TLS ending in the enclave, reproducible builds, strict mode forced, the Python verifier, and Nitro. [Issue #179](https://github.com/svayatta/agent-custody/issues/179).
 4. Run the witness for log.agent-custody.dev on a machine and under an account that is not ours, and require it in the welcome sheet. The code is done; what it needs is a second operator. [Issue #116](https://github.com/svayatta/agent-custody/issues/116).
 5. Post-quantum signatures: ML-DSA beside Ed25519 in the same DSSE envelope, hybrid by default when a PQ key is present, in every signed artefact and in the browser verifier. [Issue #11](https://github.com/svayatta/agent-custody/issues/11).
 6. Receiver attestation for agent-to-agent calls: the delegate signs its answer for the receipt, as a signing upstream does today.

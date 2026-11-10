@@ -26,7 +26,8 @@ A separate process between the agent and its tools. The agent connects to it as 
 
 | field | type | meaning |
 | --- | --- | --- |
-| `identity.keyFile` | path | the gateway's Ed25519 private key; signs every receipt. From `agent-custody keygen` |
+| `identity.keyFile` | path, *optional* | the gateway's Ed25519 private key; signs every receipt. From `agent-custody keygen`. Absent when `attestation` is set; one of the two is required |
+| `attestation` | object, *optional* | an attested key in place of the key file: made in memory at start, never written, bound to the workload by platform evidence, logged once, and named on every receipt as `issuer.attestation`. `{ "provider": "simulated", "imageDigestEnv"?: "AGENT_CUSTODY_IMAGE_DIGEST" }` runs anywhere and proves nothing about hardware; `{ "provider": "gcp-confidential-space", "audience"?: "https://agent-custody.dev/attestation" }` asks the Confidential Space launcher for a PKI token. See [attested gateway keys](https://agent-custody.dev/receipts/attestation) |
 | `upstream` | one of four shapes | `{ command, args?, env? }` spawns an MCP server over stdio; `{ url, tokenEnv? }` connects to an MCP server over Streamable HTTP with a bearer token from the environment; `{ rest: {...} }` describes a plain HTTP API as tools; `{ a2a: {...} }` is another agent reached over the A2A protocol, both below |
 | `upstreams` | array of the above, each with `name` | several upstreams behind one gateway; each tool name must belong to exactly one, checked at startup. Exactly one of `upstream` or `upstreams` |
 | `grantFile` | path, *optional* | the signed delegation the stdio gateway serves. Not needed over HTTP, where each connection presents its own |
@@ -193,6 +194,7 @@ agent-custody gateway --config gateway.json --http --port 8790 --host 127.0.0.1 
 | `POST /mcp` | MCP Streamable HTTP. The first request of a session must be `initialize` with the grant; the response carries `mcp-session-id`, sent back on every later request |
 | `GET /mcp`, `DELETE /mcp` | the session's event stream and its termination, per the MCP transport |
 | `GET /health` | `{ "ok": true, "sessions": 2, "keyid": "9d44…", "pendingReceipts": 0 }`; `pendingReceipts` counts the receipts in the outbox that the log has not taken yet |
+| `GET /attestation` | the attestation bundle of an attested key, `{ envelope, treeHead, inclusion }`, as logged at start; `404` when the key is a key file |
 
 A grant signed by a stranger, an expired one, or none gets `403` with the reason in a JSON-RPC error body, for example `{ "jsonrpc": "2.0", "error": { "code": -32000, "message": "delegation grant rejected: no trusted key matches keyids [19b2…]" }, "id": null }`. Sessions share the upstreams, the policy, the key, and the log; each has its own tools, its own receipts, and its own consumed facts. Idle sessions close after `--idle-minutes`.
 

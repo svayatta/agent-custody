@@ -66,8 +66,12 @@ export interface ReconciliationEvidence {
 export interface ReceiptPredicate {
   receiptId: string;
   timestamp: string;
-  /** `strict` is the gateway's own statement that it ran in strict mode: every call precommitted to a remote, hash-only log, and no outbox */
-  issuer: { kind: IssuerKind; keyid: string; version: string; framework?: string; strict?: boolean };
+  /**
+   * `strict` is the gateway's own statement that it ran in strict mode: every call precommitted to a remote, hash-only log, and no outbox.
+   * `attestation` is the sha256 of the canonical attestation envelope for this key, logged once when the key was made: a verifier given
+   * that attestation and a release digest checks the key was made inside that build.
+   */
+  issuer: { kind: IssuerKind; keyid: string; version: string; framework?: string; strict?: boolean; attestation?: string };
   principal: { id: string; keyid: string; provenance: "attested" } | { id: string | null; provenance: "claimed" };
   agent: { id: string; provenance: Provenance };
   /** Present on gateway receipts. Absent when the issuer had no signed grant to check against. */

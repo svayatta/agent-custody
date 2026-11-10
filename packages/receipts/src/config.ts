@@ -150,8 +150,19 @@ export function strictRefusals(c: { logFile?: string | undefined; log?: { hashOn
   return out;
 }
 
+/**
+ * An attested key: generated in the process at start, never written, and bound to the workload by the platform's evidence.
+ * `simulated` runs anywhere and proves nothing about hardware; `gcp-confidential-space` asks the Confidential Space launcher.
+ */
+const AttestationSchema = z.discriminatedUnion("provider", [
+  z.object({ provider: z.literal("simulated"), /** the environment variable holding the image digest the simulation claims */ imageDigestEnv: z.string().min(1).default("AGENT_CUSTODY_IMAGE_DIGEST") }),
+  z.object({ provider: z.literal("gcp-confidential-space"), audience: z.string().min(1).max(512).default("https://agent-custody.dev/attestation") }),
+]);
+
 export const GatewayConfigSchema = z.object({
-  identity: z.object({ keyFile: z.string() }),
+  /** the signing key file; absent when `attestation` is set, because an attested key never exists outside the process */
+  identity: z.object({ keyFile: z.string().optional() }),
+  attestation: AttestationSchema.optional(),
   /** the upstream: an MCP server to spawn over stdio, an MCP URL to reach over Streamable HTTP with an optional bearer token from the environment, or a REST API described as tools */
   upstream: UpstreamSchema.optional(),
   /** several upstreams behind one gateway and one grant; each tool name must belong to exactly one of them */
@@ -207,6 +218,7 @@ export const GatewayConfigSchema = z.object({
   otel: OtelSchema.optional(),
   splunk: SplunkSchema.optional(),
 }).refine(hasOneLog, oneLog).refine((c) => (c.upstream ? 1 : 0) + (c.upstreams ? 1 : 0) === 1, { message: "exactly one of upstream or upstreams is required" })
+  .refine((c) => !!c.identity.keyFile !== !!c.attestation, { message: "exactly one of identity.keyFile or attestation is required: an attested key is generated in the process and never read from a file" })
   .refine((c) => (c.policyFile ? 1 : 0) + (c.opa ? 1 : 0) === 1, { message: "exactly one of policyFile or opa is required" })
   // a key fetched from the log itself proves nothing about a log that is dishonest from the start, so a remote log that
   // gates consequential calls must have its keys pinned in the config (issue #99)
@@ -224,7 +236,7 @@ export function loadConfig(path: string): GatewayConfig {
   const r = (p: string) => resolve(base, p);
   return {
     ...cfg,
-    identity: { keyFile: r(cfg.identity.keyFile) },
+    identity: cfg.identity.keyFile ? { keyFile: r(cfg.identity.keyFile) } : {},
     ...(cfg.grantFile ? { grantFile: r(cfg.grantFile) } : {}),
     trustedPrincipalKeys: cfg.trustedPrincipalKeys.map(r),
     ...(cfg.policyFile ? { policyFile: r(cfg.policyFile) } : {}),

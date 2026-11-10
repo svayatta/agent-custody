@@ -2,6 +2,7 @@
 import { internalAddress, isAddressLiteral, sameAddress } from "./addresses.ts";
 import { canonicalize, digestOf, dsseVerifiers, dsseVerify, type Envelope, type PublicKeyRef } from "./crypto.ts";
 import { isApprovalTime, verifyApproval, verifyApprovalStatement } from "./approval.ts";
+import { verifyAttestation, type AttestationVerifyOptions } from "./attestation.ts";
 import { digestSaltFor, getAt, isCommitment, pathKey, pathText, restorePaths, under, type How } from "./capture.ts";
 import { delegationHasParent, delegationValidAt, describeChain, verifyDelegation } from "./delegation.ts";
 import { leafHash, MerkleLog, verifyConsistency, verifyInclusion } from "./log.ts";
@@ -40,6 +41,11 @@ export interface VerifyOptions {
   disclosed?: Record<string, unknown> & { receiptId?: string };
   /** the customer's capture key: encrypted fields are revealed and the digests recomputed */
   captureKey?: Buffer;
+  /**
+   * The issuer key's attestation and the release it must be: the attested key joins the issuer keys, and `attested build`
+   * passes only when the receipt is signed by that key, names that attestation, and the measured image is the release.
+   */
+  attestation?: AttestationVerifyOptions;
 }
 
 export interface VerifyResult {
@@ -170,13 +176,18 @@ export function structuralProblem(p: unknown): string | null {
   return null;
 }
 
-export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): VerifyResult {
+export function verifyBundle(bundle: ReceiptBundle, given: VerifyOptions): VerifyResult {
   const checks: Check[] = [];
   const add = (name: string, ok: boolean, detail?: string) => {
     checks.push(detail === undefined ? { name, ok } : { name, ok, detail });
     return ok;
   };
   const done = (statement: ReceiptStatement | null): VerifyResult => ({ ok: checks.every((c) => c.ok), checks, statement });
+
+  // An attested key is trusted for this receipt only through its attestation; its checks come first so a refusal names them.
+  const attested = given.attestation ? verifyAttestation(given.attestation, given.logKeys ?? []) : null;
+  if (attested) for (const c of attested.checks) checks.push(c);
+  const opts: VerifyOptions = attested?.key ? { ...given, issuerKeys: [...given.issuerKeys, attested.key] } : given;
 
   const sig = dsseVerify(bundle.envelope, opts.issuerKeys);
   if (!sig.ok) {
@@ -189,6 +200,10 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   const broken = structuralProblem(st.predicate);
   if (!add("structural parts in clear", !broken, broken ?? undefined)) return done(null);
   const p = st.predicate;
+  if (attested) {
+    add("receipt signed by the attested key", sig.keyid === attested.keyid, sig.keyid === attested.keyid ? `keyid ${short(sig.keyid)}` : `signed by ${short(sig.keyid)}, the attestation is for ${attested.keyid ? short(attested.keyid) : "no key"}`);
+    add("receipt names the attestation", p.issuer.attestation === attested.digest, typeof p.issuer.attestation === "string" ? `attestation ${short(p.issuer.attestation)}` : "the receipt names no attestation");
+  }
 
   add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk" || p.issuer.kind === "door" || p.issuer.kind === "egress" || p.issuer.kind === "guardian", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
   add("issuer keyid matches signer", p.issuer.keyid === sig.keyid);
@@ -577,6 +592,10 @@ export function formatReport(r: VerifyResult): string {
   const p = r.statement.predicate;
   lines.push("");
   lines.push(`ISSUER: ${p.issuer.kind}${p.issuer.framework ? ` (${p.issuer.framework})` : ""}${p.issuer.strict ? ", strict mode" : ""}, ${ISSUER_NOTE[p.issuer.kind] ?? "unknown issuer kind"}`);
+  if (typeof p.issuer.attestation === "string") {
+    const built = r.checks.find((c) => c.name === "attested build");
+    lines.push(`ATTESTATION: ${short(p.issuer.attestation)}, ${!built ? "not checked; pass the attestation and the release digest" : built.ok ? (built.detail?.startsWith("SIMULATED") ? "attested build, SIMULATED: no hardware evidence" : "attested build of the given release") : "attested build FAILED"}`);
+  }
   lines.push("");
   lines.push("field           provenance  value");
   const row = (f: string, prov: string, v: unknown) => lines.push(`${f.padEnd(15)} ${prov.padEnd(11)} ${typeof v === "string" ? v : JSON.stringify(v)}`);
