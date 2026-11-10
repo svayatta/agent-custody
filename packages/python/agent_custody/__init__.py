@@ -11,6 +11,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 from typing import Any, Callable, Dict, Optional
 
 __all__ = ["Client", "PolicyDeniedError", "SidecarError", "receipt_id_of"]
@@ -43,6 +44,12 @@ class PolicyDeniedError(PermissionError):
 def denies(policy: Optional[Dict[str, Any]]) -> bool:
     """True when a decision is a deny that must be enforced. A deny made in observe mode carries enforced=False: recorded, not acted on."""
     return bool(policy) and policy["decision"] == "deny" and policy.get("enforced", True) is not False
+
+
+def _shown(url: str) -> str:
+    """The URL for an error message: no user, password, query, or fragment."""
+    p = urlsplit(url)
+    return urlunsplit((p.scheme, p.netloc.rpartition("@")[2], p.path, "", ""))
 
 
 def no_receipt(e: BaseException) -> str:
@@ -93,9 +100,9 @@ class Client:
                 detail = ""
             raise SidecarError(f"sidecar {path}: {e.code} {detail}".strip(), "status", e.code) from None
         except urllib.error.URLError as e:
-            raise SidecarError(f"sidecar unreachable at {self.url}: {e.reason}", "unreachable") from None
+            raise SidecarError(f"sidecar unreachable at {_shown(self.url)}: {e.reason}", "unreachable") from None
         except OSError as e:
-            raise SidecarError(f"sidecar unreachable at {self.url}: {e}", "unreachable") from None
+            raise SidecarError(f"sidecar unreachable at {_shown(self.url)}: {e}", "unreachable") from None
         try:
             return json.loads(raw)
         except ValueError:

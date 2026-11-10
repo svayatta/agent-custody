@@ -143,7 +143,7 @@ export function createSdkIssuer(cfg: SdkConfig): SdkIssuer {
  */
 export function noReceipt(e: unknown): string {
   console.error(`agent-custody: no receipt: ${e instanceof Error ? e.message : String(e)}`);
-  return e instanceof SyntaxError || e instanceof TypeError ? "no receipt: the receipt could not be read" : "no receipt: the log did not take the receipt";
+  return "no receipt: the receipt could not be recorded";
 }
 
 export function receiptIdOf(bundle: ReceiptBundle): string {

@@ -65,7 +65,7 @@ Claude Code writes the hook event as JSON on stdin. The fields the handler reads
 | event | what the handler does | stdout |
 | --- | --- | --- |
 | `PreToolUse`, policy denies | issues a **denied** receipt, blocks the call | `{ "continue": true, "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "agent-custody denied this call: terraform destroy deletes infrastructure (rule policy5, receipt 47eb52af-…)" } }` |
-| `PreToolUse`, policy denies, the receipt cannot be recorded | blocks the call; prints the error on stderr | the same, with `(no receipt: the log did not take the receipt)` in the reason. The reason names the kind of failure only: the error can carry a log URL with credentials or the log's answer, and the reason reaches the model |
+| `PreToolUse`, policy denies, the receipt cannot be recorded | blocks the call; prints the error on stderr | the same, with `(no receipt: the receipt could not be recorded)` in the reason. The reason names the kind of failure only: the error can carry a log URL with credentials or the log's answer, and the reason reaches the model |
 | `PreToolUse`, policy allows or none | nothing | `{}`: Claude Code's own permission prompts still apply; the hook never auto-approves |
 | `PostToolUse` | issues an **executed** receipt with `tool_response` as the result | `{}` |
 | `PostToolUseFailure` | issues a **failed** receipt with the error as the result | `{}` |

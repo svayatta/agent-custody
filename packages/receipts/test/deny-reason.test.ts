@@ -31,22 +31,24 @@ const adapters: Record<string, (issuer: SdkIssuer) => Promise<string>> = {
 const issuer = createSdkIssuer(loadSdkConfig(buildSdkFixture(mkdtempSync(join(tmpdir(), "deny-reason-"))).configFile));
 // the remote log sink, refusing the append the way a real log does, with a URL that carries credentials
 const refusingLog = httpLog("https://admin:s3cr3t@log.example/?token=t0k3n", { fetch: async () => new Response("upstream said t0k3n", { status: 400 }) });
-const failures: Record<string, { record: SdkIssuer["record"]; why: string; logged: string }> = {
-  "the log refuses the receipt": { record: () => refusingLog.append("{}") as unknown as Promise<ReceiptBundle>, why: "the log did not take the receipt", logged: "upstream said t0k3n" },
-  "the receipt cannot be read": { record: async () => ({ envelope: { payload: Buffer.from("s3cr3t").toString("base64") } }) as unknown as ReceiptBundle, why: "the receipt could not be read", logged: "agent-custody: no receipt:" },
+const failures: Record<string, { record: SdkIssuer["record"]; why: string; logged: string; notLogged: string[] }> = {
+  "the log refuses the receipt": { record: () => refusingLog.append("{}") as unknown as Promise<ReceiptBundle>, why: "the receipt could not be recorded", logged: "log https://log.example/ refused the append", notLogged: ["admin", "s3cr3t", "token="] },
+  "the receipt cannot be read": { record: async () => ({ envelope: { payload: Buffer.from("s3cr3t").toString("base64") } }) as unknown as ReceiptBundle, why: "the receipt could not be recorded", logged: "agent-custody: no receipt:", notLogged: [] },
 };
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("a deny reason without a receipt", () => {
   for (const [adapter, reasonOf] of Object.entries(adapters)) {
-    for (const [failure, { record, why, logged }] of Object.entries(failures)) {
+    for (const [failure, { record, why, logged, notLogged }] of Object.entries(failures)) {
       it(`${adapter}: ${failure}: names the failure, keeps secrets out, and reports the error on stderr`, async () => {
         const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
         const reason = await reasonOf({ ...issuer, record });
         expect(reason).toMatch(new RegExp(`no permit policy matched \\(no receipt: ${why}\\)$`));
         expect(SECRETS.filter((s) => reason.includes(s))).toEqual([]);
-        expect(stderr.mock.calls.flat().join("\n")).toContain(logged);
+        const err = stderr.mock.calls.flat().join("\n");
+        expect(err).toContain(logged);
+        expect(notLogged.filter((s) => err.includes(s))).toEqual([]); // the log URL is shown without its credentials
       });
     }
   }

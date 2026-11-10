@@ -35,9 +35,15 @@ class CustodyTool(BaseTool):
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:
         recorded: Dict[str, Any] = dict(kwargs) if kwargs else ({"input": args[0]} if len(args) == 1 else {"input": list(args)} if args else {})
-        policy = self._client.decide(self.name, recorded)
-        if denies(policy):
-            reason = "; ".join(policy["reasons"] + policy["errors"]) or "no permit policy matched"
+        try:
+            policy = self._client.decide(self.name, recorded)
+            if policy is not None and (not isinstance(policy, dict) or policy.get("decision") not in ("allow", "deny")):
+                raise ValueError("the sidecar answered without an allow or deny decision")
+            denied = denies(policy)
+            reason = ("; ".join(str(r) for r in [*(policy.get("reasons") or []), *(policy.get("errors") or [])]) or "no permit policy matched") if denied else ""
+        except Exception as e:  # noqa: BLE001 - CrewAI hands a tool's exception text to the model, so a failure is a denial
+            return f"Denied by policy: the policy could not be evaluated; {no_receipt(e)}"
+        if denied:
             try:
                 bundle = self._client.record(self.name, recorded, {"status": "denied", "reason": reason}, policy)
                 return f"Denied by policy: {reason} (receipt {receipt_id_of(bundle)})"

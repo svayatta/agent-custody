@@ -74,7 +74,7 @@ def _not_json(req, timeout):
 
 
 FAILURES = {
-    "credentials in the url": (_unreachable, "the sidecar could not be reached", "s3cr3t"),
+    "credentials in the url": (_unreachable, "the sidecar could not be reached", "sidecar unreachable at http://127.0.0.1:"),
     "an upstream body": (_upstream_error, "the sidecar answered HTTP 502", "upstream said"),
     "an answer that is not json": (_not_json, "the sidecar's answer was malformed", "not JSON"),
 }
@@ -125,3 +125,34 @@ def test_the_claude_hook_keeps_secrets_out_when_the_policy_cannot_be_evaluated(f
     assert reason == f"agent-custody: the policy could not be evaluated; no receipt: {why}"
     assert [s for s in SECRETS if s in reason] == []
     assert logged in caplog.text
+
+
+def test_the_operator_log_names_the_sidecar_without_its_credentials(monkeypatch, caplog):
+    client = Client(f"http://admin:s3cr3t@127.0.0.1:{closed_port()}/?token=t0k3n")
+    monkeypatch.setattr(client, "decide", lambda *a, **k: DENY)
+    monkeypatch.setattr(urllib.request, "urlopen", _unreachable)
+    with caplog.at_level(logging.WARNING, logger="agent_custody"):
+        ADAPTERS["hermes"](client)
+    assert "sidecar unreachable at http://127.0.0.1:" in caplog.text
+    assert [s for s in ("admin", "s3cr3t", "t0k3n") if s in caplog.text] == []
+
+
+@pytest.mark.parametrize("failure", FAILURES)
+def test_crewai_denies_when_the_policy_cannot_be_evaluated(failure, monkeypatch):
+    urlopen, why, _ = FAILURES[failure]
+    client = Client(f"http://admin:s3cr3t@127.0.0.1:{closed_port()}/?token=t0k3n")
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    reason = str(ADAPTERS["crewai"](client))
+    assert reason == f"Denied by policy: the policy could not be evaluated; no receipt: {why}", reason
+    assert [s for s in SECRETS if s in reason] == []
+
+
+@pytest.mark.parametrize("answer", [{}, [], "deny", {"decision": "maybe"}])
+def test_crewai_denies_an_answer_without_allow_or_deny(answer, monkeypatch):
+    client = Client()
+    monkeypatch.setattr(client, "decide", lambda *a, **k: answer)
+    ran = []
+    monkeypatch.setattr(crew_refund, "_run", lambda *a, **k: ran.append(1) or {"amount": 1})
+    reason = str(ADAPTERS["crewai"](client))
+    assert reason == "Denied by policy: the policy could not be evaluated; no receipt: the sidecar's answer was malformed", reason
+    assert ran == []
