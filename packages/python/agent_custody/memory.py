@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
@@ -53,7 +52,7 @@ class MemoryClient:
         try:
             async with create_mcp_http_client(headers=headers) as http:
                 probe = await http.post(self.url, json={"jsonrpc": "2.0", "id": 0, "method": "ping"}, headers={"accept": "application/json, text/event-stream"})
-        except httpx.HTTPError as e:
+        except Exception as e:  # noqa: BLE001 - mcp 1.x brings httpx and mcp 2.x httpx2; either one's transport error means the same
             raise MemoryError(f"memory server at {self.url} could not be reached: {_refusal(e)}") from None
         if probe.status_code in (401, 403):
             raise MemoryError(f"memory server at {self.url} refused the connection: HTTP {probe.status_code}")
