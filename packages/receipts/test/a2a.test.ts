@@ -336,7 +336,7 @@ describe("the upstream alone", () => {
 });
 
 describe("the gateway as an A2A agent when the handler throws", () => {
-  it("answers 500 with a JSON-RPC error and logs the cause", async () => {
+  it("answers 500 with a generic JSON-RPC error and logs the cause, which can name an internal address", async () => {
     const agent = await fakeAgent("1.0");
     const fx = fixtureFor(agent.url);
     const cfg = loadConfig(fx.configFile);
@@ -350,9 +350,10 @@ describe("the gateway as an A2A agent when the handler throws", () => {
       const res = await fetch(`${proxy.url}${A2A_CARD_PATH}`);
       expect(res.status).toBe(500);
       const body = (await res.json()) as { jsonrpc: string; id: null; error: { code: number; message: string } };
-      expect(body).toMatchObject({ jsonrpc: "2.0", id: null, error: { code: -32603 } });
-      expect(body.error.message).not.toBe("");
-      expect(logged).toContain(`agent-custody gateway (a2a): ${body.error.message}`);
+      expect(body).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "internal error" } });
+      // the cause stays with the operator: here a fetch of the delegate's card, which names the delegate's address
+      expect(logged.filter((m) => m.startsWith("agent-custody gateway (a2a): "))).toHaveLength(1);
+      expect(logged[0]).not.toBe("agent-custody gateway (a2a): internal error");
     } finally {
       await proxy.close();
       await host.close();

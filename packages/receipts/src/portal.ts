@@ -89,6 +89,15 @@ export class UnverifiedAccountError extends Error {
 /** A single sign-on identity that the tenant's rules refuse: another domain, or an account in another tenant. */
 export class SsoRefusedError extends Error {}
 
+/** A request the client got wrong: answered with its status and message. Any other error is answered with a plain 500. */
+class ClientError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 /** One tenant's enterprise identity provider. Set by the operator only, because an IdP is trusted for the domains that the operator checked. */
 export interface SsoSetting {
   tenant: string;
@@ -671,14 +680,19 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       let text = "";
       for await (const chunk of req) {
         text += chunk;
-        if (text.length > 65_536) throw new Error("body too large");
+        if (text.length > 65_536) throw new ClientError(413, "body too large");
       }
       return text;
     };
     const jsonBody = async (): Promise<Record<string, unknown>> => {
-      if (!(req.headers["content-type"] ?? "").startsWith("application/json")) throw new Error("expected a JSON body");
+      if (!(req.headers["content-type"] ?? "").startsWith("application/json")) throw new ClientError(400, "expected a JSON body");
       const t = await rawBody();
-      return t ? (JSON.parse(t) as Record<string, unknown>) : {};
+      if (!t) return {};
+      try {
+        return JSON.parse(t) as Record<string, unknown>;
+      } catch {
+        throw new ClientError(400, "the body is not valid JSON");
+      }
     };
 
     try {
@@ -1170,7 +1184,14 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
       }
       return json(404, { error: "not found" });
     } catch (e) {
-      if (!res.headersSent) json(500, { error: e instanceof Error ? e.message : String(e) });
+      if (e instanceof ClientError) {
+        if (!res.headersSent) json(e.status, { error: e.message });
+        return;
+      }
+      // the detail can name a table, a query, or another service: it goes to the operator, not to the browser
+      log(`agent-custody portal: ${req.method} ${url.pathname} failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+      if (!res.headersSent) json(500, { error: "internal error" });
+      else res.end();
     }
   };
 }
