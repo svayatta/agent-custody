@@ -1025,7 +1025,9 @@ describe("request validation and features that are not configured", () => {
     expect(page).not.toContain("a<b>");
   });
 
-  it("refuses a body that is too large, not JSON, or not parseable, through the catch-all 500", async () => {
+  // Pins a known defect. These are client errors: the right answers are 413 for the size and 400 for the other two.
+  // Change the three statuses here when the portal answers them.
+  it("known defect: refuses a body that is too large, not JSON, or not parseable with a 500, not a 413 or a 400", async () => {
     const big = await send(bare, "POST", "/api/register", { body: JSON.stringify({ ...reg, pad: "x".repeat(70_000) }), type: "application/json" });
     expect(big.status).toBe(500);
     expect(big.json.error).toBe("body too large");
