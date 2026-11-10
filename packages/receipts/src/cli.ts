@@ -44,6 +44,7 @@ import { denyReport, formatDenyReport } from "./deny-report.ts";
 import { fileURLToPath } from "node:url";
 import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
 import { auditExtends, formatReport, verifyBundle, type VerifyOptions } from "./verify.ts";
+import { verifyAttestation, type AttestationBundle } from "./attestation.ts";
 import { CLEAR_WARNING, exportReceipts, formatReceiptExport as formatExportLines } from "./export.ts";
 import { formatSummaryMarkdown, receiptFiles, summarizeReceipts } from "./pr-summary.ts";
 import { formatSimulation, simulatePolicy, verifyOrphanAuthorization, type SimulationSkip } from "./simulate.ts";
@@ -129,6 +130,8 @@ const USAGE = `agent-custody <command>
           retention on the receipt log: replaces older leaves with their hashes, so proofs still verify and the content is gone
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
   verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--require-strict] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]
+          verify <bundle.json> --attestation <attestations/<keyid>.json> --release-digest sha256:<hex> [--allow-simulated-attestation] [--attestation-audience <aud>] [--attestation-root <pem>]...   attested build: the key was made inside that release
+          verify --attestation <file> --release-digest sha256:<hex> [same attestation flags]   the attestation alone, before any receipt
           verify --markdown <dir|bundle.json>... --issuer-key <pub>   one Markdown table for a directory of bundles; exit 1 when one does not verify or none exists
   export  --receipts <dir> --out <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--since <ISO time>] [--allow-clear]
                                                    copies the verified receipt bundles that keep their values private into a directory for a pull request, byte for byte.
@@ -766,11 +769,30 @@ async function main(argv: string[]): Promise<number> {
           "capture-key-env": { type: "string" },
           json: { type: "boolean", default: false },
           markdown: { type: "boolean", default: false },
+          attestation: { type: "string" },
+          "release-digest": { type: "string" },
+          "allow-simulated-attestation": { type: "boolean", default: false },
+          "attestation-audience": { type: "string" },
+          "attestation-root": { type: "string", multiple: true },
         },
       });
       const file = positionals[0];
       const issuerKeyFiles = [...(values["issuer-key"] ?? []), ...(values["gateway-key"] ?? [])];
-      if (!file || issuerKeyFiles.length === 0) throw new Error("verify needs <bundle> --issuer-key (alias --gateway-key)");
+      if (!!values.attestation !== !!values["release-digest"]) throw new Error("verify --attestation and --release-digest go together: the attestation is checked against the release it must be");
+      if (!file && values.attestation && values["release-digest"]) {
+        // the attestation alone: what a verifier can check before any receipt, for example from a gateway's GET /attestation
+        const r = verifyAttestation({
+          bundle: JSON.parse(readFileSync(values.attestation, "utf8")) as AttestationBundle,
+          releaseDigest: values["release-digest"],
+          ...(values["allow-simulated-attestation"] ? { allowSimulated: true } : {}),
+          ...(values["attestation-audience"] ? { audience: values["attestation-audience"] } : {}),
+          ...(values["attestation-root"] ? { gcpRoots: values["attestation-root"].map((f) => readFileSync(f, "utf8")) } : {}),
+        }, (values["log-key"] ?? []).map(loadPublicKey));
+        const ok = r.checks.every((c) => c.ok);
+        console.log(values.json ? JSON.stringify({ ok, checks: r.checks, keyid: r.keyid, digest: r.digest, simulated: r.simulated }, null, 2) : [...r.checks.map((c) => `${c.ok ? "PASS" : "FAIL"}  ${c.name}${c.detail ? `  (${c.detail})` : ""}`), "", ok ? `RESULT: ATTESTED BUILD${r.simulated ? " (SIMULATED)" : ""}, key ${r.keyid}` : "RESULT: NOT ATTESTED"].join("\n"));
+        return ok ? 0 : 1;
+      }
+      if (!file || (issuerKeyFiles.length === 0 && !values.attestation)) throw new Error("verify needs <bundle> --issuer-key (alias --gateway-key), or --attestation <file> --release-digest <sha256:...>");
       if (values.markdown && (values.json || values.disclose)) throw new Error("verify --markdown does not combine with --json or --disclose");
       const captureKey = values["capture-key-env"] ? captureKeyFrom(secretFrom(values["capture-key-env"])) : undefined;
       const disclosed = values.disclose ? (JSON.parse(readFileSync(values.disclose, "utf8")) as Record<string, unknown>) : undefined;
@@ -788,6 +810,15 @@ async function main(argv: string[]): Promise<number> {
         ...(values.log ? { logFile: values.log } : {}),
         ...(captureKey ? { captureKey } : {}),
         ...(disclosed ? { disclosed } : {}),
+        ...(values.attestation && values["release-digest"] ? {
+          attestation: {
+            bundle: JSON.parse(readFileSync(values.attestation, "utf8")) as AttestationBundle,
+            releaseDigest: values["release-digest"],
+            ...(values["allow-simulated-attestation"] ? { allowSimulated: true } : {}),
+            ...(values["attestation-audience"] ? { audience: values["attestation-audience"] } : {}),
+            ...(values["attestation-root"] ? { gcpRoots: values["attestation-root"].map((f) => readFileSync(f, "utf8")) } : {}),
+          },
+        } : {}),
       };
       if (values.markdown) {
         const summary = summarizeReceipts(positionals.flatMap(receiptFiles), verifyOptions);

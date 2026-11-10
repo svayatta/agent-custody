@@ -242,7 +242,208 @@ const ISSUER_NOTE: Record<string, string> = {
 };
 const short = (s: string) => s.slice(0, 12);
 
-export interface Options { issuerKeys: PublicKey[]; principalKeys: PublicKey[]; approvalKeys?: PublicKey[]; logKeys?: PublicKey[]; upstreamKeys?: PublicKey[]; providerSecrets?: { stripe?: string; github?: string }; logId?: string; requireStrict?: boolean; logLeaves?: (string | { pruned?: string; hash?: string })[] }
+/** An issuer key's attestation and the release it must be: mirrors AttestationVerifyOptions in packages/receipts/src/attestation.ts. */
+export interface AttestationOptions { bundle: Bundle; releaseDigest: string; allowSimulated?: boolean; audience?: string; gcpRoots?: string[] }
+export interface Options { issuerKeys: PublicKey[]; principalKeys: PublicKey[]; approvalKeys?: PublicKey[]; logKeys?: PublicKey[]; upstreamKeys?: PublicKey[]; providerSecrets?: { stripe?: string; github?: string }; logId?: string; requireStrict?: boolean; logLeaves?: (string | { pruned?: string; hash?: string })[]; attestation?: AttestationOptions }
+
+// ---- attestation: a copy of the checks in packages/receipts/src/attestation.ts, over WebCrypto ----
+const ATTESTATION_PREDICATE_TYPE = "https://agent-custody.dev/attestation/v0.1";
+const SIMULATED_EVIDENCE_TYPE = "application/vnd.agent-custody.simulated-evidence+json";
+const GCP_ISSUER = "https://confidentialcomputing.googleapis.com";
+const DEFAULT_ATTESTATION_AUDIENCE = "https://agent-custody.dev/attestation";
+// The published key that signs simulated evidence; keep identical to SIMULATED_ATTESTATION_KEY_PEM.
+const SIMULATED_ATTESTATION_KEY_PEM = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAlegZwx9uO8AsF57G/awfrdmDvZMetwsE0ua/C8Gj9yo=
+-----END PUBLIC KEY-----
+`;
+// Google's Confidential Space PKI root; keep identical to GCP_CONFIDENTIAL_SPACE_ROOT.
+const GCP_CONFIDENTIAL_SPACE_ROOT = `-----BEGIN CERTIFICATE-----
+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
+uyT5CnJulxSC5CT1
+-----END CERTIFICATE-----
+`;
+const ATT_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const SUPPORTED_HW = ["GCP_AMD_SEV", "GCP_AMD_SEV_ES", "GCP_INTEL_TDX"];
+interface Tlv { tag: number; at: number; start: number; end: number }
+function tlv(b: Bytes, at: number, limit = b.length): Tlv {
+  if (at + 2 > limit) throw new Error("truncated DER");
+  const tag = b[at]!;
+  let len = b[at + 1]!;
+  let start = at + 2;
+  if (len & 0x80) {
+    const n = len & 0x7f;
+    if (n === 0 || n > 4 || start + n > limit) throw new Error("bad DER length");
+    len = 0;
+    for (let i = 0; i < n; i++) len = len * 256 + b[start + i]!;
+    start += n;
+  }
+  if (start + len > limit) throw new Error("truncated DER");
+  return { tag, at, start, end: start + len };
+}
+function kids(b: Bytes, t: Tlv): Tlv[] { const out: Tlv[] = []; for (let at = t.start; at < t.end; ) { const c = tlv(b, at, t.end); out.push(c); at = c.end; } return out; }
+function derTime(b: Bytes, t: Tlv): number {
+  const s = String.fromCharCode(...b.subarray(t.start, t.end));
+  const m = t.tag === 0x17 ? /^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/.exec(s) : t.tag === 0x18 ? /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/.exec(s) : null;
+  if (!m) throw new Error("bad certificate time");
+  const y = t.tag === 0x17 ? (Number(m[1]) < 50 ? 2000 : 1900) + Number(m[1]) : Number(m[1]);
+  return Date.UTC(y, Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+}
+interface Cert { tbs: Bytes; sig: Bytes; issuer: string; subject: string; notBefore: number; notAfter: number; spki: Bytes; raw: string }
+function parseCert(raw: Bytes): Cert {
+  const top = tlv(raw, 0);
+  if (top.tag !== 0x30 || top.end !== raw.length) throw new Error("not a certificate");
+  const [tbsT, algT, sigT] = kids(raw, top);
+  if (!tbsT || !algT || !sigT || sigT.tag !== 0x03 || sigT.end === sigT.start) throw new Error("not a certificate");
+  const oid = kids(raw, algT)[0];
+  if (!oid || hex(raw.subarray(oid.at, oid.end)) !== "06092a864886f70d01010b") throw new Error("certificate is not signed with sha256WithRSAEncryption");
+  let f = kids(raw, tbsT);
+  if (f[0]?.tag === 0xa0) f = f.slice(1);
+  const [, , issuer, validity, subject, spki] = f;
+  if (!issuer || !validity || !subject || !spki) throw new Error("certificate is missing a field");
+  const [nb, na] = kids(raw, validity);
+  if (!nb || !na) throw new Error("certificate validity is malformed");
+  if (raw[sigT.start] !== 0) throw new Error("signature has unused bits");
+  const whole = (t: Tlv) => raw.slice(t.at, t.end);
+  return { tbs: whole(tbsT), sig: raw.slice(sigT.start + 1, sigT.end), issuer: hex(whole(issuer)), subject: hex(whole(subject)), notBefore: derTime(raw, nb), notAfter: derTime(raw, na), spki: whole(spki), raw: hex(raw) };
+}
+const pemDer = (pem: string): Bytes => b64.decode(pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, ""));
+const b64urlDecode = (s: string): Bytes => b64.decode(s.replace(/-/g, "+").replace(/_/g, "/"));
+async function rsaVerify(spki: Bytes, data: Bytes, sig: Bytes): Promise<boolean> {
+  const key = await subtle().importKey("spki", spki, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+  return subtle().verify({ name: "RSASSA-PKCS1-v1_5" }, key, sig, data);
+}
+interface EvidenceVerdict { ok: boolean; detail: string; reportData: string[]; imageDigest: string | null; simulated: boolean }
+async function verifySimulated(ev: any): Promise<EvidenceVerdict> {
+  const bad = (detail: string): EvidenceVerdict => ({ ok: false, detail, reportData: [], imageDigest: null, simulated: true });
+  const env = ev.envelope;
+  if (!isObj(env) || env.payloadType !== SIMULATED_EVIDENCE_TYPE) return bad("the simulated evidence is not a simulated-evidence envelope");
+  const v = await dsseVerify(env as Envelope, [await publicKeyFromPem(SIMULATED_ATTESTATION_KEY_PEM)]);
+  if (!v.ok) return bad(`simulated evidence signature: ${v.error}`);
+  const p = v.payload;
+  if (!isObj(p) || p.simulated !== true || typeof p.reportData !== "string" || typeof p.imageDigest !== "string" || !ATT_DIGEST.test(p.imageDigest)) return bad("the simulated evidence does not say it is simulated, or lacks its report data or image digest");
+  return { ok: true, detail: "SIMULATED evidence, signed by the published test key", reportData: [p.reportData], imageDigest: p.imageDigest, simulated: true };
+}
+async function verifyGcp(ev: any, opts: AttestationOptions): Promise<EvidenceVerdict> {
+  const bad = (detail: string): EvidenceVerdict => ({ ok: false, detail, reportData: [], imageDigest: null, simulated: false });
+  if (typeof ev.token !== "string") return bad("the evidence carries no token");
+  const parts = ev.token.split(".");
+  if (parts.length !== 3) return bad("the token is not a JWT");
+  const [h, p, s] = parts as [string, string, string];
+  let header: any;
+  let claims: any;
+  try {
+    header = JSON.parse(new TextDecoder().decode(b64urlDecode(h)));
+    claims = JSON.parse(new TextDecoder().decode(b64urlDecode(p)));
+  } catch {
+    return bad("the token header or claims are not JSON");
+  }
+  if (!isObj(header) || !isObj(claims)) return bad("the token header or claims are not objects");
+  if (header.alg !== "RS256") return bad(`the token is signed with ${String(header.alg)}, not RS256`);
+  const x5c = header.x5c;
+  if (!Array.isArray(x5c) || x5c.length !== 3 || !x5c.every((c) => typeof c === "string")) return bad("the token header does not carry a chain of three certificates (x5c)");
+  let chain: Cert[];
+  let roots: string[];
+  try {
+    chain = x5c.map((c: string) => parseCert(b64.decode(c)));
+    roots = (opts.gcpRoots ?? [GCP_CONFIDENTIAL_SPACE_ROOT]).map((r) => hex(pemDer(r)));
+  } catch (e) {
+    return bad(`the token's certificates: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const [leaf, mid, root] = chain as [Cert, Cert, Cert];
+  if (!roots.includes(root.raw)) return bad("the token's chain does not end at a pinned Confidential Space root");
+  if (leaf.issuer !== mid.subject || mid.issuer !== root.subject) return bad("the token's chain is out of order: an issuer is not the next certificate's subject");
+  try {
+    if (!(await rsaVerify(mid.spki, leaf.tbs, leaf.sig)) || !(await rsaVerify(root.spki, mid.tbs, mid.sig))) return bad("a certificate in the token's chain is not signed by the next one");
+    if (!(await rsaVerify(leaf.spki, enc.encode(`${h}.${p}`), b64urlDecode(s)))) return bad("the token signature does not verify with its leaf certificate");
+  } catch (e) {
+    return bad(`the token's chain: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const iat = typeof claims.iat === "number" ? claims.iat * 1000 : NaN;
+  for (const c of chain) if (!(c.notBefore <= iat && iat <= c.notAfter)) return bad("the token was issued outside a certificate's validity");
+  if (claims.iss !== GCP_ISSUER) return bad(`the token's issuer is ${String(claims.iss)}`);
+  const audience = opts.audience ?? DEFAULT_ATTESTATION_AUDIENCE;
+  const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  if (!aud.includes(audience)) return bad(`the token's audience is not ${audience}`);
+  if (claims.swname !== "CONFIDENTIAL_SPACE") return bad(`the token's software is ${String(claims.swname)}, not CONFIDENTIAL_SPACE`);
+  if (claims.dbgstat !== "disabled-since-boot") return bad(`the token's debug status is ${String(claims.dbgstat)}: a debug image lets the operator in`);
+  if (typeof claims.hwmodel !== "string" || !SUPPORTED_HW.includes(claims.hwmodel)) return bad(`the token's hardware is ${String(claims.hwmodel)}`);
+  if (claims.secboot !== true) return bad("the token does not say secure boot");
+  const submods = isObj(claims.submods) ? claims.submods : {};
+  const cs = isObj(submods.confidential_space) ? submods.confidential_space : {};
+  if (!Array.isArray(cs.support_attributes) || !cs.support_attributes.includes("STABLE")) return bad("the token's Confidential Space image is not a STABLE production image");
+  const container = isObj(submods.container) ? submods.container : {};
+  if (typeof container.image_digest !== "string" || !ATT_DIGEST.test(container.image_digest)) return bad("the token carries no container image digest");
+  const nonces = (Array.isArray(claims.eat_nonce) ? claims.eat_nonce : [claims.eat_nonce]).filter((n: unknown): n is string => typeof n === "string");
+  return { ok: true, detail: `Confidential Space token from ${String(claims.hwmodel)}, chain to the pinned root`, reportData: nonces, imageDigest: container.image_digest, simulated: false };
+}
+async function verifyAttestation(opts: AttestationOptions, logKeys: PublicKey[]): Promise<{ checks: Check[]; key: PublicKey | null; keyid: string | null; digest: string; simulated: boolean }> {
+  const checks: Check[] = [];
+  const add = (name: string, ok: boolean, detail?: string) => { checks.push(detail === undefined ? { name, ok } : { name, ok, detail }); return ok; };
+  const b: any = opts.bundle;
+  const digest = isObj(b) && isObj(b.envelope) ? hex(await sha256(enc.encode(canonicalize(b.envelope)))) : "";
+  const fail = () => ({ checks, key: null, keyid: null, digest, simulated: false });
+  let st: any;
+  let key: PublicKey;
+  try {
+    if (!isObj(b) || !isObj(b.envelope) || typeof b.envelope.payload !== "string") throw new Error("malformed envelope");
+    st = JSON.parse(new TextDecoder().decode(b64.decode(b.envelope.payload)));
+    if (!isObj(st) || st.predicateType !== ATTESTATION_PREDICATE_TYPE || !isObj(st.predicate) || typeof st.predicate.publicKeyPem !== "string") throw new Error("not an attestation statement");
+    key = await publicKeyFromPem(st.predicate.publicKeyPem);
+  } catch (e) {
+    add("attestation statement signature (attested key)", false, e instanceof Error && /malformed|not an attestation/.test(e.message) ? e.message : `unreadable: ${e instanceof Error ? e.message : String(e)}`);
+    return fail();
+  }
+  const sig = await dsseVerify(b.envelope as Envelope, [key]);
+  const named = sig.ok && b.envelope.payloadType === RECEIPT_TYPE && st.predicate.keyid === key.keyid && st.subject?.[0]?.digest?.sha256 === key.keyid;
+  if (!add("attestation statement signature (attested key)", named, sig.ok ? (named ? `keyid ${key.keyid.slice(0, 12)}` : "the statement names a key other than the one that signed it") : sig.error)) return fail();
+  const th = await dsseVerify(b.treeHead, [...logKeys, key]);
+  let logged = false;
+  if (th.ok && b.treeHead.payloadType === TREEHEAD_TYPE && isObj(b.inclusion)) logged = th.payload.treeSize === b.inclusion.treeSize && (await verifyInclusion(await leafHash(canonicalize(b.envelope)), b.inclusion as Bundle["inclusion"], th.payload.rootHash));
+  add("attestation log inclusion", logged, th.ok ? `leaf ${b.inclusion?.leafIndex} of ${b.inclusion?.treeSize}` : th.error);
+  const ev = st.predicate.evidence;
+  const verdict: EvidenceVerdict = !isObj(ev) ? { ok: false, detail: "the statement carries no evidence", reportData: [], imageDigest: null, simulated: false }
+    : ev.type === "simulated" ? await verifySimulated(ev)
+    : ev.type === "gcp-confidential-space" ? await verifyGcp(ev, opts)
+    : { ok: false, detail: `unknown evidence type ${String(ev.type)}`, reportData: [], imageDigest: null, simulated: false };
+  add("attestation evidence", verdict.ok, verdict.detail);
+  const bound = verdict.ok && verdict.reportData.includes(key.keyid);
+  add("attestation binds the issuer key", bound, bound ? `report data is keyid ${key.keyid.slice(0, 12)}` : "the evidence's report data is not this key's keyid");
+  const sameImage = verdict.ok && verdict.imageDigest === opts.releaseDigest;
+  const built = sameImage && (!verdict.simulated || opts.allowSimulated === true);
+  add("attested build", built, !verdict.ok ? "the evidence did not verify" : !sameImage ? `the measured image ${verdict.imageDigest} is not the release ${opts.releaseDigest}` : verdict.simulated ? (opts.allowSimulated ? `SIMULATED: ${verdict.imageDigest} (allowed for testing; not hardware evidence)` : "SIMULATED evidence: refused without the allow-simulated test flag") : `image ${verdict.imageDigest} is the release`);
+  return { checks, key: verdict.ok && bound ? key : null, keyid: key.keyid, digest, simulated: verdict.simulated };
+}
 
 async function hmacHex(secret: string, data: string): Promise<string> {
   const key = await subtle().importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -423,11 +624,15 @@ async function verifyApprovalStatement(env: any, trusted: PublicKey[], minimum: 
 }
 
 /** The same checks, in the same order, with the same names, as the reference verifyBundle. */
-export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Result> {
+export async function verifyBundle(bundle: Bundle, given: Options): Promise<Result> {
   const checks: Check[] = [];
   const add = (name: string, ok: boolean, detail?: string) => { checks.push(detail === undefined ? { name, ok } : { name, ok, detail }); return ok; };
   let treeHeadSigner: Result["treeHeadSigner"] = null;
   const done = (statement: any | null): Result => ({ ok: checks.every((c) => c.ok), checks, statement, issuerNote: statement ? (ISSUER_NOTE[statement.predicate.issuer.kind] ?? "unknown issuer kind") : null, treeHeadSigner });
+  // An attested key is trusted for this receipt only through its attestation; its checks come first so a refusal names them.
+  const attested = given.attestation ? await verifyAttestation(given.attestation, given.logKeys ?? []) : null;
+  if (attested) for (const c of attested.checks) checks.push(c);
+  const opts: Options = attested?.key ? { ...given, issuerKeys: [...given.issuerKeys, attested.key] } : given;
 
   const sig = await dsseVerify(bundle.envelope, opts.issuerKeys);
   if (!sig.ok) { add("receipt signature (issuer key)", false, sig.error); return done(null); }
@@ -437,6 +642,10 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   const broken = structuralProblem(st.predicate);
   if (!add("structural parts in clear", !broken, broken ?? undefined)) return done(null);
   const p = st.predicate;
+  if (attested) {
+    add("receipt signed by the attested key", sig.keyid === attested.keyid, sig.keyid === attested.keyid ? `keyid ${short(sig.keyid)}` : `signed by ${short(sig.keyid)}, the attestation is for ${attested.keyid ? short(attested.keyid) : "no key"}`);
+    add("receipt names the attestation", p.issuer.attestation === attested.digest, typeof p.issuer.attestation === "string" ? `attestation ${short(p.issuer.attestation)}` : "the receipt names no attestation");
+  }
   add("issuer kind is known", p.issuer.kind === "gateway" || p.issuer.kind === "sdk" || p.issuer.kind === "door" || p.issuer.kind === "egress" || p.issuer.kind === "guardian", `${p.issuer.kind}${p.issuer.framework ? ` / ${p.issuer.framework}` : ""}`);
   add("issuer keyid matches signer", p.issuer.keyid === sig.keyid);
   if (opts.requireStrict) {
@@ -800,7 +1009,12 @@ export function formatReport(r: Result): string {
   lines.push("", r.ok ? "RESULT: VERIFIED" : "RESULT: NOT VERIFIED");
   if (!r.statement) return lines.join("\n");
   const p = r.statement.predicate;
-  lines.push("", `ISSUER: ${p.issuer.kind}${p.issuer.framework ? ` (${p.issuer.framework})` : ""}${p.issuer.strict ? ", strict mode" : ""}, ${r.issuerNote}`, "", "field           provenance  value");
+  lines.push("", `ISSUER: ${p.issuer.kind}${p.issuer.framework ? ` (${p.issuer.framework})` : ""}${p.issuer.strict ? ", strict mode" : ""}, ${r.issuerNote}`);
+  if (typeof p.issuer.attestation === "string") {
+    const built = r.checks.find((c) => c.name === "attested build");
+    lines.push(`ATTESTATION: ${short(p.issuer.attestation)}, ${!built ? "not checked; pass the attestation and the release digest" : built.ok ? (built.detail?.startsWith("SIMULATED") ? "attested build, SIMULATED: no hardware evidence" : "attested build of the given release") : "attested build FAILED"}`);
+  }
+  lines.push("", "field           provenance  value");
   const row = (f: string, prov: string, v: unknown) => lines.push(`${f.padEnd(15)} ${prov.padEnd(11)} ${typeof v === "string" ? v : JSON.stringify(v)}`);
   row("principal", p.principal.provenance, p.principal.id ?? "(none)");
   row("agent", p.agent.provenance, p.agent.id);

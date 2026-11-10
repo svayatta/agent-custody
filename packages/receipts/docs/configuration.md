@@ -112,7 +112,7 @@ What each part does:
 
 | key | what it says here |
 | --- | --- |
-| `identity.keyFile` | the gateway's signing key, in `/data` because the gateway writes and keeps it. Verifiers check receipts against its public half. |
+| `identity.keyFile` | the gateway's signing key, in `/data` because the gateway writes and keeps it. Verifiers check receipts against its public half. Leave it out and set `attestation` instead for a key made in memory and bound to the workload by platform evidence ([attestation.md](attestation.md)). |
 | `upstreams` | four tool sources behind one gateway: a REST API described as tools, an MCP server over HTTP, an MCP server the gateway starts, and another agent over A2A. |
 | `…headerEnv`, `tokenEnv` | the **name** of an environment variable holding the credential. The gateway reads it at startup and refuses to start without it. The secret is never in the file. |
 | `kb.env` | what the started MCP server gets. A stdio upstream gets a minimal environment and nothing of the gateway's own, so it cannot read the other upstreams' tokens. |

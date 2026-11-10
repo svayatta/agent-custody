@@ -24,6 +24,14 @@ describe("browser verifier against the conformance vectors", () => {
       expect({ ok: r.ok, failing: r.checks.filter((x) => !x.ok).map((x) => x.name) }).toEqual(c.expected);
     });
   }
+  const attestation = load("attestation.json");
+  for (const c of attestation.cases as any[]) {
+    it(`attestation: ${c.name}`, async () => {
+      const k = (n: string) => publicKeyFromPem(attestation.keys[n].publicKeyPem);
+      const r = await verifyBundle(c.bundle, { issuerKeys: await Promise.all(c.issuerKeys.map(k)), principalKeys: await Promise.all(c.principalKeys.map(k)), attestation: c.attestation });
+      expect({ ok: r.ok, failing: r.checks.filter((x) => !x.ok).map((x) => x.name) }).toEqual(c.expected);
+    });
+  }
   for (const c of audit.cases as any[]) {
     it(`audit: ${c.name}`, async () => {
       const r = await auditExtends(c.older, c.newer, c.proof, await all(c.keys));

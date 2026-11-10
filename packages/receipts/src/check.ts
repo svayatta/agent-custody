@@ -284,7 +284,12 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   const cfg: GatewayConfig = loadConfig(configPath);
 
   // the gateway's key
-  if (!existsSync(cfg.identity.keyFile)) {
+  if (cfg.attestation) {
+    add("ok", "key", `generated in the process at start and attested by ${cfg.attestation.provider}; never written to a file`);
+    if (cfg.attestation.provider === "simulated") add("warn", "key", "simulated attestation proves nothing about hardware: a verifier refuses it unless told to allow it, so use it only to test locally");
+  } else if (!cfg.identity.keyFile) {
+    add("error", "key", "identity.keyFile is not set");
+  } else if (!existsSync(cfg.identity.keyFile)) {
     add("warn", "key", `${cfg.identity.keyFile} does not exist yet; \`agent-custody keygen\` creates it, and the container creates it on first start`);
   } else {
     try {
@@ -443,9 +448,11 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   }
   let connectCfg = cfg;
   let scratch: string | undefined;
-  if (!existsSync(cfg.identity.keyFile)) {
+  // the connection test signs nothing anyone keeps, so an attested gateway is checked with a scratch key and no attestation
+  if (!cfg.identity.keyFile || !existsSync(cfg.identity.keyFile)) {
     scratch = mkdtempSync(join(tmpdir(), "agent-custody-check-"));
-    connectCfg = { ...cfg, identity: { keyFile: writeKeyPair(generateKeyPair(), scratch, "check").keyFile } };
+    const { attestation: _attestation, ...rest } = cfg;
+    connectCfg = { ...rest, identity: { keyFile: writeKeyPair(generateKeyPair(), scratch, "check").keyFile } };
   }
   let tools: string[] | undefined;
   try {

@@ -67,6 +67,7 @@
     "coverage": "vitest run --coverage.enabled",
     "demo": "tsx scripts/demo.ts",
     "vectors": "tsx scripts/vectors.ts",
+    "vectors:attestation": "tsx scripts/attestation-vectors.ts",
     "bench": "node scripts/hot-path-bench.ts"
   },
   "engines": {

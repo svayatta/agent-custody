@@ -132,6 +132,7 @@ export default withMermaid(
           { text: "Verifying a receipt", link: "/receipts/verification" },
           { text: "Receipts on a pull request", link: "/receipts/github-action" },
           { text: "What the evidence satisfies", link: "/receipts/compliance" },
+          { text: "Attested gateway keys", link: "/receipts/attestation" },
           { text: "Threat model", link: "/receipts/threat-model" },
         ] },
         { text: "State", items: [{ text: "The fact ledger", link: "/state/" }] },
