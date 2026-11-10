@@ -84,7 +84,7 @@ const out = await handleHookEvent(issuer, input);      // HookInput → HookOutp
 const hooks = claudeAgentHooks(issuer, "Bash|Write|Edit"); // the hooks object the Claude Agent SDK takes
 ```
 
-Python: `agent_custody.claude_agent_sdk.claude_hook(client)` and `handle_hook_event(client, input_data)`, the same input and the same decisions, through the sidecar. A Python deny reason reads `agent-custody: <reason> (receipt <id>)`. When the sidecar cannot be reached, answers without an allow or deny decision, or cannot record the denial, or the event has no `tool_name`, `PreToolUse` still denies, and the reason says `no receipt: <why>`.
+Python: `agent_custody.claude_agent_sdk.claude_hook(client)` and `handle_hook_event(client, input_data)`, the same input and the same decisions, through the sidecar. A Python deny reason reads `agent-custody: <reason> (receipt <id>)`. When the sidecar cannot be reached, answers without an allow or deny decision, or cannot record the denial, or the event has no `tool_name`, `PreToolUse` still denies, and the reason says `no receipt: <why>`. `<why>` names the kind of failure only (`the sidecar could not be reached`, `the sidecar answered HTTP <status>`, `the sidecar's answer was malformed`, `the hook event has no tool_name`, …); the error itself goes to the `agent_custody` logger at `WARNING`, because it can carry the sidecar URL with credentials or an upstream answer.
 
 ## The policy's view
 

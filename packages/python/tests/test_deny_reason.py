@@ -18,6 +18,7 @@ from agent_custody import Client
 from agent_custody import crewai as crewai_adapter
 from agent_custody import openai_agents as openai_adapter
 from agent_custody.adk import adk_callbacks
+from agent_custody.claude_agent_sdk import handle_hook_event
 from agent_custody.hermes import hermes_hooks
 from conftest import closed_port
 
@@ -47,6 +48,7 @@ ADAPTERS = {
     "hermes": lambda c: hermes_hooks(c)["pre_tool_call"]("stripe.refund", {"amount": 1}, "task-1")["message"],
     "openai_agents": _openai,
     "crewai": lambda c: crewai_adapter.wrap_tools(c, [crew_refund])[0].run(amount=1),
+    "claude_agent_sdk": lambda c: handle_hook_event(c, {"hook_event_name": "PreToolUse", "tool_name": "stripe.refund", "tool_input": {"amount": 1}})["hookSpecificOutput"]["permissionDecisionReason"],
 }
 
 
@@ -111,3 +113,15 @@ def test_an_unexpected_error_gives_its_type_not_its_text(adapter, monkeypatch):
     monkeypatch.setattr(client, "record", boom)
     reason = str(ADAPTERS[adapter](client))
     assert reason.endswith("(no receipt: an unexpected RuntimeError)") and "s3cr3t" not in reason, reason
+
+
+@pytest.mark.parametrize("failure", FAILURES)
+def test_the_claude_hook_keeps_secrets_out_when_the_policy_cannot_be_evaluated(failure, monkeypatch, caplog):
+    urlopen, why, logged = FAILURES[failure]
+    client = Client(f"http://admin:s3cr3t@127.0.0.1:{closed_port()}/?token=t0k3n")
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    with caplog.at_level(logging.WARNING, logger="agent_custody"):
+        reason = handle_hook_event(client, {"hook_event_name": "PreToolUse", "tool_name": "stripe.refund", "tool_input": {"amount": 1}})["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason == f"agent-custody: the policy could not be evaluated; no receipt: {why}"
+    assert [s for s in SECRETS if s in reason] == []
+    assert logged in caplog.text
