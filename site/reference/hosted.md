@@ -58,7 +58,7 @@ The gateway's log client retries a 429 three times with backoff and then treats 
 | `POST /stripe/webhook` | Stripe's event, `Stripe-Signature` header | `{ "received": true }`; `{ "received": true, "duplicate": true }` for an event id applied already; `400` on a bad or stale signature, or an event without `id` and `created`. An event whose `created` is older than the event that set the stored billing state is acknowledged and not applied |
 | `GET /health` | | `{ "ok": true, "stripe": true\|false }` |
 
-Every write needs `Content-Type: application/json`; the cookie is `HttpOnly; SameSite=Strict`. Every action is in the tenant's audit trail as `portal:<email>`, and plan changes made by Stripe as `stripe:<event>`.
+Every write needs `Content-Type: application/json`; the cookie is `HttpOnly; SameSite=Strict`. A body over 64 KB is answered `413`, a write without the JSON content type or with a body that does not parse `400`, and any other failure a plain `500 { "error": "internal error" }`, with the detail in the portal's log. Every action is in the tenant's audit trail as `portal:<email>`, and plan changes made by Stripe as `stripe:<event>`.
 
 ### Roles
 

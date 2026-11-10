@@ -92,4 +92,4 @@ async with MemoryClient("http://127.0.0.1:8790/mcp", token="…") as memory:
 | `retract(fact_id, reason, *, actor=None)` | `memory.retract` | `{"eventId", "factId", "txTime", "actor", "reason", "source", "removedFrom", "verification"}` |
 | `history(fact_id)` | `memory.history` | the list of events, oldest first |
 
-A refused connection (wrong token) raises `MemoryError("memory server at … refused the connection: HTTP 401")`; a tool error raises `MemoryError` with the server's text. The tool contracts are on the [memory](./memory) page.
+A refused connection (wrong token) raises `MemoryError("memory server at … refused the connection: HTTP 401")`. A server that cannot be reached (nothing on the port, a timeout, a name that does not resolve) raises `MemoryError("memory server at … could not be reached: <cause>")`, never a raw `httpx` error. A server that answers but fails the MCP handshake raises `MemoryError("memory server at … refused the connection: HTTP <status> (<transport detail>)")`. A tool error raises `MemoryError` with the server's text. The tool contracts are on the [memory](./memory) page.

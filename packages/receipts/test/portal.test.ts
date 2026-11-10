@@ -1025,16 +1025,34 @@ describe("request validation and features that are not configured", () => {
     expect(page).not.toContain("a<b>");
   });
 
-  // Pins a known defect. These are client errors: the right answers are 413 for the size and 400 for the other two.
-  // Change the three statuses here when the portal answers them.
-  it("known defect: refuses a body that is too large, not JSON, or not parseable with a 500, not a 413 or a 400", async () => {
+  // A client error says what the client got wrong; anything else is the operator's problem, and its text can name a
+  // table, a query, or the database's address, so it goes to the log and the browser gets a plain 500.
+  it("answers a body that is too large with 413, and one that is not JSON or does not parse with 400", async () => {
     const big = await send(bare, "POST", "/api/register", { body: JSON.stringify({ ...reg, pad: "x".repeat(70_000) }), type: "application/json" });
-    expect(big.status).toBe(500);
+    expect(big.status).toBe(413);
     expect(big.json.error).toBe("body too large");
     const form = await send(bare, "POST", "/api/register", { body: "email=a", type: "application/x-www-form-urlencoded" });
-    expect(form.status).toBe(500);
+    expect(form.status).toBe(400);
     expect(form.json.error).toBe("expected a JSON body");
-    expect((await send(bare, "POST", "/api/register", { body: "{not json", type: "application/json" })).status).toBe(500);
+    const broken = await send(bare, "POST", "/api/register", { body: "{not json", type: "application/json" });
+    expect(broken.status).toBe(400);
+    expect(broken.json.error).toBe("the body is not valid JSON");
+  });
+
+  it("answers any other error with a plain 500 and logs the detail", async () => {
+    const detail = "connect ECONNREFUSED postgres://admin:s3cr3t@10.0.0.5:5432/custody, relation portal_users";
+    const logged: string[] = [];
+    const broken = await servePortal({ tenancy, client: { query: async () => { throw new Error(detail); } }, secret: SECRET, publicUrl: "https://log.example.test/", trustProxy: true, log: (m) => logged.push(m) }, { port: 0 });
+    try {
+      const r = await send(broken, "POST", "/api/login", { body: JSON.stringify({ email: "a@b.example", password: "x" }), type: "application/json" });
+      expect(r.status).toBe(500);
+      expect(r.json).toEqual({ error: "internal error" });
+      expect(r.text).not.toContain("s3cr3t");
+      expect(r.text).not.toContain("portal_users");
+      expect(logged.some((m) => m.startsWith("agent-custody portal: POST /api/login failed:") && m.includes(detail))).toBe(true);
+    } finally {
+      await broken.close();
+    }
   });
 
   it.each([
