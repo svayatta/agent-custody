@@ -137,6 +137,13 @@ def test_the_operator_log_names_the_sidecar_without_its_credentials(monkeypatch,
     assert [s for s in ("admin", "s3cr3t", "t0k3n") if s in caplog.text] == []
 
 
+def test_no_receipt_is_public():
+    # site/reference/python.md documents it for adapters outside this package
+    import agent_custody
+
+    assert "no_receipt" in agent_custody.__all__
+
+
 @pytest.mark.parametrize("failure", FAILURES)
 def test_crewai_denies_when_the_policy_cannot_be_evaluated(failure, monkeypatch):
     urlopen, why, _ = FAILURES[failure]

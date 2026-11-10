@@ -14,7 +14,7 @@ import urllib.request
 from urllib.parse import urlsplit, urlunsplit
 from typing import Any, Callable, Dict, Optional
 
-__all__ = ["Client", "PolicyDeniedError", "SidecarError", "receipt_id_of"]
+__all__ = ["Client", "PolicyDeniedError", "SidecarError", "no_receipt", "receipt_id_of"]
 
 DEFAULT_URL = "http://127.0.0.1:8788/"
 

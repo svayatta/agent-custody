@@ -59,24 +59,25 @@ export interface RemoteSignerOptions {
 export async function connectSigner(url: string, opts: RemoteSignerOptions = {}): Promise<Signer> {
   const f = opts.fetch ?? fetch;
   const base = url.endsWith("/") ? url : `${url}/`;
+  const shown = shownUrl(url);
   const headers = { "content-type": "application/json", ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}) };
   const res = await f(new URL("keys", base), { headers, signal: AbortSignal.timeout(10_000) });
-  if (!res.ok) throw new Error(`signer ${url} refused the key request: ${res.status}`);
+  if (!res.ok) throw new Error(`signer ${shown} refused the key request: ${res.status}`);
   const doc = (await res.json()) as KeyDocument;
   const current = doc.keys[0];
-  if (!current) throw new Error(`signer ${url} lists no key`);
+  if (!current) throw new Error(`signer ${shown} lists no key`);
   return {
     keyid: current.keyid,
     async sign(payloadType, payload) {
       const r = await f(new URL("sign", base), { method: "POST", headers, body: JSON.stringify({ payloadType, payload }), signal: AbortSignal.timeout(5000) });
-      if (!r.ok) throw new Error(`signer ${url} refused to sign: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      if (!r.ok) throw new Error(`signer ${shown} refused to sign: ${r.status} ${(await r.text()).slice(0, 200)}`);
       const env = (await r.json()) as Envelope;
-      if (typeof env.payload !== "string" || !Array.isArray(env.signatures)) throw new Error(`signer ${url} returned a malformed envelope`);
+      if (typeof env.payload !== "string" || !Array.isArray(env.signatures)) throw new Error(`signer ${shown} returned a malformed envelope`);
       return env;
     },
     async keys() {
       const k = await f(new URL("keys", base), { headers, signal: AbortSignal.timeout(10_000) });
-      if (!k.ok) throw new Error(`signer ${url} refused the key request: ${k.status}`);
+      if (!k.ok) throw new Error(`signer ${shown} refused the key request: ${k.status}`);
       return (await k.json()) as KeyDocument;
     },
   };
