@@ -63,16 +63,44 @@ def test_a_failed_handshake_is_a_memory_error(sidecar):
     async def go():
         async with MemoryClient(sidecar["url"] + "mcp") as memory:
             await memory.read()
-    # the sidecar answers the probe with 404, not 401, so the MCP handshake runs and fails
-    with pytest.raises(MemoryError, match="refused the connection") as e:
+    # the sidecar answers the probe with 404, not 401, so the MCP handshake runs and fails; the error names the status
+    with pytest.raises(MemoryError, match=r"refused the connection: HTTP 404 \(") as e:
         run(go())
     assert e.value.__cause__ is None
 
 
-@pytest.mark.xfail(strict=True, raises=httpx.ConnectError, reason="the probe runs outside the try, so a closed port raises httpx.ConnectError")
 def test_a_closed_port_is_a_memory_error():
+    # a caller catches MemoryError for "the memory server is not there"; a raw httpx error would escape that
+    port = closed_port()
+
     async def go():
-        async with MemoryClient(f"http://127.0.0.1:{closed_port()}/mcp") as memory:
+        async with MemoryClient(f"http://127.0.0.1:{port}/mcp") as memory:
             await memory.read()
-    with pytest.raises(MemoryError, match="refused the connection"):
+    with pytest.raises(MemoryError, match=rf"memory server at http://127\.0\.0\.1:{port}/mcp could not be reached: \S") as e:
         run(go())
+    assert e.value.__cause__ is None
+
+
+def test_an_unreachable_server_is_a_memory_error_with_httpx2(monkeypatch):
+    # mcp 2.x makes its HTTP client with httpx2, whose errors are not httpx's; the probe must catch those too
+    httpx2 = pytest.importorskip("httpx2")
+    from agent_custody import memory as memory_module
+
+    class Unreachable:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *a, **k):
+            raise httpx2.ConnectError("All connection attempts failed")
+
+    monkeypatch.setattr(memory_module, "create_mcp_http_client", lambda **k: Unreachable())
+
+    async def go():
+        async with MemoryClient("http://memory.invalid/mcp") as memory:
+            await memory.read()
+    with pytest.raises(MemoryError, match=r"memory server at http://memory\.invalid/mcp could not be reached: All connection attempts failed") as e:
+        run(go())
+    assert e.value.__cause__ is None
