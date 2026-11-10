@@ -344,6 +344,7 @@ export class PostgresTenancy {
   /** Creates a tenant, or renames its log id. `by` names who did it in the audit trail. */
   async addTenant(id: string, logId = id, by?: string): Promise<Tenant> {
     if (!/^[A-Za-z0-9_.-]+$/.test(id)) throw new Error(`tenant id must be a plain identifier; got "${id}"`);
+    if (!/^[A-Za-z0-9_.-]+$/.test(logId)) throw new Error(`log id must be a plain identifier; got "${logId}"`);
     await this.init();
     const rows = (await this.client.query(`INSERT INTO ${this.prefix}tenants (id, log_id) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET log_id = EXCLUDED.log_id RETURNING id, log_id, plan, created_at, disabled_at`, [id, logId])).rows as Record<string, unknown>[];
     this.tenantCache.delete(id);
