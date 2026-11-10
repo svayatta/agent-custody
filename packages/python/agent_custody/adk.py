@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
-from . import Client, denies, receipt_id_of
+from . import Client, denies, no_receipt, receipt_id_of
 
 RECEIPT_KEY = "agent-custody/receipt"
 
@@ -54,11 +54,11 @@ def adk_callbacks(client: Client) -> Dict[str, Callable[..., Any]]:
                 return None
             reason = "; ".join(str(r) for r in [*(policy.get("reasons") or []), *(policy.get("errors") or [])]) or "no permit policy matched"
         except Exception as e:  # noqa: BLE001
-            return {"error": f"agent-custody: the policy could not be evaluated; no receipt: {e}", RECEIPT_KEY: None}
+            return {"error": f"agent-custody: the policy could not be evaluated; {no_receipt(e)}", RECEIPT_KEY: None}
         try:
             rid = receipt_id_of(client.record(tool.name, args, {"status": "denied", "reason": reason}, policy, session=session))
         except Exception as e:  # noqa: BLE001 - the call stays skipped; the missing receipt is the message
-            return {"error": f"agent-custody: {reason} (no receipt: {e})", RECEIPT_KEY: None}
+            return {"error": f"agent-custody: {reason} ({no_receipt(e)})", RECEIPT_KEY: None}
         return {"error": f"agent-custody: {reason} (receipt {rid})", RECEIPT_KEY: rid}
 
     def after_tool_callback(tool: Any, args: Dict[str, Any], tool_context: Any, tool_response: Any) -> Optional[Dict[str, Any]]:

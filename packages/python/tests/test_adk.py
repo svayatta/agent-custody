@@ -116,7 +116,7 @@ def test_a_denial_that_cannot_be_recorded_still_skips_the_tool(client, monkeypat
 
     monkeypatch.setattr(client, "record", refuse)
     out = adk_callbacks(client)["before_tool_callback"](SimpleNamespace(name="stripe.refund"), {"amount": 999999}, SimpleNamespace())
-    assert out == {"error": "agent-custody: no permit policy matched (no receipt: sidecar record: 503)", RECEIPT_KEY: None}
+    assert out == {"error": "agent-custody: no permit policy matched (no receipt: the sidecar refused the request)", RECEIPT_KEY: None}
 
 
 def test_a_response_that_is_not_json_is_recorded_as_text(client, recorded):
@@ -138,7 +138,7 @@ def test_an_unreachable_sidecar_skips_the_tool_and_the_run_goes_on():
     events = run(agent, "refund 2500")
     assert calls == []
     (response,) = function_responses(events)
-    assert response["error"].startswith("agent-custody: the policy could not be evaluated; no receipt: sidecar unreachable")
+    assert response["error"] == "agent-custody: the policy could not be evaluated; no receipt: the sidecar could not be reached"
     assert response[RECEIPT_KEY] is None
 
 
@@ -150,7 +150,7 @@ def test_an_answer_without_allow_or_deny_skips_the_tool(client, monkeypatch, ans
     events = run(agent, "refund 2500")
     assert calls == []
     (response,) = function_responses(events)
-    assert response["error"] == "agent-custody: the policy could not be evaluated; no receipt: the sidecar answered without an allow or deny decision"
+    assert response["error"] == "agent-custody: the policy could not be evaluated; no receipt: the sidecar's answer was malformed"
 
 
 @pytest.mark.parametrize("answer", [{"decision": "deny"}, {"decision": "deny", "reasons": None, "errors": None}, {"decision": "deny", "reasons": 7}])
@@ -163,3 +163,13 @@ def test_a_deny_without_reasons_or_errors_still_skips_the_tool(client, monkeypat
 def test_no_policy_lets_the_tool_run(client, monkeypatch):
     monkeypatch.setattr(client, "decide", lambda *a, **k: None)  # what /decide answers when the sidecar has no policy
     assert adk_callbacks(client)["before_tool_callback"](SimpleNamespace(name="customer.lookup"), {"id": "c1"}, SimpleNamespace()) is None
+
+
+def test_credentials_in_the_sidecar_url_never_reach_the_model():
+    calls = []
+    agent = LlmAgent(name="billing", model=Scripted(), tools=[RefundTool(calls)], **adk_callbacks(Client("http://user:pass@127.0.0.1:9/?token=abc", timeout=2)))
+    events = run(agent, "refund 2500")
+    assert calls == []
+    (response,) = function_responses(events)
+    for secret in ("user", "pass", "token", "abc", "127.0.0.1"):
+        assert secret not in response["error"] and secret not in final_text(events)

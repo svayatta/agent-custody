@@ -48,7 +48,7 @@ def test_a_denial_that_cannot_be_recorded_still_blocks(client, monkeypatch):
 
     monkeypatch.setattr(client, "record", refuse)
     out = hermes_hooks(client)["pre_tool_call"]("stripe.refund", {"amount": 999999}, "task-3")
-    assert out == {"action": "block", "message": "agent-custody: no permit policy matched (no receipt: sidecar record: 503)"}
+    assert out == {"action": "block", "message": "agent-custody: no permit policy matched (no receipt: the sidecar refused the request)"}
 
 
 # Hermes releases before v2026.9.24 log a pre_tool_call hook that raises and run the tool, and a hook that returns None
@@ -56,14 +56,14 @@ def test_a_denial_that_cannot_be_recorded_still_blocks(client, monkeypatch):
 def test_an_unreachable_sidecar_blocks_instead_of_raising():
     out = hermes_hooks(Client("http://127.0.0.1:9/", timeout=2))["pre_tool_call"]("customer.lookup", {"id": "c1"}, "task-4")
     assert out["action"] == "block"
-    assert out["message"].startswith("agent-custody: the policy could not be evaluated; no receipt: sidecar unreachable")
+    assert out["message"] == "agent-custody: the policy could not be evaluated; no receipt: the sidecar could not be reached"
 
 
 @pytest.mark.parametrize("answer", [{}, {"decision": "maybe"}, {"verdict": "allow"}, [], "allow"])
 def test_an_answer_without_allow_or_deny_blocks(client, monkeypatch, answer):
     monkeypatch.setattr(client, "decide", lambda *a, **k: answer)
     out = hermes_hooks(client)["pre_tool_call"]("customer.lookup", {"id": "c1"}, "task-5")
-    assert out == {"action": "block", "message": "agent-custody: the policy could not be evaluated; no receipt: the sidecar answered without an allow or deny decision"}
+    assert out == {"action": "block", "message": "agent-custody: the policy could not be evaluated; no receipt: the sidecar's answer was malformed"}
 
 
 @pytest.mark.parametrize("answer", [{"decision": "deny"}, {"decision": "deny", "reasons": None, "errors": None}, {"decision": "deny", "reasons": 7}])
@@ -76,3 +76,10 @@ def test_a_deny_without_reasons_or_errors_still_blocks(client, monkeypatch, answ
 def test_no_policy_stays_silent(client, monkeypatch):
     monkeypatch.setattr(client, "decide", lambda *a, **k: None)  # what /decide answers when the sidecar has no policy
     assert hermes_hooks(client)["pre_tool_call"]("customer.lookup", {"id": "c1"}, "task-7") is None
+
+
+def test_credentials_in_the_sidecar_url_never_reach_the_model():
+    out = hermes_hooks(Client("http://user:pass@127.0.0.1:9/?token=abc", timeout=2))["pre_tool_call"]("stripe.refund", {"amount": 999999}, "task-8")
+    assert out["action"] == "block"
+    for secret in ("user", "pass", "token", "abc", "127.0.0.1"):
+        assert secret not in out["message"]

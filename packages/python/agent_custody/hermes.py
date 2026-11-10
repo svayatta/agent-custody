@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
-from . import Client, denies, receipt_id_of
+from . import Client, denies, no_receipt, receipt_id_of
 
 
 def _session(task_id: Optional[str], kwargs: Dict[str, Any]) -> Dict[str, Optional[str]]:
@@ -38,11 +38,11 @@ def hermes_hooks(client: Client) -> Dict[str, Callable[..., Any]]:
                 return None
             reason = "; ".join(str(r) for r in [*(policy.get("reasons") or []), *(policy.get("errors") or [])]) or "no permit policy matched"
         except Exception as e:  # noqa: BLE001
-            return {"action": "block", "message": f"agent-custody: the policy could not be evaluated; no receipt: {e}"}
+            return {"action": "block", "message": f"agent-custody: the policy could not be evaluated; {no_receipt(e)}"}
         try:
             evidence = f"receipt {receipt_id_of(client.record(tool_name, args, {'status': 'denied', 'reason': reason}, policy, session=session))}"
         except Exception as e:  # noqa: BLE001 - the block stands; the missing receipt is the message
-            evidence = f"no receipt: {e}"
+            evidence = no_receipt(e)
         return {"action": "block", "message": f"agent-custody: {reason} ({evidence})"}
 
     def post_tool_call(tool_name: str, args: Optional[Dict[str, Any]] = None, result: Any = None, task_id: Optional[str] = None, duration_ms: Optional[int] = None, **kwargs: Any) -> None:
