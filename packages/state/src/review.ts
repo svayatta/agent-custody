@@ -8,7 +8,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { DESIGN_CSS, structuralProblem, verifyBundle, type ReceiptBundle, type VerifyOptions, type VerifyResult } from "@agent-custody/receipts";
+import { APP_HEADER_CSS, appHeader, DESIGN_CSS, THEME_SCRIPT, structuralProblem, verifyBundle, type ReceiptBundle, type VerifyOptions, type VerifyResult } from "@agent-custody/receipts";
 import { buildActionPack, decodeStatement, formatExplain, type ActionPack } from "./explain.ts";
 import type { Ledger } from "./ledger.ts";
 import { matchesReceiptSearch, receiptSearchTerms, validateReceiptSearch, type ReceiptSearch } from "./search.ts";
@@ -80,7 +80,7 @@ export function scanReceipts(o: ReviewOptions, query: ReceiptSearch = o.search ?
 
 export const listReceipts = (o: ReviewOptions, query: ReceiptSearch = o.search ?? {}): ReceiptRow[] => scanReceipts(o, query).rows;
 
-const STYLE = `${DESIGN_CSS}
+const STYLE = `${DESIGN_CSS}${APP_HEADER_CSS}
   main { max-width: 74rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
   h1 { margin: 0 0 .25rem; } h2 { margin: 1.75rem 0 .6rem; }
   .sub { color: var(--ink2); margin: 0 0 1.25rem; }
@@ -108,7 +108,8 @@ const form = document.getElementById('receipt-search');
 form.addEventListener('submit', (event) => {
   event.preventDefault();
   const value = (name) => form.elements.namedItem(name).value.trim();
-  const from = value('from'), to = value('to');
+  const utc = (v) => v ? (v.length === 16 ? v + ':00' : v) + 'Z' : '';
+  const from = utc(value('from')), to = utc(value('to'));
   const error = document.getElementById('search-error');
   try {
     validateReceiptSearch({ ...(from ? { from } : {}), ...(to ? { to } : {}) });
@@ -136,16 +137,23 @@ form.addEventListener('reset', () => {
   queueMicrotask(() => form.requestSubmit());
 });
 `.replace(/\r\n?/g, "\n");
-const REVIEW_CSP = `default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${createHash("sha256").update(SEARCH_SCRIPT).digest("base64")}'; img-src data:; form-action 'self'; base-uri 'none'`;
+const REVIEW_CSP = `default-src 'none'; style-src 'unsafe-inline'; script-src ${[SEARCH_SCRIPT, THEME_SCRIPT].map((s) => `'sha256-${createHash("sha256").update(s).digest("base64")}'`).join(" ")}; img-src data:; form-action 'self'; base-uri 'none'`;
 
 const page = (title: string, body: string, script = "") => `<!doctype html>
+<html lang="en">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="content-security-policy" content="${esc(REVIEW_CSP)}">
 <title>${esc(title)}</title>
 <style>${STYLE}</style>
+${appHeader("Review")}
 <main>${body}</main>
 ${script ? `<script>${script}</script>` : ""}
+<script>${THEME_SCRIPT}</script>
 `;
+
+// The date inputs hold a local-looking value without an offset. The review reads that value as UTC.
+const asUtc = (v: string) => (/^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d)?$/.test(v) ? `${v.length === 16 ? `${v}:00` : v}Z` : v);
+const inputValue = (v: string | undefined) => (v && Number.isFinite(Date.parse(v)) ? new Date(Date.parse(v)).toISOString().slice(0, 19) : "");
 
 /** The index: one row per receipt, newest first. */
 export function renderIndex(rows: ReceiptRow[], o: ReviewOptions, link: (id: string) => string, staticPage = false, unreadable = 0): string {
@@ -157,7 +165,8 @@ export function renderIndex(rows: ReceiptRow[], o: ReviewOptions, link: (id: str
 <h1>${esc(o.title ?? "Receipts")}</h1>
 <p class="sub"><span id="receipt-count">${rows.length} receipt(s)</span> in ${esc(o.receiptsDir)}${withKeys ? ", each checked against the keys given" : ", not checked: start the review with the gateway's and principal's public keys to verify"}${o.ledger ? "; beliefs from the ledger" : "; no ledger, so what depended on a call is not known here"}.</p>
 ${unreadable ? `<p class="bad" role="alert">${unreadable} file(s) could not be read and are not in this list.</p>\n` : ""}<form id="receipt-search" method="get">
-${([['transaction', 'Transaction ID', 're_… / pi_… / charge ID'], ['customer', 'Customer ID', 'cust_…'], ['agent', 'Agent', 'support-agent'], ['from', 'From (inclusive)', '2026-10-14T00:00:00Z'], ['to', 'To (inclusive)', '2026-10-15T00:00:00Z']] as const).map(([name, label, placeholder]) => `<label>${label}<input name="${name}" value="${esc(o.search?.[name] ?? "")}" placeholder="${placeholder}"${name === 'from' || name === 'to' ? ' pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}T.+(Z|[+-][0-9]{2}:[0-9]{2})"' : ''}></label>`).join("\n")}
+${([['transaction', 'Transaction ID', 're_… / pi_… / charge ID'], ['customer', 'Customer ID', 'cust_…'], ['agent', 'Agent', 'support-agent']] as const).map(([name, label, placeholder]) => `<label>${label}<input name="${name}" value="${esc(o.search?.[name] ?? "")}" placeholder="${placeholder}"></label>`).join("\n")}
+${([['from', 'From (UTC, inclusive)'], ['to', 'To (UTC, inclusive)']] as const).map(([name, label]) => `<label>${label}<input type="datetime-local" step="1" name="${name}" value="${esc(inputValue(o.search?.[name]))}"></label>`).join("\n")}
 <button type="submit">Search receipts</button>${staticPage ? '<button class="quiet" type="reset">Clear filters</button>' : '<a href="/?transaction=&amp;customer=&amp;agent=&amp;from=&amp;to=">Clear filters</a>'}
 </form>
 <p class="muted">Filters combine and match exact IDs. Search covers public arguments, results and gateway facts; identifiers withheld by a capture rule are unavailable.${staticPage ? ' This export searches only the receipts included here.' : ''}</p>
@@ -245,7 +254,7 @@ export function reviewHandler(o: ReviewOptions): (req: IncomingMessage, res: Ser
         const search = { ...o.search };
         for (const name of ['transaction', 'customer', 'agent', 'from', 'to'] as const) {
           if (!url.searchParams.has(name)) continue;
-          const value = url.searchParams.get(name)!.trim();
+          const value = asUtc(url.searchParams.get(name)!.trim());
           if (value) search[name] = value;
           else delete search[name];
         }

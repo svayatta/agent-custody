@@ -32,6 +32,14 @@ describe("design tokens", () => {
     }
   });
 
+  it("the host pages in deploy/Caddyfile use the token values and no other colour", () => {
+    const caddyfile = read("deploy/Caddyfile");
+    const used = [...caddyfile.matchAll(/--([a-z0-9-]+):(#[0-9a-f]{6})/g)];
+    expect(used.length).toBeGreaterThan(0);
+    for (const [, name, value] of used) expect(DESIGN_CSS, `--${name}`).toContain(`--${name}: ${value}`);
+    expect(caddyfile).not.toMatch(/#(?:0f6e63|4fc3b0|1b2430|fafbfc|0e1418|e6ecf0)/);
+  });
+
   it("every app page inlines the shared CSS and keeps no palette or font of its own", () => {
     expect(CONSOLE_HTML).toContain(DESIGN_CSS);
     expect(DESIGN_CSS).not.toMatch(/url\(|@import|@font-face/);
