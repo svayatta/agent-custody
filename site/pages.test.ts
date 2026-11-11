@@ -24,7 +24,7 @@ describe("pages with one purpose", () => {
   it("/advanced is gone: its content is on How it works, and the old address redirects there", () => {
     const stub = read("site/advanced.md");
     expect(stub).toContain('content: "0; url=/how-it-works"');
-    expect(stub.split("\n").length).toBeLessThan(15);
+    expect(stub.split("\n").length).toBeLessThan(25); // a stub: the redirect, its head tags, and one line
     const how = read("site/how-it-works.md");
     for (const section of ["## Product overview film", "## The problem", "## The refund demo", "## How it works", "## Policies"]) expect(how).toContain(section);
     expect(how).not.toContain("## Parts, one by one"); // the components table lives on /guide/pieces only
@@ -40,6 +40,20 @@ describe("pages with one purpose", () => {
     }
     expect(roadmap).toContain("/receipts/mandates");
     expect(read("packages/receipts/docs/mandates.md")).toMatch(/^# .*\(planned\)\n/);
+  });
+
+  it("no link, relative or absolute, points at an anchor on a package's overview page, which has none", () => {
+    // the overview pages replaced the READMEs; a README section is linked on GitHub, where its anchor exists
+    const files = ["packages/receipts/src/portal.ts", "packages/receipts/src/log-admin.ts", "site/reference/index.md", "site/guide/pieces.md", "site/use-cases.md", "site/hosted-log.md"];
+    for (const f of files) expect(read(f), f).not.toMatch(/(https:\/\/agent-custody\.dev)?\/(receipts|state|python)\/#/);
+  });
+
+  it("the redirect stubs are not indexed, and name the page they moved to as canonical", () => {
+    for (const [stub, target] of [["site/advanced.md", "/how-it-works"], ["site/early-access.md", "/hosted-log"]] as const) {
+      const s = read(stub);
+      expect(s).toMatch(/name: robots\n\s+content: noindex/);
+      expect(s).toContain(`href: https://agent-custody.dev${target}`);
+    }
   });
 
   it("every page the sidebar or footer names exists as a source file", () => {

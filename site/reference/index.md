@@ -36,5 +36,5 @@ The packages run on Node 22 or later and Python 3.10 or later. Nothing phones ho
 
 - **Request** and **Response** blocks are JSON exactly as sent and received. Fields marked *optional* may be omitted; fields marked *env* name an environment variable and never carry the secret itself.
 - Every signed object is a [DSSE](https://github.com/secure-systems-lab/dsse) envelope: `{ "payloadType", "payload" (base64), "signatures": [{ "keyid", "sig" }] }`. The `keyid` is the SHA-256 of the signer's public key in SPKI DER, so a verifier matches keys without being told which is which.
-- `provenance` on a receipt field is one of `attested` (signed by a key other than the issuer's), `observed` (the issuer saw it itself), or `claimed` (the agent said so). The [proof table](https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not) says what each is worth.
+- `provenance` on a receipt field is one of `attested` (signed by a key other than the issuer's), `observed` (the issuer saw it itself), or `claimed` (the agent said so). The [proof table](https://github.com/svayatta/agent-custody/tree/main/packages/receipts#what-a-receipt-proves-and-what-it-does-not) says what each is worth.
 - Money is integer minor units everywhere. Timestamps are ISO 8601, UTC.

@@ -76,7 +76,9 @@ describe("the verifier (#337)", () => {
   });
   it("announces its result, clears it on any edit, and names its samples in plain words", () => {
     expect(v).toContain('role="status" aria-live="polite"');
-    expect(v).toMatch(/watch\(\[bundleText, issuerPem[^\]]*\], \(\) => \{\s*if \(busy\.value\) return;\s*result\.value = null;/);
+    // any edit clears the verdict, even during a verify, and a verify that finishes after an edit drops its result
+    expect(v).toMatch(/watch\(\[bundleText, issuerPem[^\]]*\], \(\) => \{\s*inputVersion\+\+;\s*result\.value = null;[\s\S]*?\}, \{ flush: "sync" \}\);/);
+    expect(v).toContain("if (version !== inputVersion) return;");
     const names = /filter\(\(c\) => (\[[^\]]+\])/.exec(v)![1]!;
     for (const n of JSON.parse(names) as string[]) expect(v).toContain(`"${n}": "`);
   });

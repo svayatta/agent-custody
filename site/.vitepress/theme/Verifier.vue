@@ -34,13 +34,16 @@ const SAMPLE_LABELS: Record<string, string> = {
 };
 const failed = computed(() => (result.value ? result.value.checks.filter((c) => !c.ok).map((c) => c.name) : []));
 
-// A result belongs to the inputs it was computed from: any edit clears it, so an old verdict never sits beside new input.
+// A result belongs to the inputs it was computed from: any edit clears it, and a verify that finishes after an edit
+// drops its result, so an old verdict never sits beside new input. The watcher is synchronous, so the version moves
+// before a verify started in the same tick reads it.
+let inputVersion = 0;
 watch([bundleText, issuerPem, principalPem, approvalPem, logPem, upstreamPem, stripeSecret, githubSecret, logText], () => {
-  if (busy.value) return;
+  inputVersion++;
   result.value = null;
   report.value = "";
   error.value = "";
-});
+}, { flush: "sync" });
 
 async function readFile(f: File | undefined) {
   if (!f) return;
@@ -113,15 +116,18 @@ async function keys(text: string) {
 async function verify() {
   busy.value = true;
   error.value = "";
+  const version = inputVersion;
   try {
     const bundle = JSON.parse(bundleText.value);
     const issuerKeys = await keys(issuerPem.value);
     if (issuerKeys.length === 0) throw new Error("at least one issuer public key (SPKI PEM) is required");
     const logLeaves = logText.value.trim() ? logText.value.trim().split("\n").map((l) => JSON.parse(l) as string) : undefined;
     const r = await verifyBundle(bundle, { issuerKeys, principalKeys: await keys(principalPem.value), approvalKeys: await keys(approvalPem.value), logKeys: await keys(logPem.value), upstreamKeys: await keys(upstreamPem.value), ...(stripeSecret.value || githubSecret.value ? { providerSecrets: { ...(stripeSecret.value ? { stripe: stripeSecret.value } : {}), ...(githubSecret.value ? { github: githubSecret.value } : {}) } } : {}), ...(logLeaves ? { logLeaves } : {}) });
+    if (version !== inputVersion) return; // the input changed while this ran: its verdict is for input no longer shown
     result.value = r;
     report.value = formatReport(r);
   } catch (e) {
+    if (version !== inputVersion) return;
     error.value = e instanceof Error ? e.message : String(e);
     result.value = null;
     report.value = "";

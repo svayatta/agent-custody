@@ -4,6 +4,12 @@ head:
   - - meta
     - http-equiv: refresh
       content: "0; url=/how-it-works"
+  - - meta
+    - name: robots
+      content: noindex
+  - - link
+    - rel: canonical
+      href: https://agent-custody.dev/how-it-works
 ---
 
 # This page moved

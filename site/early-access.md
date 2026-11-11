@@ -4,6 +4,12 @@ head:
   - - meta
     - http-equiv: refresh
       content: "0; url=/hosted-log"
+  - - meta
+    - name: robots
+      content: noindex
+  - - link
+    - rel: canonical
+      href: https://agent-custody.dev/hosted-log
 ---
 
 # This page moved
