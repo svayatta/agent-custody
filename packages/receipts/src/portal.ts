@@ -33,6 +33,8 @@ export interface MailOptions {
   from: string;
   /** an operator address that gets a note per registration, with the contact details */
   notify?: string;
+  /** where a reply goes, when it is not the sender */
+  replyTo?: string;
   /** the endpoint; Resend's by default */
   url?: string;
   fetch?: typeof fetch;
@@ -325,6 +327,8 @@ export class PortalStore {
         for (const c of PROFILE_COLUMNS) await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS ${c} TEXT`);
         // when the founder's note went out, so it goes once
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS followed_up_at TIMESTAMPTZ`);
+        // when the person asked for no more automatic mail about getting started
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS follow_up_opt_out_at TIMESTAMPTZ`);
         // when the address was confirmed; a provider sign-in links to a password account only once this is set
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ`);
         // a provider identity linked to an account: GitHub or Google's stable subject, and the verified email it gave
@@ -399,10 +403,14 @@ export class PortalStore {
     await this.init();
     const rows = (await this.client.query(
       `SELECT u.id, u.email, u.name, u.company, m.tenant_id, u.created_at FROM ${this.p}users u JOIN ${this.p}members m ON m.user_id = u.id
-       WHERE u.followed_up_at IS NULL AND u.name IS NOT NULL AND u.created_at <= $1 AND u.created_at >= $2 ORDER BY u.created_at`,
+       WHERE u.followed_up_at IS NULL AND u.follow_up_opt_out_at IS NULL AND u.name IS NOT NULL AND u.created_at <= $1 AND u.created_at >= $2 ORDER BY u.created_at`,
       [new Date(o.now.getTime() - o.minAgeMs).toISOString(), new Date(o.now.getTime() - o.maxAgeMs).toISOString()],
     )).rows as Record<string, unknown>[];
     return rows.map((r) => ({ id: String(r.id), email: String(r.email), name: String(r.name), company: r.company == null ? null : String(r.company), tenantId: String(r.tenant_id), createdAt: new Date(r.created_at as string).toISOString() }));
+  }
+  async optOutOfFollowUps(userId: string): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`UPDATE ${this.p}users SET follow_up_opt_out_at = COALESCE(follow_up_opt_out_at, now()) WHERE id = $1 RETURNING id`, [userId])).rows.length > 0;
   }
   async markFollowedUp(userId: string, at = new Date()): Promise<void> {
     await this.init();
@@ -732,11 +740,62 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ENFORCED = "Your organisation signs in through its identity provider. Use Sign in with single sign-on";
 const RESERVED = new Set(["default", "admin", "api", "www", "log", "checkpoints", "app", "portal", "stripe", "health", "t"]);
 
+const LOGO_URL = "https://agent-custody.dev/apple-touch-icon.png";
+const escapeHtml = (v: string) => v.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+
+export interface MailContent {
+  heading: string;
+  /** the line that an inbox shows beside the subject */
+  preheader?: string;
+  paragraphs: string[];
+  /** a block that keeps its line breaks and uses a fixed-width font */
+  code?: string;
+  /** the one action of the message */
+  button?: { label: string; url: string };
+  footer?: (string | { label: string; url: string })[];
+}
+
+/** Builds the HTML part and the plain-text part of one message from the same fields. Every value in the HTML is escaped, and only an http or https URL becomes a link. */
+export function renderMail(c: MailContent): { html: string; text: string } {
+  const link = (url: string) => (/^https?:\/\//i.test(url) ? escapeHtml(url) : null);
+  const button = c.button && link(c.button.url) ? c.button : undefined;
+  const footer = (c.footer ?? []).filter((f) => typeof f === "string" || link(f.url));
+  const text = [
+    c.heading, "",
+    ...c.paragraphs.flatMap((p) => [p, ""]),
+    ...(c.code ? [c.code, ""] : []),
+    ...(button ? [`${button.label}:`, button.url, ""] : []),
+    ...footer.map((f) => (typeof f === "string" ? f : `${f.label}: ${f.url}`)),
+    "agent-custody",
+  ].join("\n");
+  const font = `-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif`;
+  const p = (v: string, style: string, cls = "ink") => `<p class="${cls}" style="margin:0 0 16px;font:15px/1.55 ${font};${style}">${escapeHtml(v)}</p>`;
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(c.heading)}</title>
+<style>@media (prefers-color-scheme: dark) { .bg { background: #0c0a09 !important; } .card { background: #1c1917 !important; border-color: #292524 !important; } .ink { color: #fafaf9 !important; } .mute { color: #a8a29e !important; } .code { background: #0c0a09 !important; border-color: #292524 !important; color: #fafaf9 !important; } .btn { background: #f59e0b !important; } .btn a { color: #1c1917 !important; } .lnk { color: #f59e0b !important; } }</style></head>
+<body class="bg" style="margin:0;padding:0;background:#fafaf9">
+${c.preheader ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;mso-hide:all">${escapeHtml(c.preheader)}</div>` : ""}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="bg" style="background:#fafaf9"><tr><td align="center" style="padding:24px 12px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="card" style="max-width:560px;background:#ffffff;border:1px solid #e7e5e4;border-radius:8px">
+<tr><td style="padding:24px 28px 4px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding-right:10px"><img src="${LOGO_URL}" width="32" height="32" alt="logo" style="display:block;border:0;border-radius:6px"></td><td class="ink" style="font:700 17px/1 ${font};letter-spacing:.02em;color:#1c1917">agent-custody</td></tr></table></td></tr>
+<tr><td style="padding:20px 28px 8px"><h1 class="ink" style="margin:0 0 16px;font:700 22px/1.3 ${font};color:#1c1917">${escapeHtml(c.heading)}</h1>
+${c.paragraphs.map((v) => p(v, "color:#1c1917")).join("\n")}
+${c.code ? `<pre class="code ink" style="margin:0 0 16px;padding:12px;background:#fafaf9;border:1px solid #e7e5e4;border-radius:6px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#1c1917;white-space:pre-wrap;word-break:break-word">${escapeHtml(c.code)}</pre>` : ""}
+${button ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 16px"><tr><td class="btn" bgcolor="#b45309" style="background:#b45309;border-radius:6px"><a href="${link(button.url)}" style="display:inline-block;padding:12px 24px;font:600 15px/1 ${font};color:#ffffff;text-decoration:none">${escapeHtml(button.label)}</a></td></tr></table>
+${p("The button does not work? Copy this link into your browser:", "font-size:13px;margin-bottom:4px;color:#57534e", "mute")}<p class="mute" style="margin:0 0 16px;font:13px/1.5 ${font};word-break:break-all"><a href="${link(button.url)}" class="lnk" style="color:#b45309">${escapeHtml(button.url)}</a></p>` : ""}
+</td></tr>
+<tr><td style="padding:8px 28px 24px;border-top:1px solid #e7e5e4">
+${footer.map((f) => (typeof f === "string" ? `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#57534e">${escapeHtml(f)}</p>` : `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#57534e"><a href="${link(f.url)}" class="lnk" style="color:#b45309">${escapeHtml(f.label)}</a></p>`)).join("\n")}
+</td></tr></table></td></tr></table></body></html>`;
+  return { html, text };
+}
+
 /** One message through the provider. Best effort: a refusal or a failure is reported through `log`, never thrown. Returns whether it was accepted. */
-export async function deliverMail(mail: MailOptions, m: { to: string; subject: string; text: string }, log: (message: string) => void = console.error): Promise<boolean> {
+export async function deliverMail(mail: MailOptions, m: { to: string; subject: string; text: string; html?: string; headers?: Record<string, string> }, log: (message: string) => void = console.error): Promise<boolean> {
   const f = mail.fetch ?? fetch;
   try {
-    const r = await f(mail.url ?? "https://api.resend.com/emails", { method: "POST", headers: { authorization: `Bearer ${mail.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ from: mail.from, to: [m.to], subject: m.subject, text: m.text }), signal: AbortSignal.timeout(10_000) });
+    const body = { from: mail.from, to: [m.to], subject: m.subject, text: m.text, ...(m.html ? { html: m.html } : {}), ...(mail.replyTo ? { reply_to: mail.replyTo } : {}), ...(m.headers ? { headers: m.headers } : {}) };
+    const r = await f(mail.url ?? "https://api.resend.com/emails", { method: "POST", headers: { authorization: `Bearer ${mail.apiKey}`, "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
     if (r.ok) return true;
     log(`agent-custody portal: mail to ${m.to} refused: ${r.status} ${(await r.text()).slice(0, 200)}`);
   } catch (e) {
@@ -745,45 +804,57 @@ export async function deliverMail(mail: MailOptions, m: { to: string; subject: s
   return false;
 }
 
+const UNSUBSCRIBE_TTL_MS = 365 * 86_400_000;
+
 /**
  * The founder's note, sent about an hour after a registration by `sendFollowUps`, once. Written to get the first
  * receipt appended: it asks which stack they are on, offers to do the integration, and says to start in observe mode.
+ * The signer is a setting; the default is the team.
  */
-export function founderNote(o: { name: string; tenant: string; company: string | null; portalUrl: string; from: string }): { subject: string; text: string } {
+export function founderNote(o: { name: string; tenant: string; company: string | null; portalUrl: string; unsubscribeUrl: string; signer?: string; signerRole?: string }): { subject: string; text: string; html: string; headers: Record<string, string> } {
   const first = o.name.trim().split(/\s+/)[0] || o.name;
-  const signer = o.from.replace(/^.*<|>.*$/g, "");
-  return {
-    subject: "Welcome to agent-custody, and one question",
-    text: [
-      `Hi ${first},`, "",
-      `Thanks for registering ${o.tenant} on agent-custody. I am Partha, the founder; you will get me, not a queue.`, "",
-      "One question so I can help rather than guess: which stack are your agents on, and what do they touch? Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, plain Python, or an MCP host. If you tell me, I will send the exact config for it, and if it is quicker, I will do the integration with you on a call: twenty minutes gets a first receipt into your log and verified in the browser.", "",
-      'Two things worth knowing from the start. Run it in observe mode first, "mode": "observe" in the config: nothing is blocked, and each receipt records what the policy would have denied, so you tune the policy against real traffic before turning it on. And the log only ever receives a hash per receipt; the receipts stay on your machines.', "",
-      `You are on the free plan, ten thousand appends a month, no card. If you hit that, tell me and I move you up while we talk. The setup sheet is under Setup in the dashboard whenever you need it: ${o.portalUrl}`, "",
-      `What are you building${o.company ? ` at ${o.company}` : ""}? I would like to know what you want the receipts to prove, and to whom.`, "",
-      "Partha", `agent-custody.dev · ${signer}`,
-    ].join("\n"),
-  };
+  const subject = "Welcome to agent-custody, and one question";
+  // A named signer writes as one person; the default team signature writes as "we".
+  const [I, We, me, intro] = o.signer ? ["I", "I", "me", `I am ${o.signer}${o.signerRole ? `, the ${o.signerRole.toLowerCase()}` : ""}; you will get me, not a queue.`] : ["we", "We", "us", "You are writing to a person, not to a queue."];
+  const mail = renderMail({
+    heading: "One question about your agents",
+    preheader: `Which stack are your agents on? ${We} send the exact config.`,
+    paragraphs: [
+      `Hi ${first},`,
+      `Thanks for registering ${o.tenant} on agent-custody. ${intro}`,
+      `One question so that ${I} can help rather than guess: which stack are your agents on, and what do they touch? Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, plain Python, or an MCP host. If you tell ${me}, ${I} send the exact config for it. If it is quicker, ${I} do the integration with you on a call: twenty minutes gets a first receipt into your log and verified in the browser.`,
+      'Two things to know from the start. Run it in observe mode first, "mode": "observe" in the config: nothing is blocked, and each receipt records what the policy would have denied, so you tune the policy against real traffic before you turn it on. And the log only receives a hash per receipt; the receipts stay on your machines.',
+      `You are on the free plan: ten thousand appends a month, no card. If you hit that limit, tell ${me} and ${I} move you up while we talk.`,
+      `What are you building${o.company ? ` at ${o.company}` : ""}? ${We} would like to know what you want the receipts to prove, and to whom. Reply to this email.`,
+      `${o.signer ?? "The agent-custody team"}${o.signerRole ? `, ${o.signerRole}` : ""}`,
+    ],
+    button: { label: "Open the setup sheet", url: o.portalUrl },
+    footer: ["You get this one note because you registered a tenant on agent-custody. We send no other automatic messages about getting started.", { label: "Do not send me these messages", url: o.unsubscribeUrl }],
+  });
+  return { subject, ...mail, headers: { "List-Unsubscribe": `<${o.unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } };
 }
 
 /**
  * Sends the founder's note to every account registered between an hour and a week ago that has not had it, and
- * marks each one. Accounts on the operator's own mail domains are marked without a message. Idempotent: run it hourly.
+ * marks each one. Accounts on the operator's own mail domains and accounts that opted out are skipped without a message.
+ * `secret` is the portal's secret: it signs the opt-out link. Idempotent: run it hourly.
  */
-export async function sendFollowUps(store: PortalStore, mail: MailOptions, o: { portalUrl: string; now?: Date; minAgeMs?: number; maxAgeMs?: number; dryRun?: boolean; log?: (message: string) => void } = { portalUrl: "https://app.agent-custody.dev/" }): Promise<{ sent: string[]; skipped: string[]; failed: string[] }> {
+export async function sendFollowUps(store: PortalStore, mail: MailOptions, o: { portalUrl: string; secret: string; signer?: string; signerRole?: string; now?: Date; minAgeMs?: number; maxAgeMs?: number; dryRun?: boolean; log?: (message: string) => void }): Promise<{ sent: string[]; skipped: string[]; failed: string[] }> {
   const log = o.log ?? console.error;
   const now = o.now ?? new Date();
   const own = new Set([mail.from, mail.notify ?? ""].map((a) => a.replace(/^.*<|>.*$/g, "").split("@")[1]?.toLowerCase()).filter(Boolean));
   const sent: string[] = [];
   const skipped: string[] = [];
   const failed: string[] = [];
+  const portalUrl = o.portalUrl.replace(/\/?$/, "/");
   for (const u of await store.pendingFollowUps({ now, minAgeMs: o.minAgeMs ?? 3_600_000, maxAgeMs: o.maxAgeMs ?? 7 * 86_400_000 })) {
     if (own.has(u.email.split("@")[1]?.toLowerCase() ?? "")) {
       if (!o.dryRun) await store.markFollowedUp(u.id, now);
       skipped.push(u.email);
       continue;
     }
-    const note = founderNote({ name: u.name, tenant: u.tenantId, company: u.company, portalUrl: o.portalUrl, from: mail.from });
+    const unsubscribeUrl = `${portalUrl}unsubscribe?token=${signSession(o.secret, `unsub:${u.id}`, UNSUBSCRIBE_TTL_MS)}`;
+    const note = founderNote({ name: u.name, tenant: u.tenantId, company: u.company, portalUrl, unsubscribeUrl, ...(o.signer ? { signer: o.signer } : {}), ...(o.signerRole ? { signerRole: o.signerRole } : {}) });
     if (o.dryRun) { sent.push(u.email); continue; }
     if (await deliverMail(mail, { to: u.email, ...note }, log)) {
       await store.markFollowedUp(u.id, now);
@@ -812,28 +883,44 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   const sheet = (tenant: string, logId: string) => welcomeSheet({ tenant, logId, publicUrl: base, ...(o.checkpointsUrl ? { checkpointsUrl: o.checkpointsUrl } : {}), ...(o.keyid ? { keyid: o.keyid } : {}) });
   const portalBase = (o.portalUrl ?? "http://localhost/").replace(/\/?$/, "/");
   // Mail is best effort and off the request path: a provider outage is logged, never a failed registration.
-  const send = async (m: { to: string; subject: string; text: string }) => { if (o.mail) await deliverMail(o.mail, m, log); };
+  const send = async (m: { to: string; subject: string; text: string; html: string }) => (o.mail ? deliverMail(o.mail, m, log) : false);
   /** The verification link: a signed, single-purpose token good for a day. Until it is used, a provider sign-in for this address will not link to the account. */
-  const verificationMail = (u: PortalUser) => ({
-    to: u.email,
-    subject: "Verify your email address for agent-custody",
-    text: ["Hello,", "", "Please confirm this address for your agent-custody account by opening the link below. It is good for 24 hours.", "", `${portalBase}verify-email?token=${signSession(o.secret, `verify:${u.id}`, 86_400_000)}`, "", "If you did not create an account, ignore this mail; nothing was created in your name that works without it.", "", "agent-custody"].join("\n"),
-  });
+  const verificationMail = (u: PortalUser) => {
+    const subject = "Verify your email address for agent-custody";
+    return { to: u.email, subject, ...renderMail({
+      heading: "Confirm your email address",
+      preheader: "Confirm this address for your agent-custody account. The link is good for 24 hours.",
+      paragraphs: ["Hello,", "Confirm this address for your agent-custody account. The link is good for 24 hours."],
+      button: { label: "Confirm email address", url: `${portalBase}verify-email?token=${signSession(o.secret, `verify:${u.id}`, 86_400_000)}` },
+      footer: ["If you did not create an account, ignore this email. Nothing that works without this step was created in your name."],
+    }) };
+  };
 
-  const resetMail = (to: string, token: string) => ({
-    to,
-    subject: "Reset your agent-custody password",
-    text: ["Hello,", "", "Someone asked to reset the password of your agent-custody account. Open the link below to set a new password. The link works one time, for one hour.", "", `${portalBase}reset-password?token=${token}`, "", "If you did not ask for this, ignore this mail. Your password stays the same.", "", "agent-custody"].join("\n"),
-  });
+  const resetMail = (to: string, token: string) => ({ to, subject: "Reset your agent-custody password", ...renderMail({
+    heading: "Reset your password",
+    preheader: "The link works one time, for one hour.",
+    paragraphs: ["Hello,", "Someone asked to reset the password of your agent-custody account. Use the button below to set a new password. The link works one time, for one hour."],
+    button: { label: "Set a new password", url: `${portalBase}reset-password?token=${token}` },
+    footer: ["If you did not ask for this, ignore this email. Your password stays the same."],
+  }) });
 
-  const welcomeMail = (to: string, name: string, tenant: string, logId: string) => send({ to, subject: `Your agent-custody log "${tenant}" is ready`, text: [
-    `Hello ${name},`, "",
-    `Your tenant "${tenant}" is live on the hosted log. Your API key was shown once when you registered and is not in this email; if it is gone, mint another under API keys at ${portalBase}.`, "",
-    "Everything below is under Setup in the dashboard whenever you need it.", "",
-    sheet(tenant, logId), "",
-    `Dashboard: ${portalBase}`, "Getting started: https://agent-custody.dev/guide/getting-started", "Questions: reply to this email.",
-  ].join("\n") });
-  const notifyMail = (p: Profile & { email: string; tenant: string }) => o.mail?.notify ? send({ to: o.mail.notify, subject: `New registration: ${p.company} (${p.tenant})`, text: [`${p.name}${p.role ? `, ${p.role}` : ""} at ${p.company} registered tenant "${p.tenant}".`, "", `email     ${p.email}`, `phone     ${p.phone ?? "-"}`, `telegram  ${p.telegram ? `@${p.telegram}` : "-"}`, "", "The Registrations section of the admin page has the same, with their usage."].join("\n") }) : Promise.resolve();
+  const welcomeMail = (to: string, name: string, tenant: string, logId: string) => send({ to, subject: `Your agent-custody log "${tenant}" is ready`, ...renderMail({
+    heading: `Your log "${tenant}" is ready`,
+    preheader: "Your tenant is live on the hosted log. The setup sheet is below.",
+    paragraphs: [
+      `Hello ${name},`,
+      `Your tenant "${tenant}" is live on the hosted log. Your API key was shown once when you registered and is not in this email. If it is gone, mint another under API keys in the dashboard.`,
+      "The setup sheet is below. It is also under Setup in the dashboard.",
+    ],
+    code: sheet(tenant, logId),
+    button: { label: "Open the dashboard", url: portalBase },
+    footer: ["Getting started: https://agent-custody.dev/guide/getting-started", "Questions? Reply to this email."],
+  }) });
+  const notifyMail = (p: Profile & { email: string; tenant: string }) => o.mail?.notify ? send({ to: o.mail.notify, subject: `New registration: ${p.company} (${p.tenant})`, ...renderMail({
+    heading: `New registration: ${p.company}`,
+    paragraphs: [`${p.name}${p.role ? `, ${p.role}` : ""} at ${p.company} registered tenant "${p.tenant}".`, "The Registrations section of the admin page has the same, with their usage."],
+    code: [`email     ${p.email}`, `phone     ${p.phone ?? "-"}`, `telegram  ${p.telegram ? `@${p.telegram}` : "-"}`].join("\n"),
+  }) }) : Promise.resolve(false);
   const exportCommand = (tenant: string) => `npx @agent-custody/receipts log-export --log-url ${base} --tenant ${tenant} --token-env AGENT_CUSTODY_LOG_TOKEN --out custody-export/`;
   // The welcome sheet as data: what the page renders as numbered steps, at registration and again under Setup.
   const setupFor = (tenant: string, logId: string) => {
@@ -1012,6 +1099,19 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         const r = await onboard(user, parsed);
         void send(verificationMail(user));
         return json(r.status, r.body, cookie);
+      }
+      // A GET changes nothing: a mail scanner opens the link before the person does. The opt-out is the POST, from the form below or from a mail provider's one-click request. The body of that request is not read.
+      if ((req.method === "GET" || req.method === "POST") && url.pathname === "/unsubscribe") {
+        const token = url.searchParams.get("token") ?? "";
+        const who = readSession(o.secret, token);
+        const userId = who?.startsWith("unsub:") ? who.slice("unsub:".length) : null;
+        if (!userId || !(await store.user(userId))) return page(400, "Link not valid", "This link is not valid or has expired. Reply to the email and we stop the messages by hand.");
+        if (req.method === "GET") {
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'" });
+          return void res.end(resultPage("Stop these emails?", `<p>Press the button to stop the automatic messages about getting started that agent-custody sends to this account.</p><form method="post" action="/unsubscribe?token=${encodeURIComponent(token)}" style="margin-top:1.25rem"><button type="submit" style="font:inherit;font-weight:600;padding:.6rem 1.2rem;border:0;border-radius:8px;background:var(--accent);color:var(--panel);cursor:pointer">Stop these emails</button></form>`));
+        }
+        await store.optOutOfFollowUps(userId);
+        return page(200, "You are unsubscribed", "You get no more automatic messages about getting started from agent-custody. Messages about your account, such as a sign-in or invite email, still arrive.");
       }
       if (req.method === "GET" && url.pathname === "/verify-email") {
         const who = readSession(o.secret, url.searchParams.get("token") ?? undefined);
@@ -1373,8 +1473,14 @@ document.getElementById("f").onsubmit = async (e) => {
         if (ownerOnly(role, ...(await store.invitesOf(tenantId)).filter((i) => i.email === email).map((i) => i.role))) return json(403, OWNER_ONLY);
         await store.invite(tenantId, email, role as Role, user.email);
         log(`agent-custody portal: ${user.email} invited ${email} to tenant ${tenantId} as ${role}`);
-        void send({ to: email, subject: `You are invited to ${tenantId} on agent-custody`, text: [`${user.email} invited you to the agent-custody tenant "${tenantId}" as ${role}.`, "", `Create an account or sign in with this address at ${portalBase}, verify the address, and accept the invite. The invite is good for seven days.`, "", "agent-custody"].join("\n") });
-        return json(200, { invited: email, role });
+        const emailSent = await send({ to: email, subject: `You are invited to ${tenantId} on agent-custody`, ...renderMail({
+          heading: `Join "${tenantId}" on agent-custody`,
+          preheader: `${user.email} invited you as ${role}. The invite is good for seven days.`,
+          paragraphs: [`${user.email} invited you to the agent-custody tenant "${tenantId}" as ${role}.`, `Sign in, or create an account, with this address: ${email}. Verify the address. The first screen then shows the invite with an Accept button. The invite is good for seven days.`],
+          button: { label: "Accept the invite", url: portalBase },
+          footer: ["If you do not know the person who invited you, ignore this email."],
+        }) });
+        return json(200, { invited: email, role, emailSent });
       }
       if (req.method === "POST" && url.pathname === "/api/invites/remove") {
         const email = String((await jsonBody()).email ?? "").trim().toLowerCase();
@@ -2034,7 +2140,7 @@ ${DESIGN_CSS}
     $("inviteRows").innerHTML = r.invites.map((i) => "<tr><td>" + esc(i.email) + "</td><td>" + esc(ROLE_LABEL[i.role]) + "</td><td class=mono>" + esc(i.invitedBy) + "</td><td>" + esc(i.createdAt.slice(0, 10)) + "</td><td>" + (can("admin") ? "<button class=link data-rminvite=\\"" + esc(i.email) + "\\">Cancel</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>none</td></tr>";
   };
   const membersDo = async (path, body, done) => { try { await api("POST", path, body); toast(done, true); } catch (err) { toast(err.message, false); } await loadMembers(); };
-  $("inviteForm").onsubmit = (e) => { e.preventDefault(); membersDo("/api/members", { email: $("inviteEmail").value, role: $("inviteRole").value }, "Invite sent to " + $("inviteEmail").value + ".").then(() => { $("inviteEmail").value = ""; }); };
+  $("inviteForm").onsubmit = async (e) => { e.preventDefault(); const to = $("inviteEmail").value; try { const r = await api("POST", "/api/members", { email: to, role: $("inviteRole").value }); toast(r.emailSent ? "Invite sent to " + to + "." : "The invite is saved, but the email did not go out to " + to + ". Ask them to sign in at " + location.origin + "/ with that address and accept the invite.", r.emailSent); $("inviteEmail").value = ""; } catch (err) { toast(err.message, false); } await loadMembers(); };
   document.addEventListener("click", async (e) => {
     const cell = (b) => b.closest("tr").cells[0].textContent;
     const ch = e.target.closest("button[data-setrole]");
