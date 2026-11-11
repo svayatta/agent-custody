@@ -27,6 +27,11 @@ describe("one name for each thing", () => {
     for (const term of ['id="tabSignUp" aria-selected="false">Sign up<', ">Sign in<", ">Create API key<", ">Copy API key<"]) expect(dashboard).toContain(term);
   });
 
+  it("the dashboard explains append, checkpoint, Cedar, and leaf on hover", () => {
+    for (const term of [">appends</abbr>", ">Latest checkpoint</abbr>", ">Cedar</abbr>", ">leaf</abbr>"]) expect(dashboard).toContain(term);
+    expect(dashboard).toContain("abbr[title] {");
+  });
+
   it("the glossary defines every product name and the terms the docs used before defining them", () => {
     for (const term of ["Components", "Dashboard", "Gateway console", "Hosted log", "Verify a receipt", "API key", "Cedar", "DSSE", "Principal", "Tree head", "Append", "Leaf"]) expect(glossary).toContain(`**${term}**`);
   });
