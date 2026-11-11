@@ -9,13 +9,13 @@
     "source": "github",
     "subfolder": "packages/receipts"
   },
-  "version": "0.16.5",
+  "version": "0.16.6",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@agent-custody/receipts",
-      "version": "0.16.5",
+      "version": "0.16.6",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
