@@ -70,6 +70,14 @@ The gateway covers only the calls that go through it. A credential in the agent'
 
 This is for engineers who run Claude Code against repositories and systems that touch production. One command adds a hook to Claude Code. The hook checks each shell command, file edit, and MCP tool call against a deny list before the call runs. The starter list covers force push, `rm -rf` on `/` and `~`, `terraform destroy`, and `drop database`.
 
+Before you install anything, see what it would have caught in your last week of Claude Code. This reads the transcripts Claude Code keeps on your machine; it installs nothing, writes nothing, and sends nothing:
+
+```bash
+npx -y @agent-custody/receipts audit-sessions --since 7d
+```
+
+Then install the hook:
+
 ```bash
 npm install -g @agent-custody/receipts
 agent-custody init claude-code
