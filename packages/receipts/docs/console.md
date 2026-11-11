@@ -1,4 +1,4 @@
-# The gateway console
+# Gateway console
 
 A small admin service for the person who runs a gateway. It shows what the gateway is configured to do and what it has done, validates and replays a policy change before it is saved, and revokes a grant. It is a separate process from the gateway, behind a token, so the gateway never serves an admin page next to the agents' credentials.
 

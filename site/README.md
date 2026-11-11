@@ -15,6 +15,8 @@ The gateway reference and receipt specification cover financial operation outcom
 
 ## Rules for site changes
 
+- One name for each thing, as [the glossary](guide/glossary.md) defines it: "Verify a receipt", "Hosted log" (the product), "Dashboard" (app.agent-custody.dev), "Gateway console" (the local tool), "Sign up", "Sign in", "API key", "Blog" and "posts", "Components". Command names and flags, such as `agent-custody portal` and `--token-env`, keep their names. A new term goes into the glossary first.
+
 - `bun run site:build` must pass. It fails on dead links.
 - Root README sections that the site includes are fenced by `<!-- #region name -->` markers. Keep the markers.
 - `site/reference/` is written by hand, because TypeDoc does not support the workspace's TypeScript 7.

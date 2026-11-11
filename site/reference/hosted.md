@@ -20,7 +20,7 @@ Retry-After: <seconds to the start of next month>
 
 The gateway's log client retries a 429 three times with backoff and then treats the append as failed. A pre-committed call and a financial operation are not forwarded: the call returns an error. Any other call is forwarded and returns its real result marked `log-pending`, and its receipt waits in the outbox until the log takes it. In strict mode every call is pre-committed. See [pricing](https://agent-custody.dev/pricing).
 
-## Registering: the portal
+## Signing up: the dashboard
 
 `https://app.agent-custody.dev/` is one page. Registering creates the account, the tenant, and its first key, shown once. The page's own API, which any HTTP client may use with the session cookie it sets:
 
@@ -97,7 +97,7 @@ Two emails follow a registration when the operator has mail configured: the setu
 
 ## Policies: names for the digests receipts carry
 
-Enforcement is local: the gateway reads its Cedar file and writes the file's SHA-256 into every receipt as `policyDigest`. The portal's Policies page lets a tenant publish each version they deploy under a name, so a digest reads as "refunds-v3" here, in the match tool (paste a receipt or a digest), and in the export's `policies.json`. Nothing on this page is read by the gateway, and the hosted log never evaluates a policy. Every publish and removal is in the tenant's audit trail.
+Enforcement is local: the gateway reads its Cedar file and writes the file's SHA-256 into every receipt as `policyDigest`. The dashboard's Policies page lets a tenant publish each version they deploy under a name, so a digest reads as "refunds-v3" here, in the match tool (paste a receipt or a digest), and in the export's `policies.json`. Nothing on this page is read by the gateway, and the hosted log never evaluates a policy. Every publish and removal is in the tenant's audit trail.
 
 ## Using a tenant
 

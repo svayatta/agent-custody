@@ -210,7 +210,7 @@ The Claude Code hook has the same input and output as the Claude Agent SDK, so o
 
 - [Pricing](/pricing), [the hosted log](/early-access), and [the security questionnaire](/security).
 - [FAQ: where the data goes](/faq), [privacy](/privacy), [terms](/terms), and [contact](/contact).
-- [Verify a receipt in the browser](/verify). Nothing is uploaded.
+- [Verify a receipt](/verify) in your browser. Nothing is uploaded.
 - [Receipt v0.2](/receipt/v0.2) and [the conformance vectors](/receipt/vectors).
 - [Threat model](/receipts/threat-model) and [what the evidence satisfies](/receipts/compliance).
 - [Writing](/blog/) and [the changelog](/changelog).

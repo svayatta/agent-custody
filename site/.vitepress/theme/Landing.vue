@@ -178,7 +178,7 @@ const limits = [
             <div>
               <p class="h3">What a reviewer checks, offline</p>
               <div class="term"><pre tabindex="0" aria-label="The offline check of the receipts">{{ verified }}</pre></div>
-              <p class="caption">The reviewer holds the agent's public key and the receipt files. Nothing else. The last line is the <code>terraform destroy</code> receipt checked with a key that is not the agent's. <a href="/verify">Verify a receipt in your browser →</a></p>
+              <p class="caption">The reviewer holds the agent's public key and the receipt files. Nothing else. The last line is the <code>terraform destroy</code> receipt checked with a key that is not the agent's. <a href="/verify">Verify a receipt →</a></p>
             </div>
           </div>
           <div class="ctas after">
@@ -225,7 +225,7 @@ const limits = [
           <nav aria-label="Product"><h2>Product</h2><ul><li><a href="/advanced">Advanced</a></li><li><a href="/use-cases">Use cases</a></li><li><a href="/pricing">Pricing</a></li><li><a href="/early-access">Hosted log</a></li><li><a href="/verify">Verify</a></li></ul></nav>
           <nav aria-label="Docs"><h2>Docs</h2><ul><li><a href="/guide/getting-started">Getting started</a></li><li><a href="/guide/incident-replay">Incident replay</a></li><li><a href="/reference/">Reference</a></li><li><a href="/receipt/v0.2">Receipt spec</a></li><li><a href="/changelog">Changelog</a></li></ul></nav>
           <nav aria-label="Trust"><h2>Trust</h2><ul><li><a href="/security">Security</a></li><li><a href="/faq">FAQ: where data goes</a></li><li><a href="/receipts/threat-model">Threat model</a></li><li><a href="/custody">This repository</a></li></ul></nav>
-          <nav aria-label="Company"><h2>Company</h2><ul><li><a href="/blog/">Writing</a></li><li><a href="/contact">Contact</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul></nav>
+          <nav aria-label="Company"><h2>Company</h2><ul><li><a href="/blog/">Blog</a></li><li><a href="/contact">Contact</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul></nav>
         </div>
         <div class="legal">
           <span>Apache-2.0 · Charioteer Consulting Ltd, {{ year }}</span>

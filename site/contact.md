@@ -4,7 +4,7 @@
 
 | for | write to |
 | --- | --- |
-| Early access, pricing, a tenant on the hosted log | partha@charioteerconsulting.com, or the [early-access form](/early-access) |
+| The hosted log, pricing, a tenant | partha@charioteerconsulting.com, or the [early-access form](/early-access) |
 | A security problem | partha@charioteerconsulting.com, per [SECURITY.md](https://github.com/svayatta/agent-custody/blob/main/SECURITY.md); acknowledgement within two working days |
 | A bug or a question about the packages | [GitHub issues](https://github.com/svayatta/agent-custody/issues) |
 | Privacy, data access, deletion | partha@charioteerconsulting.com, see [privacy](/privacy) |

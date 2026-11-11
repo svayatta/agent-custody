@@ -1,4 +1,6 @@
-# What each piece is for, and when you need it
+# Components
+
+The words on this page are defined in the [glossary](/guide/glossary).
 
 <!--@include: ../../README.md#pieces-->
 

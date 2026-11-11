@@ -1092,7 +1092,7 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         if (ownerOnly(role, ...(await store.invitesOf(tenantId)).filter((i) => i.email === email).map((i) => i.role))) return json(403, OWNER_ONLY);
         await store.invite(tenantId, email, role as Role, user.email);
         log(`agent-custody portal: ${user.email} invited ${email} to tenant ${tenantId} as ${role}`);
-        void send({ to: email, subject: `You are invited to ${tenantId} on agent-custody`, text: [`${user.email} invited you to the agent-custody tenant "${tenantId}" as ${role}.`, "", `Create an account or sign in with this address at ${portalBase}, verify the address, and accept the invite. The invite is good for seven days.`, "", "agent-custody"].join("\n") });
+        void send({ to: email, subject: `You are invited to ${tenantId} on agent-custody`, text: [`${user.email} invited you to the agent-custody tenant "${tenantId}" as ${role}.`, "", `Sign up or sign in with this address at ${portalBase}, verify the address, and accept the invite. The invite is good for seven days.`, "", "agent-custody"].join("\n") });
         return json(200, { invited: email, role });
       }
       if (req.method === "POST" && url.pathname === "/api/invites/remove") {
@@ -1354,6 +1354,7 @@ const PORTAL_PAGE = `<!doctype html>
     #audit td { min-width: 0; padding: 0; border: 0; white-space: normal; }
     #audit td:nth-child(3) { grid-area: 1 / 1; font-weight: 600; } #audit td:nth-child(1) { grid-area: 1 / 2; color: var(--ink2); font-size: .8rem; white-space: nowrap; }
     #audit td:nth-child(2), #audit td:nth-child(4), #audit td[colspan] { grid-column: 1 / -1; font-size: .8rem; } #audit td:nth-child(2) { color: var(--ink2); } }
+  abbr[title] { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
 </style>
 <div class="top"><a class="brand" href="https://agent-custody.dev/"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links"><a href="https://agent-custody.dev/guide/getting-started">Guide</a><a href="https://docs.agent-custody.dev/reference/">Docs</a><a href="https://agent-custody.dev/verify">Verify a receipt</a></span><span class="who" id="who"></span><button class="theme" id="themeToggle" type="button">Dark mode</button></div>
 <div id="notice" class="notice" hidden></div>
@@ -1390,8 +1391,8 @@ const PORTAL_PAGE = `<!doctype html>
     <label>Work email for single sign-on<input name="email" type="email" autocomplete="email" required></label>
     <button class="quiet" type="submit">Sign in with single sign-on</button>
   </form>
-  <p class="muted swap"><button class="link" id="authSwap" type="button">Create an account instead</button></p>
-  <p class="muted fine">The free plan is ten thousand appends a month, no card. Your gateway sends only hashes; nothing you log here can be read by us.</p>
+  <p class="muted swap"><button class="link" id="authSwap" type="button">Sign up instead</button></p>
+  <p class="muted fine">The free plan is ten thousand <abbr title="An append is one receipt hash your gateway writes to your log.">appends</abbr> a month, no card. Your gateway sends only hashes; nothing you log here can be read by us.</p>
   </div>
 </section>
 <section id="onboard" class="auth split" hidden>
@@ -1428,7 +1429,7 @@ const PORTAL_PAGE = `<!doctype html>
   ${MARK}
   <h1>Your tenant is ready</h1>
   <p class="muted">Three steps to your first receipt in this log. Everything here is under <b>Setup</b> in the dashboard whenever you need it again.</p>
-  <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst">Copy key</button></div>
+  <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst">Copy API key</button></div>
   <p><button id="toDash">Go to the dashboard</button></p>
   </div>
   <div id="firstSetup"></div>
@@ -1456,7 +1457,7 @@ const PORTAL_PAGE = `<!doctype html>
         <div class="card" id="cUsed"><div class="k">Appends this month</div><div class="v" id="vUsed">–</div><div class="s" id="sUsed"></div></div>
         <div class="card" id="cSize"><div class="k">Receipts in your log</div><div class="v" id="vSize">–</div><div class="s">leaf hashes, all time</div></div>
         <div class="card" id="cKeys"><div class="k">Live keys</div><div class="v" id="vKeys">–</div><div class="s" id="sKeys"></div></div>
-        <div class="card" id="cCp"><div class="k">Latest checkpoint</div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
+        <div class="card" id="cCp"><div class="k"><abbr title="A checkpoint is the log's size and root hash, signed and published apart from the log, so anyone can check later that it was never rewritten.">Latest checkpoint</abbr></div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
       </div>
       <p class="muted">Tree heads on this log are signed by our key; there is no second, independent witness yet. Every receipt you log here is checkable by anyone with your gateway's public key and ours: <a href="https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not">what a receipt proves and what it does not</a>.</p>
       <h2>Your log</h2>
@@ -1471,15 +1472,15 @@ const PORTAL_PAGE = `<!doctype html>
     </div>
     <div data-pane="keys" hidden>
       <h1>API keys</h1>
-      <p class="muted">A key is a bearer token your gateway presents on append. It is shown once when minted; we keep only its hash. Mint a second key before revoking the first to rotate without a gap.</p>
-      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Mint key</button></form>
-        <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted">Copy key</button></div>
+      <p class="muted">An API key is what your gateway presents on each append. It is shown once when created; we keep only its hash. Create a second API key before revoking the first to rotate without a gap.</p>
+      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Create API key</button></form>
+        <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted">Copy API key</button></div>
         <table style="margin-top:1rem"><thead><tr><th>label</th><th>hash</th><th>created</th><th>state</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
       <p class="msg" id="keysMsg"></p>
     </div>
     <div data-pane="policies" hidden>
       <h1>Policies</h1>
-      <p class="muted">Enforcement stays on your machines: the gateway reads its Cedar file locally and writes the file's SHA-256 into every receipt as <code>policyDigest</code>. This page gives those digests names. Publish each version you deploy, byte for byte as the gateway loads it, and a receipt's digest reads as "refunds-v3" instead of a hash, here and in your export. We never evaluate a policy and nothing here is read by the gateway.</p>
+      <p class="muted">Enforcement stays on your machines: the gateway reads its <abbr title="Cedar is the policy language the gateway uses to allow or deny each tool call.">Cedar</abbr> file locally and writes the file's SHA-256 into every receipt as <code>policyDigest</code>. This page gives those digests names. Publish each version you deploy, byte for byte as the gateway loads it, and a receipt's digest reads as "refunds-v3" instead of a hash, here and in your export. We never evaluate a policy and nothing here is read by the gateway.</p>
       <div class="panel"><form id="policyForm"><label>Name for this version<input id="policyName" placeholder="refunds-v3" maxlength="80" required></label><label>Policy text, exactly as the gateway's file<textarea id="policyText" rows="8" spellcheck="false" placeholder="permit(principal, action == Action::&quot;stripe.refund&quot;, resource) when { context.args.amount <= 100000 };" required></textarea></label><button type="submit">Publish version</button> <span class="muted" id="policyDigestPreview"></span></form></div>
       <div class="panel"><h2>Match a receipt</h2><p class="muted">Paste a receipt file, or just its <code>policyDigest</code>, to see which published version decided it.</p><form id="matchForm"><label>Receipt JSON or digest<textarea id="matchIn" rows="3" spellcheck="false"></textarea></label><button type="submit" class="quiet">Match</button></form><p class="msg" id="matchOut"></p></div>
       <div class="panel"><table><thead><tr><th>name</th><th>digest</th><th>bytes</th><th>published</th><th>by</th><th></th></tr></thead><tbody id="policies"></tbody></table></div>
@@ -1516,7 +1517,7 @@ const PORTAL_PAGE = `<!doctype html>
     </div>
     <div data-pane="export" hidden>
       <h1>Export</h1>
-      <p class="muted">Everything the log holds about you, any time, with your key: every leaf hash as a log file the verifier reads offline, the signed head, the published keys, the checkpoints, your usage, and the actions taken on your tenant. It checks itself before writing.</p>
+      <p class="muted">Everything the log holds about you, any time, with your key: every <abbr title="A leaf is one entry in the log: the hash of one receipt.">leaf</abbr> hash as a log file the verifier reads offline, the signed head, the published keys, the checkpoints, your usage, and the actions taken on your tenant. It checks itself before writing.</p>
       <pre id="exportCmd"></pre>
     </div>
     <div data-pane="setup" hidden>
@@ -1558,7 +1559,7 @@ const PORTAL_PAGE = `<!doctype html>
   const previewTenant = () => { $("tenantPreview").textContent = LOG_BASE + "t/" + ($("tenant").value || "<tenant>") + "/"; };
   $("company").oninput = () => { if (!tenantEdited) { $("tenant").value = slug($("company").value); previewTenant(); } };
   $("tenant").oninput = () => { tenantEdited = $("tenant").value !== ""; previewTenant(); };
-  $("authSwap").onclick = () => { registering = !registering; $("authTitle").textContent = registering ? "Create an account" : "Sign in"; $("authGo").textContent = registering ? "Create account" : "Sign in"; $("authNote").hidden = !registering; $("password").autocomplete = registering ? "new-password" : "current-password"; $("authSwap").textContent = registering ? "I already have an account" : "Create an account instead"; };
+  $("authSwap").onclick = () => { registering = !registering; $("authTitle").textContent = registering ? "Sign up" : "Sign in"; $("authGo").textContent = registering ? "Sign up" : "Sign in"; $("authNote").hidden = !registering; $("password").autocomplete = registering ? "new-password" : "current-password"; $("authSwap").textContent = registering ? "Sign in instead" : "Sign up instead"; };
   $("authForm").onsubmit = async (e) => {
     e.preventDefault(); $("authMsg").className = "msg"; $("authMsg").textContent = "";
     try {

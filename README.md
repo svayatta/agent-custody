@@ -171,9 +171,9 @@ The sections above are the two ways to start. The rest of the product is below a
 ### What each piece is for, and when you need it
 
 <!-- #region pieces -->
-Each part exists because a specific thing goes wrong without it. Use the table to decide what to turn on.
+Each component exists because a specific thing goes wrong without it. Use the table to decide what to turn on.
 
-| piece | the failure it prevents | you need it when |
+| component | the failure it prevents | you need it when |
 | --- | --- | --- |
 | **SDK interceptor** (`@agent-custody/receipts`, in the agent's process) | The only record of what an agent did is its own log: mutable, unsigned, written by the thing you are trying to check. | Any agent that calls tools. Turn it on first; it is a hook or a wrapped function. It is honest about being self-reported: every field is labelled `claimed`. |
 | **Gateway** (`@agent-custody/receipts`, a separate process between agent and tools: MCP servers, REST APIs described as tools, or other agents reached over A2A) | An in-process hook can be skipped, and a policy that reads the agent's own arguments can be fed lies. | The call moves money, touches production, or handles personal data, or a security owner has to sign off on what agents may do. Denied calls never reach the tool and still produce a receipt. For tools named in `precommit`, the gateway logs a signed authorization before forwarding and withholds the call if the log will not take it, so the evidence exists before the side effect does. Only calls through the gateway are covered; a credential in the agent's own environment bypasses it, and under egress lockdown the egress witness receipts that connection. |
