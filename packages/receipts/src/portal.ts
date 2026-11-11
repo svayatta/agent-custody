@@ -12,7 +12,7 @@ import { createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { postgresCheckpoints, type CheckpointStore } from "./checkpoints.ts";
-import { DESIGN_CSS } from "./design.ts";
+import { DESIGN_CSS, LOGO_MARK as MARK } from "./design.ts";
 import { welcomeSheet } from "./log-admin.ts";
 import { clientAddress } from "./log-sink.ts";
 import { PLAN_QUOTAS, RateLimiter, type Plan, type PostgresLike, type PostgresTenancy } from "./log-store.ts";
@@ -1212,7 +1212,6 @@ export function servePortal(o: PortalOptions, opts: { port: number; host?: strin
 // ---- the page: one file, no framework, no outside requests ----
 const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#b45309"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="#b45309" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="#b45309" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-const MARK = '<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect class="tile" width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path class="ink" d="M25 20h14M25 27h14" stroke-width="2.6" stroke-linecap="round"/><path class="ink" d="M25 37.5l5 4.5 9.5-10" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 // The small pages outside the app (errors, results, the address check) share the brand without the app's script.
 const RESULT_STYLE = `<style>

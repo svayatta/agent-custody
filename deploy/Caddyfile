@@ -10,10 +10,37 @@
 	}
 }
 
+# A page for the errors that Caddy itself answers: the service behind a host does not answer (502, 503, 504), or the
+# checkpoints host has no file (404). Answers that the log server sends, its own 404 and 401 included, pass unchanged.
+# The colours are the tokens of packages/receipts/src/design.ts; a test compares them. No script and no outside request.
+(errorpages) {
+	handle_errors {
+		@page expression {http.error.status_code} in [404, 502, 503, 504]
+		handle @page {
+			header Content-Type "text/html; charset=utf-8"
+			header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'"
+			header Cache-Control "no-store"
+			header X-Content-Type-Options nosniff
+			respond <<HTML
+				<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="/favicon.svg" type="image/svg+xml">
+				<title>{http.error.status_code} {http.error.status_text}</title>
+				<style>:root{--bg:#fafaf9;--panel:#ffffff;--line:#e7e5e4;--ink:#1c1917;--ink2:#57534e;--accent:#b45309;--font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}@media(prefers-color-scheme:dark){:root{--bg:#0c0a09;--panel:#1c1917;--line:#292524;--ink:#fafaf9;--ink2:#a8a29e;--accent:#f59e0b}}body{margin:0;background:var(--bg);color:var(--ink);font:1rem/1.55 var(--font)}header{display:flex;align-items:center;padding:.75rem 1.25rem;border-bottom:1px solid var(--line);background:var(--panel)}.brand{display:inline-flex;align-items:center;gap:.5rem;color:var(--ink);font-weight:700;text-decoration:none}.mark{width:28px;height:28px}.tile{fill:var(--accent)}.ink{stroke:var(--accent)}main{max-width:40rem;margin:0 auto;padding:3rem 1.25rem}h1{margin:0 0 .5rem;font-size:1.5rem;line-height:1.25;letter-spacing:-.015em;overflow-wrap:anywhere}p{color:var(--ink2)}a{color:var(--accent);text-underline-offset:3px}code{font-family:var(--mono);font-size:.9em}table{border-collapse:collapse;margin:1rem 0;width:100%}td{padding:.5rem .75rem .5rem 0;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}</style>
+				<header><a class="brand" href="https://agent-custody.dev/"><svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect class="tile" width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path class="ink" d="M25 20h14M25 27h14" stroke-width="2.6" stroke-linecap="round"/><path class="ink" d="M25 37.5l5 4.5 9.5-10" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a></header>
+				<main>
+				<h1>{http.error.status_code} {http.error.status_text}</h1>
+				<p>This host could not answer your request. A 404 means that this address has no page here. A 502, 503, or 504 means that the service behind this host does not answer. Wait a minute and try again.</p>
+				<p>Not sure what this host is? Read about <a href="https://agent-custody.dev/">agent-custody</a>.</p>
+				</main>
+				HTML {http.error.status_code}
+		}
+	}
+}
+
 # TLS at the edge, certificate from Let's Encrypt, the log server behind it. LOG_HOST comes from .env.
 # A person who pastes the log's address into a browser gets a page saying what it is; the API is unchanged.
 {$LOG_HOST} {
 	import favicon
+	import errorpages
 	encode gzip
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -25,9 +52,10 @@
 		header Content-Type "text/html; charset=utf-8"
 		header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'"
 		respond <<HTML
-			<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="/favicon.svg" type="image/svg+xml">
+			<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="/favicon.svg" type="image/svg+xml">
 			<title>{$LOG_HOST}</title>
-			<style>body{margin:0;font:16px/1.55 system-ui,sans-serif;color:#1b2430;background:#fafbfc}@media(prefers-color-scheme:dark){body{color:#e6ecf0;background:#0e1418}a{color:#4fc3b0}}main{max-width:40rem;margin:0 auto;padding:3rem 1.25rem}h1{font-size:1.4rem;margin:0 0 .5rem}code{font-family:ui-monospace,Menlo,monospace;font-size:.9em}a{color:#0f6e63}table{border-collapse:collapse;margin:1rem 0}td{padding:.3rem .8rem .3rem 0;vertical-align:top}</style>
+			<style>:root{--bg:#fafaf9;--panel:#ffffff;--line:#e7e5e4;--ink:#1c1917;--ink2:#57534e;--accent:#b45309;--font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}@media(prefers-color-scheme:dark){:root{--bg:#0c0a09;--panel:#1c1917;--line:#292524;--ink:#fafaf9;--ink2:#a8a29e;--accent:#f59e0b}}body{margin:0;background:var(--bg);color:var(--ink);font:1rem/1.55 var(--font)}header{display:flex;align-items:center;padding:.75rem 1.25rem;border-bottom:1px solid var(--line);background:var(--panel)}.brand{display:inline-flex;align-items:center;gap:.5rem;color:var(--ink);font-weight:700;text-decoration:none}.mark{width:28px;height:28px}.tile{fill:var(--accent)}.ink{stroke:var(--accent)}main{max-width:40rem;margin:0 auto;padding:3rem 1.25rem}h1{margin:0 0 .5rem;font-size:1.5rem;line-height:1.25;letter-spacing:-.015em;overflow-wrap:anywhere}p{color:var(--ink2)}a{color:var(--accent);text-underline-offset:3px}code{font-family:var(--mono);font-size:.9em}table{border-collapse:collapse;margin:1rem 0;width:100%}td{padding:.5rem .75rem .5rem 0;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}</style>
+			<header><a class="brand" href="https://agent-custody.dev/"><svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect class="tile" width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path class="ink" d="M25 20h14M25 27h14" stroke-width="2.6" stroke-linecap="round"/><path class="ink" d="M25 37.5l5 4.5 9.5-10" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a></header>
 			<main>
 			<h1>{$LOG_HOST}</h1>
 			<p>An <a href="https://agent-custody.dev/">agent-custody</a> transparency log, run by Charioteer Consulting Ltd. It holds leaf hashes of receipts, never receipts, and signs tree heads that verifiers check against the keys published here. There is nothing to browse; the endpoints are for the gateway and the verifier.</p>
@@ -104,6 +132,7 @@
 # listing; the root says what the host is and where the files are.
 {$CHECKPOINTS_HOST} {
 	import favicon
+	import errorpages
 	root * /srv/checkpoints
 	header {
 		Cache-Control "public, max-age=60"
@@ -116,9 +145,10 @@
 		header Content-Type "text/html; charset=utf-8"
 		header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'"
 		respond <<HTML
-			<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="/favicon.svg" type="image/svg+xml">
+			<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="/favicon.svg" type="image/svg+xml">
 			<title>{$CHECKPOINTS_HOST}</title>
-			<style>body{margin:0;font:16px/1.55 system-ui,sans-serif;color:#1b2430;background:#fafbfc}@media(prefers-color-scheme:dark){body{color:#e6ecf0;background:#0e1418}a{color:#4fc3b0}}main{max-width:40rem;margin:0 auto;padding:3rem 1.25rem}h1{font-size:1.4rem;margin:0 0 .5rem}code{font-family:ui-monospace,Menlo,monospace;font-size:.9em}a{color:#0f6e63}</style>
+			<style>:root{--bg:#fafaf9;--panel:#ffffff;--line:#e7e5e4;--ink:#1c1917;--ink2:#57534e;--accent:#b45309;--font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}@media(prefers-color-scheme:dark){:root{--bg:#0c0a09;--panel:#1c1917;--line:#292524;--ink:#fafaf9;--ink2:#a8a29e;--accent:#f59e0b}}body{margin:0;background:var(--bg);color:var(--ink);font:1rem/1.55 var(--font)}header{display:flex;align-items:center;padding:.75rem 1.25rem;border-bottom:1px solid var(--line);background:var(--panel)}.brand{display:inline-flex;align-items:center;gap:.5rem;color:var(--ink);font-weight:700;text-decoration:none}.mark{width:28px;height:28px}.tile{fill:var(--accent)}.ink{stroke:var(--accent)}main{max-width:40rem;margin:0 auto;padding:3rem 1.25rem}h1{margin:0 0 .5rem;font-size:1.5rem;line-height:1.25;letter-spacing:-.015em;overflow-wrap:anywhere}p{color:var(--ink2)}a{color:var(--accent);text-underline-offset:3px}code{font-family:var(--mono);font-size:.9em}table{border-collapse:collapse;margin:1rem 0;width:100%}td{padding:.5rem .75rem .5rem 0;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}</style>
+			<header><a class="brand" href="https://agent-custody.dev/"><svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect class="tile" width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path class="ink" d="M25 20h14M25 27h14" stroke-width="2.6" stroke-linecap="round"/><path class="ink" d="M25 37.5l5 4.5 9.5-10" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a></header>
 			<main>
 			<h1>{$CHECKPOINTS_HOST}</h1>
 			<p>Signed checkpoints of the <a href="https://{$LOG_HOST}/">{$LOG_HOST}</a> transparency log, published here so the record of what the log signed does not depend on the log's API being up. Each is a tree head signed by the log's key.</p>

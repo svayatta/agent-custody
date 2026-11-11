@@ -101,7 +101,7 @@ docker compose --profile public up -d
 docker compose logs log | grep -A3 "public key"                # hand this to verifiers as --log-key
 ```
 
-Caddy obtains the certificate and forwards to the log. Without `--profile public` the log listens on the VM's loopback only, for a VPN or your own reverse proxy.
+Caddy obtains the certificate and forwards to the log. The log host and the checkpoints host each answer `/` with a branded page, and Caddy answers its own errors (404 on the checkpoints host, 502, 503, and 504 on both) with a branded page; the `errorpages` snippet in `Caddyfile` holds it. Each page is one static HTML response with inline CSS in the colours of `packages/receipts/src/design.ts` (a test compares them), no script, and no outside request. Answers from the log server pass through unchanged, its own 404 and 401 included, and every other path still reaches the upstream. Check a changed Caddyfile with `caddy validate --config deploy/Caddyfile --adapter caddyfile` (set `LOG_HOST` and `CHECKPOINTS_HOST`) and `caddy fmt --diff deploy/Caddyfile`; recreate the container as `RUNBOOK.md` says. Without `--profile public` the log listens on the VM's loopback only, for a VPN or your own reverse proxy.
 
 The operator's side is one config line, with the token in their environment:
 
