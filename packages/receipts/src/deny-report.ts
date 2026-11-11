@@ -38,12 +38,19 @@ export interface DenyReport {
 const ANNOTATIONS = /^(?:\s*@\w+\s*\("(?:[^"\\]|\\.)*"\))+\s*/;
 const TARGET_ARGS = ["command", "file_path", "notebook_path", "path", "url"];
 
-function targetOf(args: unknown): string {
+/** The command, file path, or URL of a call, for a one-line listing. */
+export function targetOf(args: unknown): string {
   if (!args || typeof args !== "object") return "(withheld)";
   const a = args as Record<string, unknown>;
   const name = TARGET_ARGS.find((k) => typeof a[k] === "string");
   const text = name ? (a[name] as string) : JSON.stringify(a);
   return text.replace(/\s+/g, " ").trim();
+}
+
+/** The `@reason` and the text of each rule a decision names, from the policy's rules and reasons by their ids. */
+export function ruleTexts(policyIds: string[], rules: (string | null)[], reasons: (string | null)[]): { reasons: string[]; rules: string[] } {
+  const at = (list: (string | null)[]) => policyIds.map((id) => list[Number(id.replace(/^policy/, ""))]).filter((r): r is string => typeof r === "string");
+  return { reasons: at(reasons), rules: at(rules).map((r) => r.replace(/\s+/g, " ").replace(/;$/, "").replace(ANNOTATIONS, "").trim()) };
 }
 
 export function denyReport(configFile: string): DenyReport {
@@ -86,8 +93,7 @@ export function denyReport(configFile: string): DenyReport {
         tool: p.tool.name,
         target: targetOf(p.request.args),
         policyIds,
-        reasons: known ? policyIds.map((id) => reasons[Number(id.replace(/^policy/, ""))]).filter((r): r is string => typeof r === "string") : [],
-        rules: known ? policyIds.map((id) => rules[Number(id.replace(/^policy/, ""))]).filter((r): r is string => typeof r === "string").map((r) => r.replace(/\s+/g, " ").replace(/;$/, "").replace(ANNOTATIONS, "").trim()) : [],
+        ...(known ? ruleTexts(policyIds, rules, reasons) : { reasons: [], rules: [] }),
       };
       leafOf.set(call, bundle.inclusion.leafIndex);
       (p.policy.enforced === false ? report.wouldDeny : report.denied).push(call);
