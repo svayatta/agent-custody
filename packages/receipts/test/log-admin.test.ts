@@ -47,6 +47,16 @@ describe("the admin surface", () => {
     expect(html).not.toMatch(/https?:\/\/(?!agent-custody\.dev)/); // no third-party requests
     expect(html).not.toContain("sessionStorage");
     expect(html).toContain('id="themeToggle"');
+    expect(html).toContain('<html lang="en">');
+    // Tabs: one link per section; a tab hash never equals an element id; the plan dialog names old and new plan; tables scroll.
+    const hashes = [...html.matchAll(/<a href="#(tab-[a-z]+)"/g)].map((m) => m[1]!);
+    expect(hashes).toHaveLength(5);
+    const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]!));
+    for (const h of hashes) expect(ids.has(h)).toBe(false);
+    expect(html).toContain('<dialog id="planDialog"');
+    expect(html).toContain("dialog.showModal()");
+    expect(html.match(/class="scroll"/g)).toHaveLength(5);
+    expect(html).toContain('role="status" data-status="addTenant"');
     expect(html).toContain(':root[data-theme="dark"]');
     for (const [m, p] of [["GET", "admin/tenants"], ["POST", "admin/tenants"], ["GET", "admin/info"]] as const) {
       expect((await call(m, p, m === "POST" ? { id: "x" } : undefined, null)).status).toBe(401);
@@ -106,7 +116,7 @@ describe("the admin surface", () => {
     expect((await append(minted.token)).status).toBe(200);
     expect((await append(ADMIN)).status).toBe(401); // the admin token is not a tenant token
     const tokens = (await (await call("GET", "admin/tenants/acme/tokens")).json()) as { label: string; tokenHash: string; revokedAt: string | null }[];
-    expect(tokens).toEqual([{ label: "support fleet", tokenHash: minted.tokenHash, createdAt: expect.any(String), revokedAt: null, tenantId: "acme" }]);
+    expect(tokens).toEqual([{ label: "support fleet", tokenHash: minted.tokenHash, createdAt: expect.any(String), revokedAt: null, lastUsedAt: expect.any(String), tenantId: "acme" }]);
     expect(await (await call("POST", `admin/tenants/acme/tokens/${minted.tokenHash.slice(0, 12)}/revoke`)).json()).toEqual({ revoked: 1 });
     expect((await append(minted.token)).status).toBe(401);
     expect((await call("POST", "admin/tenants/nobody/tokens", { label: "x" })).status).toBe(404);

@@ -79,5 +79,5 @@ export * from "./pr-summary.ts";
 export * from "./export.ts";
 export * from "./claude-init.ts";
 export * from "./deny-report.ts";
-export { DESIGN_CSS } from "./design.ts";
+export { DESIGN_CSS, LOGO_MARK, APP_HEADER_CSS, THEME_SCRIPT, appHeader } from "./design.ts";
 export * from "./session-audit.ts";

@@ -11,8 +11,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { PGlite } from "@electric-sql/pglite";
 import { generateKeyPair } from "../src/crypto.ts";
 import { httpLog, postgresResolver, serveLog, type RunningLog } from "../src/log-sink.ts";
-import { PostgresTenancy } from "../src/log-store.ts";
-import { founderNote, PortalStore, qrMatrix, qrSvg, renderMail, readSession, readSessionVia, ROLES, sendFollowUps, servePortal, signSession, totp, verifyStripeSignature, type Role, type RunningPortal } from "../src/portal.ts";
+import { readFileSync } from "node:fs";
+import { AUDIT_ACTIONS, PLAN_QUOTAS, PostgresTenancy } from "../src/log-store.ts";
+import { founderNote, PLAN_CARDS, PortalStore, qrMatrix, qrSvg, renderMail, readSession, readSessionVia, ROLES, sendFollowUps, servePortal, signSession, totp, verifyStripeSignature, type Role, type RunningPortal } from "../src/portal.ts";
 import { policyDigest } from "../src/policy.ts";
 import { standInIdp } from "../scripts/idp-standin.ts";
 
@@ -144,6 +145,7 @@ describe("the tenant portal", () => {
     expect(o.json.keys).toHaveLength(1);
     expect(o.json.audit.map((e: any) => e.action)).toEqual(["token.add", "tenant.add"]);
     expect(o.json.audit[1].actor).toBe("portal:dana@example.com");
+    await vi.waitFor(async () => expect((await b.call("GET", "/api/keys")).json.keys[0].lastUsedAt).toMatch(/^\d{4}-/));
     expect(o.json.urls.checkpoints).toBe("https://checkpoints.example.test/acme/latest.json");
   });
 
@@ -232,6 +234,44 @@ describe("the tenant portal", () => {
     // an old timestamp is refused even with a valid mac
     const stale = `t=${Math.floor(Date.now() / 1000) - 3600},v1=${createHmac("sha256", WHSEC).update(`${Math.floor(Date.now() / 1000) - 3600}.${deleted}`).digest("hex")}`;
     expect(verifyStripeSignature(stale, deleted, WHSEC)).toBe(false);
+  });
+
+  it("pages the activity with a validated limit and cursor, and the page has the Activity view, a sentence for every audit action, and the plan cards", async () => {
+    const b = browser();
+    await b.call("POST", "/api/login", { email: "dana@example.com", password: "a-long-enough-password" });
+    const all = (await tenancy.audit({ tenant: "acme" })).map((e) => e.id);
+    const seen: number[] = [];
+    let before: number | null = null;
+    do {
+      const r = await b.call("GET", `/api/audit?limit=2${before ? `&before=${before}` : ""}`);
+      expect(r.status).toBe(200);
+      expect(r.json.entries.length).toBeLessThanOrEqual(2);
+      seen.push(...r.json.entries.map((e: any) => e.id));
+      before = r.json.next;
+    } while (before !== null);
+    expect(seen).toEqual(all);
+    for (const q of ["limit=0", "limit=101", "limit=abc", "limit=", "before=0", "before=-1", "before=1e3", "before=x"]) expect((await b.call("GET", `/api/audit?${q}`)).status).toBe(400);
+    const page = await (await fetch(portal.url)).text();
+    expect(page).toContain('<a href="#activity" data-view="activity">');
+    expect(page).not.toMatch(/id="activity"/);
+    for (const a of AUDIT_ACTIONS) expect(page).toContain(`"${a}": (`);
+    expect(page).toContain('<button type="submit">Create key</button>');
+    expect(page).not.toContain("Mint key");
+    expect(page).toContain('<dialog id="publishDialog"');
+    expect(page).toContain('<dialog id="policyView"');
+    expect(page).toContain('<progress id="usageBar"');
+    expect(page).not.toContain("__PLANS__");
+    expect(page).toContain('"plan":"team","name":"Team","price":"$50 a month"');
+  });
+
+  it("the plan cards agree with the server's plan limits and with the pricing page", () => {
+    const md = readFileSync(new URL("../../../site/pricing.md", import.meta.url), "utf8").split("\n");
+    const cells = (line: string) => line.split("|").slice(1, -1).map((c) => c.trim().replace(/\*\*/g, ""));
+    const row = (name: string) => cells(md.find((l) => l.startsWith(`| **${name}**`))!).slice(1);
+    expect(PLAN_CARDS.map((c) => c.plan)).toEqual(Object.keys(PLAN_QUOTAS));
+    expect(PLAN_CARDS.map((c) => c.name)).toEqual(cells(md.find((l) => l.startsWith("| | Free"))!).slice(1));
+    expect(PLAN_CARDS.map((c) => c.price)).toEqual(row("Price"));
+    expect(PLAN_CARDS.map((c) => PLAN_QUOTAS[c.plan]?.toLocaleString("en-US") ?? "no allowance")).toEqual(row("Appends a month"));
   });
 
   it("password hashing is scrypt with a fresh salt, and a stored hash never verifies the wrong password", () => {

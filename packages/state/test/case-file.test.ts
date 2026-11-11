@@ -178,6 +178,9 @@ describe("offline case files", () => {
     expect(verifyCaseFile(parseCaseHtml(html), keys).ok).toBe(true);
     expect(() => parseCaseHtml("<!doctype html><p>nothing here</p>")).toThrow("no case-data script");
     expect(html).toContain("This page does not check itself independently");
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain('id="themeToggle"');
+    expect(html).toMatch(/Content-Security-Policy" content="default-src 'none'/);
     expect(html).toContain("--verify-case &lt;this file&gt;");
     expect((await runBrowser(html)).report).toContain("NOT CHECKED here: the ten answers");
     // A forged page that edits its data and its script together still fails the command.

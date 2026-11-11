@@ -71,3 +71,31 @@ export const SITE_CSS = `/* Generated from packages/receipts/src/design.ts. Do n
 :root { ${SCALE} ${LIGHT} }
 .dark { ${DARK} }
 ${components(".btn")}`;
+
+/** The logo: a receipt with a check mark. The tile takes the accent colour, so the mark follows the theme. */
+export const LOGO_MARK = '<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect class="tile" width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path class="ink" d="M25 20h14M25 27h14" stroke-width="2.6" stroke-linecap="round"/><path class="ink" d="M25 37.5l5 4.5 9.5-10" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+const THEME_BUTTON = '<button class="icon" id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Dark mode"><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>';
+
+/** The header of the review page and the case file: the logo, the name of the page, and the theme toggle. */
+export const appHeader = (name: string) => `<header class="apphead"><a class="brand" href="https://agent-custody.dev/">${LOGO_MARK}agent-custody</a><span class="pill">${name}</span>${THEME_BUTTON}</header>`;
+
+export const APP_HEADER_CSS = `
+.apphead { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--line); background: var(--panel); }
+.apphead .brand { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--ink); font-weight: 700; text-decoration: none; }
+.apphead .pill { padding: 0 var(--space-2); border-radius: var(--radius-full); background: var(--accent-bg); color: var(--accent); font: 600 var(--text-xs)/1.6 var(--font); }
+.apphead #themeToggle { margin-left: auto; }
+.mark { width: 28px; height: 28px; display: block; } .mark .tile { fill: var(--accent); } .mark .ink { stroke: var(--accent); }
+#themeToggle[aria-pressed="true"] .moon, #themeToggle[aria-pressed="false"] .sun { display: none; }
+`;
+
+/** Applies the saved theme and wires the toggle. It uses the storage key of the portal. Put it after the button. */
+export const THEME_SCRIPT = `(() => {
+  const root = document.documentElement, button = document.getElementById("themeToggle");
+  try { const saved = localStorage.getItem("agent-custody-theme"); if (saved === "dark" || saved === "light") root.dataset.theme = saved; } catch {}
+  const now = () => root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const label = () => button.setAttribute("aria-pressed", String(now() === "dark"));
+  button.onclick = () => { const next = now() === "dark" ? "light" : "dark"; root.dataset.theme = next; try { localStorage.setItem("agent-custody-theme", next); } catch {} label(); };
+  label();
+})();
+`;

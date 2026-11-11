@@ -7,7 +7,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { RateLimiter, type PostgresTenancy, PLANS, type Plan } from "./log-store.ts";
-import { DESIGN_CSS } from "./design.ts";
+import { APP_HEADER_CSS, DESIGN_CSS, THEME_SCRIPT, appHeader } from "./design.ts";
 import { clientAddress } from "./log-sink.ts";
 import type { PortalStore } from "./portal.ts";
 
@@ -210,73 +210,97 @@ export function adminRoutes(opts: AdminOptions): (req: IncomingMessage, res: Ser
 }
 
 /** The page. One file, no framework, no third-party requests; the browser holds the admin credential it prompted for. */
+const TABS = ["registrations", "tenants", "tokens", "usage", "activity"] as const;
 const ADMIN_PAGE = `<!doctype html>
+<html lang="en">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agent-custody log admin</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <script>(() => { try { const t = localStorage.getItem("agent-custody-theme"); if (t === "dark" || t === "light") document.documentElement.dataset.theme = t; } catch {} })();</script>
 <style>
-${DESIGN_CSS}
+${DESIGN_CSS}${APP_HEADER_CSS}
   main { max-width: 72rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-  h1 { margin: 0 0 .25rem; } h2 { margin: 2rem 0 .75rem; }
+  h1 { margin: 0 0 .25rem; } h2 { margin: 1.5rem 0 .75rem; }
   .sub { color: var(--ink2); margin: 0 0 1.5rem; }
   .row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: end; }
   label { display: grid; gap: .25rem; font-size: .85rem; color: var(--ink2); }
   input { min-width: 14rem; }
+  .scroll { overflow-x: auto; }
   table { border-collapse: collapse; width: 100%; font-size: .93rem; }
-  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
   th { font-size: var(--text-xs); font-weight: 600; color: var(--ink2); } th::first-letter { text-transform: uppercase; }
+  td.detail { white-space: normal; min-width: 16rem; }
   code, pre { font-size: .86em; }
   pre { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .9rem 1rem; overflow-x: auto; white-space: pre-wrap; }
   .once { border-left: 3px solid var(--warn); background: var(--warn-bg); padding: .8rem 1rem; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; margin: 1rem 0; }
   .muted { color: var(--ink2); } .err { color: var(--bad); } .ok { color: var(--ok); }
   .tok { font-family: var(--mono); font-size: 1.05rem; word-break: break-all; user-select: all; }
-  .head { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
-  #themeToggle[aria-pressed="true"] .moon, #themeToggle[aria-pressed="false"] .sun { display: none; }
+  .tabs { display: flex; gap: var(--space-1); overflow-x: auto; border-bottom: 1px solid var(--line); margin-bottom: var(--space-4); }
+  .tabs a { padding: var(--space-2) var(--space-3); border-bottom: 2px solid transparent; color: var(--ink2); font-weight: 600; text-decoration: none; white-space: nowrap; }
+  .tabs a:hover { color: var(--ink); } .tabs a[aria-current] { color: var(--accent); border-bottom-color: var(--accent); }
+  .status { margin-left: var(--space-2); font-size: var(--text-sm); }
+  .actions { display: flex; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-5); }
   [hidden] { display: none !important; }
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .6rem; margin: .8rem 0 1rem; }
   .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-md); padding: .6rem .8rem; }
   .stat b { display: block; font-size: var(--text-xl); font-variant-numeric: tabular-nums; } .stat span { color: var(--ink2); font-size: .8rem; }
 </style>
+${appHeader("Log admin")}
 <main>
-  <div class="head"><div><h1>Log admin</h1>
-  <p class="sub" id="where">Tenants and tokens on this log.</p></div><button class="theme icon" id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Dark mode"><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button></div>
+  <h1>Log admin</h1>
+  <p class="sub" id="where">Tenants and tokens on this log.</p>
+  <p class="err" role="status" data-status="page"></p>
+  <nav class="tabs" aria-label="Sections">${TABS.map((t) => `<a href="#tab-${t}">${t[0]!.toUpperCase()}${t.slice(1)}</a>`).join("")}</nav>
   <section id="app">
+    <div data-tab="registrations">
     <h2>Registrations</h2>
-    <div class="row"><label>month<input id="rmonth" type="month"></label><button class="quiet" id="loadRegs">Show</button><a id="rcsv" class="quiet" href="#" style="align-self:center">Download CSV</a></div>
+    <div class="row"><label>month<input id="rmonth" type="month"></label><button class="quiet" id="loadRegs">Show</button><a id="rcsv" class="quiet" href="#" style="align-self:center">Download CSV</a><span class="status" role="status" data-status="regs"></span></div>
     <div class="stats"><div class="stat"><b id="sTenants">–</b><span>tenants</span></div><div class="stat"><b id="sRegistered">–</b><span>registered through the portal</span></div><div class="stat"><b id="sAppends">–</b><span>appends this month</span></div><div class="stat"><b id="sLeaves">–</b><span>leaves in total</span></div></div>
-    <table><thead><tr><th>who</th><th>reach</th><th>tenant</th><th>plan</th><th>registered</th><th>billing</th><th>appends this month</th><th>leaves in total</th><th>live tokens</th></tr></thead><tbody id="regs"></tbody></table>
+    <div class="scroll" tabindex="0" role="region" aria-label="Registrations"><table><thead><tr><th>who</th><th>reach</th><th>tenant</th><th>plan</th><th>registered</th><th>billing</th><th>appends this month</th><th>leaves in total</th><th>live tokens</th></tr></thead><tbody id="regs"></tbody></table></div>
+    </div>
+    <div data-tab="tenants" hidden>
     <h2>Tenants</h2>
-    <table><thead><tr><th>tenant</th><th>log id</th><th>plan</th><th>live tokens</th><th>created</th><th></th></tr></thead><tbody id="tenants"></tbody></table>
+    <div class="scroll" tabindex="0" role="region" aria-label="Tenants"><table><thead><tr><th>tenant</th><th>log id</th><th>plan</th><th>live tokens</th><th>created</th><th></th></tr></thead><tbody id="tenants"></tbody></table></div>
     <h2>New tenant</h2>
     <div class="row">
       <label>tenant id (in the URL)<input id="tid" placeholder="acme" autocomplete="off"></label>
       <label>log id (on tree heads; default = tenant id)<input id="lid" placeholder="acme-eu" autocomplete="off"></label>
-      <button id="addTenant">Create</button>
+      <button id="addTenant">Create</button><span class="status" role="status" data-status="addTenant"></span>
     </div>
+    </div>
+    <div data-tab="tokens" hidden>
     <h2>New token</h2>
     <div class="row">
       <label>tenant<input id="ttid" placeholder="acme" autocomplete="off"></label>
       <label>label (which fleet)<input id="label" placeholder="support fleet" autocomplete="off"></label>
-      <button id="mint">Mint token</button>
+      <button id="mint">Mint token</button><span class="status" role="status" data-status="mint"></span>
     </div>
     <div id="minted" class="once" hidden>
       <p><b>Shown once.</b> Hand it over by a channel you trust; the log keeps only its hash.</p>
       <p class="tok" id="tokval"></p>
-      <button class="quiet" id="copyTok">Copy token</button> <button class="quiet" id="copySheet">Copy welcome sheet</button>
+      <button class="quiet" id="copyTok">Copy token</button> <button class="quiet" id="copySheet">Copy welcome sheet</button><span class="status" role="status" data-status="copy"></span>
       <pre id="sheet"></pre>
     </div>
-    <h2>Usage</h2>
-    <div class="row"><label>month<input id="month" type="month"></label><button class="quiet" id="loadUsage">Show</button><a id="csv" class="quiet" href="#" style="align-self:center">Download CSV</a></div>
-    <table><thead><tr><th>tenant</th><th>log id</th><th>plan</th><th>appends this month</th><th>quota</th><th>leaves in total</th><th>live tokens</th></tr></thead><tbody id="usage"></tbody></table>
     <h2>Tokens of a tenant</h2>
-    <div class="row"><label>tenant<input id="ltid" placeholder="acme" autocomplete="off"></label><button class="quiet" id="listTokens">List</button></div>
-    <table><thead><tr><th>label</th><th>hash</th><th>created</th><th>state</th><th></th></tr></thead><tbody id="tokens"></tbody></table>
+    <div class="row"><label>tenant<input id="ltid" placeholder="acme" autocomplete="off"></label><button class="quiet" id="listTokens">List</button><span class="status" role="status" data-status="listTokens"></span></div>
+    <div class="scroll" tabindex="0" role="region" aria-label="Tokens of a tenant"><table><thead><tr><th>label</th><th>hash</th><th>created</th><th>state</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
+    </div>
+    <div data-tab="usage" hidden>
+    <h2>Usage</h2>
+    <div class="row"><label>month<input id="month" type="month"></label><button class="quiet" id="loadUsage">Show</button><a id="csv" class="quiet" href="#" style="align-self:center">Download CSV</a><span class="status" role="status" data-status="usage"></span></div>
+    <div class="scroll" tabindex="0" role="region" aria-label="Usage"><table><thead><tr><th>tenant</th><th>log id</th><th>plan</th><th>appends this month</th><th>quota</th><th>leaves in total</th><th>live tokens</th></tr></thead><tbody id="usage"></tbody></table></div>
+    </div>
+    <div data-tab="activity" hidden>
     <h2>Activity</h2>
     <p class="muted">Every tenant and token change on this log, newest first, with who made it: the name entered at the sign-in prompt, or the command line on the server. Tenants see their own rows in their export.</p>
-    <table><thead><tr><th>when</th><th>who</th><th>action</th><th>tenant</th><th>detail</th></tr></thead><tbody id="audit"></tbody></table>
-    <p class="muted" id="msg"></p>
+    <div class="scroll" tabindex="0" role="region" aria-label="Activity"><table><thead><tr><th>when</th><th>who</th><th>action</th><th>tenant</th><th>detail</th></tr></thead><tbody id="audit"></tbody></table></div>
+    </div>
   </section>
+  <dialog id="planDialog" aria-labelledby="planTitle">
+    <h2 id="planTitle">Change the plan?</h2>
+    <p>Tenant <code id="dTenant"></code>: change the plan from <b id="dFrom"></b> to <b id="dTo"></b>.</p>
+    <div class="actions"><button class="quiet" id="planCancel" type="button">Cancel</button><button id="planSave" type="button">Save plan</button></div>
+  </dialog>
 </main>
 <script>
 (() => {
@@ -290,20 +314,27 @@ ${DESIGN_CSS}
     return j;
   };
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const say = (t, cls) => { $("msg").textContent = t; $("msg").className = cls || "muted"; };
-  // Light or dark by choice, kept in this browser; unset, the page follows the system. The button says where it is going.
-  const themeNow = () => document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  const themeLabel = () => { $("themeToggle").setAttribute("aria-pressed", String(themeNow() === "dark")); };
-  $("themeToggle").onclick = () => { const next = themeNow() === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; try { localStorage.setItem("agent-custody-theme", next); } catch {} themeLabel(); };
-  themeLabel();
+  // The result of an action shows beside the control that caused it.
+  const say = (key, t, cls) => { const el = document.querySelector("[data-status=\\"" + key + "\\"]"); if (el) { el.textContent = t; el.className = "status " + (cls || "muted"); } };
+  const statusSpan = (key) => "<span class=status role=status data-status=\\"" + esc(key) + "\\"></span>";
+  // A tab is a link to #tab-<name>. No element has that id, so the browser does not scroll.
+  const TABS = ${JSON.stringify(TABS)};
+  const showTab = () => {
+    const name = location.hash.replace(/^#tab-/, "");
+    const tab = TABS.includes(name) ? name : TABS[0];
+    for (const pane of document.querySelectorAll("[data-tab]")) pane.hidden = pane.dataset.tab !== tab;
+    for (const a of document.querySelectorAll(".tabs a")) { if (a.getAttribute("href") === "#tab-" + tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
+  };
+  window.addEventListener("hashchange", showTab);
+  showTab();
   const loadTenants = async () => {
     const list = await api("GET", "/admin/tenants");
-    const planPick = (t) => "<select data-plan=\\"" + esc(t.id) + "\\">" + ["free", "team", "enterprise"].map((p) => "<option" + (p === t.plan ? " selected" : "") + ">" + p + "</option>").join("") + "</select>";
-    $("tenants").innerHTML = list.map((t) => "<tr><td><code>" + esc(t.id) + "</code></td><td><code>" + esc(t.logId) + "</code></td><td>" + planPick(t) + "</td><td>" + t.tokens + "</td><td>" + esc(t.createdAt.slice(0, 10)) + "</td><td>" + (t.disabledAt ? "<span class=muted>disabled</span>" : "<button class=quiet data-disable=\\"" + esc(t.id) + "\\">Disable</button>") + "</td></tr>").join("") || "<tr><td colspan=6 class=muted>none yet</td></tr>";
+    const planPick = (t) => "<select data-plan=\\"" + esc(t.id) + "\\" data-current=\\"" + esc(t.plan) + "\\" aria-label=\\"Plan of " + esc(t.id) + "\\">" + ["free", "team", "enterprise"].map((p) => "<option" + (p === t.plan ? " selected" : "") + ">" + p + "</option>").join("") + "</select>" + statusSpan("plan:" + t.id);
+    $("tenants").innerHTML = list.map((t) => "<tr><td><code>" + esc(t.id) + "</code></td><td><code>" + esc(t.logId) + "</code></td><td>" + planPick(t) + "</td><td>" + t.tokens + "</td><td>" + esc(t.createdAt.slice(0, 10)) + "</td><td>" + (t.disabledAt ? "<span class=muted>disabled</span>" : "<button class=quiet data-disable=\\"" + esc(t.id) + "\\">Disable</button>") + statusSpan("disable:" + t.id) + "</td></tr>").join("") || "<tr><td colspan=6 class=muted>none yet</td></tr>";
   };
   const loadTokens = async (id) => {
     const list = await api("GET", "/admin/tenants/" + encodeURIComponent(id) + "/tokens");
-    $("tokens").innerHTML = list.map((k) => "<tr><td>" + esc(k.label) + "</td><td><code>" + esc(k.tokenHash.slice(0, 12)) + "</code></td><td>" + esc(k.createdAt.slice(0, 10)) + "</td><td>" + (k.revokedAt ? "revoked " + esc(k.revokedAt.slice(0, 10)) : "<span class=ok>live</span>") + "</td><td>" + (k.revokedAt ? "" : "<button class=quiet data-revoke=\\"" + esc(id) + "|" + esc(k.tokenHash.slice(0, 12)) + "\\">Revoke</button>") + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>no tokens</td></tr>";
+    $("tokens").innerHTML = list.map((k) => "<tr><td>" + esc(k.label) + "</td><td><code>" + esc(k.tokenHash.slice(0, 12)) + "</code></td><td>" + esc(k.createdAt.slice(0, 10)) + "</td><td>" + (k.revokedAt ? "revoked " + esc(k.revokedAt.slice(0, 10)) : "<span class=ok>live</span>") + "</td><td>" + (k.revokedAt ? "" : "<button class=quiet data-revoke=\\"" + esc(id) + "|" + esc(k.tokenHash.slice(0, 12)) + "\\">Revoke</button>") + statusSpan("revoke:" + k.tokenHash.slice(0, 12)) + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>no tokens</td></tr>";
   };
   const enter = async () => {
     try {
@@ -313,21 +344,21 @@ ${DESIGN_CSS}
       await loadTenants();
       await loadUsage();
       await loadAudit();
-    } catch (e) { say(e.message, "err"); }
+    } catch (e) { say("page", e.message, "err"); }
   };
-  $("addTenant").onclick = async () => { try { const t = await api("POST", "/admin/tenants", { id: $("tid").value.trim(), logId: $("lid").value.trim() }); say("tenant " + t.id + " created; reached at /t/" + t.id + "/", "ok"); $("ttid").value = t.id; await loadTenants(); await loadAudit(); } catch (e) { say(e.message, "err"); } };
+  $("addTenant").onclick = async () => { try { const t = await api("POST", "/admin/tenants", { id: $("tid").value.trim(), logId: $("lid").value.trim() }); $("ttid").value = t.id; await loadTenants(); await loadAudit(); say("addTenant", "tenant " + t.id + " created; reached at /t/" + t.id + "/", "ok"); } catch (e) { say("addTenant", e.message, "err"); } };
   $("mint").onclick = async () => {
     try {
       const r = await api("POST", "/admin/tenants/" + encodeURIComponent($("ttid").value.trim()) + "/tokens", { label: $("label").value.trim() });
       $("tokval").textContent = r.token; $("sheet").textContent = r.welcome || "(set --public-url on the server for the welcome sheet)"; $("minted").hidden = false;
-      say("token minted for " + $("ttid").value.trim() + "; stored as hash " + r.tokenHash.slice(0, 12), "ok");
       await loadTenants();
       await loadAudit();
-    } catch (e) { say(e.message, "err"); }
+      say("mint", "token minted for " + $("ttid").value.trim() + "; stored as hash " + r.tokenHash.slice(0, 12), "ok");
+    } catch (e) { say("mint", e.message, "err"); }
   };
-  $("copyTok").onclick = () => navigator.clipboard.writeText($("tokval").textContent).then(() => say("token copied", "ok"));
-  $("copySheet").onclick = () => navigator.clipboard.writeText($("sheet").textContent).then(() => say("welcome sheet copied", "ok"));
-  $("listTokens").onclick = () => loadTokens($("ltid").value.trim()).catch((e) => say(e.message, "err"));
+  $("copyTok").onclick = () => navigator.clipboard.writeText($("tokval").textContent).then(() => say("copy", "token copied", "ok"), (e) => say("copy", e.message, "err"));
+  $("copySheet").onclick = () => navigator.clipboard.writeText($("sheet").textContent).then(() => say("copy", "welcome sheet copied", "ok"), (e) => say("copy", e.message, "err"));
+  $("listTokens").onclick = () => loadTokens($("ltid").value.trim()).then(() => say("listTokens", "", "muted"), (e) => say("listTokens", e.message, "err"));
   const loadUsage = async () => {
     const month = $("month").value || new Date().toISOString().slice(0, 7);
     const u = await api("GET", "/admin/usage?month=" + encodeURIComponent(month));
@@ -345,21 +376,36 @@ ${DESIGN_CSS}
   };
   const loadAudit = async () => {
     const a = await api("GET", "/admin/audit?limit=100");
-    $("audit").innerHTML = a.entries.map((e) => "<tr><td>" + esc(e.at.replace("T", " ").slice(0, 19)) + "</td><td><code>" + esc(e.actor) + "</code></td><td>" + esc(e.action) + "</td><td><code>" + esc(e.tenantId || "") + "</code></td><td class=muted>" + esc(Object.entries(e.detail).map(([k, v]) => k + "=" + v).join(" ")) + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>nothing yet</td></tr>";
+    $("audit").innerHTML = a.entries.map((e) => "<tr><td>" + esc(e.at.replace("T", " ").slice(0, 19)) + "</td><td><code>" + esc(e.actor) + "</code></td><td>" + esc(e.action) + "</td><td><code>" + esc(e.tenantId || "") + "</code></td><td class=\\"detail muted\\">" + esc(Object.entries(e.detail).map(([k, v]) => k + "=" + v).join(" ")) + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>nothing yet</td></tr>";
   };
-  $("loadUsage").onclick = () => loadUsage().catch((e) => say(e.message, "err"));
-  $("loadRegs").onclick = () => loadRegs().catch((e) => say(e.message, "err"));
+  $("loadUsage").onclick = () => loadUsage().then(() => say("usage", "", "muted"), (e) => say("usage", e.message, "err"));
+  $("loadRegs").onclick = () => loadRegs().then(() => say("regs", "", "muted"), (e) => say("regs", e.message, "err"));
   $("month").value = $("rmonth").value = new Date().toISOString().slice(0, 7);
-  document.addEventListener("change", async (e) => {
+  // A plan change opens the dialog. It saves only when the operator confirms; any other way out puts the old plan back.
+  const dialog = $("planDialog");
+  let pending = null;
+  document.addEventListener("change", (e) => {
     const s = e.target.closest("select[data-plan]"); if (!s) return;
-    try { await api("POST", "/admin/tenants/" + encodeURIComponent(s.dataset.plan) + "/plan", { plan: s.value }); say("plan of " + s.dataset.plan + " set to " + s.value, "ok"); await loadRegs(); await loadUsage(); await loadAudit(); } catch (err) { say(err.message, "err"); await loadTenants(); }
+    pending = { select: s, id: s.dataset.plan, from: s.dataset.current, to: s.value };
+    $("dTenant").textContent = pending.id; $("dFrom").textContent = pending.from; $("dTo").textContent = pending.to;
+    dialog.returnValue = "";
+    dialog.showModal();
+  });
+  $("planCancel").onclick = () => dialog.close("cancel");
+  $("planSave").onclick = () => dialog.close("save");
+  dialog.addEventListener("close", async () => {
+    const p = pending; pending = null;
+    if (!p) return;
+    if (dialog.returnValue !== "save") { p.select.value = p.from; return; }
+    try { await api("POST", "/admin/tenants/" + encodeURIComponent(p.id) + "/plan", { plan: p.to }); await loadTenants(); await loadRegs(); await loadUsage(); await loadAudit(); say("plan:" + p.id, "plan set to " + p.to, "ok"); } catch (err) { p.select.value = p.from; say("plan:" + p.id, err.message, "err"); }
   });
   document.addEventListener("click", async (e) => {
     const b = e.target.closest("button"); if (!b) return;
-    if (b.dataset.disable && confirm("Disable tenant " + b.dataset.disable + "? Its paths answer 404 within ten seconds.")) { try { await api("POST", "/admin/tenants/" + encodeURIComponent(b.dataset.disable) + "/disable"); await loadTenants(); await loadAudit(); say("disabled " + b.dataset.disable, "ok"); } catch (err) { say(err.message, "err"); } }
-    if (b.dataset.revoke) { const [id, prefix] = b.dataset.revoke.split("|"); if (confirm("Revoke token " + prefix + " of " + id + "?")) { try { await api("POST", "/admin/tenants/" + encodeURIComponent(id) + "/tokens/" + prefix + "/revoke"); await loadTokens(id); await loadTenants(); await loadAudit(); say("revoked", "ok"); } catch (err) { say(err.message, "err"); } } }
+    if (b.dataset.disable && confirm("Disable tenant " + b.dataset.disable + "? Its paths answer 404 within ten seconds.")) { const id = b.dataset.disable; try { await api("POST", "/admin/tenants/" + encodeURIComponent(id) + "/disable"); await loadTenants(); await loadAudit(); say("disable:" + id, "disabled", "ok"); } catch (err) { say("disable:" + id, err.message, "err"); } }
+    if (b.dataset.revoke) { const [id, prefix] = b.dataset.revoke.split("|"); if (confirm("Revoke token " + prefix + " of " + id + "?")) { try { await api("POST", "/admin/tenants/" + encodeURIComponent(id) + "/tokens/" + prefix + "/revoke"); await loadTokens(id); await loadTenants(); await loadAudit(); say("revoke:" + prefix, "revoked", "ok"); } catch (err) { say("revoke:" + prefix, err.message, "err"); } } }
   });
   enter();
 })();
 </script>
+<script>${THEME_SCRIPT}</script>
 `;

@@ -43,7 +43,7 @@ PROVENANCE: perathos.receipt/v1, recorded by hooks inside the agent's host (clau
 | `--allow-unsigned` | accepts a log with no checkpoint, or an unsigned one, and reports each as a warning |
 | `--json` | the report as JSON |
 
-It exits 0 when the log is valid and 1 when it is not. Receipts after the last checkpoint whose signature verified are reported as an unsealed tail, not an error, because the session may still be running; an unsigned checkpoint, or one whose signature fails, seals nothing. The head witness file is checked for shape first. From code: `verifyPerathosLog(text, { trustedKeys?, allowUnsigned?, head? })` and `formatPerathosReport(report)`.
+It exits 0 when the log is valid and 1 when it is not. Receipts after the last checkpoint whose signature verified are reported as an unsealed tail, not an error, because the session may still be running; an unsigned checkpoint, one whose signature fails, or, with `--key`, one signed by a key that is not pinned, seals nothing. The head witness file is checked for shape first. From code: `verifyPerathosLog(text, { trustedKeys?, allowUnsigned?, head? })` and `formatPerathosReport(report)`.
 
 ## What it checks
 

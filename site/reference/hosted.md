@@ -54,8 +54,9 @@ The gateway's log client retries a 429 three times with backoff and then treats 
 | `POST /api/members/<userId>/remove` | `{}` | `{ "removed": true }`; `403` when a non-owner removes an owner; `409` for the last owner |
 | `POST /api/invites/remove` | `{ "email" }` | `{ "removed": true\|false }` |
 | `POST /api/invites/accept` | `{ "tenant" }` | for an account with no tenant and a verified address: `{ "tenant", "role" }`; `403` for an unverified address, `404` for no invite or one older than seven days, `409` when the account has a tenant already |
-| `GET /api/overview` | | `{ "tenant", "logId", "plan", "used", "quota", "treeSize", "rootHash", "latestCheckpoint": { "treeSize", "signedAt" } \| null, "months": [{ "month": "2026-09", "appends": 37 }, …6], "keys": [{ "label", "hash", "createdAt", "revokedAt" }], "audit": [{ "id", "at", "actor", "action", "tenantId", "detail" }], "billing": { "status" } \| null, "urls": { "log", "keys", "checkpoints" }, "exportCommand", "welcome", "setup" (as on register), "stripe": true\|false }` |
-| `GET /api/keys` | | `{ "keys": [...] }` |
+| `GET /api/overview` | | `{ "tenant", "logId", "plan", "used", "quota", "treeSize", "rootHash", "latestCheckpoint": { "treeSize", "signedAt" } \| null, "months": [{ "month": "2026-09", "appends": 37 }, …6], "keys": [{ "label", "hash", "createdAt", "revokedAt", "lastUsedAt" }], "audit": [{ "id", "at", "actor", "action", "tenantId", "detail" }] (the newest 50), "billing": { "status" } \| null, "urls": { "log", "keys", "checkpoints" }, "exportCommand", "welcome", "setup" (as on register), "stripe": true\|false }` |
+| `GET /api/audit?limit=&before=` | | the tenant's audit trail, newest first: `{ "entries": [{ "id", "at", "actor", "action", "tenantId", "detail" }], "next": <id> \| null }`. `limit` is 1 to 100 (25 if not given). To get the next page, send `next` as `before`. `400` on a bad `limit` or `before` |
+| `GET /api/keys` | | `{ "keys": [{ "label", "hash", "createdAt", "revokedAt", "lastUsedAt" }] }`. `lastUsedAt` is the time of the last append with the key, correct to about one minute, or `null` when the key has no recorded use |
 | `POST /api/keys` | `{ "label" }` | `{ "token": "<shown once>", "tokenHash": "<12 hex>", "label" }` |
 | `POST /api/keys/<hash prefix>/revoke` | `{}` | `{ "revoked": 1 }` |
 | `GET /api/policies` | | `{ "policies": [{ "id", "name", "digest", "bytes", "createdAt", "createdBy" }] }`; with `?digest=<64 hex>`, `{ "match": <policy> \| null }`: the published version a receipt's `policyDigest` names |
@@ -125,6 +126,8 @@ Two emails follow a registration when the operator has mail configured: the setu
 ## Policies: names for the digests receipts carry
 
 Enforcement is local: the gateway reads its Cedar file and writes the file's SHA-256 into every receipt as `policyDigest`. The dashboard's Policies page lets a tenant publish each version they deploy under a name, so a digest reads as "refunds-v3" here, in the match tool (paste a receipt or a digest), and in the export's `policies.json`. Nothing on this page is read by the gateway, and the hosted log never evaluates a policy. Every publish and removal is in the tenant's audit trail.
+
+The portal's Activity page shows the audit trail as sentences, such as "You created the key 'first key'", in the reader's time zone, with the UTC time on hover. The Billing page shows the three plans of the [pricing page](https://agent-custody.dev/pricing), and a test keeps their names, prices, and limits equal to that page and to the server's plan limits.
 
 ## Using a tenant
 
