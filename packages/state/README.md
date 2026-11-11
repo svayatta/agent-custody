@@ -343,6 +343,6 @@ tsconfig.build.json  emits dist/ for consumers; the repo itself runs the .ts dir
 - Quarantine: facts carry `attested` or `claimed` provenance; claimed facts are hidden from reads by default and a gateway-only `memory.confirm` lifts them, as a recorded event.
 
 **Next, in the order it pays off**
-
+<!-- #region state-next -->
 1. The hosted plane, behind early access: tenanted log, then memory, then reports and a control plane, with SSO, SCIM, residency, and SIEM export. [Issue #6](https://github.com/svayatta/agent-custody/issues/6).
-
+<!-- #endregion state-next -->

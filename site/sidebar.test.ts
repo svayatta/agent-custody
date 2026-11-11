@@ -13,16 +13,15 @@ const entries = groups.flatMap((g) => g.items);
 
 /** The markdown file a site path is built from, the inverse of sitePath() in config.ts. */
 function source(link: string): string {
+  if (link === "/receipts/") return "site/receipts/index.md";
   if (link.startsWith("/receipts/")) return `packages/receipts/docs/${link.slice("/receipts/".length)}.md`;
-  if (link === "/state/") return "packages/state/README.md";
-  if (link === "/python/") return "packages/python/README.md";
   return `site${link.endsWith("/") ? `${link}index` : link}.md`;
 }
 const h1 = (file: string) => /^# (.+)$/m.exec(readFileSync(resolve(root, file), "utf8").replace(/^---\n[\s\S]*?\n---\n/, ""))?.[1];
 
 describe("the docs sidebar", () => {
   it("runs from first run to reference, in order", () => {
-    expect(groups.map((g) => g.group)).toEqual(["Start", "Concepts", "Set up", "Advanced", "Tutorials", "Reference"]);
+    expect(groups.map((g) => g.group)).toEqual(["Start", "Concepts", "Set up", "Advanced", "Tutorials", "Reference", "Roadmap"]);
     expect(groups[0]!.items[0]).toEqual({ text: "Getting started", link: "/guide/getting-started" });
   });
 

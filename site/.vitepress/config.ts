@@ -11,7 +11,6 @@ const REPO = "https://github.com/svayatta/agent-custody/blob/main/";
 function sitePath(repoPath: string): string | null {
   const m = (re: RegExp) => repoPath.match(re);
   let x: RegExpMatchArray | null;
-  if (repoPath === "README.md") return "/repo";
   if (repoPath === "CHANGELOG.md") return "/changelog";
   if (repoPath === "packages/receipts/README.md") return "/receipts/";
   if ((x = m(/^packages\/receipts\/docs\/([^/]+)\.md$/))) return `/receipts/${x[1]}`;
@@ -26,11 +25,12 @@ export default withMermaid(
     title: "agent-custody",
     description: "Proof of what your AI agents did. Give your agents real power, without losing control of them.",
     srcDir: "..",
-    srcExclude: ["deploy/**", "site/verifier/**", "**/node_modules/**", "**/dist/**", "**/examples-out/**", "**/demo-out/**", "**/.venv/**", "**/target/**", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md", "packages/receipts/examples/**", "packages/state/examples/**", "packages/python/tests/**", "site/README.md"],
+    srcExclude: ["deploy/**", "site/verifier/**", "**/node_modules/**", "**/dist/**", "**/examples-out/**", "**/demo-out/**", "**/.venv/**", "**/target/**", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md", "README.md", "packages/receipts/README.md", "packages/state/README.md", "packages/python/README.md", "packages/receipts/examples/**", "packages/state/examples/**", "packages/python/tests/**", "site/README.md"],
     rewrites: {
       "site/index.md": "index.md",
       "site/verify.md": "verify.md",
       "site/advanced.md": "advanced.md",
+      "site/how-it-works.md": "how-it-works.md",
       "site/early-access.md": "early-access.md",
       "site/security.md": "security.md",
       "site/pricing.md": "pricing.md",
@@ -44,12 +44,12 @@ export default withMermaid(
       "site/reference/:page": "reference/:page",
       "site/guide/:page": "guide/:page",
       "site/receipt/:page": "receipt/:page",
-      "README.md": "repo.md",
       "CHANGELOG.md": "changelog.md",
-      "packages/receipts/README.md": "receipts/index.md",
+      "site/receipts/index.md": "receipts/index.md",
       "packages/receipts/docs/:page": "receipts/:page",
-      "packages/state/README.md": "state/index.md",
-      "packages/python/README.md": "python/index.md",
+      "site/state/index.md": "state/index.md",
+      "site/python/index.md": "python/index.md",
+      "site/roadmap.md": "roadmap.md",
     },
     cleanUrls: true,
     head: [
@@ -96,7 +96,7 @@ export default withMermaid(
           ] },
           { text: "Set up", items: [
             { text: "SDK and framework hooks", link: "/receipts/sdk" },
-            { text: "agent-custody (Python)", link: "/python/" },
+            { text: "Python SDK", link: "/python/" },
             { text: "Running the gateway", link: "/receipts/usage" },
             { text: "Configuring the gateway", link: "/receipts/configuration" },
             { text: "Gateway console", link: "/receipts/console" },
@@ -115,9 +115,8 @@ export default withMermaid(
             { text: "Completeness", link: "/receipts/completeness" },
             { text: "Anchoring the log on a chain", link: "/receipts/anchoring" },
             { text: "The ACS Guardian", link: "/receipts/acs" },
-            { text: "@agent-custody/state", link: "/state/" },
+            { text: "Fact ledger", link: "/state/" },
             { text: "What a receipt costs", link: "/receipts/performance" },
-            { text: "Payment mandates and agent identity (planned)", link: "/receipts/mandates" },
           ] },
           { text: "Tutorials", items: [
             { text: "Tutorials", link: "/receipts/tutorials" },
@@ -142,6 +141,10 @@ export default withMermaid(
             { text: "Receipt specification, v0.2", link: "/receipt/v0.2" },
             { text: "Conformance vectors", link: "/receipt/vectors" },
             { text: "Aligning with IETF SCITT", link: "/receipts/scitt" },
+          ] },
+          { text: "Roadmap", items: [
+            { text: "Roadmap", link: "/roadmap" },
+            { text: "Payment mandates and agent identity (planned)", link: "/receipts/mandates" },
           ] },
         ],
       },

@@ -6,9 +6,9 @@
 
 Give your agents real power, without losing control of them. Your policy checks your agent's actions before they run. What it forbids does not run. Each action that it checks leaves a signed receipt that anyone can verify.
 
-[![An AI agent clears an AML alert, and its own log can be edited. Replayed through agent-custody, the same call is denied before it runs, the refusal is signed, and an auditor verifies the receipt with public keys.](site/public/promo.gif)](https://agent-custody.dev/advanced#product-overview-film)
+[![An AI agent clears an AML alert, and its own log can be edited. Replayed through agent-custody, the same call is denied before it runs, the refusal is signed, and an auditor verifies the receipt with public keys.](site/public/promo.gif)](https://agent-custody.dev/how-it-works#product-overview-film)
 
-*An agent cleared an alert, and its own log was the only record. Replayed through agent-custody, the call is denied, and an auditor can prove it. [Watch the 30-second film with sound](https://agent-custody.dev/advanced#product-overview-film).*
+*An agent cleared an alert, and its own log was the only record. Replayed through agent-custody, the call is denied, and an auditor can prove it. [Watch the 30-second film with sound](https://agent-custody.dev/how-it-works#product-overview-film).*
 
 agent-custody is infrastructure to authorize the actions of AI agents and to account for them:
 
@@ -62,7 +62,7 @@ cd agent-custody && bun install && bun run demo
 - A payout is refused: the tool is not in the grant.
 - An auditor verifies all four receipts with public keys and a copy of the log. Then someone edits the first receipt to make the refund look smaller, and the verification fails.
 
-The demo needs Node 22 and Bun. The [refund demo](site/advanced.md#the-refund-demo) shows the output step by step. For production payments, read [safe financial operations](packages/receipts/docs/financial-operations.md) (budgets, idempotency, and reconciliation with the provider), [human approvals](packages/receipts/docs/approvals.md) (one or two people approve the exact payment), and [completeness](packages/receipts/docs/completeness.md) (the provider's records matched against the receipts, so an action that went around the gateway shows up).
+The demo needs Node 22 and Bun. The [refund demo](site/how-it-works.md#the-refund-demo) shows the output step by step. For production payments, read [safe financial operations](packages/receipts/docs/financial-operations.md) (budgets, idempotency, and reconciliation with the provider), [human approvals](packages/receipts/docs/approvals.md) (one or two people approve the exact payment), and [completeness](packages/receipts/docs/completeness.md) (the provider's records matched against the receipts, so an action that went around the gateway shows up).
 
 The gateway covers only the calls that go through it. A credential in the agent's own environment goes around it: [the egress witness](#calls-that-go-around-the-gateway-the-egress-witness) and lockdown close that route. The [threat model](packages/receipts/docs/threat-model.md) lists the other limits.
 
@@ -166,7 +166,7 @@ Each receipt is an observed bypass, not a record of what was done. A permitted h
 
 ## Advanced
 
-The sections above are the two ways to start. The rest of the product is below and on the [advanced page](site/advanced.md): the gateway with grants and Cedar policy, the transparency log, the state package for agent memory, the hosted log, and the other frameworks and languages.
+The sections above are the two ways to start. The rest of the product is below and on [How it works](site/how-it-works.md): the gateway with grants and Cedar policy, the transparency log, the state package for agent memory, the hosted log, and the other frameworks and languages.
 
 ### What each piece is for, and when you need it
 

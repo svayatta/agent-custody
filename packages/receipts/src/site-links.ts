@@ -25,8 +25,8 @@ export const SIGN_IN: SiteLink = { text: "Sign in", link: DASHBOARD_URL };
 export const GET_STARTED: SiteLink = { text: "Get started", link: "/guide/getting-started" };
 
 export const SITE_FOOTER: { title: string; links: SiteLink[] }[] = [
-  { title: "Product", links: [{ text: "Use cases", link: "/use-cases" }, { text: "Pricing", link: "/pricing" }, { text: "Hosted log", link: "/early-access" }, { text: "Verify a receipt", link: "/verify" }] },
-  { title: "Docs", links: [{ text: "Getting started", link: "/guide/getting-started" }, { text: "Incident replay", link: "/guide/incident-replay" }, { text: "Reference", link: "/reference/" }, { text: "Receipt specification", link: "/receipt/v0.2" }, { text: "Glossary", link: "/guide/glossary" }, { text: "Changelog", link: "/changelog" }] },
+  { title: "Product", links: [{ text: "How it works", link: "/how-it-works" }, { text: "Use cases", link: "/use-cases" }, { text: "Pricing", link: "/pricing" }, { text: "Hosted log", link: "/early-access" }, { text: "Verify a receipt", link: "/verify" }] },
+  { title: "Docs", links: [{ text: "Getting started", link: "/guide/getting-started" }, { text: "Incident replay", link: "/guide/incident-replay" }, { text: "Reference", link: "/reference/" }, { text: "Receipt specification", link: "/receipt/v0.2" }, { text: "Glossary", link: "/guide/glossary" }, { text: "Roadmap", link: "/roadmap" }, { text: "Changelog", link: "/changelog" }] },
   { title: "Trust", links: [{ text: "Security", link: "/security" }, { text: "Where data goes", link: "/faq" }, { text: "Threat model", link: "/receipts/threat-model" }, { text: "This repository", link: "/custody" }] },
   { title: "Company", links: [{ text: "Blog", link: "/blog/" }, { text: "Contact", link: "/contact" }, { text: "Privacy", link: "/privacy" }, { text: "Terms", link: "/terms" }] },
 ];

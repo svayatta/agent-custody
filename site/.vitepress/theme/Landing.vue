@@ -2,7 +2,7 @@
 // The product's front door, outside the docs theme. It speaks to one reader: an engineer who runs a coding agent, such
 // as Claude Code, against a repository or a system that touches production. The order is the command, what the user
 // sees (the report), the incident replay, how a reviewer checks the record, and the limits of the hook. Everything else
-// is on /advanced. The word "receipt" comes after the page shows what a receipt does. The terminal text below is
+// is on /how-it-works. The word "receipt" comes after the page shows what a receipt does. The terminal text below is
 // real output: the report is from tutorial 36, and the replay is from tutorial 38 (packages/receipts/examples). Colours
 // are tokens on .landing. Light and dark share the names. Every section uses the same 1200px container, so all left
 // edges line up.
@@ -206,7 +206,7 @@ const limits = [
           <div class="cards c2">
             <div v-for="l in limits" :key="l.t" class="card"><h3>{{ l.t }}</h3><p>{{ l.d }}</p></div>
           </div>
-          <p class="after">To cover more, keep production credentials out of the agent's environment, and put a gateway between the agent and the tools that touch production. The gateway is on the <a href="/advanced">advanced page</a>, and <a href="/guide/credential-custody">credential custody and egress lockdown</a> shows how to take away the routes around it. The <a href="/receipts/threat-model">threat model</a> lists what each part defends, and what it does not. No independent witness runs yet, and the hosted log is not anchored on mainnet yet.</p>
+          <p class="after">To cover more, keep production credentials out of the agent's environment, and put a gateway between the agent and the tools that touch production. The gateway is on the <a href="/how-it-works">How it works</a>, and <a href="/guide/credential-custody">credential custody and egress lockdown</a> shows how to take away the routes around it. The <a href="/receipts/threat-model">threat model</a> lists what each part defends, and what it does not. No independent witness runs yet, and the hosted log is not anchored on mainnet yet.</p>
         </div>
       </section>
 
@@ -218,7 +218,7 @@ const limits = [
           <p v-if="failed === 'final'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
           <div class="ctas">
             <a class="btn primary" :href="setupHref">Setup for Claude Code →</a>
-            <a class="btn" href="/advanced">Advanced: the gateway, memory, and the hosted log</a>
+            <a class="btn" href="/how-it-works">How it works: the gateway, memory, and the hosted log</a>
           </div>
         </div>
       </section>
