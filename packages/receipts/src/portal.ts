@@ -1891,7 +1891,7 @@ ${DESIGN_CSS}
         <div class="card" id="cUsed"><div class="k">Appends this month</div><div class="v" id="vUsed">–</div><div class="s" id="sUsed"></div></div>
         <div class="card" id="cSize"><div class="k">Receipts in your log</div><div class="v" id="vSize">–</div><div class="s">leaf hashes, all time</div></div>
         <div class="card" id="cKeys"><div class="k">Active keys</div><div class="v" id="vKeys">–</div><div class="s" id="sKeys"></div></div>
-        <div class="card" id="cCp"><div class="k">Latest checkpoint</div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
+        <div class="card" id="cCp"><div class="k"><abbr title="A checkpoint is the log's size and root hash, signed and published apart from the log, so anyone can check later that it was never rewritten.">Latest checkpoint</abbr></div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
       </div>
       <p class="muted">Tree heads on this log are signed by our key; there is no second, independent witness yet. Every receipt you log here is checkable by anyone with your gateway's public key and ours: <a href="https://github.com/svayatta/agent-custody/tree/main/packages/receipts#what-a-receipt-proves-and-what-it-does-not" target="_blank" rel="noopener">what a receipt proves and what it does not</a>.</p>
       <h2>Your log</h2>
@@ -1910,14 +1910,14 @@ ${DESIGN_CSS}
     </div>
     <div data-pane="keys" hidden>
       <h1>API keys</h1>
-      <p class="muted">A key is a bearer token that your gateway sends with each append. You see a key one time, when you create it; we keep only its hash. To rotate a key without a gap, create the new key before you revoke the old one.</p>
-      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Create key</button></form>
+      <p class="muted">An API key is what your gateway sends with each append. You see it one time, when you create it; we keep only its hash. To rotate without a gap, create the new API key before you revoke the old one.</p>
+      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Create API key</button></form>
         <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted" data-copy>Copy API key</button> <button type="button" id="savedMinted">I saved the key</button></div>
         <table style="margin-top:1rem"><thead><tr><th>label</th><th>created</th><th>last used</th><th>state</th><th></th></tr></thead><tbody id="keyRows"></tbody></table></div>
     </div>
     <div data-pane="policies" hidden>
       <h1>Policies</h1>
-      <p class="muted">Publish each Cedar policy version that your gateway loads, and the <code>policyDigest</code> of a receipt reads as its name, such as "refunds-v3". Enforcement stays on your machines: the gateway never reads this page. <a href="https://docs.agent-custody.dev/reference/hosted#policies-names-for-the-digests-receipts-carry" target="_blank" rel="noopener">How policy names work</a></p>
+      <p class="muted">Publish each <abbr title="Cedar is the policy language the gateway uses to allow or deny each tool call.">Cedar</abbr> policy version that your gateway loads, and the <code>policyDigest</code> of a receipt reads as its name, such as "refunds-v3". Enforcement stays on your machines: the gateway never reads this page. <a href="https://agent-custody.dev/reference/hosted#policies-names-for-the-digests-receipts-carry" target="_blank" rel="noopener">How policy names work</a></p>
       <p><button type="button" id="policyNew">Publish version</button></p>
       <div class="panel"><table><thead><tr><th>name</th><th>digest</th><th>bytes</th><th>published</th><th>by</th><th></th></tr></thead><tbody id="policyRows"></tbody></table></div>
       <div class="panel"><h2>Match a receipt</h2><p class="muted">Paste a receipt file, or just its <code>policyDigest</code>, to see which published version decided it.</p><form id="matchForm"><label>Receipt JSON or digest<textarea id="matchIn" rows="3" spellcheck="false"></textarea></label><button type="submit" class="quiet">Match</button></form><p class="msg" id="matchOut"></p></div>

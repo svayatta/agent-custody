@@ -255,7 +255,7 @@ describe("the tenant portal", () => {
     expect(page).toContain('<a href="#activity" data-view="activity">');
     expect(page).not.toMatch(/id="activity"/);
     for (const a of AUDIT_ACTIONS) expect(page).toContain(`"${a}": (`);
-    expect(page).toContain('<button type="submit">Create key</button>');
+    expect(page).toContain('<button type="submit">Create API key</button>');
     expect(page).not.toContain("Mint key");
     expect(page).toContain('<dialog id="publishDialog"');
     expect(page).toContain('<dialog id="policyView"');
