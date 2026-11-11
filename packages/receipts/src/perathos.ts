@@ -165,8 +165,9 @@ export function verifyPerathosLog(text: string, opts: PerathosOptions = {}): Per
     add("the head witness's checkpoint is in the log", found ? [] : [`no checkpoint at seq ${h.seq} with that receipt_hash: the log was cut or replaced`]);
   }
 
-  // only a checkpoint whose signature verified seals what comes before it
-  const last = sealed.at(-1);
+  // only a checkpoint whose signature verified, by a pinned key when keys are pinned, seals what comes before it
+  const pinned = opts.trustedKeys ? new Set(opts.trustedKeys.map((k) => k.toLowerCase())) : null;
+  const last = sealed.filter((c) => !pinned || pinned.has(c.signer as string)).at(-1);
   const sealedThrough = typeof last?.seq === "number" ? last.seq : 0;
   const agent = typeof receipts[0]?.agent === "string" ? (receipts[0].agent as string) : null;
   return {
