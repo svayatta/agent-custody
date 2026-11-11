@@ -16,6 +16,7 @@ const repo = "https://github.com/svayatta/agent-custody";
 const commands = ["npm install -g @agent-custody/receipts", "agent-custody init claude-code"];
 const command = commands.join("\n");
 const tryCommand = "npx @agent-custody/receipts init claude-code";
+const auditCommand = "npx -y @agent-custody/receipts audit-sessions";
 const setupHref = "/guide/getting-started#claude-code-in-one-command";
 
 // The Copy button shows "Copied" for 1.5 seconds. The id says which of the two command boxes was used.
@@ -117,6 +118,7 @@ const limits = [
             <p v-if="failed === 'hero'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
             <p class="note">Needs Node 22. It starts in observe mode: nothing is blocked until you say so.</p>
             <p class="note">To try it once, run <code>{{ tryCommand }}</code>. Do not keep the npx form: npm can clear its cache, and the hooks then stop working.</p>
+            <p class="note">To see first what the list would have caught in your last week, run <code>{{ auditCommand }}</code>. It reads your Claude Code transcripts and writes nothing.</p>
             <div class="ctas">
               <a class="btn" href="/guide/incident-replay">See the incident replay</a>
               <a class="btn quiet" :href="setupHref">Setup for Claude Code</a>
