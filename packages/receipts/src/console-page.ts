@@ -35,6 +35,17 @@ textarea { width: 100%; min-height: 280px; background: var(--code); color: var(-
 [hidden] { display: none !important; }
 .mt { margin-top: 16px; }
 textarea.short { min-height: 140px; }
+dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 16px; max-width: min(480px, calc(100vw - 32px)); }
+dialog::backdrop { background: rgba(0, 0, 0, .5); }
+dialog h3 { margin: 0 0 8px; }
+dialog p { margin: 8px 0; overflow-wrap: anywhere; }
+.inline { margin-left: 4px; }
+button.link { background: none; border: 0; padding: 0; font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--accent); text-decoration: underline; cursor: pointer; }
+details { margin-top: 8px; }
+summary { cursor: pointer; color: var(--muted); }
+.scroll { overflow-x: auto; } .scroll table { min-width: 640px; }
+.detail h3:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pair { padding: 1px 0; }
 @media (max-width: 600px) { .finding { grid-template-columns: 56px 1fr; } .finding .check { display: none; } }
 `;
 
@@ -50,6 +61,7 @@ const SCRIPT = String.raw`
   var tabs = ['Overview', 'Check', 'Policy', 'Grants', 'Receipts', 'Audit'];
   var current = 'Overview';
   var policyDigest = '';
+  var dirty = false;
 
   function h(tag, attrs) {
     var e = document.createElement(tag);
@@ -103,6 +115,57 @@ const SCRIPT = String.raw`
     return box;
   }
   function short(s) { return s ? String(s).slice(0, 12) + '…' : '-'; }
+  // the one place a time is formatted: local time to read, the UTC ISO value in the title and in datetime
+  function when(v) {
+    var d = v == null || v === '' ? null : new Date(v);
+    if (!d || isNaN(d.getTime())) return v == null || v === '' ? '-' : String(v);
+    var iso = d.toISOString();
+    return h('time', { datetime: iso, title: iso + ' (UTC)', text: d.toLocaleString() });
+  }
+  function digest(v) { return h('code', { title: String(v), text: short(v) }); }
+  function isDigest(v) { return typeof v === 'string' && /^(sha256:)?[0-9a-f]{32,}$/i.test(v); }
+  function isIso(v) { return typeof v === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$/.test(v); }
+  function value(v) {
+    if (isDigest(v)) return digest(v);
+    if (isIso(v)) return when(v);
+    if (typeof v === 'boolean') return v ? 'yes' : 'no';
+    if (Array.isArray(v)) return v.length ? v.join(', ') : 'none';
+    if (v !== null && typeof v === 'object') return JSON.stringify(v);
+    return v == null ? '-' : String(v);
+  }
+  function pairs(o) {
+    var box = h('div');
+    Object.keys(o).forEach(function (k) { box.appendChild(h('div', { class: 'pair' }, h('span', { class: 'muted', text: k + ' ' }), value(o[k]))); });
+    return box;
+  }
+  function inline(el, text, bad) { el.className = 'inline ' + (bad ? 'bad' : 'ok'); el.textContent = text; }
+  function inlineFail(el) { return function (e) { inline(el, e.message || String(e), true); }; }
+
+  // An in-page question built on the native dialog. It resolves true on the confirm button and false on Cancel or Escape.
+  function ask(title, body, label, danger) {
+    return new Promise(function (resolve) {
+      var dlg = h('dialog', { 'aria-labelledby': 'dlg-title' });
+      var cancel = h('button', { type: 'button', class: 'secondary', autofocus: !!danger, onclick: function () { dlg.close('cancel'); } }, 'Cancel');
+      var go = h('button', { type: 'button', class: danger ? 'danger' : 'primary', autofocus: !danger, onclick: function () { dlg.close('ok'); } }, label);
+      dlg.appendChild(h('h3', { id: 'dlg-title', text: title }));
+      body.forEach(function (t) { dlg.appendChild(h('p', { text: t })); });
+      dlg.appendChild(h('div', { class: 'row' }, go, cancel));
+      dlg.addEventListener('close', function () { document.body.removeChild(dlg); resolve(dlg.returnValue === 'ok'); });
+      document.body.appendChild(dlg);
+      dlg.showModal();
+    });
+  }
+
+  var ACTIONS = { 'policy.save': 'Policy saved', 'grant.revoke': 'Grant revoked' };
+  function historyTable(files) {
+    var t = h('table', null, h('tr', null, h('th', { text: 'saved' }), h('th', { text: 'digest' })));
+    files.forEach(function (f) {
+      var m = /^(\d{4}-\d\d-\d\d)T(\d\d)-(\d\d)-(\d\d)-(\d+)Z-([0-9a-f]+)\.cedar$/.exec(f);
+      t.appendChild(m ? h('tr', null, h('td', null, when(m[1] + 'T' + m[2] + ':' + m[3] + ':' + m[4] + '.' + m[5] + 'Z')), h('td', null, h('code', { text: m[6] })))
+        : h('tr', null, h('td', { colspan: 2, text: f })));
+    });
+    return t;
+  }
 
   var renderers = {
     Overview: function () {
@@ -120,7 +183,7 @@ const SCRIPT = String.raw`
             h('div', { class: 'card' }, h('h3', { text: 'Gateway' }), kv([['status', gw], ['key id', o.gatewayKeyid ? short(o.gatewayKeyid) : 'not created yet'], ['mode', o.mode], ['config', o.configFile]])),
             h('div', { class: 'card' }, h('h3', { text: 'Evidence' }), kv([['receipts', String(o.receiptCount)], ['last receipt', o.lastReceiptAt], ['log', o.log.kind === 'remote' ? 'remote ' + o.log.url + (o.log.hashOnly ? ' (hashes only)' : '') : 'local ' + o.log.file], ['precommit', o.precommit.length ? o.precommit.join(', ') : 'none']])),
             h('div', { class: 'card' }, h('h3', { text: 'Who is trusted' }), kv([['principal keys', String(o.principals.length)], ['key ids', o.principals.map(short).join(', ') || 'none'], ['revoked grants', String(o.revokedCount)]])),
-            h('div', { class: 'card' }, h('h3', { text: 'Config check' }), h('p', null, h('span', { class: errs ? 'bad' : 'ok', text: errs + ' error' + (errs === 1 ? '' : 's') }), ', ', h('span', { class: warns ? 'warn' : 'muted', text: warns + ' warning' + (warns === 1 ? '' : 's') })), h('button', { class: 'secondary', onclick: function () { show('Check'); } }, 'See the findings'))),
+            h('div', { class: 'card' }, h('h3', { text: 'Config check' }), h('p', null, h('span', { class: errs ? 'bad' : 'ok', text: errs + ' error' + (errs === 1 ? '' : 's') }), ', ', h('span', { class: warns ? 'warn' : 'muted', text: warns + ' warning' + (warns === 1 ? '' : 's') })), h('button', { class: 'secondary', onclick: function () { location.hash = hashOf('Check'); } }, 'See the findings'))),
           o.keyProblems.length ? h('div', { class: 'banner bad' }, o.keyProblems.join('. ')) : null,
           h('div', { class: 'card mt' }, h('h3', { text: 'Upstreams' }), up),
           o.facts.length ? h('div', { class: 'card' }, h('h3', { text: 'Fact lookups the gateway makes itself' }), kv(o.facts.map(function (f) { return [f.name, f.tool + ' for ' + f.forTools.join(', ')]; }))) : null);
@@ -146,7 +209,10 @@ const SCRIPT = String.raw`
         policyDigest = p.digest;
         var area = h('textarea', { 'aria-label': 'Cedar policy', spellcheck: 'false' });
         area.value = p.text;
+        dirty = false;
         var out = h('div');
+        var result = h('span', { role: 'status' });
+        area.addEventListener('input', function () { dirty = true; inline(result, ''); });
         function validate() {
           return api('POST', '/api/policy/validate', { text: area.value }).then(function (r) {
             clear(out);
@@ -178,12 +244,14 @@ const SCRIPT = String.raw`
         function save() {
           return validate().then(function (v) {
             if (!v.ok) return;
-            var ask = 'Save this policy?\n\nA running gateway applies it from its next call.';
-            if (v.issues.length) ask = 'Confirm before saving:\n\n' + v.issues.join('\n\n') + '\n\nSave this policy anyway?';
-            if (!window.confirm(ask)) return;
-            return api('PUT', '/api/policy', { text: area.value, expectDigest: policyDigest, confirm: v.issues.length > 0 }).then(function (r) {
-              policyDigest = r.digest;
-              say('Saved (' + short(r.digest) + '). ' + r.note);
+            var body = ['A running gateway applies it from its next call.'].concat(v.issues);
+            return ask('Save the policy ' + p.path + '?', body, v.issues.length ? 'Save anyway' : 'Save').then(function (yes) {
+              if (!yes) return;
+              return api('PUT', '/api/policy', { text: area.value, expectDigest: policyDigest, confirm: v.issues.length > 0 }).then(function (r) {
+                policyDigest = r.digest;
+                dirty = false;
+                inline(result, 'Saved (' + short(r.digest) + '). A running gateway applies it from its next call.');
+              });
             });
           });
         }
@@ -193,9 +261,9 @@ const SCRIPT = String.raw`
           area, h('div', { class: 'row' },
             h('button', { class: 'secondary', onclick: function () { validate().catch(fail); } }, 'Validate'),
             h('button', { class: 'secondary', onclick: function () { simulate().catch(fail); } }, 'Replay recorded calls'),
-            h('button', { class: 'primary', onclick: function () { save().catch(fail); } }, 'Save')),
+            h('button', { class: 'primary', onclick: function () { inline(result, ''); save().catch(inlineFail(result)); } }, 'Save'), result),
           out,
-          p.history.length ? h('div', { class: 'card' }, h('h3', { text: 'Earlier versions kept' }), h('p', { class: 'muted', text: p.history.join(', ') })) : null);
+          p.history.length ? h('div', { class: 'card' }, h('h3', { text: 'Earlier versions kept' }), historyTable(p.history)) : null);
       });
     },
 
@@ -203,26 +271,31 @@ const SCRIPT = String.raw`
       var area = h('textarea', { 'aria-label': 'Grant', placeholder: 'Paste a grant (the JSON of a grant file)', spellcheck: 'false', class: 'short' });
       var out = h('div');
       var last = null;
+      var note = h('span', { role: 'status' });
       function inspect() {
         return api('POST', '/api/grants/inspect', { grant: area.value }).then(function (g) {
           last = g;
           clear(out);
           out.appendChild(h('div', { class: 'card' }, h('h3', { text: 'Grant' }), kv([
             ['status', h('span', { class: g.status === 'valid' ? 'ok' : 'bad', text: g.status })],
-            ['agent', g.agent], ['principal', g.principal], ['scopes', g.scopes.join(', ')], ['issued', g.issuedAt], ['expires', g.expiresAt],
-            ['delegated from another grant', g.delegated ? 'yes' : 'no'], ['can delegate', g.canDelegate ? 'yes' : 'no'], ['digest', g.digest], ['why not valid', g.error]]),
-            h('div', { class: 'row' }, g.revoked ? h('span', { class: 'pill', text: 'already revoked' }) : h('button', { class: 'danger', onclick: function () { revoke().catch(fail); } }, 'Revoke this grant'))));
+            ['agent', g.agent], ['principal', g.principal], ['scopes', g.scopes.join(', ')], ['issued', when(g.issuedAt)], ['expires', when(g.expiresAt)],
+            ['delegated from another grant', g.delegated ? 'yes' : 'no'], ['can delegate', g.canDelegate ? 'yes' : 'no'], ['digest', g.digest ? digest(g.digest) : null], ['why not valid', g.error]]),
+            h('div', { class: 'row' }, g.revoked ? h('span', { class: 'pill', text: 'already revoked' }) : h('button', { class: 'danger', onclick: function () { inline(note, ''); revoke().catch(inlineFail(note)); } }, 'Revoke this grant'), note)));
         });
       }
       function revoke() {
-        if (!last || !window.confirm('Revoke the grant for ' + last.agent + '?\n\nIt, and every grant delegated from it, is refused on its next call. This cannot be undone here.')) return Promise.resolve();
-        return api('POST', '/api/grants/revoke', { grant: area.value }).then(function (r) { say('Revoked the grant for ' + r.agent + '. ' + r.note); return inspect().then(list); });
+        if (!last) return Promise.resolve();
+        var who = last.agent + ' (digest ' + short(last.digest) + ')';
+        return ask('Revoke the grant for ' + who + '?', ['The grant, and every grant delegated from it, is refused on its next call. This cannot be undone here.'], 'Revoke', true).then(function (yes) {
+          if (!yes) return;
+          return api('POST', '/api/grants/revoke', { grant: area.value }).then(function (r) { return inspect().then(list).then(function () { inline(note, 'Revoked the grant for ' + r.agent + '. The gateway refuses it, and every grant delegated from it, on its next call.'); }); });
+        });
       }
       var revoked = h('div');
       function list() {
         return api('GET', '/api/revocations').then(function (r) {
           clear(revoked);
-          revoked.appendChild(h('div', { class: 'card' }, h('h3', { text: 'Revoked grants (' + r.digests.length + ')' }), r.digests.length ? h('table', null, r.digests.map(function (d) { return h('tr', null, h('td', null, h('code', { text: d }))); })) : h('p', { class: 'muted', text: 'None.' })));
+          revoked.appendChild(h('div', { class: 'card' }, h('h3', { text: 'Revoked grants (' + r.digests.length + ')' }), r.digests.length ? r.digests.reduce(function (t, d) { t.appendChild(h('tr', null, h('td', null, h('code', { text: d })))); return t; }, h('table', null, h('tr', null, h('th', { text: 'digest' })))) : h('p', { class: 'muted', text: 'None.' })));
         });
       }
       list().catch(fail);
@@ -238,20 +311,36 @@ const SCRIPT = String.raw`
         var body = h('table');
         function draw() {
           clear(body);
-          body.appendChild(h('tr', null, h('th', { text: 'time' }), h('th', { text: 'agent' }), h('th', { text: 'tool' }), h('th', { text: 'decision' }), h('th', { text: 'outcome' }), h('th', { text: 'verifies' })));
+          body.appendChild(h('tr', null, h('th', { text: 'receipt' }), h('th', { text: 'time' }), h('th', { text: 'agent' }), h('th', { text: 'tool' }), h('th', { text: 'decision' }), h('th', { text: 'outcome' }), h('th', { text: 'verifies' })));
           r.receipts.filter(function (x) { return !filter.value || x.status === filter.value; }).forEach(function (x) {
-            body.appendChild(h('tr', { class: 'click', onclick: function () { open(x.id); } },
-              h('td', { text: x.timestamp || '-' }), h('td', { text: x.agent || '-' }), h('td', { text: x.tool || '-' }),
+            body.appendChild(h('tr', { class: 'click', onclick: function (ev) { open(x.id, ev.currentTarget.querySelector('button')); } },
+              h('td', null, h('button', { type: 'button', class: 'link', 'data-id': x.id, title: x.id, text: short(x.id) })),
+              h('td', null, when(x.timestamp)), h('td', { text: x.agent || '-' }), h('td', { text: x.tool || '-' }),
               h('td', { class: x.decision === 'deny' ? 'bad' : '', text: x.decision ? x.decision + (x.enforced ? '' : ' (not enforced)') : '-' }),
               h('td', { text: x.status ? x.status + (x.reason ? ': ' + x.reason : '') : '-' }),
               h('td', { class: x.verified ? 'ok' : 'bad', text: x.verified ? 'yes' : 'NO: ' + (x.failing || []).join(', ') })));
           });
         }
-        function open(id) {
+        function close(id) {
+          clear(detail);
+          var row = body.querySelector('button[data-id="' + id + '"]');
+          (row || filter).focus();
+        }
+        function open(id, opener) {
           api('GET', '/api/receipts/' + encodeURIComponent(id)).then(function (d) {
-            clear(detail);
-            detail.appendChild(h('div', { class: 'card' }, h('h3', { text: 'Receipt ' + id }), h('pre', { text: JSON.stringify(d.statement, null, 2) })));
-            detail.scrollIntoView();
+            var s = d.summary || {};
+            var st = d.statement || {};
+            var title = h('h3', { tabindex: '-1', text: 'Receipt ' + id });
+            var args = st.request && st.request.argsDigest;
+            var res = st.execution && st.execution.resultDigest;
+            var rows = [['tool', s.tool], ['decision', s.decision ? s.decision + (s.enforced ? '' : ' (not enforced)') : null],
+              ['status', s.status ? s.status + (s.reason ? ': ' + s.reason : '') : null], ['time', when(s.timestamp)], ['agent', s.agent], ['principal', s.principal],
+              ['grant', st.delegation ? 'a signed grant was presented' : 'none'], ['arguments digest', args ? digest(args) : null], ['result digest', res ? digest(res) : null],
+              ['verifies', h('span', { class: s.verified ? 'ok' : 'bad', text: s.verified ? 'yes' : 'NO: ' + (s.failing || []).join(', ') })]];
+            clear(detail).appendChild(h('div', { class: 'card detail' }, title, kv(rows),
+              h('details', null, h('summary', { text: 'Raw JSON' }), h('pre', { text: JSON.stringify(d.statement, null, 2) })),
+              h('div', { class: 'row' }, h('button', { type: 'button', class: 'secondary', onclick: function () { close(id); } }, 'Close'))));
+            title.focus();
           }).catch(fail);
         }
         filter.addEventListener('change', draw);
@@ -259,7 +348,7 @@ const SCRIPT = String.raw`
         return h('div', null, h('h2', { text: 'Receipts' }),
           h('p', { class: 'muted', text: r.total + ' receipts on disk, the newest ' + r.receipts.length + ' shown. Each is verified against the gateway key, the trusted principals, and the local log.' }),
           r.problems.length ? h('div', { class: 'banner bad' }, r.problems.join('. ')) : null,
-          h('div', { class: 'row' }, h('label', null, 'Outcome ', filter)), h('div', { class: 'card' }, body), detail);
+          h('div', { class: 'row' }, h('label', null, 'Outcome ', filter)), h('div', { class: 'card scroll' }, body), detail);
       });
     },
 
@@ -268,15 +357,19 @@ const SCRIPT = String.raw`
         var t = h('table', null, h('tr', null, h('th', { text: 'when' }), h('th', { text: 'by' }), h('th', { text: 'action' }), h('th', { text: 'detail' })));
         a.entries.forEach(function (e) {
           var rest = {}; Object.keys(e).forEach(function (k) { if (k !== 'at' && k !== 'by' && k !== 'action') rest[k] = e[k]; });
-          t.appendChild(h('tr', null, h('td', { text: e.at }), h('td', { text: e.by }), h('td', { text: e.action }), h('td', null, h('code', { text: JSON.stringify(rest) }))));
+          t.appendChild(h('tr', null, h('td', null, when(e.at)), h('td', { text: e.by }), h('td', { text: ACTIONS[e.action] || e.action }), h('td', null, pairs(rest))));
         });
-        return h('div', null, h('h2', { text: 'Audit trail' }), h('p', { class: 'muted', text: 'Every change made here: who, when, and what.' }), h('div', { class: 'card' }, a.entries.length ? t : h('p', { class: 'muted', text: 'No changes yet.' })));
+        return h('div', null, h('h2', { text: 'Audit trail' }), h('p', { class: 'muted', text: 'Every change made here: who, when, and what.' }), h('div', { class: 'card scroll' }, a.entries.length ? t : h('p', { class: 'muted', text: 'No changes yet.' })));
       });
     }
   };
 
+  // "tab=" keeps the hash from ever matching an element id, so the browser does not scroll to one
+  function hashOf(name) { return '#tab=' + name.toLowerCase(); }
+  function tabOf(hash) { return tabs.filter(function (n) { return hashOf(n) === hash; })[0]; }
   function show(name) {
     current = name;
+    dirty = false;
     say('');
     Array.prototype.forEach.call(document.querySelectorAll('nav button'), function (b) { if (b.textContent === name) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     clear(view).appendChild(h('p', { class: 'muted', text: 'Loading…' }));
@@ -284,7 +377,16 @@ const SCRIPT = String.raw`
   }
 
   var nav = document.getElementById('nav');
-  tabs.forEach(function (n) { nav.appendChild(h('button', { type: 'button', onclick: function () { show(n); } }, n)); });
+  tabs.forEach(function (n) { nav.appendChild(h('button', { type: 'button', onclick: function () { location.hash = hashOf(n); } }, n)); });
+  window.addEventListener('hashchange', function () {
+    var name = tabOf(location.hash);
+    if (document.getElementById('app').hidden || !name || name === current) return;
+    if (!dirty) return show(name);
+    ask('Leave the policy editor?', ['The policy has changes that are not saved. If you leave, they are lost.'], 'Discard the changes', true).then(function (yes) {
+      if (yes) show(name); else history.replaceState(null, '', hashOf(current));
+    });
+  });
+  window.addEventListener('beforeunload', function (ev) { if (dirty) { ev.preventDefault(); ev.returnValue = ''; } });
   document.getElementById('signout').addEventListener('click', signOut);
   document.getElementById('theme').addEventListener('click', function () {
     var dark = document.documentElement.getAttribute('data-theme') === 'dark' || (!document.documentElement.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
@@ -300,11 +402,11 @@ const SCRIPT = String.raw`
       try { sessionStorage.setItem(KEY, token); } catch (e) {}
       document.getElementById('login').hidden = true;
       document.getElementById('app').hidden = false;
-      show(current);
+      show(tabOf(location.hash) || current);
     }).catch(function (e) { clear(document.getElementById('login-msg')).appendChild(h('p', { class: 'bad', role: 'alert', text: e.message })); });
   });
   if (token) {
-    api('GET', '/api/audit').then(function () { document.getElementById('login').hidden = true; document.getElementById('app').hidden = false; show(current); }).catch(function () { signOut(); });
+    api('GET', '/api/audit').then(function () { document.getElementById('login').hidden = true; document.getElementById('app').hidden = false; show(tabOf(location.hash) || current); }).catch(function () { signOut(); });
   }
 })();
 `;
