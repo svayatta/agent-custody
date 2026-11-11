@@ -26,6 +26,16 @@ The policy allows `git push --force-with-lease`. It is a force push that fails w
 
 The settings file is merged, not replaced. Every other key and hook stays, a hook that is already there is not added again, and a settings file that is not valid JSON stops the command before it changes anything. Hooks can run at the same time. The local log takes the lock file `log.jsonl.lock` for each append, so concurrent hooks keep one log that `report` verifies. A writer waits up to 20 seconds for the lock. A `PreToolUse` hook that gives up still blocks a denied call, and the denial text ends with `no receipt: <reason>`. A `PostToolUse` or `PostToolUseFailure` hook that gives up loses its receipt: the tool call has already run, and the hook exits with code 1 and does not retry. A lock is stale when its process on this host is gone. The lock of a live process on this host is never broken. The lock of a process on another host, or a lock file with no readable owner, is stale when nobody touched it for 60 seconds. If a process is killed in the middle of a write, the next append moves the partial last line to `log.jsonl.torn`. The command never overwrites an existing key, `sdk.json`, `policy.cedar`, or `log.pub`, so it is safe to run two times. When `sdk.json` exists, the command ignores `--enforce` and the log options, and it warns for each one. A second run updates the path of a hook of ours. The hook pins the path of the Node binary that runs `init`. With nvm, a removed Node version breaks the hook, and every tool call then prints an error; run `init` again to update the path. When the path is in the npx cache (`/_npx/`), the command warns that npm can clear the cache; install the package globally and run the command again.
 
+## Auditing past sessions
+
+```bash
+agent-custody audit-sessions [--since 7d|24h|30m|<date>|all] [--dir <projects dir>] [--policy <file.cedar>] [--counts] [--json]
+```
+
+A read-only preview, before anything is installed: it reads Claude Code's own transcripts (`--dir`, default `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`, nested subagent transcripts included), takes each tool call in the window once by its id, evaluates it against `--policy` or the template that `init` installs, and prints the calls the policy would have denied with the rule and its `@reason`. `--since` defaults to `7d`. `--counts` prints the numbers per rule and nothing from the transcripts. A call the policy cannot evaluate (a value Cedar cannot hold) is listed apart; the hook denies such a call. A Rego policy is refused. It writes nothing and opens no connection, and it always ends with a `PREVIEW` line: a transcript is the host's own account, not a receipt. Exit 0, or 1 when the directory is missing.
+
+From code: `auditSessions({ dir, policyText, policyName, since? }): SessionAudit` (`{ dir, since, policy, policyDigest, transcripts, sessions, calls, denied: [{ session, project, timestamp, tool, target, policyIds, reasons, rules }], unevaluated, unreadable }`), `formatSessionAudit(audit, { counts? })`, `parseSince(text, now?)`, and `defaultTranscriptDir(env?)`.
+
 ## The report
 
 ```bash
