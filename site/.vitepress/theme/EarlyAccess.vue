@@ -69,7 +69,7 @@ const copied = ref(false);
     </label>
     <label>Anything else<textarea v-model="note" rows="2"></textarea></label>
     <div class="row">
-      <button type="submit" :disabled="busy || sent">{{ sent ? "Sent" : busy ? "Sending…" : opened ? "Open my mail app again" : "Request early access" }}</button>
+      <button class="btn" type="submit" :disabled="busy || sent">{{ sent ? "Sent" : busy ? "Sending…" : opened ? "Open my mail app again" : "Request early access" }}</button>
       <span v-if="sent" class="ok">Thank you. We answer every request.</span>
       <span v-else-if="opened" class="ok">Your mail app should have opened with the request filled in; send it from there. If nothing opened, <button type="button" class="link" @click="copyRequest">{{ copied ? "copied" : "copy the request" }}</button> and email it to {{ TO }}.</span>
       <span v-if="error" class="err">{{ error }}</span>
@@ -82,11 +82,10 @@ const copied = ref(false);
 .early { display: grid; gap: 0.9rem; margin: 1.5rem 0; max-width: 640px; }
 label { display: grid; gap: 0.3rem; font-size: 0.9rem; color: var(--vp-c-text-1); }
 .req { font-size: 0.75rem; color: var(--vp-c-text-3); }
-input, textarea, select { font: inherit; padding: 0.5rem 0.6rem; border: 1px solid var(--vp-c-divider); border-radius: 6px; background: var(--vp-c-bg-alt); color: var(--vp-c-text-1); }
+input, textarea { font: inherit; padding: 0.5rem 0.6rem; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--vp-c-bg-alt); color: var(--vp-c-text-1); }
+select { width: 100%; font-size: inherit; }
 textarea { resize: vertical; }
 .row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-button { padding: 0.55rem 1.2rem; border-radius: 6px; background: var(--vp-c-brand-1); color: white; font-weight: 600; border: 0; cursor: pointer; }
-button:disabled { opacity: 0.6; cursor: default; }
 .ok { color: var(--vp-c-green-1); font-size: 0.9rem; }
 .err { color: var(--vp-c-danger-1); font-size: 0.9rem; }
 .note { font-size: 0.8rem; color: var(--vp-c-text-3); margin: 0; }

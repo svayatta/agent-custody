@@ -120,7 +120,7 @@ async function verify() {
       <div><label>A copy of the log, optional (<code>log.jsonl</code>, one JSON string per line)</label><textarea v-model="logText" rows="5" spellcheck="false" placeholder='"eyJ..."'></textarea></div>
     </div>
     <div class="actions">
-      <button class="run" :disabled="busy || !supported || !bundleText" @click="verify">{{ busy ? "verifying…" : "Verify" }}</button>
+      <button class="btn" :disabled="busy || !supported || !bundleText" @click="verify">{{ busy ? "verifying…" : "Verify" }}</button>
       <span v-if="result" :class="['verdict', result.ok ? 'ok' : 'bad']">{{ result.ok ? "VERIFIED" : "NOT VERIFIED" }}</span>
       <span v-if="result?.treeHeadSigner" class="signer">tree head signed by the {{ result.treeHeadSigner }}</span>
     </div>
@@ -133,20 +133,18 @@ async function verify() {
 <style scoped>
 .verifier { margin: 1rem 0 2rem; }
 label { display: block; font-size: 0.85rem; color: var(--vp-c-text-2); margin: 0.75rem 0 0.25rem; }
-input, textarea { width: 100%; font: 12px/1.4 var(--vp-font-family-mono); padding: 0.5rem; border: 1px solid var(--vp-c-divider); border-radius: 6px; background: var(--vp-c-bg-alt); color: var(--vp-c-text-1); resize: vertical; }
+input, textarea { width: 100%; font: var(--text-xs)/1.4 var(--vp-font-family-mono); padding: 0.5rem; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--vp-c-bg-alt); color: var(--vp-c-text-1); resize: vertical; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1rem; }
 @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
 .samples { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; font-size: 0.85rem; color: var(--vp-c-text-2); }
-.chip { font: 12px var(--vp-font-family-mono); padding: 0.2rem 0.55rem; border: 1px solid var(--vp-c-divider); border-radius: 999px; background: var(--vp-c-bg-soft); color: var(--vp-c-text-1); cursor: pointer; }
+.chip { font: var(--text-xs) var(--vp-font-family-mono); padding: 0.2rem 0.55rem; border: 1px solid var(--vp-c-divider); border-radius: var(--radius-full); background: var(--vp-c-bg-soft); color: var(--vp-c-text-1); cursor: pointer; }
 .chip.tamper { border-color: var(--vp-c-danger-1); color: var(--vp-c-danger-1); }
 .chip:disabled { opacity: 0.5; cursor: default; }
 .actions { display: flex; align-items: center; gap: 1rem; margin-top: 1rem; }
-.run { padding: 0.5rem 1.2rem; border-radius: 6px; background: var(--vp-c-brand-1); color: white; font-weight: 600; border: 0; cursor: pointer; }
-.run:disabled { opacity: 0.5; cursor: default; }
 .verdict { font-weight: 700; font-family: var(--vp-font-family-mono); }
 .verdict.ok { color: var(--vp-c-green-1); } .verdict.bad { color: var(--vp-c-danger-1); }
 .signer { font-size: 0.85rem; color: var(--vp-c-text-2); }
-.report { margin-top: 1rem; font-size: 12px; line-height: 1.45; white-space: pre; overflow-x: auto; }
+.report { margin-top: 1rem; font-size: var(--text-xs); line-height: 1.45; white-space: pre; overflow-x: auto; }
 .warn { color: var(--vp-c-danger-1); }
 .note { font-size: 0.85rem; color: var(--vp-c-text-2); }
 </style>
