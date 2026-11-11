@@ -451,6 +451,8 @@ describe("the founder's note", () => {
     expect((await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", secret: SECRET, now: t0, log: () => {} })).sent).toEqual([]);
     expect((await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", secret: SECRET, signer: "Ada Rowe", signerRole: "Founder", now: new Date(t0.getTime() + 2 * 3_600_000), log: () => {} })).sent).toContain("fresh@example.com"); // other tests' registrations may be due too
     expect(captured.at(-1)!.text).toContain("Ada Rowe, Founder");
+    expect(captured.at(-1)!.text).toContain("I am Ada Rowe, the founder; you will get me, not a queue.");
+    expect(captured.at(-1)!.text).not.toMatch(/\bwe (send|do|move)\b/);
     expect(founderNote({ name: "Solo", tenant: "t", company: null, portalUrl: "https://p/", unsubscribeUrl: "https://p/unsubscribe?token=x" }).text).toContain("What are you building?");
   });
 

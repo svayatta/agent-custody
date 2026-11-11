@@ -814,16 +814,18 @@ const UNSUBSCRIBE_TTL_MS = 365 * 86_400_000;
 export function founderNote(o: { name: string; tenant: string; company: string | null; portalUrl: string; unsubscribeUrl: string; signer?: string; signerRole?: string }): { subject: string; text: string; html: string; headers: Record<string, string> } {
   const first = o.name.trim().split(/\s+/)[0] || o.name;
   const subject = "Welcome to agent-custody, and one question";
+  // A named signer writes as one person; the default team signature writes as "we".
+  const [I, We, me, intro] = o.signer ? ["I", "I", "me", `I am ${o.signer}${o.signerRole ? `, the ${o.signerRole.toLowerCase()}` : ""}; you will get me, not a queue.`] : ["we", "We", "us", "You are writing to a person, not to a queue."];
   const mail = renderMail({
     heading: "One question about your agents",
-    preheader: "Which stack are your agents on? We send the exact config.",
+    preheader: `Which stack are your agents on? ${We} send the exact config.`,
     paragraphs: [
       `Hi ${first},`,
-      `Thanks for registering ${o.tenant} on agent-custody. You are writing to a person, not to a queue.`,
-      "One question so that we can help rather than guess: which stack are your agents on, and what do they touch? Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, plain Python, or an MCP host. If you tell us, we send the exact config for it. If it is quicker, we do the integration with you on a call: twenty minutes gets a first receipt into your log and verified in the browser.",
+      `Thanks for registering ${o.tenant} on agent-custody. ${intro}`,
+      `One question so that ${I} can help rather than guess: which stack are your agents on, and what do they touch? Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, plain Python, or an MCP host. If you tell ${me}, ${I} send the exact config for it. If it is quicker, ${I} do the integration with you on a call: twenty minutes gets a first receipt into your log and verified in the browser.`,
       'Two things to know from the start. Run it in observe mode first, "mode": "observe" in the config: nothing is blocked, and each receipt records what the policy would have denied, so you tune the policy against real traffic before you turn it on. And the log only receives a hash per receipt; the receipts stay on your machines.',
-      "You are on the free plan: ten thousand appends a month, no card. If you hit that limit, tell us and we move you up while we talk.",
-      `What are you building${o.company ? ` at ${o.company}` : ""}? We would like to know what you want the receipts to prove, and to whom. Reply to this email.`,
+      `You are on the free plan: ten thousand appends a month, no card. If you hit that limit, tell ${me} and ${I} move you up while we talk.`,
+      `What are you building${o.company ? ` at ${o.company}` : ""}? ${We} would like to know what you want the receipts to prove, and to whom. Reply to this email.`,
       `${o.signer ?? "The agent-custody team"}${o.signerRole ? `, ${o.signerRole}` : ""}`,
     ],
     button: { label: "Open the setup sheet", url: o.portalUrl },

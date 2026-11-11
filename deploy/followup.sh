@@ -3,7 +3,7 @@
 # container against the same database and mail settings the portal uses. It reads .env from its own directory, so it
 # must run in place: install a wrapper as /etc/cron.hourly/agent-custody-followup that execs this file (see the runbook),
 # not a copy. Prints one line per run; a provider failure leaves the person pending for the next hour.
-# MAIL_SIGNER and MAIL_SIGNER_ROLE in .env name who signs the note; the default is "The agent-custody team".
+# MAIL_SIGNER and MAIL_SIGNER_ROLE in .env name who signs the note; the default is "The agent-custody team". With a signer, the note is in the first person.
 set -eu
 cd "$(dirname "$0")"
 MAIL_FROM=$(sed -n 's/^MAIL_FROM=//p' .env | tail -1); MAIL_NOTIFY=$(sed -n 's/^MAIL_NOTIFY=//p' .env | tail -1); PORTAL_HOST=$(sed -n 's/^PORTAL_HOST=//p' .env | tail -1)
