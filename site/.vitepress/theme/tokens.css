@@ -1,0 +1,42 @@
+/* Generated from packages/receipts/src/design.ts. Do not edit; a test compares the two. */
+:root { --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --text-xs: .75rem; --text-sm: .875rem; --text-md: 1rem; --text-lg: 1.125rem; --text-xl: 1.5rem; --text-2xl: 2rem; --text-3xl: 2.75rem;
+  --space-1: .25rem; --space-2: .5rem; --space-3: .75rem; --space-4: 1rem; --space-5: 1.5rem; --space-6: 2rem; --space-7: 3rem; --space-8: 4rem;
+  --radius-sm: 8px; --radius-md: 12px; --radius-full: 999px; --bg: #fafaf9; --panel: #ffffff; --soft: #f5f5f4; --line: #e7e5e4; --line-strong: #d6d3d1;
+  --ink: #1c1917; --ink2: #57534e; --ink3: #78716c;
+  --accent: #b45309; --accent-hover: #92400e; --accent-active: #78350f; --accent-ink: #ffffff; --accent-bg: #fef3c7;
+  --ok: #15803d; --ok-bg: #dcfce7; --warn: #a16207; --warn-bg: #fef9c3; --bad: #b91c1c; --bad-bg: #fee2e2;
+  --shadow: 0 1px 2px rgb(28 25 23 / .05), 0 18px 40px -18px rgb(28 25 23 / .25); }
+.dark { --bg: #0c0a09; --panel: #1c1917; --soft: #292524; --line: #292524; --line-strong: #44403c;
+  --ink: #fafaf9; --ink2: #a8a29e; --ink3: #8a847f;
+  --accent: #f59e0b; --accent-hover: #fbbf24; --accent-active: #d97706; --accent-ink: #1c1917; --accent-bg: #451a03;
+  --ok: #4ade80; --ok-bg: #052e16; --warn: #facc15; --warn-bg: #422006; --bad: #f87171; --bad-bg: #450a0a;
+  --shadow: none; }
+
+:where(h1, h2, h3) { font-family: var(--font); color: var(--ink); letter-spacing: -.015em; line-height: 1.25; }
+:where(h1) { font-size: var(--text-xl); font-weight: 700; }
+:where(h2) { font-size: var(--text-lg); font-weight: 600; }
+:where(h3) { font-size: var(--text-md); font-weight: 600; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-height: 2.5rem; padding: 0 var(--space-4); border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-ink); font: 600 var(--text-sm)/1.2 var(--font); text-decoration: none; white-space: nowrap; cursor: pointer; transition: background-color .15s, border-color .15s, color .15s; }
+.btn:not(:disabled):hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-ink); }
+.btn:not(:disabled):active { background: var(--accent-active); border-color: var(--accent-active); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn:is(.quiet, .secondary) { background: transparent; border-color: var(--line-strong); color: var(--ink); }
+.btn:is(.quiet, .secondary):not(:disabled):hover { background: var(--soft); border-color: var(--ink3); color: var(--ink); }
+.btn:is(.quiet, .secondary):not(:disabled):active { background: var(--line); }
+.btn.danger { background: var(--bad); border-color: var(--bad); color: var(--panel); }
+.btn.danger:not(:disabled):hover { background: var(--bad); border-color: var(--bad); color: var(--panel); filter: brightness(1.1); }
+.btn.icon { width: 2.25rem; min-height: 2.25rem; padding: 0; background: transparent; border-color: var(--line); color: var(--ink2); }
+.btn.icon:not(:disabled):hover { background: var(--soft); border-color: var(--line-strong); color: var(--ink); }
+.btn.icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+select { appearance: none; min-height: 2.5rem; padding: 0 2.25rem 0 var(--space-3); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background-color: var(--panel); color: var(--ink); font: var(--text-sm) var(--font); cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink2) 50%), linear-gradient(135deg, var(--ink2) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 50%, calc(100% - 12px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+select:hover { border-color: var(--ink3); }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+select:disabled { opacity: .5; cursor: not-allowed; }
+:where(.card, .panel, dialog) { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: var(--radius-md); }
+:where(dialog) { padding: var(--space-5); box-shadow: var(--shadow); max-width: min(32rem, calc(100vw - 2rem)); }
+:where(dialog)::backdrop { background: rgb(12 10 9 / .5); }

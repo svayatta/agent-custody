@@ -125,6 +125,7 @@ describe("the tenant portal", () => {
     expect(page).toContain('id="retry"');
     expect(page).toContain("Paste a receipt file or a 64-character digest.");
     expect(page).toContain("Read-only");
+    expect(page).toMatch(/id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false"[^>]*><svg/);
     expect(page).toContain(':root[data-theme="dark"]');
     const icon = await fetch(new URL("favicon.svg", portal.url));
     expect(icon.status).toBe(200);
