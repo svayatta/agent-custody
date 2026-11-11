@@ -71,7 +71,7 @@ Every member of a tenant has one role. A role includes the roles above it in thi
 | `admin` | also mint and revoke API keys, invite, cancel invites, change a member's role, and remove a member, but never touch an owner and never grant `owner` |
 | `owner` | everything, billing included |
 
-A write route that is not in this table needs `admin`. The last owner of a tenant cannot be removed or demoted. An invite lasts seven days. An account belongs to one tenant. A removed member loses access at once, also in a tenant with single sign-on. The members page of the portal shows the same operations.
+A write route that is not in this table needs `admin`. The last owner of a tenant cannot be removed or demoted. An invite lasts seven days. An account belongs to one tenant. A removed member loses access at once, also in a tenant with single sign-on. The members page of the portal shows the same operations. It names each role with a label (Read-only, Reviewer, Admin, Owner) and a description; the stored and API values stay as in the table. Remove, Revoke, Cancel invite, and a role change ask for confirmation in a dialog that names the member or key. The last owner row shows no Change or Remove action.
 
 ### Two-step sign-in
 

@@ -1354,6 +1354,10 @@ const PORTAL_PAGE = `<!doctype html>
     #audit td { min-width: 0; padding: 0; border: 0; white-space: normal; }
     #audit td:nth-child(3) { grid-area: 1 / 1; font-weight: 600; } #audit td:nth-child(1) { grid-area: 1 / 2; color: var(--ink2); font-size: .8rem; white-space: nowrap; }
     #audit td:nth-child(2), #audit td:nth-child(4), #audit td[colspan] { grid-column: 1 / -1; font-size: .8rem; } #audit td:nth-child(2) { color: var(--ink2); } }
+  .toast { position: fixed; right: 1rem; bottom: 1rem; z-index: 20; max-width: min(26rem, calc(100vw - 2rem)); padding: .65rem .9rem; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 8px; box-shadow: 0 8px 24px -8px rgb(0 0 0 / .35); } .toast.err { border-left-color: var(--bad); } .toast:empty { visibility: hidden; }
+  dialog.confirm { padding: 0; width: min(28rem, calc(100vw - 2rem)); background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; } dialog.confirm::backdrop { background: rgb(0 0 0 / .5); } dialog.confirm form { padding: 1.25rem; } dialog.confirm h2 { margin: 0 0 .5rem; font: 700 1.1rem/1.3 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0; text-transform: none; color: var(--ink); overflow-wrap: anywhere; } dialog.confirm p:empty { display: none; }
+  dialog.confirm .acts { display: flex; justify-content: flex-end; gap: .6rem; margin-top: 1.1rem; flex-wrap: wrap; } dialog.confirm .choice { display: grid; grid-template-columns: auto 1fr; column-gap: .6rem; margin: .7rem 0; font-weight: 400; cursor: pointer; } dialog.confirm .choice input { width: auto; margin: .2rem 0 0; } dialog.confirm .choice span { grid-column: 2; color: var(--ink2); font-size: .9rem; }
+  dialog.confirm button.danger, dialog.confirm button.danger:hover { background: var(--bad); border-color: var(--bad); color: var(--panel); }
 </style>
 <div class="top"><a class="brand" href="https://agent-custody.dev/"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links"><a href="https://agent-custody.dev/guide/getting-started">Guide</a><a href="https://docs.agent-custody.dev/reference/">Docs</a><a href="https://agent-custody.dev/verify">Verify a receipt</a></span><span class="who" id="who"></span><button class="theme" id="themeToggle" type="button">Dark mode</button></div>
 <div id="notice" class="notice" hidden></div>
@@ -1428,10 +1432,15 @@ const PORTAL_PAGE = `<!doctype html>
   ${MARK}
   <h1>Your tenant is ready</h1>
   <p class="muted">Three steps to your first receipt in this log. Everything here is under <b>Setup</b> in the dashboard whenever you need it again.</p>
-  <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst">Copy key</button></div>
+  <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst" data-copy>Copy key</button> <button type="button" id="savedFirst">I saved the key</button></div>
   <p><button id="toDash">Go to the dashboard</button></p>
   </div>
   <div id="firstSetup"></div>
+</section>
+<section id="loadFail" class="auth" role="alert" hidden>
+  <h1>We could not load your account</h1>
+  <p class="muted" id="loadErr"></p>
+  <p><button type="button" id="retry">Retry</button></p>
 </section>
 <div class="layout" id="app" hidden>
   <nav>
@@ -1473,9 +1482,8 @@ const PORTAL_PAGE = `<!doctype html>
       <h1>API keys</h1>
       <p class="muted">A key is a bearer token your gateway presents on append. It is shown once when minted; we keep only its hash. Mint a second key before revoking the first to rotate without a gap.</p>
       <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Mint key</button></form>
-        <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted">Copy key</button></div>
+        <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted" data-copy>Copy key</button> <button type="button" id="savedMinted">I saved the key</button></div>
         <table style="margin-top:1rem"><thead><tr><th>label</th><th>hash</th><th>created</th><th>state</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
-      <p class="msg" id="keysMsg"></p>
     </div>
     <div data-pane="policies" hidden>
       <h1>Policies</h1>
@@ -1484,16 +1492,14 @@ const PORTAL_PAGE = `<!doctype html>
       <div class="panel"><h2>Match a receipt</h2><p class="muted">Paste a receipt file, or just its <code>policyDigest</code>, to see which published version decided it.</p><form id="matchForm"><label>Receipt JSON or digest<textarea id="matchIn" rows="3" spellcheck="false"></textarea></label><button type="submit" class="quiet">Match</button></form><p class="msg" id="matchOut"></p></div>
       <div class="panel"><table><thead><tr><th>name</th><th>digest</th><th>bytes</th><th>published</th><th>by</th><th></th></tr></thead><tbody id="policies"></tbody></table></div>
       <div class="panel" id="policyView" hidden><h2 id="policyViewName"></h2><pre id="policyViewText"></pre></div>
-      <p class="msg" id="policiesMsg"></p>
     </div>
     <div data-pane="members" hidden>
       <h1>Members</h1>
-      <p class="muted">An owner manages everything, billing and owners included. An admin manages keys and members below owner. A reviewer publishes policy versions. A read-only member only looks. An invited person creates an account with the invited address, verifies it, and accepts on the first screen. An invite is good for seven days.</p>
-      <div class="panel" id="inviteBox" hidden><form id="inviteForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Email<input id="inviteEmail" type="email" required></label><label style="margin:0">Role<select id="inviteRole"></select></label><button type="submit">Invite</button></form></div>
+      <p class="muted">Each member has one role. The list of choices explains each role. An invited person creates an account with the invited address, verifies it, and accepts on the first screen. An invite is good for seven days.</p>
+      <div class="panel" id="inviteBox" hidden><form id="inviteForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Email<input id="inviteEmail" type="email" required></label><label style="margin:0">Role<select id="inviteRole"></select></label><button type="submit">Invite</button></form><p class="muted" id="inviteRoleHint"></p></div>
       <div class="panel"><table><thead><tr><th>member</th><th>role</th><th>joined</th><th>two-step</th><th></th></tr></thead><tbody id="members"></tbody></table></div>
       <h2>Pending invites</h2>
       <div class="panel"><table><thead><tr><th>email</th><th>role</th><th>invited by</th><th>sent</th><th></th></tr></thead><tbody id="inviteRows"></tbody></table></div>
-      <p class="msg" id="membersMsg"></p>
     </div>
     <div data-pane="account" hidden>
       <h1>Two-step sign-in</h1>
@@ -1517,7 +1523,7 @@ const PORTAL_PAGE = `<!doctype html>
     <div data-pane="export" hidden>
       <h1>Export</h1>
       <p class="muted">Everything the log holds about you, any time, with your key: every leaf hash as a log file the verifier reads offline, the signed head, the published keys, the checkpoints, your usage, and the actions taken on your tenant. It checks itself before writing.</p>
-      <pre id="exportCmd"></pre>
+      <div class="snip"><pre id="exportCmd"></pre><button type="button" class="quiet" data-copy>Copy</button></div>
     </div>
     <div data-pane="setup" hidden>
       <h1>Setup</h1>
@@ -1526,6 +1532,15 @@ const PORTAL_PAGE = `<!doctype html>
     </div>
   </main>
 </div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<dialog id="dlg" class="confirm" aria-labelledby="dlgTitle" aria-describedby="dlgText">
+  <form method="dialog">
+    <h2 id="dlgTitle"></h2>
+    <p id="dlgText" class="muted"></p>
+    <div id="dlgChoices"></div>
+    <div class="acts"><button type="submit" value="cancel" class="quiet" id="dlgNo" formnovalidate autofocus>Go back</button><button type="submit" value="ok" id="dlgOk"></button></div>
+  </form>
+</dialog>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -1543,7 +1558,24 @@ const PORTAL_PAGE = `<!doctype html>
   const ROLES = ["readonly", "reviewer", "admin", "owner"];
   const can = (least) => ROLES.indexOf(myRole) >= ROLES.indexOf(least);
   const note = (id, text, ok) => { $(id).className = "msg " + (ok ? "ok" : "err"); $(id).textContent = text; };
-  const show = (id) => { for (const s of ["auth", "onboard", "welcome", "app"]) $(s).hidden = s !== id; };
+  const toast = (text, ok) => {
+    const t = $("toast"), s = String(text).charAt(0).toUpperCase() + String(text).slice(1);
+    t.className = "toast " + (ok ? "ok" : "err"); t.textContent = /[.!?…]$/.test(s) ? s : s + ".";
+    clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.textContent = ""; }, ok ? 6000 : 10000);
+  };
+  const ask = (o) => new Promise((resolve) => {
+    const d = $("dlg"), box = $("dlgChoices");
+    $("dlgTitle").textContent = o.title; $("dlgText").textContent = o.text || ""; $("dlgOk").textContent = o.ok; $("dlgOk").className = o.danger ? "danger" : "";
+    box.replaceChildren(...(o.choices || []).map(([v, label, desc]) => {
+      const l = document.createElement("label"), r = document.createElement("input"), b = document.createElement("b"), t = document.createElement("span");
+      l.className = "choice"; r.type = "radio"; r.name = "dlgChoice"; r.value = v; r.checked = v === o.current; b.textContent = label; t.textContent = desc; l.append(r, b, t); return l;
+    }));
+    d.returnValue = "";
+    d.onclose = () => { const c = box.querySelector("input:checked"); resolve(d.returnValue !== "ok" ? null : o.choices ? c && c.value : true); };
+    d.showModal();
+  });
+  $("dlg").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+  const show = (id) => { for (const s of ["auth", "onboard", "welcome", "loadFail", "app"]) $(s).hidden = s !== id; };
   const PROVIDERS = __PROVIDERS__;
   const ICONS = { github: "<svg viewBox='0 0 16 16' aria-hidden='true'><path fill='currentColor' d='M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z'/></svg>", google: "<svg viewBox='0 0 48 48' aria-hidden='true'><path fill='#EA4335' d='M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z'/><path fill='#4285F4' d='M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z'/><path fill='#FBBC05' d='M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z'/><path fill='#34A853' d='M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z'/></svg>" };
   if (PROVIDERS.length) { $("providers").innerHTML = PROVIDERS.map((p) => "<a href='/auth/" + p + "'>" + ICONS[p] + "Continue with " + (p === "github" ? "GitHub" : "Google") + "</a>").join("") + "<p class=or>or with email</p>"; $("providers").hidden = false; }
@@ -1577,11 +1609,10 @@ const PORTAL_PAGE = `<!doctype html>
     e.preventDefault(); $("onboardMsg").className = "msg"; $("onboardMsg").textContent = "";
     try {
       const r = await api("POST", "/api/onboard", { tenant: $("tenant").value, name: $("name").value, company: $("company").value, role: $("role").value, phone: $("phone").value, telegram: $("telegram").value });
-      $("firstToken").textContent = r.token; renderSetup($("firstSetup"), r.setup, true); show("welcome");
+      $("firstToken").textContent = r.token; renderSetup($("firstSetup"), r.setup, true); $("savedFirst").disabled = false; $("savedFirst").textContent = "I saved the key"; show("welcome");
     } catch (err) { $("onboardMsg").className = "msg err"; $("onboardMsg").textContent = err.message; }
   };
   $("signoutOnboard").onclick = async (e) => { e.preventDefault(); await api("POST", "/api/logout", {}); location.hash = ""; show("auth"); };
-  $("copyFirst").onclick = () => navigator.clipboard.writeText($("firstToken").textContent);
   // Light or dark by choice, kept in this browser; unset, the page follows the system. The button says where it is going.
   const themeNow = () => document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   const themeLabel = () => { $("themeToggle").textContent = themeNow() === "dark" ? "Light mode" : "Dark mode"; };
@@ -1600,10 +1631,12 @@ const PORTAL_PAGE = `<!doctype html>
       "<h2>What this log does not do</h2><p class=muted>Hold receipt contents; forge a receipt, since your gateway key signs those; or, today, countersign with a second independent witness. <a href=\\"https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not\\">What a receipt proves and what it does not.</a></p>";
   };
   document.addEventListener("click", (e) => {
-    const b = e.target.closest("button[data-copy]"); if (b) { navigator.clipboard.writeText(b.previousElementSibling.textContent).then(() => { b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy"; }, 1500); }); return; }
+    const b = e.target.closest("button[data-copy]"); if (b) { const was = b.dataset.was || b.textContent; b.dataset.was = was; navigator.clipboard.writeText(b.previousElementSibling.textContent).then(() => { b.textContent = "Copied"; setTimeout(() => { b.textContent = was; }, 1500); }, () => toast("Copy failed. Select the text and copy it by hand.", false)); return; }
     const a = e.target.closest("a[data-view]"); if (a && a.closest("main")) { e.preventDefault(); view(a.dataset.view); }
   });
-  $("toDash").onclick = () => enter();
+  $("savedFirst").onclick = () => { $("savedFirst").disabled = true; $("savedFirst").textContent = "Key saved"; };
+  $("toDash").onclick = async () => { if (!$("savedFirst").disabled && !(await ask({ title: "Leave without saving the key?", text: "We show the key one time. If you did not copy it, create a new key under API keys.", ok: "Leave anyway" }))) return; enter(); };
+  addEventListener("beforeunload", (e) => { if ((!$("welcome").hidden && !$("savedFirst").disabled) || !$("minted").hidden) e.preventDefault(); });
   $("signout").onclick = async (e) => { e.preventDefault(); await api("POST", "/api/logout", {}); location.hash = ""; show("auth"); };
   for (const a of document.querySelectorAll("nav a[data-view]")) a.onclick = (e) => { e.preventDefault(); view(a.dataset.view); };
   const render = (o) => {
@@ -1633,20 +1666,32 @@ const PORTAL_PAGE = `<!doctype html>
   $("mfaStart").onclick = async () => { try { const r = await api("POST", "/api/mfa/setup", {}); $("mfaSecret").textContent = r.secret; $("mfaUri").textContent = r.uri; $("mfaSetupBox").hidden = false; $("accountMsg").textContent = ""; } catch (err) { note("accountMsg", err.message, false); } };
   $("mfaOnForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/mfa/enable", { code: $("mfaOnCode").value }); $("mfaOnCode").value = ""; mfaShow(true); note("accountMsg", "Two-step sign-in is on.", true); } catch (err) { note("accountMsg", err.message, false); } };
   $("mfaOffForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/mfa/disable", { code: $("mfaOffCode").value }); $("mfaOffCode").value = ""; mfaShow(false); note("accountMsg", "Two-step sign-in is off.", true); } catch (err) { note("accountMsg", err.message, false); } };
-  const roleOptions = (cur) => ROLES.filter((r) => r !== "owner" || can("owner")).map((r) => "<option" + (r === cur ? " selected" : "") + ">" + r + "</option>").join("");
+  const ROLE_LABEL = { readonly: "Read-only", reviewer: "Reviewer", admin: "Admin", owner: "Owner" };
+  const ROLE_DESC = { readonly: "Looks at everything. Changes nothing.", reviewer: "Looks at everything and publishes policy versions.", admin: "Does what a reviewer does, and manages API keys and members below owner.", owner: "Manages everything, including billing and owners." };
+  const roleChoices = () => ROLES.filter((r) => r !== "owner" || can("owner")).map((r) => [r, ROLE_LABEL[r], ROLE_DESC[r]]);
+  const hint = () => { $("inviteRoleHint").textContent = ROLE_DESC[$("inviteRole").value]; };
+  $("inviteRole").onchange = hint;
   const loadMembers = async () => {
     const r = await api("GET", "/api/members");
     $("nMembers").textContent = r.members.length;
-    $("inviteRole").innerHTML = roleOptions("readonly");
-    $("members").innerHTML = r.members.map((m) => "<tr><td>" + esc(m.email) + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<select data-setrole=" + m.id + ">" + roleOptions(m.role) + "</select>" : esc(m.role)) + "</td><td>" + esc(m.joinedAt.slice(0, 10)) + "</td><td>" + (m.mfa ? "on" : "off") + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<button class=link data-rmmember=" + m.id + ">Remove</button>" : "") + "</td></tr>").join("");
-    $("inviteRows").innerHTML = r.invites.map((i) => "<tr><td>" + esc(i.email) + "</td><td>" + esc(i.role) + "</td><td class=mono>" + esc(i.invitedBy) + "</td><td>" + esc(i.createdAt.slice(0, 10)) + "</td><td>" + (can("admin") ? "<button class=link data-rminvite=\\"" + esc(i.email) + "\\">Cancel</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>none</td></tr>";
+    $("inviteRole").innerHTML = roleChoices().map(([v, label]) => "<option value=" + v + ">" + label + "</option>").join(""); hint();
+    const owners = r.members.filter((m) => m.role === "owner").length;
+    $("members").innerHTML = r.members.map((m) => {
+      const mine = can("admin") && (m.role !== "owner" || can("owner")), last = m.role === "owner" && owners === 1;
+      return "<tr><td>" + esc(m.email) + "</td><td>" + esc(ROLE_LABEL[m.role]) + (mine && !last ? " <button class=link data-setrole=" + m.id + " data-role=" + m.role + ">Change</button>" : "") + "</td><td>" + esc(m.joinedAt.slice(0, 10)) + "</td><td>" + (m.mfa ? "on" : "off") + "</td><td>" + (last ? "<span class=muted>Last owner</span>" : mine ? "<button class=link data-rmmember=" + m.id + ">Remove</button>" : "") + "</td></tr>";
+    }).join("");
+    $("inviteRows").innerHTML = r.invites.map((i) => "<tr><td>" + esc(i.email) + "</td><td>" + esc(ROLE_LABEL[i.role]) + "</td><td class=mono>" + esc(i.invitedBy) + "</td><td>" + esc(i.createdAt.slice(0, 10)) + "</td><td>" + (can("admin") ? "<button class=link data-rminvite=\\"" + esc(i.email) + "\\">Cancel</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>none</td></tr>";
   };
-  const membersDo = async (path, body, done) => { try { await api("POST", path, body); note("membersMsg", done, true); await loadMembers(); } catch (err) { note("membersMsg", err.message, false); await loadMembers(); } };
+  const membersDo = async (path, body, done) => { try { await api("POST", path, body); toast(done, true); } catch (err) { toast(err.message, false); } await loadMembers(); };
   $("inviteForm").onsubmit = (e) => { e.preventDefault(); membersDo("/api/members", { email: $("inviteEmail").value, role: $("inviteRole").value }, "Invite sent to " + $("inviteEmail").value + ".").then(() => { $("inviteEmail").value = ""; }); };
-  document.addEventListener("change", (e) => { const s = e.target.closest("select[data-setrole]"); if (s) membersDo("/api/members/" + s.dataset.setrole + "/role", { role: s.value }, "Role changed."); });
   document.addEventListener("click", async (e) => {
-    const rm = e.target.closest("button[data-rmmember]"); if (rm && confirm("Remove this member? They lose access to the tenant at once.")) { membersDo("/api/members/" + rm.dataset.rmmember + "/remove", {}, "Member removed."); return; }
-    const ri = e.target.closest("button[data-rminvite]"); if (ri) { membersDo("/api/invites/remove", { email: ri.dataset.rminvite }, "Invite cancelled."); return; }
+    const cell = (b) => b.closest("tr").cells[0].textContent;
+    const ch = e.target.closest("button[data-setrole]");
+    if (ch) { const who = cell(ch), role = await ask({ title: "Change the role of " + who, ok: "Save role", current: ch.dataset.role, choices: roleChoices() }); if (role && role !== ch.dataset.role) membersDo("/api/members/" + ch.dataset.setrole + "/role", { role }, "Role of " + who + " is now " + ROLE_LABEL[role] + "."); return; }
+    const rm = e.target.closest("button[data-rmmember]");
+    if (rm) { const who = cell(rm); if (await ask({ title: "Remove " + who + "?", text: "This member loses access to the tenant at once.", ok: "Remove member", danger: true })) membersDo("/api/members/" + rm.dataset.rmmember + "/remove", {}, who + " is removed."); return; }
+    const ri = e.target.closest("button[data-rminvite]");
+    if (ri) { if (await ask({ title: "Cancel the invite to " + ri.dataset.rminvite + "?", text: "This person can no longer accept it.", ok: "Cancel invite", danger: true })) membersDo("/api/invites/remove", { email: ri.dataset.rminvite }, "Invite to " + ri.dataset.rminvite + " is cancelled."); return; }
     const ac = e.target.closest("button[data-accept]"); if (ac) { try { await api("POST", "/api/invites/accept", { tenant: ac.dataset.accept }); await enter(); } catch (err) { note("onboardMsg", err.message, false); } }
   });
   const enter = async () => {
@@ -1656,8 +1701,12 @@ const PORTAL_PAGE = `<!doctype html>
       if (me.tenant === null) { $("onboardWho").textContent = me.email; $("invites").hidden = !(me.invites || []).length; $("inviteList").innerHTML = (me.invites || []).map((i) => "<p>Join <b>" + esc(i.tenant) + "</b> as " + esc(i.role) + " <button type=button data-accept=\\"" + esc(i.tenant) + "\\">Accept</button></p>").join(""); if (me.profile) { for (const k of ["name", "company", "role", "phone", "telegram"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
       $("who").textContent = me.email; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyForm").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa); show("app"); await load(); view((location.hash || "#overview").slice(1) || "overview");
     }
-    catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) $("authSwap").click(); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { show("app"); $("who").textContent = err.message; } }
+    catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) $("authSwap").click(); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { $("loadErr").textContent = err.message.charAt(0).toUpperCase() + err.message.slice(1) + "."; show("loadFail"); } }
   };
+  $("retry").onclick = () => enter();
+  const recheck = () => { if ($("resendVerify")) api("GET", "/api/me").then((me) => { if (me.emailVerified !== false) accountNotice(me); }, () => {}); };
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") recheck(); });
+  addEventListener("focus", recheck);
   const accountNotice = (me) => {
     const parts = [];
     if (me.emailVerified === false && me.mail) parts.push("Verify your email address: we sent a link to " + me.email + ". <button type=button id=resendVerify>Send it again</button>");
@@ -1676,26 +1725,34 @@ const PORTAL_PAGE = `<!doctype html>
   };
   $("policyText").oninput = async () => { const t = $("policyText").value; $("policyDigestPreview").textContent = t ? "sha256 " + (await sha256hex(t)).slice(0, 16) + "…" : ""; };
   $("policyForm").onsubmit = async (e) => {
-    e.preventDefault(); $("policiesMsg").className = "msg";
-    try { const r = await api("POST", "/api/policies", { name: $("policyName").value, text: $("policyText").value }); $("policiesMsg").className = "msg ok"; $("policiesMsg").textContent = "Published " + r.policy.name + " as " + r.policy.digest.slice(0, 16) + "…"; $("policyName").value = ""; $("policyText").value = ""; $("policyDigestPreview").textContent = ""; await loadPolicies(); }
-    catch (err) { $("policiesMsg").className = "msg err"; $("policiesMsg").textContent = err.message; }
+    e.preventDefault();
+    try { const r = await api("POST", "/api/policies", { name: $("policyName").value, text: $("policyText").value }); toast("Published version " + r.policy.name + " (digest " + r.policy.digest.slice(0, 16) + "…).", true); $("policyName").value = ""; $("policyText").value = ""; $("policyDigestPreview").textContent = ""; await loadPolicies(); }
+    catch (err) { toast(err.message, false); }
   };
   $("matchForm").onsubmit = async (e) => {
     e.preventDefault(); $("matchOut").className = "msg";
     try {
       const raw = $("matchIn").value.trim(); let digest = raw;
-      if (!/^[0-9a-f]{64}$/i.test(raw)) { const b = JSON.parse(raw); const payload = b.envelope ? b.envelope.payload : b.payload; const st = JSON.parse(atob(payload)); digest = st.predicate && st.predicate.policy ? st.predicate.policy.policyDigest : ""; if (!digest) throw new Error("this receipt carries no policy decision"); }
+      if (!/^[0-9a-f]{64}$/i.test(raw)) { try { const b = JSON.parse(raw); const st = JSON.parse(atob(b.envelope ? b.envelope.payload : b.payload)); digest = st.predicate && st.predicate.policy ? st.predicate.policy.policyDigest : ""; } catch { throw new Error("Paste a receipt file or a 64-character digest."); } if (!digest) throw new Error("This receipt carries no policy decision."); }
       const r = await api("GET", "/api/policies?digest=" + encodeURIComponent(digest));
       $("matchOut").className = r.match ? "msg ok" : "msg"; $("matchOut").textContent = r.match ? "Decided by \\"" + r.match.name + "\\", published " + r.match.createdAt.slice(0, 10) + " (" + digest.slice(0, 16) + "…)" : "No published version has digest " + digest.slice(0, 16) + "…; publish the file the gateway loaded to name it.";
     } catch (err) { $("matchOut").className = "msg err"; $("matchOut").textContent = err.message; }
   };
   document.addEventListener("click", async (e) => {
-    const v = e.target.closest("button[data-viewpol]"); if (v) { try { const r = await api("GET", "/api/policies/" + v.dataset.viewpol); $("policyViewName").textContent = r.policy.name + " · " + r.policy.digest; $("policyViewText").textContent = r.policy.text; $("policyView").hidden = false; } catch (err) { $("policiesMsg").className = "msg err"; $("policiesMsg").textContent = err.message; } return; }
-    const rm = e.target.closest("button[data-rmpol]"); if (rm && confirm("Remove this published version? Receipts keep their digests; only the name goes.")) { try { await api("POST", "/api/policies/" + rm.dataset.rmpol + "/remove", {}); $("policyView").hidden = true; await loadPolicies(); } catch (err) { $("policiesMsg").className = "msg err"; $("policiesMsg").textContent = err.message; } }
+    const v = e.target.closest("button[data-viewpol]"); if (v) { try { const r = await api("GET", "/api/policies/" + v.dataset.viewpol); $("policyViewName").textContent = r.policy.name + " · " + r.policy.digest; $("policyViewText").textContent = r.policy.text; $("policyView").hidden = false; } catch (err) { toast(err.message, false); } return; }
+    const rm = e.target.closest("button[data-rmpol]"); if (rm && await ask({ title: "Remove version " + rm.closest("tr").cells[0].textContent + "?", text: "Receipts keep their digests. Only the name goes.", ok: "Remove version", danger: true })) { try { await api("POST", "/api/policies/" + rm.dataset.rmpol + "/remove", {}); $("policyView").hidden = true; await loadPolicies(); toast("Version removed.", true); } catch (err) { toast(err.message, false); } }
   });
-  $("mintForm").onsubmit = async (e) => { e.preventDefault(); try { const r = await api("POST", "/api/keys", { label: $("label").value }); $("mintedTok").textContent = r.token; $("minted").hidden = false; $("keysMsg").className = "msg ok"; $("keysMsg").textContent = "minted " + r.label + ", stored as hash " + r.tokenHash; await load(); } catch (err) { $("keysMsg").className = "msg err"; $("keysMsg").textContent = err.message; } };
-  $("copyMinted").onclick = () => navigator.clipboard.writeText($("mintedTok").textContent);
-  document.addEventListener("click", async (e) => { const b = e.target.closest("button[data-revoke]"); if (!b) return; if (!confirm("Revoke key " + b.dataset.revoke + "? A gateway using it stops appending at once.")) return; try { await api("POST", "/api/keys/" + b.dataset.revoke + "/revoke", {}); $("keysMsg").className = "msg ok"; $("keysMsg").textContent = "revoked"; await load(); } catch (err) { $("keysMsg").className = "msg err"; $("keysMsg").textContent = err.message; } });
+  $("mintForm").onsubmit = async (e) => {
+    e.preventDefault();
+    if (!$("minted").hidden && !(await ask({ title: "Replace the key that is still shown?", text: "You did not confirm that you saved it. We show a key one time.", ok: "Continue" }))) return;
+    try { const r = await api("POST", "/api/keys", { label: $("label").value }); $("mintedTok").textContent = r.token; $("minted").hidden = false; toast("Key created" + (r.label ? ": " + r.label : "") + ". We keep only its hash, " + r.tokenHash + ".", true); await load(); } catch (err) { toast(err.message, false); }
+  };
+  $("savedMinted").onclick = () => { $("minted").hidden = true; $("mintedTok").textContent = ""; toast("Key hidden. We do not show it again.", true); };
+  document.addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-revoke]"); if (!b) return;
+    if (!(await ask({ title: "Revoke key " + b.closest("tr").cells[0].textContent + " (" + b.dataset.revoke + ")?", text: "A gateway that uses it stops appending at once. You cannot undo this.", ok: "Revoke key", danger: true }))) return;
+    try { await api("POST", "/api/keys/" + b.dataset.revoke + "/revoke", {}); toast("Key revoked.", true); await load(); } catch (err) { toast(err.message, false); }
+  });
   if (new URLSearchParams(location.search).get("upgraded")) history.replaceState(null, "", "/#billing");
   enter();
 })();
