@@ -176,7 +176,7 @@ Each receipt is an observed bypass, not a record of what was done. A permitted h
 
 The sections above are the two ways to start. The rest of the product is below and on the [advanced page](site/advanced.md): the gateway with grants and Cedar policy, the transparency log, the state package for agent memory, the hosted log, and the other frameworks and languages.
 
-### What each piece is for, and when you need it
+### Components
 
 <!-- #region pieces -->
 Each component exists because a specific thing goes wrong without it. Use the table to decide what to turn on.
@@ -279,7 +279,7 @@ This whole loop is one runnable file, [packages/state/examples/02-receipt-to-bel
 - Answer a security questionnaire with a file: which artefact supplies evidence for which SOC 2, ISO 27001, UK GDPR, EU AI Act, FINRA, MAS, Colorado, DORA, CSA AICM, OWASP, and ISO 42001 requirement, with dates, primary sources, and what a receipt does not supply. [compliance.md](packages/receipts/docs/compliance.md)
 - Give a security reviewer the attacker's view: who could make a receipt false, what stops them, and what is not defended. [threat-model.md](packages/receipts/docs/threat-model.md)
 - Log to a server the operator does not control, so tree heads are signed by a key that is not yours. [verification.md](packages/receipts/docs/verification.md)
-- Verify a receipt in the browser, nothing uploaded, and check a second implementation against the published conformance vectors. [agent-custody.dev/verify](https://agent-custody.dev/verify), [vectors](https://agent-custody.dev/receipt/vectors)
+- [Verify a receipt](https://agent-custody.dev/verify) in your browser, nothing uploaded, and check a second implementation against the published conformance vectors. [agent-custody.dev/verify](https://agent-custody.dev/verify), [vectors](https://agent-custody.dev/receipt/vectors)
 - Prove a log was never rewritten: keep any receipt's tree head, later audit that the log still extends it. [verification.md](packages/receipts/docs/verification.md)
 - Run the console for a gateway: config, tools, receipts with a verdict each, a policy editor that replays recorded calls before it saves, and grant revocation, as a service of its own. [console.md](packages/receipts/docs/console.md).
 - Configure the gateway: who may use which tools, where the tools live, a worked example, and `agent-custody check` to validate a config before it starts. [configuration.md](packages/receipts/docs/configuration.md).
