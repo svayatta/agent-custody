@@ -10,7 +10,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { ruleTexts, targetOf } from "./deny-report.ts";
-import { evaluate, policyDigest, policyReasons, policyRules } from "./policy.ts";
+import { evaluate, policyDigest, policyParseErrors, policyReasons, policyRules } from "./policy.ts";
 
 export interface AuditedCall {
   session: string;
@@ -77,6 +77,9 @@ function transcriptsUnder(dir: string): string[] {
 
 export function auditSessions(o: SessionAuditOptions): SessionAudit {
   if (!existsSync(o.dir)) throw new Error(`no Claude Code transcripts at ${o.dir}; give another directory with --dir`);
+  // a policy that does not parse denies every call with the parse error, which would read as "it catches nothing"
+  const parseErrors = policyParseErrors(o.policyText);
+  if (parseErrors.length) throw new Error(`${o.policyName} does not parse: ${parseErrors.join("; ")}`);
   const rules = policyRules(o.policyText);
   const reasons = policyReasons(o.policyText);
   const since = o.since?.getTime();
@@ -131,12 +134,15 @@ export function auditSessions(o: SessionAuditOptions): SessionAudit {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const clip = (s: string, n = 160) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const NO_PERMIT = "no permit matched (default deny)";
 const PREVIEW = "PREVIEW: these are the agent host's own transcripts, not receipts. Nothing here is signed or logged, and a transcript can be edited. For a receipt of each call, signed and logged, run: agent-custody init claude-code";
 
 /** The audit as text. `counts` leaves out every command, path, session, and project, so the output can be shared. */
 export function formatSessionAudit(a: SessionAudit, opts: { counts?: boolean } = {}): string {
   const window = a.since ? ` since ${a.since}` : "";
-  const lines = [`Read ${plural(a.calls, "tool call")} in ${plural(a.sessions, "session")}${window}.`, `Policy: ${a.policy}.`, ""];
+  // --counts is the output people share: the policy's file name, not the path to it
+  const policy = opts.counts && a.policy.includes("/") ? basename(a.policy) : a.policy;
+  const lines = [`Read ${plural(a.calls, "tool call")} in ${plural(a.sessions, "session")}${window}.`, `Policy: ${policy}.`, ""];
   lines.push(`The policy would have denied ${plural(a.denied.length, "call")}${a.denied.length ? ":" : "."}`);
   if (opts.counts) {
     const byRule = new Map<string, { n: number; reason: string }>();
@@ -146,12 +152,12 @@ export function formatSessionAudit(a: SessionAudit, opts: { counts?: boolean } =
       r.n++;
       byRule.set(key, r);
     }
-    for (const [ids, r] of [...byRule].sort((x, y) => y[1].n - x[1].n)) lines.push(`  ${String(r.n).padStart(4)}  ${ids}${r.reason ? `  ${r.reason}` : ""}`);
+    for (const [ids, r] of [...byRule].sort((x, y) => y[1].n - x[1].n)) lines.push(`  ${String(r.n).padStart(4)}  ${ids || NO_PERMIT}${r.reason ? `  ${r.reason}` : ""}`);
   } else {
     for (const c of a.denied) {
       lines.push("", `  ${c.tool}: ${clip(c.target)}`);
       if (c.reasons.length) lines.push(`    reason:  ${c.reasons.join("; ")}`);
-      lines.push(`    rule:    ${c.rules.length ? clip(c.rules.join(" | ")) : c.policyIds.join(", ")} [${c.policyIds.join(", ")}]`);
+      lines.push(`    rule:    ${!c.policyIds.length ? NO_PERMIT : c.rules.length ? `${clip(c.rules.join(" | "))} [${c.policyIds.join(", ")}]` : c.policyIds.join(", ")}`);
       lines.push(`    when:    ${c.timestamp}  session ${c.session.slice(0, 8)}${c.project ? `  in ${c.project}` : ""}`);
     }
   }

@@ -76,6 +76,28 @@ describe("auditSessions", () => {
     expect(formatSessionAudit(a, { counts: true })).toMatch(/^\s+1\s+policy\d+\s+no force push$/m);
   });
 
+  it("refuses a policy that does not parse, instead of reporting that it denied nothing", () => {
+    // a parse error denies every call, which would read as "this policy catches nothing in my work"
+    const broken = 'permit(principal, action, resource)\nforbid(principal, action == Action::"Bash", resource);\n';
+    expect(() => auditSessions({ dir: fixture(), policyText: broken, policyName: "draft.cedar" })).toThrow(/draft\.cedar does not parse:/);
+  });
+
+  it("labels a call that no permit matched under a default-deny policy, rather than printing an empty rule", () => {
+    const readsOnly = 'permit(principal, action == Action::"Read", resource);\n';
+    const a = auditSessions({ dir: fixture(), policyText: readsOnly, policyName: "reads-only.cedar", since: parseSince("7d", NOW) });
+    expect(a.denied.length).toBeGreaterThan(0);
+    expect(a.denied.every((c) => c.policyIds.length === 0)).toBe(true);
+    expect(formatSessionAudit(a)).toContain("rule:    no permit matched (default deny)");
+    expect(formatSessionAudit(a, { counts: true })).toMatch(new RegExp(`^\\s+${a.denied.length}\\s+no permit matched \\(default deny\\)$`, "m"));
+  });
+
+  it("names the policy by its file name in --counts, so the shared output carries no home path", () => {
+    const a = auditSessions({ dir: fixture(), policyText: TEMPLATE, policyName: "/home/dev/policies/team.cedar", since: parseSince("7d", NOW) });
+    expect(formatSessionAudit(a, { counts: true })).toContain("Policy: team.cedar.");
+    expect(formatSessionAudit(a, { counts: true })).not.toContain("/home/dev");
+    expect(formatSessionAudit(a)).toContain("Policy: /home/dev/policies/team.cedar.");
+  });
+
   it("reads every transcript with --since all, including the stale one", () => {
     const a = auditSessions({ dir: fixture(), policyText: TEMPLATE, policyName: "the template" });
     expect(a).toMatchObject({ transcripts: 4, calls: 8 });
@@ -152,6 +174,11 @@ describe("agent-custody audit-sessions", () => {
     const j = JSON.parse(r.stdout) as { denied: { tool: string; reasons: string[] }[]; policy: string };
     expect(j.policy).toBe(pol);
     expect(j.denied.map((c) => [c.tool, c.reasons[0]])).toEqual([["Read", "no reads"]]);
+    writeFileSync(join(resolve(dir, ".."), "broken.cedar"), "permit(principal, action, resource)\n");
+    const broken = spawnSync(process.execPath, [cli, "audit-sessions", "--dir", dir, "--since", "all", "--policy", join(resolve(dir, ".."), "broken.cedar"), "--counts"], { encoding: "utf8" });
+    expect(broken.status).toBe(1);
+    expect(broken.stderr).toContain("broken.cedar does not parse");
+    expect(broken.stdout).toBe("");
     const rego = spawnSync(process.execPath, [cli, "audit-sessions", "--dir", dir, "--policy", "p.rego"], { encoding: "utf8" });
     expect(rego.status).not.toBe(0);
     expect(rego.stderr).toContain("audit-sessions reads a Cedar policy");
