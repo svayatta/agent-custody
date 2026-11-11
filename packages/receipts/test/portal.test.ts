@@ -118,6 +118,13 @@ describe("the tenant portal", () => {
     expect(page).toContain('data-view="setup"');
     expect(page).toContain('rel="icon" href="/favicon.svg"');
     expect(page).toContain('id="themeToggle"');
+    // dialogs and messages are in the page, not in the browser: no confirm(), a live region for results, and a Retry for a failed load
+    expect(page).not.toMatch(/\bconfirm\(/);
+    expect(page).toContain('<dialog id="dlg"');
+    expect(page).toContain('id="toast" class="toast" role="status" aria-live="polite"');
+    expect(page).toContain('id="retry"');
+    expect(page).toContain("Paste a receipt file or a 64-character digest.");
+    expect(page).toContain("Read-only");
     expect(page).toMatch(/id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false"[^>]*><svg/);
     expect(page).toContain(':root[data-theme="dark"]');
     const icon = await fetch(new URL("favicon.svg", portal.url));
@@ -516,6 +523,19 @@ describe("roles, invites, and two-step sign-in", () => {
     const list = (await hit("GET", "/api/members", undefined, admin.cookie)).json;
     expect(list.members.map((m: any) => [m.email, m.role, m.mfa])).toEqual([["o1@rbac2.example", "admin", false], ["ad@rbac2.example", "owner", false], ["rv@rbac2.example", "admin", false]]);
     expect(list.members[0].joinedAt).toEqual(expect.any(String));
+  });
+
+  it("the last owner cannot demote or remove themselves; with a second owner they can leave", async () => {
+    await tenancy.addTenant("rbac2b", "rbac2b", "test");
+    const first = await account("a@rbac2b.example", "rbac2b", "owner");
+    const demote = await hit("POST", `/api/members/${first.id}/role`, { role: "admin" }, first.cookie);
+    expect(demote.status).toBe(409);
+    expect(demote.json.error).toContain("last owner");
+    expect((await hit("POST", `/api/members/${first.id}/remove`, {}, first.cookie)).status).toBe(409);
+    expect((await hit("GET", "/api/members", undefined, first.cookie)).json.members.map((m: any) => m.role)).toEqual(["owner"]);
+    const second = await account("b@rbac2b.example", "rbac2b", "owner");
+    expect((await hit("POST", `/api/members/${first.id}/remove`, {}, first.cookie)).json).toEqual({ removed: true });
+    expect((await hit("POST", `/api/members/${second.id}/remove`, {}, second.cookie)).status).toBe(409);
   });
 
   it("an invite mails the invitee; accepting needs a verified address and an account with no tenant; an old invite is gone; a removed member loses access on its next request", async () => {
