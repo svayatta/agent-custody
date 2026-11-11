@@ -32,8 +32,17 @@ It listens on `127.0.0.1:8795` and prints the URL. Open it and sign in with the 
 | **Check** | the same checks as `agent-custody check`, except that the credential variables are **not** checked: the console deliberately does not hold the gateway's credentials, so it cannot tell whether they are set where the gateway runs. "Connect" starts the upstreams and lists their tools only for a config that names no credentials; otherwise it says to run `agent-custody check --connect` where the gateway runs, for example `docker compose exec gateway agent-custody check --config /config/gateway.json --connect`. A connect check that does not finish in 60 seconds is stopped and the upstreams it started are closed ([configuration.md](configuration.md#check-it-before-you-start-it)) |
 | **Policy** | the policy file in an editor. *Validate* asks Cedar to parse it. *Replay recorded calls* runs it against the verified receipts, using each call's own arguments and facts, and lists the decisions that would change, with their receipts. **A replay only re-decides calls that already happened**: a limit that no recorded call reached, or removing one, can show no change, so it is not a test of what a policy allows. *Save* writes it, keeping the previous version and recording the change |
 | **Grants** | paste a grant to see whether the gateway would accept it (valid, expired, revoked, signed by a key it does not trust) and what it allows; *Revoke* adds its digest to the revocation file, and the gateway refuses it, and every grant delegated from it, on its next call. Lists the revoked digests |
-| **Receipts** | the newest receipts with their agent, tool, decision, and outcome, each verified against the gateway key, the trusted principals, and the local log; a receipt that does not verify says which checks failed; a row opens the full statement |
+| **Receipts** | the newest receipts with their agent, tool, decision, and outcome, each verified against the gateway key, the trusted principals, and the local log; a receipt that does not verify says which checks failed; the id in a row opens a summary of the statement, with the full statement behind *Raw JSON* |
 | **Audit** | every change made through the console: who, when, and what, with the policy's digest before and after |
+
+## Use the page
+
+- **The tab is in the URL.** The hash is `#tab=policy`, `#tab=receipts`, and so on. Copy the URL to link to a tab. Back and Forward move between the tabs that you opened.
+- **Results show beside the button.** The result of *Save* shows beside *Save*. The result of *Revoke* shows beside *Revoke*. Both are announced to a screen reader.
+- **Unsaved policy edits are not lost without a warning.** A tab change with unsaved edits opens a dialog that asks you to discard them or to keep editing. Closing or reloading the page shows the browser's own warning.
+- **Save and Revoke ask in the page.** The dialog names the policy file or the grant (the agent and the digest). Escape and *Cancel* do nothing. For *Revoke*, the focus starts on *Cancel*.
+- **A receipt opens from its id.** The id in each row is a button, so the keyboard and a screen reader can open it. The detail shows the tool, the decision, the status, the time, the agent, the principal, whether a grant was presented, the digests, and whether the receipt verifies. The full statement is behind *Raw JSON*. The focus moves to the detail when it opens and returns to the id when you press *Close*.
+- **Times show in your local time.** The UTC value shows when you hold the pointer over a time.
 
 ## What a saved policy does
 

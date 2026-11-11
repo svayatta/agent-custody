@@ -24,7 +24,7 @@ describe("one name for each thing", () => {
 
   it("the dashboard says Sign up, Sign in, and API key", () => {
     for (const old of ["Create an account", "Create account", "a bearer token your gateway presents", ">Mint key<", ">Copy key<"]) expect(dashboard).not.toContain(old);
-    for (const term of ["Sign up instead", ">Create API key<", ">Copy API key<"]) expect(dashboard).toContain(term);
+    for (const term of ['id="tabSignUp" aria-selected="false">Sign up<', ">Sign in<", ">Create API key<", ">Copy API key<"]) expect(dashboard).toContain(term);
   });
 
   it("the glossary defines every product name and the terms the docs used before defining them", () => {
