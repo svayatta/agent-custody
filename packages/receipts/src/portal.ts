@@ -1645,9 +1645,14 @@ const PORTAL_PAGE = `<!doctype html>
 <style>
 ${DESIGN_CSS}
   :root { --field: var(--line-strong); --lift: 0 1px 2px rgb(28 25 23 / .04); }
-  .top { display: flex; align-items: center; gap: 1rem; padding: .7rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel); }
-  .brand { font-weight: 700; display: inline-flex; align-items: center; gap: .5rem; color: var(--ink); text-decoration: none; } .brand svg { width: 20px; height: 20px; display: block; } .brand rect { fill: var(--accent); }
-  .top .links { margin-left: auto; display: flex; gap: .9rem; font-size: .9rem; } .top .links a { color: var(--accent); text-decoration: none; }
+  .top { display: flex; align-items: center; gap: var(--space-3); min-height: 3.5rem; padding: 0 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .top [hidden] { display: none !important; }
+  .brand { flex: none; font-weight: 600; font-size: var(--text-md); display: inline-flex; align-items: center; gap: var(--space-2); color: var(--ink); text-decoration: none; white-space: nowrap; } .brand svg { width: 28px; height: 28px; display: block; } .brand rect { fill: var(--accent); }
+  .top .tenant { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font: 600 var(--text-md)/1.5rem var(--font); }
+  .top .tenant::before { content: ""; display: inline-block; width: 1px; height: 1.5rem; margin: 0 var(--space-3) 0 0; vertical-align: middle; position: relative; top: .15rem; background: var(--ink3); opacity: .6; transform: rotate(20deg); }
+  .top .badge { flex: none; padding: 0 var(--space-2); border: 1px solid var(--line-strong); border-radius: var(--radius-full); color: var(--ink2); font: 500 var(--text-xs)/1.25rem var(--font); }
+  .top .links { margin-left: auto; display: flex; align-items: center; gap: var(--space-4); font-size: var(--text-sm); } .top .links a { color: var(--ink2); font-weight: 500; text-decoration: none; transition: color .15s; } .top .links a:hover { color: var(--ink); }
+  .top .sep { width: 1px; height: 1.25rem; background: var(--line-strong); }
   #themeToggle[aria-pressed="true"] .moon, #themeToggle[aria-pressed="false"] .sun { display: none; }
   .pill { display: inline-block; padding: .05rem .55rem; border-radius: var(--radius-full); font: 600 var(--text-xs)/1.6 var(--font); background: var(--accent-bg); color: var(--accent); }
   .notice { padding: .6rem 1.25rem; font-size: .9rem; color: var(--ink); background: var(--accent-bg); border-bottom: 1px solid var(--line); } .notice a, .notice button { margin-left: .6rem; } .notice button { font: inherit; background: none; border: 1px solid var(--line); border-radius: var(--radius-sm); min-height: 0; padding: .1rem .5rem; color: var(--ink); font-weight: 600; cursor: pointer; }
@@ -1658,14 +1663,26 @@ ${DESIGN_CSS}
   nav a { display: flex; justify-content: space-between; gap: .5rem; padding: .45rem 1.25rem; color: var(--ink); text-decoration: none; border-left: 3px solid transparent; }
   nav a:hover { background: var(--bg); } nav a.on { border-left-color: var(--accent); background: var(--accent-bg); font-weight: 600; }
   nav a span.n { color: var(--ink2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-  .navbtn { display: none; } .userbtn { min-height: 2.25rem; }
-  #userMenu { position: fixed; inset: auto; margin: 0; min-width: 14rem; max-width: calc(100vw - 1rem); padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
-  #userMenu:popover-open { display: grid; gap: var(--space-1); }
-  #userMenu .who { padding: var(--space-2) var(--space-3); color: var(--ink2); font-size: var(--text-sm); overflow-wrap: anywhere; }
-  #userMenu a { padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); color: var(--ink); font-size: var(--text-sm); text-decoration: none; } #userMenu a:hover { background: var(--soft); }
-  #userMenu button { width: 100%; justify-content: flex-start; gap: var(--space-3); padding: 0 var(--space-3); color: var(--ink); }
+  .navbtn { display: none; }
+  .top .userbtn { flex: none; width: 2.25rem; min-height: 2.25rem; padding: 0; border-color: transparent; border-radius: var(--radius-full); }
+  .top .userbtn:not(:disabled):hover, .top .userbtn[aria-expanded="true"] { background: var(--soft); border-color: transparent; }
+  .userbtn svg, #userMenu svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .avatar { display: inline-flex; align-items: center; justify-content: center; width: 1.75rem; height: 1.75rem; flex: none; border-radius: var(--radius-full); background: var(--accent-bg); color: var(--accent); font: 600 var(--text-sm)/1 var(--font); text-transform: uppercase; }
+  #userMenu { position: fixed; inset: auto; margin: 0; width: 20rem; max-width: calc(100vw - 1rem); padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
+  #userMenu:popover-open { display: grid; }
+  #userMenu .head { display: grid; gap: 2px; padding: var(--space-2) var(--space-3); }
+  #userMenu .who { color: var(--ink); font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
+  #userMenu .meta { color: var(--ink2); font-size: var(--text-xs); } #userMenu .plan { display: none; }
+  #userMenu hr { margin: var(--space-1) 0; border: 0; border-top: 1px solid var(--line); }
+  #userMenu .row { display: flex; align-items: center; justify-content: flex-start; gap: var(--space-3); width: 100%; min-height: 2.25rem; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); font: 500 var(--text-sm)/1.2 var(--font); text-decoration: none; text-align: left; }
+  #userMenu .row:hover { background: var(--soft); color: var(--ink); border: 0; }
+  #userMenu .row:focus-visible { outline-offset: -2px; }
+  #userMenu .row.out:hover { color: var(--bad); }
+  #userMenu .state { margin-left: auto; color: var(--ink2); font-size: var(--text-xs); } #userMenu .state::after { content: "Off"; } #themeToggle[aria-pressed="true"] .state::after { content: "On"; }
+  nav .help { display: none; }
   @media (max-width: 48rem) { .navbtn { display: inline-flex; } nav { position: fixed; z-index: 10; inset: 0 auto 0 0; width: min(18rem, 85vw); overflow-y: auto; visibility: hidden; transform: translateX(-100%); } nav.open { visibility: visible; transform: none; box-shadow: 0 0 0 100vmax rgb(12 10 9 / .5); } }
   @media (max-width: 48rem) and (prefers-reduced-motion: no-preference) { nav { transition: transform .2s, visibility 0s .2s; } nav.open { transition: transform .2s, visibility 0s; } }
+  @media (max-width: 48rem) { .top:has(#menuBtn:not([hidden])) :is(.links, .sep) { display: none; } .top:has(#menuBtn:not([hidden])) .userbtn { margin-left: auto; } nav { display: flex; flex-direction: column; } nav .help { display: flex; } nav .group.help { display: block; margin-top: auto; } }
   main { padding: 2rem 2rem 3rem; max-width: 72rem; min-width: 0; }
   h1 { margin: 0 0 1rem; } h2 { font-size: var(--text-md); margin: 1.5rem 0 .6rem; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .9rem; }
@@ -1727,7 +1744,6 @@ ${DESIGN_CSS}
     .auth.wide { display: grid; grid-template-columns: 21rem minmax(0, 1fr); gap: 0 2.5rem; align-items: start; max-width: 72rem; }
     .wide .side { position: sticky; top: 1.5rem; } .wide #firstSetup > .step:first-child { border-top: 0; padding-top: 0; }
   }
-  .auth .mark { display: block; width: 40px; height: 40px; margin: 0 0 1rem; } .mark .tile { fill: var(--accent); } .mark .ink { stroke: var(--accent); }
   .auth .eyebrow { margin: 0 0 .3rem; font: 600 var(--text-sm)/1.4 var(--font); color: var(--accent); }
   .auth h1 { margin: 0 0 1.5rem; }
   .auth h1 + .muted { margin-top: -.75rem; }
@@ -1756,7 +1772,7 @@ ${DESIGN_CSS}
   .auth .msg.err:not(:empty), .auth .msg.ok:not(:empty) { padding: .55rem .8rem; border-radius: var(--radius-sm); border: 1px solid; }
   .auth .msg.err:not(:empty) { border-color: color-mix(in srgb, var(--bad) 40%, var(--panel)); background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
   .auth .msg.ok:not(:empty) { border-color: color-mix(in srgb, var(--ok) 40%, var(--panel)); background: color-mix(in srgb, var(--ok) 8%, var(--panel)); }
-  @media (max-width: 30rem) { .top { flex-wrap: wrap; row-gap: .4rem; } .brand { white-space: nowrap; } .userbtn { margin-left: auto; } .top .links { order: 1; flex-basis: 100%; margin-left: 0; font-size: .85rem; } #planTag, #tenantTag { display: none !important; } .auth { --pad: 1.25rem; margin: 1rem .75rem 2rem; } .auth h1 { font-size: var(--text-xl); } }
+  @media (max-width: 30rem) { .top { padding: 0 var(--space-3); } .top:not(:has(#menuBtn:not([hidden]))) { flex-wrap: wrap; padding-block: var(--space-2); row-gap: var(--space-1); } .top:not(:has(#menuBtn:not([hidden]))) .links { order: 1; flex-basis: 100%; margin-left: 0; } .top:not(:has(#menuBtn:not([hidden]))) .userbtn { margin-left: auto; } .top .sep { display: none; } #planTag { display: none !important; } #userMenu .plan { display: block; } .auth { --pad: 1.25rem; margin: 1rem .75rem 2rem; } .auth h1 { font-size: var(--text-xl); } }
   .step { display: grid; grid-template-columns: 2rem 1fr; gap: .2rem .8rem; padding: 1rem 0; border-top: 1px solid var(--line); }
   .step .n { font: 700 var(--text-sm)/1.6 var(--font); color: var(--accent); }
   .step h3 { margin: 0 0 .3rem; font-size: 1rem; } .step p { margin: 0 0 .5rem; color: var(--ink2); font-size: .92rem; }
@@ -1779,7 +1795,7 @@ ${DESIGN_CSS}
   dialog.confirm .acts { display: flex; justify-content: flex-end; gap: var(--space-3); margin-top: var(--space-5); flex-wrap: wrap; } dialog.confirm .choice { display: grid; grid-template-columns: auto 1fr; column-gap: var(--space-3); margin: var(--space-3) 0; font-weight: 400; cursor: pointer; } dialog.confirm .choice input { width: auto; margin: .2rem 0 0; } dialog.confirm .choice span { grid-column: 2; color: var(--ink2); font-size: var(--text-sm); }
   abbr[title] { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
 </style>
-<div class="top"><button class="navbtn icon" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Navigation" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><a class="brand" href="#overview"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links">${DASHBOARD_NAV}</span><button class="userbtn quiet" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu">Account</button><div id="userMenu" popover><span class="who" id="who" data-acct></span><a href="#account" data-view="account" data-acct>Security</a><button class="theme icon" id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Dark mode"><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Dark mode</button><button class="quiet" id="signout" type="button" data-acct>Sign out</button></div></div>
+<div class="top"><button class="navbtn icon" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Navigation" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><a class="brand" href="#overview" aria-label="agent-custody, Overview"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-out>agent-custody</span></a><span id="tenantTag" class="tenant" hidden></span><span id="planTag" class="badge" hidden></span><span class="links">${DASHBOARD_NAV}</span><span class="sep" aria-hidden="true"></span><button class="userbtn quiet" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu" aria-label="Appearance"><span class="avatar" id="avatar" aria-hidden="true" data-acct hidden></span><svg class="theme-ic" viewBox="0 0 24 24" aria-hidden="true" data-out><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg></button><div id="userMenu" popover><div class="head" data-acct><span class="who" id="who"></span><span class="meta" id="whoMeta"></span><span class="meta plan" id="whoPlan"></span></div><hr data-acct><a class="row" href="#account" data-view="account" data-acct><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>Security</a><button class="row" id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Dark mode"><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Dark mode<span class="state" aria-hidden="true"></span></button><hr data-acct><button class="row out" id="signout" type="button" data-acct><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9"/></svg>Sign out</button></div></div>
 <div id="notice" class="notice" hidden></div>
 <section id="auth" class="auth split" hidden>
   <aside class="pitch">
@@ -1793,7 +1809,6 @@ ${DESIGN_CSS}
     </ol>
   </aside>
   <div class="pane">
-  ${MARK}
   <p class="eyebrow">Hosted log</p>
   <h1 id="authTitle">Sign in</h1>
   <div class="tabs" id="authTabs" role="tablist"><button type="button" role="tab" id="tabSignIn" aria-selected="true">Sign in</button><button type="button" role="tab" id="tabSignUp" aria-selected="false">Sign up</button></div>
@@ -1838,7 +1853,6 @@ ${DESIGN_CSS}
     </ol>
   </aside>
   <div class="pane">
-  ${MARK}
   <h1>Set up your tenant</h1>
   <p class="muted">Signed in as <b id="onboardWho"></b>. A tenant is your own log on this service, with its own keys and its own path.</p>
   <div id="invites" class="panel" hidden><p><b>You are invited to join a tenant.</b> Your email address must be verified first.</p><div id="inviteList"></div></div>
@@ -1855,7 +1869,6 @@ ${DESIGN_CSS}
 </section>
 <section id="welcome" class="auth wide" hidden>
   <div class="side">
-  ${MARK}
   <h1>Your tenant is ready</h1>
   <p class="muted">That was step 1 of 4. Steps 2 to 4 take you to your first receipt in this log. Everything here is under <b>Setup</b> in the dashboard whenever you need it again.</p>
   <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst" data-copy>Copy API key</button> <button type="button" id="savedFirst">I saved the key</button></div>
@@ -1882,6 +1895,8 @@ ${DESIGN_CSS}
     <div class="group">Organisation</div>
     <a href="#members" data-view="members">Members <span class="n" id="nMembers"></span></a>
     <a href="#billing" data-view="billing">Billing</a>
+    <div class="group help">Help</div>
+    ${DASHBOARD_NAV.replaceAll("<a ", '<a class="help" ')}
   </nav>
   <main>
     <div data-pane="overview">
@@ -2020,10 +2035,14 @@ ${DESIGN_CSS}
     d.showModal();
   });
   $("dlg").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
   const show = (id) => {
     for (const s of ["auth", "onboard", "welcome", "loadFail", "app"]) $(s).hidden = s !== id;
     $("menuBtn").hidden = id !== "app";
-    for (const el of document.querySelectorAll("[data-acct]")) el.hidden = id !== "app";
+    for (const el of document.querySelectorAll("[data-acct]")) el.toggleAttribute("hidden", id !== "app");
+    for (const el of document.querySelectorAll("[data-out]")) el.toggleAttribute("hidden", id === "app");
+    if (id !== "app") { $("tenantTag").hidden = true; $("planTag").hidden = true; }
+    $("userBtn").setAttribute("aria-label", id === "app" ? "Account menu for " + myEmail : "Appearance");
     if (id !== "app") { document.title = "agent-custody"; setDrawer(false); }
   };
   const PROVIDERS = __PROVIDERS__;
@@ -2160,7 +2179,7 @@ ${DESIGN_CSS}
   addEventListener("beforeunload", (e) => { if ((!$("welcome").hidden && !$("savedFirst").disabled) || !$("minted").hidden) e.preventDefault(); });
   $("signout").onclick = async () => { $("userMenu").hidePopover(); await api("POST", "/api/logout", {}); location.hash = ""; show("auth"); };
   const render = (o) => {
-    $("tenantTag").textContent = o.tenant; $("tenantTag").hidden = false; $("planTag").textContent = o.plan + " plan"; $("planTag").hidden = false;
+    $("tenantTag").textContent = o.tenant; $("tenantTag").hidden = false; $("planTag").textContent = cap(o.plan); $("planTag").hidden = false;
     const pct = o.quota ? o.used / o.quota : 0;
     $("cUsed").className = "card " + (o.quota === null ? "ok" : pct >= 1 ? "bad" : pct >= .8 ? "warn" : "ok");
     $("vUsed").textContent = fmt(o.used); $("sUsed").textContent = o.quota === null ? "no allowance on " + o.plan : "of " + fmt(o.quota) + " on " + o.plan + (pct >= 1 ? ": appends are refused until next month" : "");
@@ -2232,7 +2251,7 @@ ${DESIGN_CSS}
       const me = await api("GET", "/api/me");
       accountNotice(me);
       if (me.tenant === null) { $("onboardWho").textContent = me.email; $("invites").hidden = !(me.invites || []).length; $("inviteList").innerHTML = (me.invites || []).map((i) => "<p>Join <b>" + esc(i.tenant) + "</b> as " + esc(i.role) + " <button type=button data-accept=\\"" + esc(i.tenant) + "\\">Accept</button></p>").join(""); if (me.profile) { for (const k of ["name", "company", "role"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
-      $("who").textContent = me.email; myEmail = me.email; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyNew").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa, me.recoveryCodes); show("app"); await load(); route();
+      $("who").textContent = me.email; myEmail = me.email; $("avatar").textContent = me.email.charAt(0); $("whoMeta").textContent = me.tenant + " \u00b7 " + ROLE_LABEL[me.role]; $("whoPlan").textContent = cap(me.plan) + " plan"; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyNew").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa, me.recoveryCodes); show("app"); await load(); route();
     }
     catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) authTab(true); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { $("loadErr").textContent = err.message.charAt(0).toUpperCase() + err.message.slice(1) + "."; show("loadFail"); } }
   };
