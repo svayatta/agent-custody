@@ -53,7 +53,7 @@ Rules 1 to 9 of the spec:
 2. `seq` runs 1, 2, 3, and so on in file order.
 3. Each `prev_hash` is the previous receipt's `receipt_hash`, and the first is 64 zeros.
 4. Each `receipt_hash` recomputes: SHA-256 of the canonical JSON of every field except `receipt_hash` and `signature`, known fields or not.
-5. One `session_id` throughout, and `ts` never goes back.
+5. One `session_id` throughout, and `ts` never goes back. Every `ts` must be in the spec's form, `YYYY-MM-DDTHH:MM:SS.mmmmmmZ`: in that fixed-width UTC form, string order is time order. A `ts` without the microseconds or with an offset could be an earlier instant that sorts as later, and a receipt after the last checkpoint has no signature to stop it, so any other form fails.
 6. Every checkpoint signature verifies: Ed25519 over the 32 raw bytes of `receipt_hash`, by the key in `signer`, which `signature.verify_key` must equal.
 7. At least one checkpoint, and every checkpoint signed. A checkpoint with `signer_error` is named as a signer failure, which explains a missing signature and does not excuse it.
 8. With `--key`, every signer is a pinned key.

@@ -15,6 +15,8 @@ export const PERATHOS_RECEIPT_V1 = "perathos.receipt/v1";
 const KINDS = new Set(["pre", "post", "checkpoint"]);
 const ZERO = "0".repeat(64);
 const HEX64 = /^[0-9a-f]{64}$/;
+// the spec's only form: fixed width, UTC, microseconds, so string order is time order
+const TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
 export interface PerathosCheck {
@@ -114,7 +116,8 @@ export function verifyPerathosLog(text: string, opts: PerathosOptions = {}): Per
     if (r.prev_hash !== prev) chain.push(`${at}: prev_hash does not match the receipt before`);
     if (r.receipt_hash !== perathosReceiptHash(r)) hashes.push(`${at}: receipt_hash does not recompute`);
     if (r.session_id !== receipts[0]!.session_id) order.push(`${at}: session ${String(r.session_id)}`);
-    if (i > 0 && String(r.ts) < String(receipts[i - 1]!.ts)) order.push(`${at}: time goes back`);
+    if (typeof r.ts !== "string" || !TS.test(r.ts)) order.push(`${at}: ts ${JSON.stringify(r.ts)} is not YYYY-MM-DDTHH:MM:SS.mmmmmmZ`);
+    else if (i > 0 && typeof receipts[i - 1]!.ts === "string" && TS.test(receipts[i - 1]!.ts as string) && r.ts < (receipts[i - 1]!.ts as string)) order.push(`${at}: time goes back`);
     if (r.kind !== "checkpoint") return;
     checkpoints.push(r);
     if (r.signature === undefined && r.signer === undefined) {

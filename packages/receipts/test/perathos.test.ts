@@ -124,6 +124,30 @@ describe("verifyPerathosLog", () => {
     expect(failed(verifyPerathosLog(""))).toEqual(["every line is a JSON object", "every checkpoint is signed"]);
   });
 
+  it("refuses a timestamp outside the spec's form, so an earlier instant cannot sort as later", () => {
+    // each case is a later receipt that is earlier in time, and that a plain string comparison would let through
+    const cases: [string, string][] = [
+      ["2026-11-04T08:19:10.900000Z", "2026-11-04T08:19:10Z"], // 900 ms earlier, without the microseconds
+      ["2026-11-04T08:00:00.000000Z", "2026-11-04T09:00:00.000000+05:00"], // four hours earlier, with an offset
+    ];
+    for (const [first, second] of cases) {
+      // the receipt after the last checkpoint: no signature covers it, so only rule 5 can catch it
+      const log = write([pre("Bash", {}), checkpoint(), pre("Bash", { n: 1 })]);
+      log[1]!.ts = first;
+      log[1]!.receipt_hash = perathosReceiptHash(log[1]!);
+      log[2]!.prev_hash = log[1]!.receipt_hash;
+      log[2]!.ts = second;
+      log[2]!.receipt_hash = perathosReceiptHash(log[2]!);
+      const r = verifyPerathosLog(jsonl(log), { allowUnsigned: true });
+      expect(r.checks.find((c) => c.name === "one session, and time never goes back")).toMatchObject({ ok: false, detail: expect.stringContaining("is not YYYY-MM-DDTHH:MM:SS.mmmmmmZ") });
+    }
+    // the spec's form still verifies, and still catches time going back
+    const back = write([pre("Bash", {}), checkpoint()]);
+    back[1]!.ts = "2026-11-04T08:18:59.999999Z";
+    back[1]!.receipt_hash = perathosReceiptHash(back[1]!);
+    expect(verifyPerathosLog(jsonl(back)).checks.find((c) => c.name === "one session, and time never goes back")?.detail).toContain("time goes back");
+  });
+
   it("refuses a signer that is not an Ed25519 key instead of throwing", () => {
     const bad = session();
     const last = bad.at(-1)!;
