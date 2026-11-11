@@ -47,6 +47,16 @@ describe("the admin surface", () => {
     expect(html).not.toMatch(/https?:\/\/(?!agent-custody\.dev)/); // no third-party requests
     expect(html).not.toContain("sessionStorage");
     expect(html).toContain('id="themeToggle"');
+    expect(html).toContain('<html lang="en">');
+    // Tabs: one link per section; a tab hash never equals an element id; the plan dialog names old and new plan; tables scroll.
+    const hashes = [...html.matchAll(/<a href="#(tab-[a-z]+)"/g)].map((m) => m[1]!);
+    expect(hashes).toHaveLength(5);
+    const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]!));
+    for (const h of hashes) expect(ids.has(h)).toBe(false);
+    expect(html).toContain('<dialog id="planDialog"');
+    expect(html).toContain("dialog.showModal()");
+    expect(html.match(/class="scroll"/g)).toHaveLength(5);
+    expect(html).toContain('role="status" data-status="addTenant"');
     expect(html).toContain(':root[data-theme="dark"]');
     for (const [m, p] of [["GET", "admin/tenants"], ["POST", "admin/tenants"], ["GET", "admin/info"]] as const) {
       expect((await call(m, p, m === "POST" ? { id: "x" } : undefined, null)).status).toBe(401);
