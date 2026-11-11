@@ -30,15 +30,20 @@ The gateway's log client retries a 429 three times with backoff and then treats 
 | `GET /verify-email?token=` | | the link sent at registration: shows a page that posts the token to `POST /api/verify-email`. Opening the link verifies nothing by itself; without the account's own session the page asks the user to sign in with the password first |
 | `POST /api/verify-email` | `{ token }` | needs a session whose user is the token's user (else 403); marks the address verified: `{ "ok": true, "emailVerified": true }`. A provider sign-in links to a password account only once this has happened |
 | `POST /api/verify-email/resend` | `{}` | sends the verification link again; `{ "ok": true, "emailVerified" }` |
-| `POST /api/register` | `{ "email", "password" (10+ chars) }` creates the account only (the page then shows the tenant setup) and sends the verification link, answering `{ "email", "tenant": null, "emailVerified": false }`; with `"tenant"` (3–40 chars, `[a-z0-9-]`), `"name"`, `"company"`, `"role"`?, `"phone"`?, `"telegram"`? as well, the tenant is created in the same call, as before |
+| `POST /api/register` | `{ "email", "password" (10+ chars) }` creates the account only (the page then shows the tenant setup) and sends the verification link, answering `{ "email", "tenant": null, "emailVerified": false }`; with `"tenant"` (3–40 chars, `[a-z0-9-]`), `"name"`, `"company"`, `"role"`?, `"phone"`?, `"telegram"`? as well, the tenant is created in the same call, as before. The page no longer asks for `phone` and `telegram`; the API still accepts and stores them for older clients |
 | `POST /api/onboard` | `{ "tenant", "name", "company", "role"?, "phone"?, "telegram"? }` | the same response as a one-call register; `409` when the account already has a tenant or the id is taken | `{ "tenant", "logId", "plan": "free", "token": "<64 hex, shown once>", "tokenHash": "<12 hex>", "welcome": "<the welcome sheet>", "setup": { "log", "logId", "checkpoints", "keys", "keyid", "env", "config", "verify", "audit", "export" } (the sheet as data; the page shows it as numbered steps, and again under Setup), "exportCommand": "…" }` and a session cookie; with mail configured, one email to the address with the sheet (never the key) and one to the operator with the contact details; `400` on validation, `409` if the email or tenant is taken, `429` after five registrations from one address |
 | `POST /api/login` | `{ "email", "password" }` | `{ "email" }` and the cookie; `401` otherwise; throttled per address. When the account has [MFA](#two-step-sign-in) on: `{ "mfa": true }` and a five-minute `custody_mfa` cookie, and no session. Refused for a member of a tenant that enforces [single sign-on](#single-sign-on) |
-| `POST /api/login/mfa` | `{ "code" }` | needs the `custody_mfa` cookie; `{ "email" }` and the session cookie; `401` for a wrong or used code; `429` after five wrong codes for the account |
-| `POST /api/mfa/setup` | `{}` | `{ "secret": "<base32>", "uri": "otpauth://…" }`; `409` when MFA is on already |
-| `POST /api/mfa/enable` | `{ "code" }` | `{ "mfa": true }` once the code from the new secret is valid |
-| `POST /api/mfa/disable` | `{ "code" }` | `{ "mfa": false }` with a current code |
+| `POST /api/login/mfa` | `{ "code" }` | needs the `custody_mfa` cookie; `{ "email" }` and the session cookie; `401` for a wrong or used code; `429` after five tries for the account. A [recovery code](#two-step-sign-in) works once in place of the six-digit code |
+| `POST /api/mfa/setup` | `{}` | `{ "secret": "<base32>", "uri": "otpauth://…", "qr": "<svg …>" }` (the `uri` as an inline SVG QR code, made by the portal); `409` when MFA is on already |
+| `POST /api/mfa/enable` | `{ "code" }` | `{ "mfa": true, "recoveryCodes": ["xxxx-xxxx-xxxx", …10] }` once the code from the new secret is valid. The codes are shown this one time |
+| `POST /api/mfa/disable` | `{ "code" }` | `{ "mfa": false }` with a current code or a recovery code |
+| `POST /api/mfa/recovery` | `{ "code" }` | `{ "recoveryCodes": [ …10] }`: ten new codes that replace the old ones; needs a current code or a recovery code; `401` without one |
+| `POST /api/password/forgot` | `{ "email" }` | `{ "ok": true }` for every address, with or without an account. With an account, the portal mails a link to `/reset-password?token=`. `400` for a malformed address, `429` after five requests from one client address, `503` when mail is not configured. After three requests for one email address in fifteen minutes, the answer stays the same and no mail goes |
+| `GET /reset-password?token=` | | the link in the mail: a page with a field for the new password, which posts to `POST /api/password/reset` |
+| `POST /api/password/reset` | `{ "token", "password" (10+ chars) }` | `{ "ok": true }` and no session: the user signs in with the new password, and two-step sign-in still applies. `400` for a short password (the token stays valid), or for a token that is unknown, used, or older than one hour; `403` for a member of a tenant that enforces single sign-on |
+| `POST /api/password/change` | `{ "current", "password" (10+ chars) }` | needs a session; `{ "ok": true }` and a new session cookie for this browser. `401` for a wrong current password, `400` for a short new one, `409` in a tenant that enforces single sign-on, `429` after eight tries |
 | `POST /api/logout` | `{}` | `{ "ok": true }` |
-| `GET /api/me` | | `{ "email", "tenant", "role", "logId", "plan", "used", "quota", "disabled", "billing": true\|false }`; before onboarding, `{ "email", "tenant": null, "profile", "billing" }`; the second also carries `"invites"` (`[{ "tenant", "role" }]`); both carry `"emailVerified"`, `"identities"` (the linked providers), `"providers"` (the ones offered), `"mail"` (whether the portal can send), and `"mfa"` |
+| `GET /api/me` | | `{ "email", "tenant", "role", "logId", "plan", "used", "quota", "disabled", "billing": true\|false }`; before onboarding, `{ "email", "tenant": null, "profile", "billing" }`; the second also carries `"invites"` (`[{ "tenant", "role" }]`); both carry `"emailVerified"`, `"identities"` (the linked providers), `"providers"` (the ones offered), `"mail"` (whether the portal can send), `"mfa"`, and `"recoveryCodes"` (the number of unused recovery codes) |
 | `GET /api/members` | | `{ "members": [{ "id", "email", "role", "joinedAt", "mfa" }], "invites": [{ "email", "role", "invitedBy", "createdAt" }] }` |
 | `POST /api/members` | `{ "email", "role" }` | invites the address: `{ "invited", "role" }`; `403` when a non-owner grants `owner` |
 | `POST /api/members/<userId>/role` | `{ "role" }` | `{ "role" }`; `403` when a non-owner touches an owner; `409` for the last owner |
@@ -67,16 +72,34 @@ Every member of a tenant has one role. A role includes the roles above it in thi
 
 | role | may |
 | --- | --- |
-| `readonly` | every `GET` |
+| `readonly` | every `GET`, and the routes of the member's own account: `/api/password/change`, `/api/mfa/setup`, `/api/mfa/enable`, `/api/mfa/disable`, and `/api/mfa/recovery` |
 | `reviewer` | also publish and remove policy versions |
 | `admin` | also mint and revoke API keys, invite, cancel invites, change a member's role, and remove a member, but never touch an owner and never grant `owner` |
 | `owner` | everything, billing included |
 
-A write route that is not in this table needs `admin`. The last owner of a tenant cannot be removed or demoted. An invite lasts seven days. An account belongs to one tenant. A removed member loses access at once, also in a tenant with single sign-on. The members page of the portal shows the same operations.
+A write route that is not in this table needs `admin`. The last owner of a tenant cannot be removed or demoted. An invite lasts seven days. An account belongs to one tenant. A removed member loses access at once, also in a tenant with single sign-on. The members page of the portal shows the same operations. It names each role with a label (Read-only, Reviewer, Admin, Owner) and a description; the stored and API values stay as in the table. Remove, Revoke, Cancel invite, and a role change ask for confirmation in a dialog that names the member or key. The last owner row shows no Change or Remove action.
+
+### Portal navigation
+
+The sidebar has three groups. Monitor holds Overview, Usage, and Activity. Log holds Setup, API keys, Policies, and Export. Organisation holds Members and Billing. The user menu at the top right holds the signed-in address, Security (two-step sign-in), the theme control, and Sign out. On a narrow screen the sidebar is a drawer that the menu button opens.
+
+The address bar names the view: `/#policies` opens Policies after sign-in, and the Back and Forward buttons of the browser change the view. An unknown name opens Overview.
 
 ### Two-step sign-in
 
-An account can turn on MFA with a time-based one-time password (TOTP, RFC 6238: 6 digits, 30-second step) from any authenticator app. Setup is `POST /api/mfa/setup`, then `POST /api/mfa/enable` with the first code. After that, a password, GitHub, or Google sign-in ends with a code step, `POST /api/login/mfa`. The `custody_mfa` cookie that the first step sets lasts five minutes and is never a session. A code works once. Wrong codes are throttled per address and per account. An operator turns MFA off for an account that lost its authenticator with `log-admin user mfa-reset <email>` (see [the operator's side](#the-operators-side)).
+An account can turn on MFA with a time-based one-time password (TOTP, RFC 6238: 6 digits, 30-second step) from any authenticator app. Setup is `POST /api/mfa/setup`, then `POST /api/mfa/enable` with the first code. After that, a password, GitHub, or Google sign-in ends with a code step, `POST /api/login/mfa`. The `custody_mfa` cookie that the first step sets lasts five minutes and is never a session. A code works once. Wrong codes are throttled per address and per account. The setup shows the secret as a QR code, which the portal draws itself (no outside request), and as text. Turning MFA on gives ten recovery codes, shown one time. The portal keeps only their SHA-256 hashes. Each recovery code works one time in place of a code, at sign-in and to turn MFA off, and counts against the same limit as a code. `POST /api/mfa/recovery` with a current code replaces all ten. An operator turns MFA off for an account that lost its authenticator and its recovery codes with `log-admin user mfa-reset <email>` (see [the operator's side](#the-operators-side)). That also deletes the recovery codes.
+
+### Password reset and password change
+
+A user who forgot the password asks for a link on the sign-in page (`POST /api/password/forgot`). The page shows the "Forgot password?" link only when the portal can send mail. The answer is the same for every address, and the portal looks up the address after it answers, so neither the answer nor its time tells whether an account exists. Requests are limited per client address and per email address. The token in the link is 256 random bits, works one time, and expires after one hour. The portal stores only its SHA-256 hash.
+
+A reset sets the new password and ends every session and every half-signed-in `custody_mfa` cookie of the account. It does not sign the user in. The user signs in with the new password, and two-step sign-in still applies. A reset proves control of the mailbox. If the address was not verified, the reset marks it verified and removes each GitHub or Google identity linked to the account, because whoever held the old password linked it before anyone proved the address. This keeps the rule that a provider sign-in links only to a verified address.
+
+An account that a GitHub, Google, or single sign-on sign-in created has a random password that nobody knows. A reset sets its first password, because the mailbox owner already controls the account through the provider. A member of a tenant that enforces single sign-on gets no reset mail, a reset link is refused (`403`), and a change is refused (`409`), so enforcement has no password back door.
+
+A signed-in user changes the password on the Account page with the current password (`POST /api/password/change`). The change ends every other session of the account and keeps the session of the browser that made it.
+
+Sessions carry the time they were signed. Each account has a "sessions valid after" time, which a reset or a change moves to now. A session or a `custody_mfa` cookie signed before that time is refused.
 
 ### Single sign-on
 
