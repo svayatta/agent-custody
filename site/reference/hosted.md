@@ -78,6 +78,12 @@ Every member of a tenant has one role. A role includes the roles above it in thi
 
 A write route that is not in this table needs `admin`. The last owner of a tenant cannot be removed or demoted. An invite lasts seven days. An account belongs to one tenant. A removed member loses access at once, also in a tenant with single sign-on. The members page of the portal shows the same operations.
 
+### Portal navigation
+
+The sidebar has three groups. Monitor holds Overview, Usage, and Activity. Log holds Setup, API keys, Policies, and Export. Organisation holds Members and Billing. The user menu at the top right holds the signed-in address, Security (two-step sign-in), the theme control, and Sign out. On a narrow screen the sidebar is a drawer that the menu button opens.
+
+The address bar names the view: `/#policies` opens Policies after sign-in, and the Back and Forward buttons of the browser change the view. An unknown name opens Overview.
+
 ### Two-step sign-in
 
 An account can turn on MFA with a time-based one-time password (TOTP, RFC 6238: 6 digits, 30-second step) from any authenticator app. Setup is `POST /api/mfa/setup`, then `POST /api/mfa/enable` with the first code. After that, a password, GitHub, or Google sign-in ends with a code step, `POST /api/login/mfa`. The `custody_mfa` cookie that the first step sets lasts five minutes and is never a session. A code works once. Wrong codes are throttled per address and per account. The setup shows the secret as a QR code, which the portal draws itself (no outside request), and as text. Turning MFA on gives ten recovery codes, shown one time. The portal keeps only their SHA-256 hashes. Each recovery code works one time in place of a code, at sign-in and to turn MFA off, and counts against the same limit as a code. `POST /api/mfa/recovery` with a current code replaces all ten. An operator turns MFA off for an account that lost its authenticator and its recovery codes with `log-admin user mfa-reset <email>` (see [the operator's side](#the-operators-side)). That also deletes the recovery codes.
