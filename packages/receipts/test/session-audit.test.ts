@@ -60,6 +60,22 @@ describe("auditSessions", () => {
     expect(a.unevaluated.map((u) => u.tool)).toEqual(["mcp__browser__click"]);
   });
 
+  it("counts a call as denied when a rule matched it, even when another rule errored on the same call", () => {
+    // a force push matches the first rule; the second rule reads an attribute a Bash call does not have and errors
+    const policy = 'permit(principal, action, resource);\n@reason("no force push")\nforbid(principal, action == Action::"Bash", resource) when { context.args.command like "*git push --force*" };\n@reason("no charges")\nforbid(principal, action, resource) when { context.args.amount > 0 };\n';
+    const dir = join(mkdtempSync(join(tmpdir(), "audit-err-")), "projects");
+    mkdirSync(join(dir, "-p"), { recursive: true });
+    writeFileSync(join(dir, "-p", "s.jsonl"), [
+      call("2026-11-10T09:00:00Z", "s", "/p", [{ id: "a", name: "Bash", input: { command: "git push --force origin main" } }]),
+      call("2026-11-10T09:00:01Z", "s", "/p", [{ id: "b", name: "Bash", input: { command: "ls" } }]),
+    ].join("\n"));
+    const a = auditSessions({ dir, policyText: policy, policyName: "p" });
+    expect(a.denied.map((c) => [c.target, c.reasons])).toEqual([["git push --force origin main", ["no force push"]]]);
+    // the call no rule matched, where the second rule errored, is the one listed apart
+    expect(a.unevaluated.map((u) => u.target)).toEqual(["ls"]);
+    expect(formatSessionAudit(a, { counts: true })).toMatch(/^\s+1\s+policy\d+\s+no force push$/m);
+  });
+
   it("reads every transcript with --since all, including the stale one", () => {
     const a = auditSessions({ dir: fixture(), policyText: TEMPLATE, policyName: "the template" });
     expect(a).toMatchObject({ transcripts: 4, calls: 8 });

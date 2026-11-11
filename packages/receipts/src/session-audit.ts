@@ -33,7 +33,7 @@ export interface SessionAudit {
   sessions: number;
   calls: number;
   denied: AuditedCall[];
-  /** calls the policy could not evaluate, such as arguments with a value Cedar cannot hold; the hook denies these, and they are listed apart because no rule decided them */
+  /** calls that no forbid matched but on which a rule errored (a value Cedar cannot hold, an attribute the call lacks); the hook denies these, and they are listed apart because no rule decided them. A call a forbid matched is in `denied` even when another rule errored on it */
   unevaluated: { tool: string; target: string; errors: string[] }[];
   /** lines that were not JSON; a transcript being written can end in a partial line */
   unreadable: number;
@@ -111,12 +111,16 @@ export function auditSessions(o: SessionAuditOptions): SessionAudit {
         result.calls++;
         const args = c.input && typeof c.input === "object" ? (c.input as Record<string, unknown>) : {};
         const d = evaluate(o.policyText, { agentId: "claude-code", tool: c.name, context: { args, facts: {} } });
-        if (d.errors.length) {
+        // A rule error turns the decision into deny but keeps Cedar's own reasons, which for an allowed call are permits.
+        // So a call is a rule's denial when a forbid matched it, whatever else errored, and unevaluated otherwise.
+        const forbids = d.reasons.filter((id) => ruleTexts([id], rules, reasons).rules[0]?.startsWith("forbid"));
+        if (d.errors.length && !forbids.length) {
           result.unevaluated.push({ tool: c.name, target: targetOf(args), errors: d.errors });
           continue;
         }
         if (d.decision !== "deny") continue;
-        result.denied.push({ session, project: typeof entry.cwd === "string" ? basename(entry.cwd) : "", timestamp, tool: c.name, target: targetOf(args), policyIds: d.reasons, ...ruleTexts(d.reasons, rules, reasons) });
+        const ids = d.errors.length ? forbids : d.reasons;
+        result.denied.push({ session, project: typeof entry.cwd === "string" ? basename(entry.cwd) : "", timestamp, tool: c.name, target: targetOf(args), policyIds: ids, ...ruleTexts(ids, rules, reasons) });
       }
     }
   }
@@ -152,7 +156,7 @@ export function formatSessionAudit(a: SessionAudit, opts: { counts?: boolean } =
     }
   }
   if (a.unevaluated.length) {
-    lines.push("", `${plural(a.unevaluated.length, "more call")} could not be evaluated, such as arguments with a value Cedar cannot hold (a float). The hook denies a call like this; no rule decided it, so it is listed apart:`);
+    lines.push("", `${plural(a.unevaluated.length, "more call")} matched no forbid rule, but a rule errored on ${a.unevaluated.length === 1 ? "it" : "them"}, for example on a value Cedar cannot hold (a float) or an attribute the call does not have. The hook denies a call like this; no rule decided it, so it is listed apart:`);
     if (!opts.counts) for (const u of a.unevaluated) lines.push(`  ${u.tool}: ${clip(u.target, 80)}  (${clip(u.errors[0] ?? "", 80)})`);
   }
   if (a.unreadable) lines.push(`${plural(a.unreadable, "transcript line")} could not be read.`);
