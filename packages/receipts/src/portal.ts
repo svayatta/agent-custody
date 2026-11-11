@@ -577,20 +577,20 @@ export function renderMail(c: MailContent): { html: string; text: string } {
   const p = (v: string, style: string, cls = "ink") => `<p class="${cls}" style="margin:0 0 16px;font:15px/1.55 ${font};${style}">${escapeHtml(v)}</p>`;
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(c.heading)}</title>
-<style>@media (prefers-color-scheme: dark) { .bg { background: #0e1418 !important; } .card { background: #151d23 !important; border-color: #27333c !important; } .ink { color: #e6ecf0 !important; } .mute { color: #9fb0bd !important; } .code { background: #0e1418 !important; border-color: #27333c !important; color: #e6ecf0 !important; } .btn { background: #f59e0b !important; } .btn a { color: #1c1917 !important; } .lnk { color: #f59e0b !important; } }</style></head>
-<body class="bg" style="margin:0;padding:0;background:#f5f7f9">
+<style>@media (prefers-color-scheme: dark) { .bg { background: #0c0a09 !important; } .card { background: #1c1917 !important; border-color: #292524 !important; } .ink { color: #fafaf9 !important; } .mute { color: #a8a29e !important; } .code { background: #0c0a09 !important; border-color: #292524 !important; color: #fafaf9 !important; } .btn { background: #f59e0b !important; } .btn a { color: #1c1917 !important; } .lnk { color: #f59e0b !important; } }</style></head>
+<body class="bg" style="margin:0;padding:0;background:#fafaf9">
 ${c.preheader ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;mso-hide:all">${escapeHtml(c.preheader)}</div>` : ""}
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="bg" style="background:#f5f7f9"><tr><td align="center" style="padding:24px 12px">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="card" style="max-width:560px;background:#ffffff;border:1px solid #d7dfe5;border-radius:8px">
-<tr><td style="padding:24px 28px 4px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding-right:10px"><img src="${LOGO_URL}" width="32" height="32" alt="logo" style="display:block;border:0;border-radius:6px"></td><td class="ink" style="font:700 17px/1 ${font};letter-spacing:.02em;color:#1b2430">agent-custody</td></tr></table></td></tr>
-<tr><td style="padding:20px 28px 8px"><h1 class="ink" style="margin:0 0 16px;font:700 22px/1.3 ${font};color:#1b2430">${escapeHtml(c.heading)}</h1>
-${c.paragraphs.map((v) => p(v, "color:#1b2430")).join("\n")}
-${c.code ? `<pre class="code ink" style="margin:0 0 16px;padding:12px;background:#f5f7f9;border:1px solid #d7dfe5;border-radius:6px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#1b2430;white-space:pre-wrap;word-break:break-word">${escapeHtml(c.code)}</pre>` : ""}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="bg" style="background:#fafaf9"><tr><td align="center" style="padding:24px 12px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="card" style="max-width:560px;background:#ffffff;border:1px solid #e7e5e4;border-radius:8px">
+<tr><td style="padding:24px 28px 4px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding-right:10px"><img src="${LOGO_URL}" width="32" height="32" alt="logo" style="display:block;border:0;border-radius:6px"></td><td class="ink" style="font:700 17px/1 ${font};letter-spacing:.02em;color:#1c1917">agent-custody</td></tr></table></td></tr>
+<tr><td style="padding:20px 28px 8px"><h1 class="ink" style="margin:0 0 16px;font:700 22px/1.3 ${font};color:#1c1917">${escapeHtml(c.heading)}</h1>
+${c.paragraphs.map((v) => p(v, "color:#1c1917")).join("\n")}
+${c.code ? `<pre class="code ink" style="margin:0 0 16px;padding:12px;background:#fafaf9;border:1px solid #e7e5e4;border-radius:6px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#1c1917;white-space:pre-wrap;word-break:break-word">${escapeHtml(c.code)}</pre>` : ""}
 ${button ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 16px"><tr><td class="btn" bgcolor="#b45309" style="background:#b45309;border-radius:6px"><a href="${link(button.url)}" style="display:inline-block;padding:12px 24px;font:600 15px/1 ${font};color:#ffffff;text-decoration:none">${escapeHtml(button.label)}</a></td></tr></table>
-${p("The button does not work? Copy this link into your browser:", "font-size:13px;margin-bottom:4px;color:#5b6b7a", "mute")}<p class="mute" style="margin:0 0 16px;font:13px/1.5 ${font};word-break:break-all"><a href="${link(button.url)}" class="lnk" style="color:#b45309">${escapeHtml(button.url)}</a></p>` : ""}
+${p("The button does not work? Copy this link into your browser:", "font-size:13px;margin-bottom:4px;color:#57534e", "mute")}<p class="mute" style="margin:0 0 16px;font:13px/1.5 ${font};word-break:break-all"><a href="${link(button.url)}" class="lnk" style="color:#b45309">${escapeHtml(button.url)}</a></p>` : ""}
 </td></tr>
-<tr><td style="padding:8px 28px 24px;border-top:1px solid #d7dfe5">
-${footer.map((f) => (typeof f === "string" ? `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#5b6b7a">${escapeHtml(f)}</p>` : `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#5b6b7a"><a href="${link(f.url)}" class="lnk" style="color:#b45309">${escapeHtml(f.label)}</a></p>`)).join("\n")}
+<tr><td style="padding:8px 28px 24px;border-top:1px solid #e7e5e4">
+${footer.map((f) => (typeof f === "string" ? `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#57534e">${escapeHtml(f)}</p>` : `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#57534e"><a href="${link(f.url)}" class="lnk" style="color:#b45309">${escapeHtml(f.label)}</a></p>`)).join("\n")}
 </td></tr></table></td></tr></table></body></html>`;
   return { html, text };
 }
