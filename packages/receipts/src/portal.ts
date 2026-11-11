@@ -8,7 +8,7 @@
 // content-security policy, and every API write requires a JSON body, which with a SameSite=Strict cookie is what
 // keeps a cross-site page from acting as the user. Billing is Stripe Checkout for the team plan; the webhook moves
 // the tenant's plan, and nothing about a card ever passes through here.
-import { createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { postgresCheckpoints, type CheckpointStore } from "./checkpoints.ts";
@@ -73,8 +73,10 @@ export interface PortalUser {
   id: string;
   email: string;
   createdAt: string;
-  /** when the address was confirmed: by a verification link, or by a provider that vouched for it; null until then */
+  /** when the address was confirmed: by a verification link, a password reset, or a provider that vouched for it; null until then */
   emailVerifiedAt?: string | null;
+  /** a session or an MFA cookie signed before this time (ms) is not valid: set by a password reset or change */
+  sessionsAfter?: number;
 }
 
 /** A provider sign-in whose verified email belongs to a password account that never verified its address: refused, never linked (issue #103). */
@@ -146,6 +148,158 @@ export function totpStep(key: Buffer, code: string, now = Date.now()): number | 
   return null;
 }
 
+// ---- QR code (ISO/IEC 18004): byte mode, error correction level M, versions 1 to 40; for the two-step setup ----
+// Level M per version: error correction codewords per block, and the number of blocks.
+const QR_ECC = [0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28];
+const QR_BLOCKS = [0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49];
+const gfMul = (x: number, y: number) => {
+  let z = 0;
+  for (let i = 7; i >= 0; i--) z = ((z << 1) ^ ((z >>> 7) * 0x11d)) ^ (((y >>> i) & 1) * x);
+  return z;
+};
+const qrRawModules = (v: number) => {
+  let n = (16 * v + 128) * v + 64;
+  if (v >= 2) {
+    const a = Math.floor(v / 7) + 2;
+    n -= (25 * a - 10) * a - 55;
+    if (v >= 7) n -= 36;
+  }
+  return n;
+};
+/** The modules of the QR code for `text`, true for dark, without the quiet zone. */
+export function qrMatrix(text: string): boolean[][] {
+  const data = [...Buffer.from(text, "utf8")];
+  let v = 1;
+  const capacity = (v: number) => (Math.floor(qrRawModules(v) / 8) - QR_ECC[v]! * QR_BLOCKS[v]!) * 8;
+  while (4 + (v < 10 ? 8 : 16) + data.length * 8 > capacity(v)) if (++v > 40) throw new Error("too long for a QR code");
+  const bits: number[] = [];
+  const put = (val: number, len: number) => { for (let i = len - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+  put(4, 4);
+  put(data.length, v < 10 ? 8 : 16);
+  for (const b of data) put(b, 8);
+  const cap = capacity(v);
+  put(0, Math.min(4, cap - bits.length));
+  put(0, (8 - (bits.length % 8)) % 8);
+  for (let pad = 0xec; bits.length < cap; pad ^= 0xec ^ 0x11) put(pad, 8);
+  const words = Array.from({ length: bits.length / 8 }, (_, i) => parseInt(bits.slice(i * 8, i * 8 + 8).join(""), 2));
+  // Reed-Solomon over GF(256), and the blocks interleaved
+  const eccLen = QR_ECC[v]!;
+  const nBlocks = QR_BLOCKS[v]!;
+  const div = new Array<number>(eccLen).fill(0);
+  div[eccLen - 1] = 1;
+  for (let i = 0, root = 1; i < eccLen; i++, root = gfMul(root, 2)) for (let j = 0; j < eccLen; j++) div[j] = gfMul(div[j]!, root) ^ (div[j + 1] ?? 0);
+  const raw = Math.floor(qrRawModules(v) / 8);
+  const nShort = nBlocks - (raw % nBlocks);
+  const shortLen = Math.floor(raw / nBlocks);
+  const blocks: number[][] = [];
+  for (let i = 0, k = 0; i < nBlocks; i++) {
+    const dat = words.slice(k, k + shortLen - eccLen + (i < nShort ? 0 : 1));
+    k += dat.length;
+    const rem = new Array<number>(eccLen).fill(0);
+    for (const b of dat) {
+      const f = b ^ rem.shift()!;
+      rem.push(0);
+      div.forEach((c, j) => { rem[j]! ^= gfMul(c, f); });
+    }
+    if (i < nShort) dat.push(0);
+    blocks.push([...dat, ...rem]);
+  }
+  const all: number[] = [];
+  for (let i = 0; i < blocks[0]!.length; i++) blocks.forEach((b, j) => { if (i !== shortLen - eccLen || j >= nShort) all.push(b[i]!); });
+  // function patterns
+  const size = v * 4 + 17;
+  const m = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
+  const fixed = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
+  const set = (x: number, y: number, dark: boolean) => { m[y]![x] = dark; fixed[y]![x] = true; };
+  for (let i = 0; i < size; i++) { set(6, i, i % 2 === 0); set(i, 6, i % 2 === 0); }
+  for (const [cx, cy] of [[3, 3], [size - 4, 3], [3, size - 4]] as const) {
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+      const d = Math.max(Math.abs(dx), Math.abs(dy));
+      if (cx + dx >= 0 && cx + dx < size && cy + dy >= 0 && cy + dy < size) set(cx + dx, cy + dy, d !== 2 && d !== 4);
+    }
+  }
+  const align: number[] = [];
+  if (v > 1) {
+    const n = Math.floor(v / 7) + 2;
+    const step = Math.floor((v * 8 + n * 3 + 5) / (n * 4 - 4)) * 2;
+    align.push(6);
+    for (let pos = size - 7; align.length < n; pos -= step) align.splice(1, 0, pos);
+  }
+  for (const [i, ax] of align.entries()) for (const [j, ay] of align.entries()) {
+    if ((i === 0 && j === 0) || (i === 0 && j === align.length - 1) || (i === align.length - 1 && j === 0)) continue;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) set(ax + dx, ay + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+  }
+  const format = (mask: number) => {
+    const d = mask; // level M is 00
+    let r = d;
+    for (let i = 0; i < 10; i++) r = (r << 1) ^ ((r >>> 9) * 0x537);
+    const f = ((d << 10) | r) ^ 0x5412;
+    const bit = (i: number) => ((f >>> i) & 1) === 1;
+    for (let i = 0; i <= 5; i++) set(8, i, bit(i));
+    set(8, 7, bit(6)); set(8, 8, bit(7)); set(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) set(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
+    set(8, size - 8, true);
+  };
+  format(0);
+  if (v >= 7) {
+    let r = v;
+    for (let i = 0; i < 12; i++) r = (r << 1) ^ ((r >>> 11) * 0x1f25);
+    const f = (v << 12) | r;
+    for (let i = 0; i < 18; i++) {
+      const a = size - 11 + (i % 3), b = Math.floor(i / 3), dark = ((f >>> i) & 1) === 1;
+      set(a, b, dark); set(b, a, dark);
+    }
+  }
+  // the codewords, in the zigzag from the bottom right
+  let i = 0;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert++) for (let j = 0; j < 2; j++) {
+      const x = right - j;
+      const y = ((right + 1) & 2) === 0 ? size - 1 - vert : vert;
+      if (!fixed[y]![x] && i < all.length * 8) { m[y]![x] = ((all[i >>> 3]! >>> (7 - (i & 7))) & 1) === 1; i++; }
+    }
+  }
+  // the mask with the lowest penalty
+  const MASKS = [(x: number, y: number) => (x + y) % 2 === 0, (_x: number, y: number) => y % 2 === 0, (x: number) => x % 3 === 0, (x: number, y: number) => (x + y) % 3 === 0, (x: number, y: number) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x: number, y: number) => ((x * y) % 2) + ((x * y) % 3) === 0, (x: number, y: number) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0, (x: number, y: number) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0];
+  const apply = (k: number) => { for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!fixed[y]![x] && MASKS[k]!(x, y)) m[y]![x] = !m[y]![x]; };
+  const penalty = () => {
+    let p = 0, dark = 0;
+    const lines = [...m.map((r) => r.map(Number).join("")), ...m.map((_, x) => m.map((r) => Number(r[x])).join(""))];
+    for (const l of lines) {
+      for (const run of l.match(/0{5,}|1{5,}/g) ?? []) p += run.length - 2;
+      p += 40 * ((l.match(/(?=10111010000|00001011101)/g) ?? []).length);
+    }
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      if (m[y]![x]) dark++;
+      if (x < size - 1 && y < size - 1 && m[y]![x] === m[y]![x + 1] && m[y]![x] === m[y + 1]![x] && m[y]![x] === m[y + 1]![x + 1]) p += 3;
+    }
+    return p + 10 * (Math.ceil(Math.abs(dark * 20 - size * size * 10) / (size * size)) - 1);
+  };
+  let best = 0, least = Infinity;
+  for (let k = 0; k < 8; k++) {
+    apply(k); format(k);
+    const p = penalty();
+    if (p < least) { least = p; best = k; }
+    apply(k);
+  }
+  apply(best); format(best);
+  return m;
+}
+/** The QR code as an SVG, dark on white with a four-module quiet zone, whatever the page's theme. */
+export function qrSvg(text: string): string {
+  const m = qrMatrix(text);
+  const n = m.length + 8;
+  let d = "";
+  m.forEach((row, y) => row.forEach((dark, x) => { if (dark) d += `M${x + 4} ${y + 4}h1v1h-1z`; }));
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${n} ${n}" shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="${n}" height="${n}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+}
+
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+const recoveryHash = (code: string) => sha256(code.toLowerCase().replace(/[^a-z0-9]/g, ""));
+
 export class PortalStore {
   private readonly client: PostgresLike;
   private readonly p: string;
@@ -182,6 +336,10 @@ export class PortalStore {
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}removed (tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (tenant_id, user_id))`);
         // the address too, so the removal holds after the account is made again under a new id
         await this.client.query(`ALTER TABLE ${p}removed ADD COLUMN IF NOT EXISTS email TEXT`);
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS mfa_recovery TEXT[]`);
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS sessions_after BIGINT`);
+        // the SHA-256 of each password reset token; the token itself is only in the mail
+        await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}resets (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES ${p}users(id), expires_at TIMESTAMPTZ NOT NULL)`);
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}sso (tenant_id TEXT PRIMARY KEY, protocol TEXT NOT NULL, config TEXT NOT NULL, domains TEXT[] NOT NULL, default_role TEXT NOT NULL, enforced BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
       })();
     }
@@ -211,7 +369,7 @@ export class PortalStore {
     return rows[0] ? PortalStore.asUser(rows[0]) : null;
   }
   private static asUser(r: Record<string, unknown>): PortalUser {
-    return { id: String(r.id), email: String(r.email), createdAt: new Date(r.created_at as string).toISOString(), emailVerifiedAt: r.email_verified_at ? new Date(r.email_verified_at as string).toISOString() : null };
+    return { id: String(r.id), email: String(r.email), createdAt: new Date(r.created_at as string).toISOString(), emailVerifiedAt: r.email_verified_at ? new Date(r.email_verified_at as string).toISOString() : null, ...(r.sessions_after != null ? { sessionsAfter: Number(r.sessions_after) } : {}) };
   }
   async markEmailVerified(userId: string, at = new Date()): Promise<void> {
     await this.init();
@@ -283,9 +441,32 @@ export class PortalStore {
     if (!r || !PortalStore.checkPassword(password, String(r.password_hash))) return null;
     return { id: String(r.id), email: String(r.email), createdAt: new Date(r.created_at as string).toISOString() };
   }
+  /** A reset token for the account, good for `ttlMs` and once. Only its hash is stored. */
+  async createPasswordReset(userId: string, ttlMs = 3_600_000): Promise<string> {
+    await this.init();
+    const token = randomBytes(32).toString("base64url");
+    await this.client.query(`INSERT INTO ${this.p}resets (token_hash, user_id, expires_at) VALUES ($1, $2, $3)`, [sha256(token), userId, new Date(Date.now() + ttlMs).toISOString()]);
+    return token;
+  }
+  /** The account of a reset token that has not expired, and the token is gone; null otherwise. */
+  async takePasswordReset(token: string): Promise<string | null> {
+    await this.init();
+    const rows = (await this.client.query(`DELETE FROM ${this.p}resets WHERE token_hash = $1 RETURNING user_id, expires_at`, [sha256(token)])).rows as { user_id: string; expires_at: string }[];
+    return rows[0] && new Date(rows[0].expires_at).getTime() > Date.now() ? rows[0].user_id : null;
+  }
+  /** Sets the password, ends every session and MFA cookie signed before `at`, and drops the account's reset tokens. */
+  async setPassword(userId: string, password: string, at = Date.now()): Promise<void> {
+    await this.init();
+    await this.client.query(`UPDATE ${this.p}users SET password_hash = $2, sessions_after = $3 WHERE id = $1`, [userId, PortalStore.hashPassword(password), at]);
+    await this.client.query(`DELETE FROM ${this.p}resets WHERE user_id = $1`, [userId]);
+  }
+  async unlinkIdentities(userId: string): Promise<void> {
+    await this.init();
+    await this.client.query(`DELETE FROM ${this.p}identities WHERE user_id = $1`, [userId]);
+  }
   async user(id: string): Promise<PortalUser | null> {
     await this.init();
-    const rows = (await this.client.query(`SELECT id, email, created_at, email_verified_at FROM ${this.p}users WHERE id = $1`, [id])).rows as Record<string, unknown>[];
+    const rows = (await this.client.query(`SELECT id, email, created_at, email_verified_at, sessions_after FROM ${this.p}users WHERE id = $1`, [id])).rows as Record<string, unknown>[];
     return rows[0] ? PortalStore.asUser(rows[0]) : null;
   }
   async addMember(userId: string, tenantId: string, role: Role = "owner"): Promise<void> {
@@ -337,10 +518,23 @@ export class PortalStore {
     const rows = (await this.client.query(`DELETE FROM ${this.p}invites WHERE tenant_id = $1 AND email = $2 AND created_at > now() - interval '7 days' RETURNING role`, [tenantId, email])).rows as { role: Role }[];
     return rows[0]?.role ?? null;
   }
-  async mfa(userId: string): Promise<{ secret: string | null; enabled: boolean }> {
+  async mfa(userId: string): Promise<{ secret: string | null; enabled: boolean; recoveryCodes: number }> {
     await this.init();
-    const rows = (await this.client.query(`SELECT mfa_secret, mfa_enabled_at FROM ${this.p}users WHERE id = $1`, [userId])).rows as Record<string, unknown>[];
-    return { secret: rows[0]?.mfa_secret ? String(rows[0].mfa_secret) : null, enabled: !!rows[0]?.mfa_enabled_at };
+    const rows = (await this.client.query(`SELECT mfa_secret, mfa_enabled_at, mfa_recovery FROM ${this.p}users WHERE id = $1`, [userId])).rows as Record<string, unknown>[];
+    return { secret: rows[0]?.mfa_secret ? String(rows[0].mfa_secret) : null, enabled: !!rows[0]?.mfa_enabled_at, recoveryCodes: ((rows[0]?.mfa_recovery as string[] | null) ?? []).length };
+  }
+  /** Replaces the account's recovery codes with ten new ones, returned once; only their hashes are stored. */
+  async newRecoveryCodes(userId: string): Promise<string[]> {
+    await this.init();
+    const codes = Array.from({ length: 10 }, () => base32(randomBytes(8)).slice(0, 12).toLowerCase().replace(/(.{4})(?=.)/g, "$1-"));
+    await this.client.query(`UPDATE ${this.p}users SET mfa_recovery = $2::text[] WHERE id = $1`, [userId, codes.map(recoveryHash)]);
+    return codes;
+  }
+  /** False when the code is not one of the account's unused recovery codes. */
+  async takeRecoveryCode(userId: string, code: string): Promise<boolean> {
+    await this.init();
+    const h = recoveryHash(code);
+    return (await this.client.query(`UPDATE ${this.p}users SET mfa_recovery = array_remove(mfa_recovery, $2) WHERE id = $1 AND $2 = ANY(mfa_recovery) RETURNING id`, [userId, h])).rows.length > 0;
   }
   async setMfaSecret(userId: string, secretHex: string): Promise<boolean> {
     await this.init();
@@ -357,7 +551,7 @@ export class PortalStore {
   }
   async resetMfa(email: string): Promise<boolean> {
     await this.init();
-    return (await this.client.query(`UPDATE ${this.p}users SET mfa_secret = NULL, mfa_enabled_at = NULL, mfa_last_step = NULL WHERE email = $1 RETURNING id`, [email])).rows.length > 0;
+    return (await this.client.query(`UPDATE ${this.p}users SET mfa_secret = NULL, mfa_enabled_at = NULL, mfa_last_step = NULL, mfa_recovery = NULL WHERE email = $1 RETURNING id`, [email])).rows.length > 0;
   }
   /** Replaces the tenant's setting. A domain belongs to one tenant, so a domain that another tenant holds is refused. */
   async setSso(s: SsoSetting): Promise<void> {
@@ -420,7 +614,7 @@ export class PortalStore {
       role = invited;
     }
     if (unverified) {
-      for (const t of ["members", "identities"]) await this.client.query(`DELETE FROM ${this.p}${t} WHERE user_id = $1`, [user!.id]);
+      for (const t of ["members", "identities", "resets"]) await this.client.query(`DELETE FROM ${this.p}${t} WHERE user_id = $1`, [user!.id]);
       await this.client.query(`DELETE FROM ${this.p}users WHERE id = $1`, [user!.id]);
       user = null;
       home = null;
@@ -481,18 +675,19 @@ export class PortalStore {
 const b64u = (b: Buffer) => b.toString("base64url");
 /** `via` records how the user signed in, for example `sso:acme`. */
 export function signSession(secret: string, userId: string, ttlMs = 14 * 86_400_000, via?: string): string {
-  const body = b64u(Buffer.from(JSON.stringify({ u: userId, e: Date.now() + ttlMs, ...(via ? { a: via } : {}) })));
+  const body = b64u(Buffer.from(JSON.stringify({ u: userId, e: Date.now() + ttlMs, i: Date.now(), ...(via ? { a: via } : {}) })));
   return `${body}.${createHmac("sha256", secret).update(body).digest("base64url")}`;
 }
-function readClaims(secret: string, cookie: string | undefined): { u: string; a?: string } | null {
+function readClaims(secret: string, cookie: string | undefined): { u: string; a?: string; i: number } | null {
   if (!cookie) return null;
   const [body, mac] = cookie.split(".");
   if (!body || !mac) return null;
   const expected = createHmac("sha256", secret).update(body).digest("base64url");
   if (expected.length !== mac.length || !timingSafeEqual(Buffer.from(expected), Buffer.from(mac))) return null;
   try {
-    const { u, e, a } = JSON.parse(Buffer.from(body, "base64url").toString()) as { u: string; e: number; a?: string };
-    return typeof u === "string" && typeof e === "number" && e > Date.now() ? { u, ...(typeof a === "string" ? { a } : {}) } : null;
+    const { u, e, a, i } = JSON.parse(Buffer.from(body, "base64url").toString()) as { u: string; e: number; a?: string; i?: number };
+    // a cookie from before the issue time was added counts as issued at 0, so a reset ends it too
+    return typeof u === "string" && typeof e === "number" && e > Date.now() ? { u, i: typeof i === "number" ? i : 0, ...(typeof a === "string" ? { a } : {}) } : null;
   } catch {
     return null;
   }
@@ -608,6 +803,8 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   const registrations = new RateLimiter({ perSecond: 1 / 600, burst: 5 });
   // per account, whatever the address
   const mfaFailures = new RateLimiter({ perSecond: 1 / 120, burst: 5 });
+  const resetsByClient = new RateLimiter({ perSecond: 1 / 600, burst: 5 });
+  const resetsByEmail = new RateLimiter({ perSecond: 1 / 900, burst: 3 });
   const base = o.publicUrl.endsWith("/") ? o.publicUrl : `${o.publicUrl}/`;
   const cookieName = "custody_session";
 
@@ -620,6 +817,12 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
     to: u.email,
     subject: "Verify your email address for agent-custody",
     text: ["Hello,", "", "Please confirm this address for your agent-custody account by opening the link below. It is good for 24 hours.", "", `${portalBase}verify-email?token=${signSession(o.secret, `verify:${u.id}`, 86_400_000)}`, "", "If you did not create an account, ignore this mail; nothing was created in your name that works without it.", "", "agent-custody"].join("\n"),
+  });
+
+  const resetMail = (to: string, token: string) => ({
+    to,
+    subject: "Reset your agent-custody password",
+    text: ["Hello,", "", "Someone asked to reset the password of your agent-custody account. Open the link below to set a new password. The link works one time, for one hour.", "", `${portalBase}reset-password?token=${token}`, "", "If you did not ask for this, ignore this mail. Your password stays the same.", "", "agent-custody"].join("\n"),
   });
 
   const welcomeMail = (to: string, name: string, tenant: string, logId: string) => send({ to, subject: `Your agent-custody log "${tenant}" is ready`, text: [
@@ -664,8 +867,11 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
     // the state between the first step and the code; never a session
     const mfaCookie = (id: string | null) => `custody_mfa=${id ? signSession(o.secret, `mfa:${id}`, 300_000) : ""}; Path=/api/login; HttpOnly; SameSite=Strict${o.trustProxy ? "; Secure" : ""}; Max-Age=${id ? 300 : 0}`;
     const cookies = Object.fromEntries((req.headers.cookie ?? "").split(";").map((c) => c.trim().split("=") as [string, string]).filter(([k]) => k));
-    const userId = readSession(o.secret, cookies[cookieName]);
-    const via = readSessionVia(o.secret, cookies[cookieName]);
+    const claims = readClaims(o.secret, cookies[cookieName]);
+    const userId = claims?.u ?? null;
+    const via = claims?.a ?? null;
+    // a password reset or change ends every session and MFA cookie signed before it
+    const fresh = (u: PortalUser | null, c: { i: number } | null) => (u && c && c.i >= (u.sessionsAfter ?? 0) ? u : null);
     // A page, not a redirect: the session cookie is SameSite=Strict, and a redirect that started at the provider
     // would not carry it. The page's own navigation to / does.
     const signedInPage = (who: string, next: string, setCookies: string[], lead: string) => {
@@ -701,7 +907,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'" });
         const providers = JSON.stringify((["github", "google"] as const).filter((p) => !!o.oauth?.[p]));
-        return void res.end(PORTAL_PAGE.replace("__LOG_BASE__", base.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!)).replace("__PROVIDERS__", providers));
+        return void res.end(PORTAL_PAGE.replace("__LOG_BASE__", base.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!)).replace("__PROVIDERS__", providers).replace("__MAIL__", String(!!o.mail)));
       }
 
       // ---- Stripe's webhook: the only caller that is not a browser with a session ----
@@ -767,11 +973,14 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         return { status: 200, body: { tenant: t.id, logId: t.logId, plan: t.plan, token: minted.token, tokenHash: minted.tokenHash.slice(0, 12), welcome: sheet(t.id, t.logId), setup: setupFor(t.id, t.logId), exportCommand: exportCommand(t.id) } };
       };
       // `on` is the state the account must be in: true to sign in or turn MFA off, false to turn it on.
+      // With MFA on, a recovery code works once in place of a code.
       const checkCode = async (id: string, code: unknown, on: boolean): Promise<Refusal | null> => {
         if (!mfaFailures.take(id)) return { status: 429, body: { error: "too many codes tried for this account; wait a few minutes" } };
         const m = await store.mfa(id);
         if (!m.secret || m.enabled !== on) return { status: 409, body: { error: on ? "MFA is not on for this account" : "start the MFA setup first" } };
-        const step = totpStep(Buffer.from(m.secret, "hex"), String(code ?? ""));
+        const given = String(code ?? "").trim();
+        if (on && !/^[0-9]{6}$/.test(given)) return (await store.takeRecoveryCode(id, given)) ? null : { status: 401, body: { error: "that code is not valid, or was used already" } };
+        const step = totpStep(Buffer.from(m.secret, "hex"), given);
         if (step === null || !(await store.takeMfaStep(id, step))) return { status: 401, body: { error: "that code is not valid, or was used already" } };
         if (!on) await store.enableMfa(id);
         return null;
@@ -907,7 +1116,7 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         if (!provider[2]) {
           // ?link=1 from a signed-in session links the provider to that account instead of signing in; the state says so
           const linking = url.searchParams.get("link") === "1";
-          if (linking && !userId) return json(401, { error: "sign in first, then link a provider from the account page" });
+          if (linking && !fresh(userId ? await store.user(userId) : null, claims)) return json(401, { error: "sign in first, then link a provider from the account page" });
           const state = signSession(o.secret, `oauth:${name}:${linking ? `link:${userId}:` : ""}${randomBytes(16).toString("hex")}`, 600_000);
           const authorize = name === "github"
             ? `https://github.com/login/oauth/authorize?${new URLSearchParams({ client_id: conf.clientId, redirect_uri: redirectUri, scope: "user:email", state })}`
@@ -951,7 +1160,7 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         let user: PortalUser;
         if (linkTo) {
           // linking: the signed state records the session that started it (the Strict cookie does not come back from the provider), so the provider's email need not match; when it does, it also confirms the address
-          const owner = await store.user(linkTo);
+          const owner = fresh(await store.user(linkTo), readClaims(o.secret, state));
           if (!owner) return json(401, { error: "the account that started the link no longer exists" }, { "set-cookie": stateCookie(null) });
           await store.linkIdentity(name, subject, email, owner.id);
           if (email === owner.email) await store.markEmailVerified(owner.id);
@@ -982,24 +1191,75 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
       if (req.method === "POST" && url.pathname === "/api/login/mfa") {
         if (!loginFailures.take(`login:${addr}`)) return json(429, { error: "too many attempts; wait a minute" });
         const b = await jsonBody();
-        const who = readSession(o.secret, cookies.custody_mfa);
-        const half = who?.startsWith("mfa:") ? await store.user(who.slice(4)) : null;
+        const half_ = readClaims(o.secret, cookies.custody_mfa);
+        const half = half_?.u.startsWith("mfa:") ? fresh(await store.user(half_.u.slice(4)), half_) : null;
         if (!half) return json(401, { error: "the password step expired; sign in again" });
         const refused = await checkCode(half.id, b.code, true);
         if (refused) return json(refused.status, refused.body);
         return json(200, { email: half.email }, { "set-cookie": [setCookie(signSession(o.secret, half.id)), mfaCookie(null)] });
       }
+      // ---- password reset by mail: the same answer for every address, and the token proves the mailbox ----
+      if (req.method === "POST" && url.pathname === "/api/password/forgot") {
+        const email = String((await jsonBody()).email ?? "").trim().toLowerCase();
+        if (!o.mail) return json(503, { error: "mail is not configured on this portal" });
+        if (!EMAIL.test(email)) return json(400, { error: "a valid email address is needed" });
+        if (!resetsByClient.take(`reset:${addr}`)) return json(429, { error: "too many reset requests from this address; try again later" });
+        // the lookup runs after the answer, so the time to answer does not tell whether the address has an account
+        if (resetsByEmail.take(email)) void (async () => {
+          const u = await store.userByEmail(email);
+          // a member of a tenant that enforces single sign-on gets no password
+          if (!u || (await enforcedFor(u.id))) return;
+          await send(resetMail(u.email, await store.createPasswordReset(u.id)));
+          log(`agent-custody portal: ${u.email} asked for a password reset`);
+        })().catch((e) => log(`agent-custody portal: a password reset failed: ${e instanceof Error ? e.message : String(e)}`));
+        return json(200, { ok: true });
+      }
+      if (req.method === "GET" && url.pathname === "/reset-password") {
+        const token = url.searchParams.get("token") ?? "";
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; base-uri 'none'" });
+        return void res.end(`${resultPage("Set a new password", `<style>form { display: grid; gap: .75rem; margin-top: 1rem; } [hidden] { display: none; } label { display: grid; gap: .35rem; font-weight: 600; font-size: .9rem; } label span { font-weight: 400; color: var(--ink2); font-size: .82rem; } input { font: inherit; padding: .6rem .8rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); } button { font: inherit; font-weight: 600; padding: .6rem .9rem; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }</style>
+<form id="f"><label>New password<input id="pw" type="password" autocomplete="new-password" minlength="10" required><span>At least ten characters.</span></label><button type="submit">Set the password</button></form><p id="m" aria-live="polite"></p>`)}<script>
+document.getElementById("f").onsubmit = async (e) => {
+  e.preventDefault();
+  const m = document.getElementById("m");
+  const r = await fetch("/api/password/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: ${JSON.stringify(token).replace(/</g, "\\u003c")}, password: document.getElementById("pw").value }) });
+  const b = await r.json().catch(() => ({}));
+  if (r.ok) { document.getElementById("f").hidden = true; m.innerHTML = "Your password is set. Other sessions of this account are signed out. <a href='/'>Sign in</a>."; }
+  else m.textContent = b.error || "The password was not set.";
+};
+</script>`);
+      }
+      if (req.method === "POST" && url.pathname === "/api/password/reset") {
+        const b = await jsonBody();
+        const password = String(b.password ?? "");
+        // checked before the token is used, so a short password does not spend the link
+        if (password.length < 10) return json(400, { error: "the password needs at least ten characters" });
+        const id = await store.takePasswordReset(String(b.token ?? ""));
+        const u = id ? await store.user(id) : null;
+        if (!u) return json(400, { error: "this reset link is not valid, was used already, or is older than one hour; ask for a new one" });
+        if (await enforcedFor(u.id)) return json(403, { error: ENFORCED });
+        await store.setPassword(u.id, password);
+        // The link proves the mailbox, and the new password replaces any password set before that proof. A provider
+        // linked before the address was proved was linked by whoever held that password, so it goes.
+        if (!u.emailVerifiedAt) {
+          await store.unlinkIdentities(u.id);
+          await store.markEmailVerified(u.id);
+        }
+        log(`agent-custody portal: ${u.email} reset their password`);
+        // no session here: the user signs in with the new password, and two-step sign-in still applies
+        return json(200, { ok: true });
+      }
       if (req.method === "POST" && url.pathname === "/api/logout") return json(200, { ok: true }, { "set-cookie": setCookie(null) });
 
       // ---- everything below needs a session ----
       if (!url.pathname.startsWith("/api/")) return json(404, { error: "not found" });
-      const user = userId ? await store.user(userId) : null;
+      const user = fresh(userId ? await store.user(userId) : null, claims);
       if (!user) return json(401, { error: "sign in first" });
       if (req.method !== "GET" && !(req.headers["content-type"] ?? "").startsWith("application/json")) return json(415, { error: "expected a JSON body" });
       const tenantId = await store.tenantOf(user.id);
       const ssoConf = tenantId ? await store.ssoOf(tenantId) : null;
       if (ssoConf?.enforced && via !== `sso:${tenantId}`) return json(401, { error: ENFORCED });
-      const account = async () => ({ emailVerified: !!user.emailVerifiedAt, identities: await store.identities(user.id), providers: (["github", "google"] as const).filter((p) => !!o.oauth?.[p]), mail: !!o.mail, mfa: (await store.mfa(user.id)).enabled });
+      const account = async () => { const m = await store.mfa(user.id); return { emailVerified: !!user.emailVerifiedAt, identities: await store.identities(user.id), providers: (["github", "google"] as const).filter((p) => !!o.oauth?.[p]), mail: !!o.mail, mfa: m.enabled, recoveryCodes: m.recoveryCodes }; };
       if (req.method === "POST" && url.pathname === "/api/verify-email") {
         const who = readSession(o.secret, String((await jsonBody()).token ?? ""));
         if (!who?.startsWith("verify:")) return json(400, { error: "this verification link is not valid or has expired" });
@@ -1020,7 +1280,8 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         const secret = randomBytes(20);
         if (!(await store.setMfaSecret(user.id, secret.toString("hex")))) return json(409, { error: "MFA is on already; turn it off first" });
         const b32 = base32(secret);
-        return json(200, { secret: b32, uri: `otpauth://totp/agent-custody:${encodeURIComponent(user.email)}?secret=${b32}&issuer=agent-custody` });
+        const uri = `otpauth://totp/agent-custody:${encodeURIComponent(user.email)}?secret=${b32}&issuer=agent-custody`;
+        return json(200, { secret: b32, uri, qr: qrSvg(uri) });
       }
       if (req.method === "POST" && (url.pathname === "/api/mfa/enable" || url.pathname === "/api/mfa/disable")) {
         const on = url.pathname.endsWith("/disable");
@@ -1028,7 +1289,26 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         if (refused) return json(refused.status, refused.body);
         if (on) await store.resetMfa(user.email);
         log(`agent-custody portal: ${user.email} turned MFA ${on ? "off" : "on"}`);
-        return json(200, { mfa: !on });
+        return json(200, { mfa: !on, ...(on ? {} : { recoveryCodes: await store.newRecoveryCodes(user.id) }) });
+      }
+      // a code is needed, so a stolen session cannot take the codes
+      if (req.method === "POST" && url.pathname === "/api/mfa/recovery") {
+        const refused = await checkCode(user.id, (await jsonBody()).code, true);
+        if (refused) return json(refused.status, refused.body);
+        log(`agent-custody portal: ${user.email} made new recovery codes`);
+        return json(200, { recoveryCodes: await store.newRecoveryCodes(user.id) });
+      }
+      if (req.method === "POST" && url.pathname === "/api/password/change") {
+        const b = await jsonBody();
+        const password = String(b.password ?? "");
+        if (ssoConf?.enforced) return json(409, { error: "this tenant signs in through its identity provider; its members have no password here" });
+        if (password.length < 10) return json(400, { error: "the new password needs at least ten characters" });
+        if (!loginFailures.take(`password:${user.id}`)) return json(429, { error: "too many attempts; wait a minute" });
+        if (!(await store.authenticate(user.email, String(b.current ?? "")))) return json(401, { error: "the current password is not correct" });
+        await store.setPassword(user.id, password);
+        log(`agent-custody portal: ${user.email} changed their password`);
+        // this browser stays signed in; every other session ends
+        return json(200, { ok: true }, { "set-cookie": setCookie(signSession(o.secret, user.id, undefined, via ?? undefined)) });
       }
       // The address must be verified: otherwise anyone who registers the invited address with a password gets in.
       if (req.method === "POST" && url.pathname === "/api/invites/accept") {
@@ -1328,6 +1608,13 @@ const PORTAL_PAGE = `<!doctype html>
   #authNote { margin: 1rem 0 0; padding: .65rem .85rem; border-radius: 8px; background: var(--accent-bg); color: var(--ink); font-size: .88rem; }
   #ssoForm { margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); } #ssoForm button { margin-top: .25rem; }
   .auth .swap { text-align: center; margin: 1.25rem 0 0; }
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: .25rem; margin: 0 0 1.5rem; padding: .25rem; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); }
+  .tabs button { background: transparent; border: 0; color: var(--ink2); padding: .5rem; border-radius: 7px; } .tabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+  .tabs button:not([aria-selected="true"]):hover { color: var(--ink); background: transparent; }
+  .auth .forgot { position: absolute; top: 0; right: 0; font-weight: 400; font-size: .82rem; }
+  .qr { width: 12rem; max-width: 100%; margin: .5rem 0; } .qr svg { display: block; width: 100%; height: auto; border-radius: 6px; }
+  .codes { columns: 2; font-family: var(--mono); }
+  #firstSetup pre { overflow-wrap: anywhere; }
   .auth .fine { margin: 1.5rem calc(-1 * var(--pad)) -1.75rem; padding: 1rem var(--pad); border-top: 1px solid var(--line); border-radius: 0 0 14px 14px; background: var(--bg); font-size: .82rem; line-height: 1.55; }
   .auth .msg { min-height: 0; margin: .75rem 0 0; font-size: .9rem; } .auth .msg:empty { margin: 0; }
   .auth .msg.err:not(:empty), .auth .msg.ok:not(:empty) { padding: .55rem .8rem; border-radius: 8px; border: 1px solid; }
@@ -1372,25 +1659,33 @@ const PORTAL_PAGE = `<!doctype html>
   ${MARK}
   <p class="eyebrow">Hosted log</p>
   <h1 id="authTitle">Sign in</h1>
+  <div class="tabs" id="authTabs" role="tablist"><button type="button" role="tab" id="tabSignIn" aria-selected="true">Sign in</button><button type="button" role="tab" id="tabSignUp" aria-selected="false">Sign up</button></div>
   <div id="providers" class="providers" hidden></div>
   <form id="authForm">
     <label>Work email<input id="email" type="email" autocomplete="email" required></label>
-    <label>Password<input id="password" type="password" autocomplete="current-password" minlength="10" required></label>
+    <label>Password<button class="link forgot" id="forgotOpen" type="button" hidden>Forgot password?</button><input id="password" type="password" autocomplete="current-password" minlength="10" required><span class="hint" id="pwRule" hidden>At least ten characters.</span></label>
     <button id="authGo" type="submit">Sign in</button>
     <p class="msg" id="authMsg" aria-live="polite"></p>
   </form>
+  <form id="forgotForm" hidden>
+    <p class="muted">Enter the address of your account. We send a link to set a new password. The link works for one hour.</p>
+    <label>Work email<input id="forgotEmail" type="email" autocomplete="email" required></label>
+    <button type="submit">Send the link</button>
+    <p class="msg" id="forgotMsg" aria-live="polite"></p>
+    <p class="muted swap"><button class="link" id="forgotBack" type="button">Back to sign in</button></p>
+  </form>
   <form id="mfaForm" hidden>
-    <p class="muted">Your account has two-step sign-in. Enter the six-digit code from your authenticator app.</p>
-    <label>Code<input id="mfaCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+    <p class="muted">Your account has two-step sign-in. Enter the six-digit code from your authenticator app, or one of your recovery codes.</p>
+    <label>Code<input id="mfaCode" autocomplete="one-time-code" maxlength="20" required></label>
     <button type="submit">Verify</button>
     <p class="msg" id="mfaMsg" aria-live="polite"></p>
   </form>
   <p class="muted" id="authNote" hidden>Next you name your organisation and get your tenant and its first key. Two minutes.</p>
-  <form id="ssoForm" action="/auth/sso" method="get">
+  <p class="muted swap" id="ssoSwap"><button class="link" id="ssoOpen" type="button">Sign in with single sign-on</button></p>
+  <form id="ssoForm" action="/auth/sso" method="get" hidden>
     <label>Work email for single sign-on<input name="email" type="email" autocomplete="email" required></label>
-    <button class="quiet" type="submit">Sign in with single sign-on</button>
+    <button class="quiet" type="submit">Continue with single sign-on</button>
   </form>
-  <p class="muted swap"><button class="link" id="authSwap" type="button">Create an account instead</button></p>
   <p class="muted fine">The free plan is ten thousand appends a month, no card. Your gateway sends only hashes; nothing you log here can be read by us.</p>
   </div>
 </section>
@@ -1415,8 +1710,6 @@ const PORTAL_PAGE = `<!doctype html>
     <label>Company or organisation<input id="company" autocomplete="organization" maxlength="160" required></label>
     <label>Tenant id<input id="tenant" placeholder="acme" pattern="[a-z0-9][a-z0-9\\-]{1,38}[a-z0-9]" required><span class="hint">A short name for your organisation, filled in from the company name; change it if you like. It becomes the path of your log, which your gateway config and your auditors will use: <code id="tenantPreview">__LOG_BASE__t/&lt;tenant&gt;/</code></span></label>
     <label>Your role <span class="opt">optional</span><input id="role" autocomplete="organization-title" maxlength="120" placeholder="Head of Platform"></label>
-    <label>Phone <span class="opt">optional</span><input id="phone" type="tel" autocomplete="tel" maxlength="40" placeholder="+44 20 …"></label>
-    <label>Telegram username <span class="opt">optional</span><input id="telegram" maxlength="40" placeholder="@yourname"><span class="hint">Your handle in Telegram, under Settings, if you would rather we reach you there than by email.</span></label>
     <button type="submit">Create tenant</button>
     <p class="msg" id="onboardMsg" aria-live="polite"></p>
   </form>
@@ -1427,7 +1720,7 @@ const PORTAL_PAGE = `<!doctype html>
   <div class="side">
   ${MARK}
   <h1>Your tenant is ready</h1>
-  <p class="muted">Three steps to your first receipt in this log. Everything here is under <b>Setup</b> in the dashboard whenever you need it again.</p>
+  <p class="muted">That was step 1 of 4. Steps 2 to 4 take you to your first receipt in this log. Everything here is under <b>Setup</b> in the dashboard whenever you need it again.</p>
   <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst">Copy key</button></div>
   <p><button id="toDash">Go to the dashboard</button></p>
   </div>
@@ -1452,7 +1745,8 @@ const PORTAL_PAGE = `<!doctype html>
   <main>
     <div data-pane="overview">
       <h1>Overview</h1>
-      <div class="cards">
+      <div class="panel" id="firstReceipt" hidden><h2>Send your first receipt</h2><p>Your log is empty. Put your API key where your gateway runs, point the gateway at this log, and run your agent once. The numbers show here after the first append.</p><p><a href="#setup" data-view="setup">Open Setup</a></p></div>
+      <div class="cards" id="ovCards">
         <div class="card" id="cUsed"><div class="k">Appends this month</div><div class="v" id="vUsed">–</div><div class="s" id="sUsed"></div></div>
         <div class="card" id="cSize"><div class="k">Receipts in your log</div><div class="v" id="vSize">–</div><div class="s">leaf hashes, all time</div></div>
         <div class="card" id="cKeys"><div class="k">Live keys</div><div class="v" id="vKeys">–</div><div class="s" id="sKeys"></div></div>
@@ -1496,18 +1790,30 @@ const PORTAL_PAGE = `<!doctype html>
       <p class="msg" id="membersMsg"></p>
     </div>
     <div data-pane="account" hidden>
-      <h1>Two-step sign-in</h1>
+      <h1>Account</h1>
+      <h2>Two-step sign-in</h2>
       <p class="muted">Two-step sign-in is <b id="mfaState">off</b>. With it on, a password or a GitHub or Google sign-in is followed by a six-digit code from an authenticator app (TOTP).</p>
       <div class="panel">
         <button id="mfaStart" type="button">Set up</button>
         <div id="mfaSetupBox" hidden>
-          <p>Add this secret to your authenticator app (enter it by hand, or paste the address), then type a code from the app.</p>
-          <p class="tok" id="mfaSecret"></p><p class="tok" id="mfaUri"></p>
+          <p>Scan this QR code with your authenticator app, then type a code from the app.</p>
+          <div class="qr" id="mfaQr"></div>
+          <p class="muted">Cannot scan? Type this secret into the app by hand:</p>
+          <p class="tok" id="mfaSecret"></p>
+          <details><summary class="muted">Show the setup address</summary><p class="tok" id="mfaUri"></p></details>
           <form id="mfaOnForm"><label>Code<input id="mfaOnCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><button type="submit">Turn on</button></form>
         </div>
-        <form id="mfaOffForm" hidden><label>Current code<input id="mfaOffCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><button type="submit" class="quiet">Turn off</button></form>
+        <div id="recoveryBox" class="once" hidden><p><b>Your recovery codes, shown once.</b> Keep them in a safe place. Each code works one time in place of a code from the app, if you lose your phone. We keep only their hashes.</p><div class="snip"><pre class="codes" id="recoveryCodes"></pre><button type="button" class="quiet" data-copy>Copy</button></div></div>
+        <form id="mfaOffForm" hidden><label>Current code or recovery code<input id="mfaOffCode" autocomplete="one-time-code" maxlength="20" required></label><button type="submit" class="quiet">Turn off</button></form>
+        <form id="recoveryForm" hidden><p class="muted"><span id="recoveryLeft"></span> Make new codes to replace all of them.</p><label>Current code<input id="recoveryCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><button type="submit" class="quiet">Make new recovery codes</button></form>
       </div>
       <p class="msg" id="accountMsg"></p>
+      <h2>Password</h2>
+      <div class="panel">
+        <form id="pwForm"><label>Current password<input id="pwCurrent" type="password" autocomplete="current-password" required></label><label>New password<input id="pwNew" type="password" autocomplete="new-password" minlength="10" required><span class="hint">At least ten characters.</span></label><button type="submit">Change password</button></form>
+        <p class="muted">A change signs out every other session of this account. An account made through GitHub, Google, or single sign-on has a random password that nobody knows<span id="pwNoMail">.</span><span id="pwMail" hidden>: to set one, sign out and use <b>Forgot password?</b> on the sign-in page.</span></p>
+        <p class="msg" id="pwMsg"></p>
+      </div>
     </div>
     <div data-pane="billing" hidden>
       <h1>Billing</h1>
@@ -1545,6 +1851,7 @@ const PORTAL_PAGE = `<!doctype html>
   const note = (id, text, ok) => { $(id).className = "msg " + (ok ? "ok" : "err"); $(id).textContent = text; };
   const show = (id) => { for (const s of ["auth", "onboard", "welcome", "app"]) $(s).hidden = s !== id; };
   const PROVIDERS = __PROVIDERS__;
+  const MAIL = __MAIL__;
   const ICONS = { github: "<svg viewBox='0 0 16 16' aria-hidden='true'><path fill='currentColor' d='M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z'/></svg>", google: "<svg viewBox='0 0 48 48' aria-hidden='true'><path fill='#EA4335' d='M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z'/><path fill='#4285F4' d='M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z'/><path fill='#FBBC05' d='M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z'/><path fill='#34A853' d='M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z'/></svg>" };
   if (PROVIDERS.length) { $("providers").innerHTML = PROVIDERS.map((p) => "<a href='/auth/" + p + "'>" + ICONS[p] + "Continue with " + (p === "github" ? "GitHub" : "Google") + "</a>").join("") + "<p class=or>or with email</p>"; $("providers").hidden = false; }
   const view = (name) => {
@@ -1558,7 +1865,25 @@ const PORTAL_PAGE = `<!doctype html>
   const previewTenant = () => { $("tenantPreview").textContent = LOG_BASE + "t/" + ($("tenant").value || "<tenant>") + "/"; };
   $("company").oninput = () => { if (!tenantEdited) { $("tenant").value = slug($("company").value); previewTenant(); } };
   $("tenant").oninput = () => { tenantEdited = $("tenant").value !== ""; previewTenant(); };
-  $("authSwap").onclick = () => { registering = !registering; $("authTitle").textContent = registering ? "Create an account" : "Sign in"; $("authGo").textContent = registering ? "Create account" : "Sign in"; $("authNote").hidden = !registering; $("password").autocomplete = registering ? "new-password" : "current-password"; $("authSwap").textContent = registering ? "I already have an account" : "Create an account instead"; };
+  const authTab = (signUp) => {
+    registering = signUp;
+    $("tabSignIn").setAttribute("aria-selected", String(!signUp)); $("tabSignUp").setAttribute("aria-selected", String(signUp));
+    $("authTitle").textContent = signUp ? "Create an account" : "Sign in"; $("authGo").textContent = signUp ? "Create account" : "Sign in";
+    $("authNote").hidden = !signUp; $("pwRule").hidden = !signUp; $("forgotOpen").hidden = signUp || !MAIL; $("ssoSwap").hidden = signUp; $("ssoForm").hidden = true;
+    $("password").autocomplete = signUp ? "new-password" : "current-password";
+    $("authForm").hidden = false; $("forgotForm").hidden = true; $("authMsg").textContent = "";
+  };
+  $("tabSignIn").onclick = () => authTab(false);
+  $("tabSignUp").onclick = () => authTab(true);
+  authTab(false);
+  $("ssoOpen").onclick = () => { $("ssoSwap").hidden = true; $("ssoForm").hidden = false; $("ssoForm").querySelector("input").focus(); };
+  $("forgotOpen").onclick = () => { $("authForm").hidden = true; $("ssoSwap").hidden = true; $("authTitle").textContent = "Reset your password"; $("forgotForm").hidden = false; $("forgotEmail").value = $("email").value; $("forgotMsg").textContent = ""; $("forgotEmail").focus(); };
+  $("forgotBack").onclick = () => authTab(false);
+  $("forgotForm").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("POST", "/api/password/forgot", { email: $("forgotEmail").value }); note("forgotMsg", "If an account has this address, we sent it a link to set a new password. The link works for one hour.", true); }
+    catch (err) { note("forgotMsg", err.message, false); }
+  };
   $("authForm").onsubmit = async (e) => {
     e.preventDefault(); $("authMsg").className = "msg"; $("authMsg").textContent = "";
     try {
@@ -1567,7 +1892,7 @@ const PORTAL_PAGE = `<!doctype html>
       await enter();
     } catch (err) { $("authMsg").className = "msg err"; $("authMsg").textContent = err.message; }
   };
-  const askCode = () => { $("authForm").hidden = true; $("ssoForm").hidden = true; $("providers").hidden = true; $("authSwap").parentElement.hidden = true; $("authTitle").textContent = "Enter your code"; $("mfaForm").hidden = false; $("mfaCode").focus(); };
+  const askCode = () => { $("authForm").hidden = true; $("ssoForm").hidden = true; $("ssoSwap").hidden = true; $("providers").hidden = true; $("authTabs").hidden = true; $("authTitle").textContent = "Enter your code"; $("mfaForm").hidden = false; $("mfaCode").focus(); };
   $("mfaForm").onsubmit = async (e) => {
     e.preventDefault();
     try { await api("POST", "/api/login/mfa", { code: $("mfaCode").value }); location.href = "/"; }
@@ -1576,8 +1901,8 @@ const PORTAL_PAGE = `<!doctype html>
   $("onboardForm").onsubmit = async (e) => {
     e.preventDefault(); $("onboardMsg").className = "msg"; $("onboardMsg").textContent = "";
     try {
-      const r = await api("POST", "/api/onboard", { tenant: $("tenant").value, name: $("name").value, company: $("company").value, role: $("role").value, phone: $("phone").value, telegram: $("telegram").value });
-      $("firstToken").textContent = r.token; renderSetup($("firstSetup"), r.setup, true); show("welcome");
+      const r = await api("POST", "/api/onboard", { tenant: $("tenant").value, name: $("name").value, company: $("company").value, role: $("role").value });
+      $("firstToken").textContent = r.token; renderSetup($("firstSetup"), Object.assign({}, r.setup, { env: "export AGENT_CUSTODY_LOG_TOKEN=" + r.token }), true); show("welcome");
     } catch (err) { $("onboardMsg").className = "msg err"; $("onboardMsg").textContent = err.message; }
   };
   $("signoutOnboard").onclick = async (e) => { e.preventDefault(); await api("POST", "/api/logout", {}); location.hash = ""; show("auth"); };
@@ -1590,12 +1915,13 @@ const PORTAL_PAGE = `<!doctype html>
   const snip = (text) => "<div class=snip><pre>" + esc(text) + "</pre><button type=button class=quiet data-copy>Copy</button></div>";
   const step = (n, title, body) => "<div class=step><span class=n>" + n + "</span><div><h3>" + title + "</h3>" + body + "</div></div>";
   const renderSetup = (el, s, atRegistration) => {
+    const n = atRegistration ? 1 : 0;
     el.innerHTML =
-      step(1, "Keep the key where your gateway runs", (atRegistration ? "<p>Your first key is shown once; we keep only its hash. Put it in the environment of the machine that runs your gateway or SDK:</p>" : "<p>Your key was shown once at registration. If it is gone, mint another under <a href=\\"#keys\\" data-view=\\"keys\\">API keys</a>. It lives in the environment of the machine that runs your gateway or SDK:</p>") + snip(s.env)) +
-      step(2, "Point your gateway or SDK at your log", "<p>Add this to <code>gateway.json</code> or <code>sdk.json</code>. <code>hashOnly</code> means this log receives the hash of each receipt and never the receipt.</p>" + snip(s.config)) +
-      step(3, "Send the first receipt", "<p>Run your agent through the gateway once. The <a href=\\"#overview\\" data-view=\\"overview\\">Overview</a> shows the append within seconds, and the first signed checkpoint follows within minutes. New to the gateway? <a href=\\"https://agent-custody.dev/guide/getting-started\\">Getting started</a> takes ten minutes.</p>") +
-      step(4, "Hand this to whoever verifies your receipts", "<p>Both commands fetch this log's published keys and pin them; <code>--log-id</code> makes sure the tree heads are this log's.</p>" + snip(s.verify) + snip(s.audit)) +
-      step(5, "Take your data, any time", "<p>Every leaf hash, the signed head, the keys, the checkpoints, your usage, and the actions taken on your tenant, checked against each other and written as a log copy the verifier reads offline.</p>" + snip(s.export)) +
+      step(n + 1, "Keep the key where your gateway runs", (atRegistration ? "<p>Your first key is shown once; we keep only its hash. Put it in the environment of the machine that runs your gateway or SDK. The command below holds your key:</p>" : "<p>Your key was shown once at registration. If it is gone, mint another under <a href=\\"#keys\\" data-view=\\"keys\\">API keys</a>. It lives in the environment of the machine that runs your gateway or SDK:</p>") + snip(s.env)) +
+      step(n + 2, "Point your gateway or SDK at your log", "<p>Add this to <code>gateway.json</code> or <code>sdk.json</code>. <code>hashOnly</code> means this log receives the hash of each receipt and never the receipt.</p>" + snip(s.config)) +
+      step(n + 3, "Send the first receipt", "<p>Run your agent through the gateway once. The <a href=\\"#overview\\" data-view=\\"overview\\">Overview</a> shows the append within seconds, and the first signed checkpoint follows within minutes. New to the gateway? <a href=\\"https://agent-custody.dev/guide/getting-started\\">Getting started</a> takes ten minutes.</p>") +
+      "<h2>After the first receipt</h2>" + step("", "Hand this to whoever verifies your receipts", "<p>Both commands fetch this log's published keys and pin them; <code>--log-id</code> makes sure the tree heads are this log's.</p>" + snip(s.verify) + snip(s.audit)) +
+      step("", "Take your data, any time", "<p>Every leaf hash, the signed head, the keys, the checkpoints, your usage, and the actions taken on your tenant, checked against each other and written as a log copy the verifier reads offline.</p>" + snip(s.export)) +
       "<h2>Your log's addresses</h2><div class=panel><table class=addr><tbody>" + [["Your log", s.log], ["Log id on tree heads", s.logId], ["Your checkpoints", s.checkpoints || "published after your first append"], ["The log's keys", s.keys + (s.keyid ? " (current keyid " + s.keyid.slice(0, 12) + "…)" : "")]].map(([k, v]) => "<tr><th>" + esc(k) + "</th><td class=mono>" + esc(v) + "</td></tr>").join("") + "</tbody></table></div>" +
       "<h2>What this log does not do</h2><p class=muted>Hold receipt contents; forge a receipt, since your gateway key signs those; or, today, countersign with a second independent witness. <a href=\\"https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not\\">What a receipt proves and what it does not.</a></p>";
   };
@@ -1612,10 +1938,11 @@ const PORTAL_PAGE = `<!doctype html>
     $("cUsed").className = "card " + (o.quota === null ? "ok" : pct >= 1 ? "bad" : pct >= .8 ? "warn" : "ok");
     $("vUsed").textContent = fmt(o.used); $("sUsed").textContent = o.quota === null ? "no allowance on " + o.plan : "of " + fmt(o.quota) + " on " + o.plan + (pct >= 1 ? ": appends are refused until next month" : "");
     $("vSize").textContent = fmt(o.treeSize);
+    $("firstReceipt").hidden = o.treeSize > 0; $("ovCards").hidden = o.treeSize === 0;
     const live = o.keys.filter((k) => !k.revokedAt).length; $("vKeys").textContent = live; $("sKeys").textContent = o.keys.length - live + " revoked"; $("nKeys").textContent = live;
     $("cCp").className = "card " + (o.latestCheckpoint ? (Date.now() - Date.parse(o.latestCheckpoint.signedAt) < 7 * 3600e3 ? "ok" : "warn") : "warn");
     $("vCp").textContent = o.latestCheckpoint ? "size " + fmt(o.latestCheckpoint.treeSize) : "none yet"; $("sCp").textContent = o.latestCheckpoint ? "signed " + ago(o.latestCheckpoint.signedAt) : "published after your first append";
-    $("urls").innerHTML = [["Append here", o.urls.log], ["Log id on tree heads", o.logId], ["The log's keys", o.urls.keys], ["Your checkpoints", o.urls.checkpoints || "(not published)"], ["Current root", o.rootHash || "(empty)"]].map(([k, v]) => "<tr><th>" + esc(k) + "</th><td class=mono>" + esc(v) + "</td></tr>").join("");
+    $("urls").innerHTML = [["Append here", o.urls.log], ["Log id on tree heads", o.logId], ["The log's keys", o.urls.keys], ["Your checkpoints", o.urls.checkpoints || "(not published)"], ["Current root", o.rootHash || "none until the first append"]].map(([k, v]) => "<tr><th>" + esc(k) + "</th><td class=mono>" + esc(v) + "</td></tr>").join("");
     $("audit").innerHTML = o.audit.map((e) => "<tr><td>" + esc(e.at.replace("T", " ").slice(0, 16)) + "</td><td class=mono>" + esc(e.actor) + "</td><td>" + esc(e.action) + "</td><td class=muted>" + esc(Object.entries(e.detail).map(([k, v]) => k + "=" + v).join(" ")) + "</td></tr>").join("") || "<tr><td colspan=4 class=muted>nothing yet</td></tr>";
     const max = Math.max(1, ...o.months.map((m) => m.appends));
     $("bars").innerHTML = o.months.map((m) => "<div class=bar><span class=mono>" + fmt(m.appends) + "</span><i style=\\"height:" + Math.max(2, Math.round(100 * m.appends / max)) + "%\\"></i><b>" + esc(m.month.slice(2)) + "</b></div>").join("");
@@ -1629,10 +1956,15 @@ const PORTAL_PAGE = `<!doctype html>
     const mg = $("manage"); if (mg) mg.onclick = async () => { try { const r = await api("POST", "/api/billing-portal", {}); location.href = r.url; } catch (err) { $("billingMsg").className = "msg err"; $("billingMsg").textContent = err.message; } };
   };
   const load = async () => { render(await api("GET", "/api/overview")); await loadPolicies(); await loadMembers(); };
-  const mfaShow = (on) => { $("mfaState").textContent = on ? "on" : "off"; $("mfaStart").hidden = on; $("mfaOffForm").hidden = !on; $("mfaSetupBox").hidden = true; };
-  $("mfaStart").onclick = async () => { try { const r = await api("POST", "/api/mfa/setup", {}); $("mfaSecret").textContent = r.secret; $("mfaUri").textContent = r.uri; $("mfaSetupBox").hidden = false; $("accountMsg").textContent = ""; } catch (err) { note("accountMsg", err.message, false); } };
-  $("mfaOnForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/mfa/enable", { code: $("mfaOnCode").value }); $("mfaOnCode").value = ""; mfaShow(true); note("accountMsg", "Two-step sign-in is on.", true); } catch (err) { note("accountMsg", err.message, false); } };
+  const recoveryLeft = (n) => { $("recoveryLeft").textContent = n === 1 ? "1 recovery code is left." : n + " recovery codes are left."; };
+  const showCodes = (codes) => { $("recoveryCodes").textContent = codes.join("\\n"); $("recoveryBox").hidden = false; recoveryLeft(codes.length); };
+  const mfaShow = (on, left) => { $("mfaState").textContent = on ? "on" : "off"; $("mfaStart").hidden = on; $("mfaOffForm").hidden = !on; $("recoveryForm").hidden = !on; $("mfaSetupBox").hidden = true; if (!on) $("recoveryBox").hidden = true; if (left !== undefined) recoveryLeft(left); };
+  $("mfaStart").onclick = async () => { try { const r = await api("POST", "/api/mfa/setup", {}); $("mfaQr").innerHTML = r.qr; $("mfaSecret").textContent = r.secret; $("mfaUri").textContent = r.uri; $("mfaSetupBox").hidden = false; $("mfaStart").hidden = true; $("accountMsg").textContent = ""; } catch (err) { note("accountMsg", err.message, false); } };
+  $("mfaOnForm").onsubmit = async (e) => { e.preventDefault(); try { const r = await api("POST", "/api/mfa/enable", { code: $("mfaOnCode").value }); $("mfaOnCode").value = ""; mfaShow(true); showCodes(r.recoveryCodes); note("accountMsg", "Two-step sign-in is on.", true); } catch (err) { note("accountMsg", err.message, false); } };
   $("mfaOffForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/mfa/disable", { code: $("mfaOffCode").value }); $("mfaOffCode").value = ""; mfaShow(false); note("accountMsg", "Two-step sign-in is off.", true); } catch (err) { note("accountMsg", err.message, false); } };
+  $("recoveryForm").onsubmit = async (e) => { e.preventDefault(); try { const r = await api("POST", "/api/mfa/recovery", { code: $("recoveryCode").value }); $("recoveryCode").value = ""; showCodes(r.recoveryCodes); note("accountMsg", "New recovery codes are made. The old codes no longer work.", true); } catch (err) { note("accountMsg", err.message, false); } };
+  $("pwMail").hidden = !MAIL; $("pwNoMail").hidden = MAIL;
+  $("pwForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/password/change", { current: $("pwCurrent").value, password: $("pwNew").value }); $("pwCurrent").value = ""; $("pwNew").value = ""; note("pwMsg", "Your password is changed. Other sessions are signed out.", true); } catch (err) { note("pwMsg", err.message, false); } };
   const roleOptions = (cur) => ROLES.filter((r) => r !== "owner" || can("owner")).map((r) => "<option" + (r === cur ? " selected" : "") + ">" + r + "</option>").join("");
   const loadMembers = async () => {
     const r = await api("GET", "/api/members");
@@ -1653,10 +1985,10 @@ const PORTAL_PAGE = `<!doctype html>
     try {
       const me = await api("GET", "/api/me");
       accountNotice(me);
-      if (me.tenant === null) { $("onboardWho").textContent = me.email; $("invites").hidden = !(me.invites || []).length; $("inviteList").innerHTML = (me.invites || []).map((i) => "<p>Join <b>" + esc(i.tenant) + "</b> as " + esc(i.role) + " <button type=button data-accept=\\"" + esc(i.tenant) + "\\">Accept</button></p>").join(""); if (me.profile) { for (const k of ["name", "company", "role", "phone", "telegram"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
-      $("who").textContent = me.email; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyForm").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa); show("app"); await load(); view((location.hash || "#overview").slice(1) || "overview");
+      if (me.tenant === null) { $("onboardWho").textContent = me.email; $("invites").hidden = !(me.invites || []).length; $("inviteList").innerHTML = (me.invites || []).map((i) => "<p>Join <b>" + esc(i.tenant) + "</b> as " + esc(i.role) + " <button type=button data-accept=\\"" + esc(i.tenant) + "\\">Accept</button></p>").join(""); if (me.profile) { for (const k of ["name", "company", "role"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
+      $("who").textContent = me.email; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyForm").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa, me.recoveryCodes); show("app"); await load(); view((location.hash || "#overview").slice(1) || "overview");
     }
-    catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) $("authSwap").click(); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { show("app"); $("who").textContent = err.message; } }
+    catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) authTab(true); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { show("app"); $("who").textContent = err.message; } }
   };
   const accountNotice = (me) => {
     const parts = [];

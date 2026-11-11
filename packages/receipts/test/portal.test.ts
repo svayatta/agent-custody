@@ -3,7 +3,7 @@
 // which is reachable only with Stripe's signature. Postgres runs in-process through PGlite; the log server runs
 // beside the portal on the same tenancy so the dashboard's numbers come from real appends; Stripe is a stand-in
 // that answers the two calls the portal makes.
-import { createHmac, generateKeyPairSync } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync } from "node:crypto";
 import { Script } from "node:vm";
 import { inflateRawSync } from "node:zlib";
 import { SignedXml } from "xml-crypto";
@@ -12,7 +12,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { generateKeyPair } from "../src/crypto.ts";
 import { httpLog, postgresResolver, serveLog, type RunningLog } from "../src/log-sink.ts";
 import { PostgresTenancy } from "../src/log-store.ts";
-import { founderNote, PortalStore, readSession, readSessionVia, ROLES, sendFollowUps, servePortal, signSession, totp, verifyStripeSignature, type Role, type RunningPortal } from "../src/portal.ts";
+import { founderNote, PortalStore, qrMatrix, qrSvg, readSession, readSessionVia, ROLES, sendFollowUps, servePortal, signSession, totp, verifyStripeSignature, type Role, type RunningPortal } from "../src/portal.ts";
 import { policyDigest } from "../src/policy.ts";
 import { standInIdp } from "../scripts/idp-standin.ts";
 
@@ -587,7 +587,7 @@ describe("roles, invites, and two-step sign-in", () => {
     const key = b32decode(setup.json.secret);
     expect(key).toHaveLength(20);
     expect((await hit("POST", "/api/mfa/enable", { code: totp(key, step + 5) }, user.cookie, ip)).status).toBe(401);
-    expect((await hit("POST", "/api/mfa/enable", { code: totp(key, step - 1) }, user.cookie, ip)).json).toEqual({ mfa: true });
+    expect((await hit("POST", "/api/mfa/enable", { code: totp(key, step - 1) }, user.cookie, ip)).json).toMatchObject({ mfa: true });
     expect((await hit("POST", "/api/mfa/setup", {}, user.cookie, ip)).status).toBe(409);
 
     const first = await hit("POST", "/api/login", { email: "mfa1@example.com", password: "a-long-enough-password" }, undefined, ip);
@@ -681,6 +681,254 @@ describe("roles, invites, and two-step sign-in", () => {
     } finally {
       gh = { id: 4242, email: "Octo@Example.com" };
     }
+  });
+
+  it("turns on with ten recovery codes shown once and stored as hashes; a recovery code signs in once in place of a code, is throttled like a code, and new codes need a current code and replace the old ones", async () => {
+    const step = midStep();
+    const t0 = Date.now();
+    // the per-account code limit counts every try, so each part runs a quarter of an hour after the last
+    const later = (min: number) => { vi.spyOn(Date, "now").mockReturnValue(t0 + min * 60_000); return step + min * 2; };
+    await tenancy.addTenant("rec1", "rec1", "test");
+    const user = await account("rec1@example.com", "rec1");
+    const ip = "10.7.0.1";
+    const key = b32decode((await hit("POST", "/api/mfa/setup", {}, user.cookie, ip)).json.secret);
+    const on = await hit("POST", "/api/mfa/enable", { code: totp(key, step) }, user.cookie, ip);
+    expect(on.json.mfa).toBe(true);
+    const codes: string[] = on.json.recoveryCodes;
+    expect(codes).toHaveLength(10);
+    expect(new Set(codes).size).toBe(10);
+    for (const c of codes) expect(c).toMatch(/^[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}$/);
+    const stored = ((await db.query("SELECT mfa_recovery FROM portal_users WHERE id = $1", [user.id])).rows[0] as any).mfa_recovery as string[];
+    expect(stored).toHaveLength(10);
+    for (const c of codes) expect(stored.join()).not.toContain(c.replace(/-/g, ""));
+    expect((await hit("GET", "/api/me", undefined, user.cookie, ip)).json.recoveryCodes).toBe(10);
+
+    const half = async () => cookieOf((await hit("POST", "/api/login", { email: "rec1@example.com", password: "a-long-enough-password" }, undefined, ip)).cookies, "custody_mfa")!.split(";")[0]!;
+    const h1 = await half();
+    const signedIn = await hit("POST", "/api/login/mfa", { code: codes[0]!.toUpperCase() }, h1, ip);
+    expect(signedIn.status).toBe(200);
+    expect(cookieOf(signedIn.cookies, "custody_session")).toBeDefined();
+    expect((await hit("POST", "/api/login/mfa", { code: codes[0] }, await half(), ip)).status).toBe(401);
+    expect((await hit("GET", "/api/me", undefined, user.cookie, ip)).json.recoveryCodes).toBe(9);
+
+    // new codes need a code; a stolen session has none
+    expect((await hit("POST", "/api/mfa/recovery", {}, user.cookie, ip)).status).toBe(401);
+    const fresh = await hit("POST", "/api/mfa/recovery", { code: totp(key, later(15)) }, user.cookie, ip);
+    expect(fresh.json.recoveryCodes).toHaveLength(10);
+    expect((await hit("POST", "/api/login/mfa", { code: codes[1] }, await half(), ip)).status).toBe(401);
+    expect((await hit("POST", "/api/login/mfa", { code: fresh.json.recoveryCodes[0] }, await half(), ip)).status).toBe(200);
+
+    // wrong recovery codes count against the same per-account limit as wrong codes
+    later(30);
+    const h2 = await half();
+    for (let i = 0; i < 5; i++) await hit("POST", "/api/login/mfa", { code: `wrong-code-${i}` }, h2, `10.7.1.${i}`);
+    expect((await hit("POST", "/api/login/mfa", { code: fresh.json.recoveryCodes[1] }, h2, "10.7.2.1")).status).toBe(429);
+    // an operator's mfa-reset clears the codes too
+    await new PortalStore(db).resetMfa("rec1@example.com");
+    expect((await new PortalStore(db).mfa(user.id)).recoveryCodes).toBe(0);
+  });
+});
+
+describe("password reset and password change", () => {
+  let p4: RunningPortal;
+  const hit = async (method: string, path: string, body?: unknown, cookie?: string, ip = "10.20.0.1") => {
+    const res = await fetch(new URL(path, p4.url), { method, headers: { "x-forwarded-for": ip, ...(cookie ? { cookie } : {}), ...(body !== undefined ? { "content-type": "application/json" } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
+    return { status: res.status, json: (await res.json().catch(() => ({}))) as any, cookies: res.headers.getSetCookie() };
+  };
+  const store = () => new PortalStore(db);
+  const account = async (email: string, o: { tenant?: string; verified?: boolean } = {}) => {
+    const u = await store().createUser(email, "the-old-password");
+    if (o.verified !== false) await store().markEmailVerified(u.id);
+    if (o.tenant) await store().addMember(u.id, o.tenant, "owner");
+    return { ...u, cookie: `custody_session=${signSession(SECRET, u.id)}` };
+  };
+  const cookieOf = (cookies: string[], name: string) => cookies.find((c) => c.startsWith(`${name}=`));
+  const session = (cookies: string[]) => cookieOf(cookies, "custody_session")?.split(";")[0];
+  /** the reset link mailed to the address after `since` mails, if one comes */
+  const resetLink = async (email: string, since: number) => {
+    for (let i = 0; i < 40; i++) {
+      const m = mails.slice(since).find((x) => x.to[0] === email && /Reset your/.test(x.subject));
+      if (m) return new URL(/(https?:\S+reset-password\?token=\S+)/.exec(m.text)![1]!);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return null;
+  };
+  const login = (email: string, password: string, ip = "10.20.9.9") => hit("POST", "/api/login", { email, password }, undefined, ip);
+
+  beforeAll(async () => {
+    p4 = await servePortal({ tenancy, client: db, secret: SECRET, publicUrl: log.url, portalUrl: "https://app.example.test/", trustProxy: true, mail: { apiKey: "re_test", from: "hello@example.test", fetch: mailFetch }, oauth: { github: { clientId: "gh_id", clientSecret: "gh_secret" }, fetch: oauthFetch }, log: () => {} }, { port: 0 });
+  }, 60_000);
+  afterAll(async () => { await p4?.close(); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("answers the same for a known and an unknown address, mails a single-use link only to an account, stores only the token's hash, ends every session, and signs nobody in", async () => {
+    const u = await account("reset1@example.com");
+    const before = mails.length;
+    const known = await hit("POST", "/api/password/forgot", { email: "Reset1@Example.com" }, undefined, "10.20.1.1");
+    const unknown = await hit("POST", "/api/password/forgot", { email: "nobody-here@example.com" }, undefined, "10.20.1.2");
+    expect([known.status, known.json]).toEqual([200, { ok: true }]);
+    expect([unknown.status, unknown.json]).toEqual([200, { ok: true }]);
+    const link = (await resetLink("reset1@example.com", before))!;
+    expect(link.origin + link.pathname).toBe("https://app.example.test/reset-password");
+    expect(await resetLink("nobody-here@example.com", before)).toBeNull();
+    const token = link.searchParams.get("token")!;
+    expect(Buffer.from(token, "base64url")).toHaveLength(32);
+    const rows = (await db.query("SELECT token_hash, expires_at FROM portal_resets WHERE user_id = $1", [u.id])).rows as any[];
+    expect(rows.map((r) => r.token_hash)).toEqual([createHash("sha256").update(token).digest("hex")]);
+    expect(new Date(rows[0].expires_at).getTime() - Date.now()).toBeLessThanOrEqual(3_600_000);
+
+    const page = await fetch(new URL(`/reset-password?token=${token}`, p4.url));
+    expect(page.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(page.headers.get("content-security-policy")).toMatch(/^default-src 'none'/);
+    for (const m of (await page.text()).matchAll(/<script>([\s\S]*?)<\/script>/g)) new Script(m[1]!);
+
+    const oldSession = u.cookie;
+    const linkStart = (cookie: string) => fetch(new URL("/auth/github?link=1", p4.url), { redirect: "manual", headers: { cookie } });
+    expect((await hit("GET", "/api/me", undefined, oldSession)).status).toBe(200);
+    expect((await linkStart(oldSession)).status).toBe(302);
+    // a short password does not spend the link
+    expect((await hit("POST", "/api/password/reset", { token, password: "short" })).status).toBe(400);
+    const done = await hit("POST", "/api/password/reset", { token, password: "the-new-password" });
+    expect(done.json).toEqual({ ok: true });
+    expect(session(done.cookies)).toBeUndefined();
+    expect((await hit("POST", "/api/password/reset", { token, password: "another-password" })).status).toBe(400);
+    expect((await hit("GET", "/api/me", undefined, oldSession)).status).toBe(401);
+    // nor can an old session link a provider to the account
+    expect((await linkStart(oldSession)).status).toBe(401);
+    expect((await login("reset1@example.com", "the-old-password")).status).toBe(401);
+    expect((await login("reset1@example.com", "the-new-password")).status).toBe(200);
+    expect((await db.query("SELECT 1 FROM portal_resets WHERE user_id = $1", [u.id])).rows).toHaveLength(0);
+  });
+
+  it("refuses an expired or unknown token, and limits requests per client and per address", async () => {
+    const u = await account("reset2@example.com");
+    const old = await store().createPasswordReset(u.id, -1);
+    expect((await hit("POST", "/api/password/reset", { token: old, password: "the-new-password" })).status).toBe(400);
+    expect((await hit("POST", "/api/password/reset", { token: "not-a-token", password: "the-new-password" })).status).toBe(400);
+    expect((await login("reset2@example.com", "the-old-password")).status).toBe(200);
+
+    // per address: three links, then the answer stays the same and no mail goes
+    const before = mails.length;
+    for (let i = 0; i < 5; i++) expect((await hit("POST", "/api/password/forgot", { email: "reset2@example.com" }, undefined, `10.20.2.${i}`)).json).toEqual({ ok: true });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(mails.slice(before).filter((m) => m.to[0] === "reset2@example.com")).toHaveLength(3);
+    // per client: five requests, whatever the address
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) statuses.push((await hit("POST", "/api/password/forgot", { email: `someone${i}@example.com` }, undefined, "10.20.3.1")).status);
+    expect(statuses).toEqual([200, 200, 200, 200, 200, 429]);
+  });
+
+  it("keeps two-step sign-in after a reset, and a reset proves the address: an unverified account becomes verified and loses providers linked before", async () => {
+    const step = Math.floor(Date.now() / 30_000);
+    const u = await account("reset3@example.com", { verified: false });
+    await store().linkIdentity("github", "reset3-gh", "attacker@example.com", u.id);
+    const key = Buffer.from("r".repeat(20));
+    await store().setMfaSecret(u.id, key.toString("hex"));
+    await store().enableMfa(u.id);
+    const half = cookieOf((await login("reset3@example.com", "the-old-password")).cookies, "custody_mfa")!.split(";")[0]!;
+    const token = await store().createPasswordReset(u.id);
+    expect((await hit("POST", "/api/password/reset", { token, password: "the-new-password" })).json).toEqual({ ok: true });
+    // a half sign-in from before the reset is over
+    expect((await hit("POST", "/api/login/mfa", { code: totp(key, step) }, half)).status).toBe(401);
+    const again = await login("reset3@example.com", "the-new-password");
+    expect(again.json).toEqual({ mfa: true });
+    expect(session(again.cookies)).toBeUndefined();
+    expect((await store().user(u.id))!.emailVerifiedAt).toBeTruthy();
+    expect(await store().identities(u.id)).toEqual([]);
+  });
+
+  it("gives no password to a member of a tenant that enforces single sign-on", async () => {
+    await tenancy.addTenant("reset-sso", "reset-sso", "test");
+    await store().setSso({ tenant: "reset-sso", protocol: "oidc", config: { issuer: "https://idp.reset.example", clientId: "c", clientSecret: "s" }, domains: ["reset-sso.example"], defaultRole: "readonly", enforced: true });
+    const u = await account("pat@reset-sso.example", { tenant: "reset-sso" });
+    const before = mails.length;
+    expect((await hit("POST", "/api/password/forgot", { email: "pat@reset-sso.example" }, undefined, "10.20.4.1")).json).toEqual({ ok: true });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(mails.slice(before)).toEqual([]);
+    // a link from before the tenant enforced it does not work either
+    const token = await store().createPasswordReset(u.id);
+    expect((await hit("POST", "/api/password/reset", { token, password: "the-new-password" })).status).toBe(403);
+    const viaSso = `custody_session=${signSession(SECRET, u.id, undefined, "sso:reset-sso")}`;
+    expect((await hit("POST", "/api/password/change", { current: "the-old-password", password: "the-new-password" }, viaSso)).status).toBe(409);
+  });
+
+  it("changes the password with the current one and a JSON body, keeps this session, and ends the others", async () => {
+    const u = await account("change1@example.com");
+    const other = `custody_session=${signSession(SECRET, u.id)}`;
+    const noJson = await fetch(new URL("/api/password/change", p4.url), { method: "POST", headers: { cookie: u.cookie }, body: "current=the-old-password&password=the-new-password" });
+    expect(noJson.status).toBe(415);
+    expect((await hit("POST", "/api/password/change", { current: "wrong-password", password: "the-new-password" }, u.cookie)).status).toBe(401);
+    expect((await hit("POST", "/api/password/change", { current: "the-old-password", password: "short" }, u.cookie)).status).toBe(400);
+    expect((await hit("POST", "/api/password/change", { current: "the-old-password", password: "the-new-password" })).status).toBe(401);
+    await new Promise((r) => setTimeout(r, 5));
+    const done = await hit("POST", "/api/password/change", { current: "the-old-password", password: "the-new-password" }, u.cookie);
+    expect(done.json).toEqual({ ok: true });
+    const mine = session(done.cookies)!;
+    expect((await hit("GET", "/api/me", undefined, mine)).status).toBe(200);
+    expect((await hit("GET", "/api/me", undefined, other)).status).toBe(401);
+    expect((await hit("GET", "/api/me", undefined, u.cookie)).status).toBe(401);
+    expect((await login("change1@example.com", "the-new-password")).status).toBe(200);
+  });
+
+  it("the page offers the reset only when the portal can send mail, and shows the sign-in and sign-up tabs, the password rule, single sign-on behind a link, no phone or Telegram field, the Overview empty state, and the account forms", async () => {
+    const page = await (await fetch(p4.url)).text();
+    for (const m of page.matchAll(/<script>([\s\S]*?)<\/script>/g)) new Script(m[1]!);
+    expect(page).toContain("const MAIL = true;");
+    for (const id of ["tabSignIn", "tabSignUp", "pwRule", "ssoOpen", "forgotOpen", "forgotForm", "firstReceipt", "pwForm", "mfaQr", "recoveryBox", "recoveryForm"]) expect(page).toContain(`id="${id}"`);
+    expect(page).toMatch(/<form id="ssoForm"[^>]*hidden>/);
+    expect(page).not.toContain('id="phone"');
+    expect(page).not.toContain('id="telegram"');
+    expect(page).toContain("step 1 of 4");
+    expect(page).not.toContain("Three steps");
+    const bare = await servePortal({ tenancy, client: db, secret: SECRET, publicUrl: log.url, log: () => {} }, { port: 0 });
+    try {
+      expect(await (await fetch(bare.url)).text()).toContain("const MAIL = false;");
+      const r = await fetch(new URL("/api/password/forgot", bare.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "reset1@example.com" }) });
+      expect(r.status).toBe(503);
+    } finally {
+      await bare.close();
+    }
+  });
+});
+
+describe("the QR code for two-step setup", () => {
+  const formatOf = (m: boolean[][]) => {
+    let f = 0;
+    const at = (x: number, y: number) => (m[y]![x] ? 1 : 0);
+    const bits = [...[0, 1, 2, 3, 4, 5].map((i) => at(8, i)), at(8, 7), at(8, 8), at(7, 8), ...[9, 10, 11, 12, 13, 14].map((i) => at(14 - i, 8))];
+    bits.forEach((b, i) => { f |= b << i; });
+    return f ^ 0x5412;
+  };
+  const finder = (m: boolean[][], x0: number, y0: number) => Array.from({ length: 7 }, (_, y) => Array.from({ length: 7 }, (_, x) => (m[y0 + y]![x0 + x] ? 1 : 0)).join("")).join("/");
+  const FINDER = "1111111/1000001/1011101/1011101/1011101/1000001/1111111";
+
+  it("picks the smallest version for the text, draws the three finder patterns and the timing lines, and writes format bits for level M that pass their BCH check", () => {
+    const uri = "otpauth://totp/agent-custody:dana%40example.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=agent-custody";
+    // byte mode at level M holds 14 bytes in version 1, 26 in version 2, and 122 in version 7
+    expect([qrMatrix("a".repeat(14)).length, qrMatrix("a".repeat(15)).length, qrMatrix("a".repeat(26)).length, qrMatrix(uri).length]).toEqual([21, 25, 25, 45]);
+    for (const m of [qrMatrix("HELLO"), qrMatrix(uri)]) {
+      const n = m.length;
+      expect([finder(m, 0, 0), finder(m, n - 7, 0), finder(m, 0, n - 7)]).toEqual([FINDER, FINDER, FINDER]);
+      for (let i = 8; i < n - 8; i++) expect([m[6]![i], m[i]![6]]).toEqual([i % 2 === 0, i % 2 === 0]);
+      const f = formatOf(m);
+      expect(f >>> 13).toBe(0); // level M
+      let r = f >>> 10;
+      for (let i = 0; i < 10; i++) r = (r << 1) ^ ((r >>> 9) * 0x537);
+      expect(r).toBe(f & 0x3ff);
+      expect(m[n - 8]![8]).toBe(true); // the dark module
+    }
+    // version 7 and up carry the version: 000111 110010 010100 for 7
+    const m = qrMatrix(uri);
+    let v = 0;
+    for (let i = 0; i < 18; i++) v |= (m[Math.floor(i / 3)]![m.length - 11 + (i % 3)] ? 1 : 0) << i;
+    expect(v).toBe(0x07c94);
+  });
+
+  it("is an inline SVG with no outside reference, dark on white", () => {
+    const svg = qrSvg("otpauth://totp/x?secret=ABC");
+    expect(svg).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" viewBox="0 0 37 37"/);
+    expect(svg.replace('xmlns="http://www.w3.org/2000/svg"', "")).not.toMatch(/https?:|href/);
+    expect(svg).toContain('fill="#fff"');
   });
 });
 
