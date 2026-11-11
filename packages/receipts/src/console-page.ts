@@ -1,42 +1,34 @@
 // The console's one page. The data it shows is written into the document with textContent only, never as markup, and the
 // content-security-policy allows exactly this script and this style by hash, so a value that reaches the page cannot run.
 import { createHash } from "node:crypto";
+import { DESIGN_CSS } from "./design.ts";
 
-const STYLE = String.raw`
-:root { --bg: #fafaf9; --panel: #ffffff; --ink: #1c1917; --muted: #78716c; --line: #e7e5e4; --accent: #b45309; --accent-ink: #ffffff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --code: #f5f5f4; color-scheme: light dark; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #1c1917; --panel: #292524; --ink: #fafaf9; --muted: #a8a29e; --line: #44403c; --accent: #f59e0b; --accent-ink: #1c1917; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --code: #1c1917; } }
-:root[data-theme="dark"] { --bg: #1c1917; --panel: #292524; --ink: #fafaf9; --muted: #a8a29e; --line: #44403c; --accent: #f59e0b; --accent-ink: #1c1917; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --code: #1c1917; }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+const STYLE = DESIGN_CSS + String.raw`
+:root { --muted: var(--ink2); --code: var(--soft); }
 header { display: flex; align-items: center; gap: 16px; padding: 12px 24px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
-header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+header h1 { font-size: var(--text-md); margin: 0; }
 nav { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
-nav button { background: none; border: 0; padding: 6px 12px; border-radius: 6px; color: var(--muted); cursor: pointer; font: inherit; }
+nav button { background: none; border: 0; padding: 6px 12px; border-radius: var(--radius-sm); color: var(--muted); cursor: pointer; font: inherit; }
 nav button[aria-current="page"] { background: var(--code); color: var(--ink); font-weight: 600; }
 main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
-h2 { font-size: 18px; margin: 0 0 12px; }
-h3 { font-size: 14px; margin: 0 0 8px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+h2 { margin: 0 0 12px; }
+h3 { margin: 0 0 8px; }
+.card { padding: 16px; margin-bottom: 16px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
 .grid .card { margin: 0; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
-th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; overflow-wrap: normal; }
+th { color: var(--muted); font-weight: 600; font-size: var(--text-xs); white-space: nowrap; overflow-wrap: normal; }
 table.kv th { width: 9em; white-space: nowrap; overflow-wrap: normal; }
 tr.click { cursor: pointer; } tr.click:hover { background: var(--code); }
-code, pre, textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
-pre { background: var(--code); padding: 10px; border-radius: 6px; overflow: auto; max-height: 420px; margin: 8px 0 0; }
-textarea { width: 100%; min-height: 280px; background: var(--code); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 10px; resize: vertical; }
-input[type=password], input[type=text], select { background: var(--code); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; }
-button.primary { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px; padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer; }
-button.secondary { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer; }
-button.danger { background: var(--bad); color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer; }
-button:disabled { opacity: .5; cursor: default; }
+code, pre, textarea { font-family: var(--mono); font-size: var(--text-xs); }
+pre { background: var(--code); padding: 10px; border-radius: var(--radius-sm); overflow: auto; max-height: 420px; margin: 8px 0 0; }
+textarea { width: 100%; min-height: 280px; background: var(--code); color: var(--ink); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px; resize: vertical; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
 .muted { color: var(--muted); }
 .ok { color: var(--ok); } .warn { color: var(--warn); } .error, .bad { color: var(--bad); }
-.pill { display: inline-block; padding: 0 8px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; }
-.banner { border: 1px solid var(--line); border-left: 4px solid var(--accent); background: var(--panel); border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; }
+.pill { display: inline-block; padding: 0 8px; border-radius: var(--radius-full); border: 1px solid var(--line); font-size: var(--text-xs); }
+.banner { border: 1px solid var(--line); border-left: 4px solid var(--accent); background: var(--panel); border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 16px; }
 .banner.bad { border-left-color: var(--bad); }
 .finding { display: grid; grid-template-columns: 56px 130px 1fr; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
 #login { max-width: 420px; margin: 96px auto; }
