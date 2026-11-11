@@ -141,7 +141,7 @@ Then verify the receipt in the shell, or drop it on [/verify](/verify):
 npx @agent-custody/receipts verify receipts/<id>.json --issuer-key keys/app.pub --log log.jsonl
 ```
 
-Every adapter is on [the SDK page](/receipts/sdk) with what it enforces and what it only records. **To make a receipt evidence** a customer or auditor accepts, put [the gateway](/receipts/usage) in front of the tool and log to [a log run by someone else](/early-access): the receipt then carries a signed grant, a policy decision made outside the agent, and a tree head signed by a key you do not hold.
+Every adapter is on [the SDK page](/receipts/sdk) with what it enforces and what it only records. **To make a receipt evidence** a customer or auditor accepts, put [the gateway](/receipts/usage) in front of the tool and log to [a log run by someone else](/hosted-log): the receipt then carries a signed grant, a policy decision made outside the agent, and a tree head signed by a key you do not hold.
 
 <Flow />
 

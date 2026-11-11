@@ -1,5 +1,7 @@
 # The ACS Guardian
 
+> Every field, route, and flag. How it works and when to use it is in [the guide](/receipts/acs).
+
 An [OWASP Agent Control Standard](https://github.com/GenAI-Security-Project/agent-control-standard) Guardian for `steps/toolCallRequest` and `steps/toolCallResult`. The Cedar policy decides each one, and each decision is a signed, logged receipt with `issuer.kind: "guardian"`, returned in the answer. The guide, including the ACS sections it relies on and what it does not implement, is [the ACS Guardian](/receipts/acs). This page is the exact contract.
 
 The agent chooses to ask, and nothing makes it honor the answer. A guardian receipt proves the decision, not enforcement.

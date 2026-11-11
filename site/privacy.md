@@ -1,3 +1,8 @@
+---
+sidebar: false
+aside: false
+---
+
 # Privacy
 
 What Charioteer Consulting Ltd, the operator of agent-custody.dev and the hosted log at log.agent-custody.dev, collects, and what it does with it. Last reviewed 2026-09-09. Questions to partha@charioteerconsulting.com.

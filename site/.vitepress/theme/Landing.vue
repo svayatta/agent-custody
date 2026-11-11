@@ -9,6 +9,7 @@
 import { onBeforeUnmount, ref } from "vue";
 import { useData } from "vitepress";
 import SiteFooter from "./SiteFooter.vue";
+import Flow from "./Flow.vue";
 import { SITE_NAV, SIGN_IN, GET_STARTED } from "../../../packages/receipts/src/site-links.ts";
 
 const { isDark } = useData();
@@ -18,7 +19,6 @@ const menuOpen = ref(false);
 const repo = "https://github.com/svayatta/agent-custody";
 const commands = ["npm install -g @agent-custody/receipts", "agent-custody init claude-code"];
 const command = commands.join("\n");
-const tryCommand = "npx @agent-custody/receipts init claude-code";
 const auditCommand = "npx -y @agent-custody/receipts audit-sessions";
 const setupHref = "/guide/getting-started#claude-code-in-one-command";
 
@@ -125,15 +125,14 @@ const limits = [
         <div class="wrap">
           <div>
             <h1>Proof of what your AI agents did.</h1>
-            <p class="lede">Give your agents real power, without losing control of them. Start with your coding agent: one command adds a hook to Claude Code. The hook checks each shell command, file edit, and MCP tool call against a deny list before the call runs. The starter list covers force push, <code>rm -rf</code> on <code>/</code> and <code>~</code>, <code>terraform destroy</code>, and <code>drop database</code>.</p>
+            <p class="lede">Give your agents real power, without losing control of them. One command adds a hook to Claude Code that checks each command before it runs and signs a record that a reviewer can check.</p>
             <div class="cmd"><div class="lines"><div v-for="c in commands" :key="c"><span class="prompt" aria-hidden="true">$</span><code>{{ c }}</code></div></div><button type="button" aria-live="polite" @click="copy('hero')">{{ label("hero") }}</button></div>
             <p v-if="failed === 'hero'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
             <p class="note">Needs Node 22. It starts in observe mode: nothing is blocked until you say so.</p>
-            <p class="note">To try it once, run <code>{{ tryCommand }}</code>. Do not keep the npx form: npm can clear its cache, and the hooks then stop working.</p>
             <p class="note">To see first what the list would have caught in your last week, run <code>{{ auditCommand }}</code>. It reads your Claude Code transcripts and writes nothing.</p>
             <div class="ctas">
-              <a class="btn" href="/guide/incident-replay">See the incident replay</a>
-              <a class="btn quiet" :href="setupHref">Setup for Claude Code</a>
+              <a class="btn" :href="setupHref">Set up Claude Code</a>
+              <a class="btn quiet" href="/guide/incident-replay">See the incident replay</a>
             </div>
           </div>
 
@@ -148,8 +147,14 @@ const limits = [
               <dt>Result</dt><dd>denied before it ran</dd>
               <dt>The agent was told</dt><dd>{{ denial }}</dd>
             </dl>
-            <footer><span>From the incident replay. No command ran.</span><a href="/guide/incident-replay">Read the replay →</a></footer>
+            <footer><span>From the incident replay. No command ran.</span></footer>
           </article>
+        </div>
+      </section>
+
+      <section class="visual" aria-label="How a call becomes a receipt">
+        <div class="wrap">
+          <Flow />
         </div>
       </section>
 
@@ -219,7 +224,7 @@ const limits = [
           <div class="cmd"><div class="lines"><div v-for="c in commands" :key="c"><span class="prompt" aria-hidden="true">$</span><code>{{ c }}</code></div></div><button type="button" aria-live="polite" @click="copy('final')">{{ label("final") }}</button></div>
           <p v-if="failed === 'final'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
           <div class="ctas">
-            <a class="btn" :href="setupHref">Setup for Claude Code →</a>
+            <a class="btn" :href="setupHref">Set up Claude Code</a>
             <a class="btn quiet" href="/how-it-works">How it works: the gateway, memory, and the hosted log</a>
           </div>
         </div>
@@ -273,7 +278,7 @@ html.dark .icon-btn svg.moon { display: none; }
 /* Section rhythm */
 .sec { padding: 96px 0; border-top: 1px solid var(--line); scroll-margin-top: 64px; }
 .alt { background: var(--bg); }
-h1 { font-size: clamp(var(--text-2xl), 4.4vw, var(--text-3xl)); line-height: 1.12; letter-spacing: -.03em; font-weight: 700; margin: 0 0 20px; }
+h1 { font-size: clamp(2.25rem, 6vw, 3.5rem); line-height: 1.12; letter-spacing: -.03em; font-weight: 700; margin: 0 0 20px; }
 h2 { font-size: clamp(var(--text-xl), 4vw, var(--text-2xl)); line-height: 1.15; letter-spacing: -.025em; font-weight: 650; margin: 0 0 16px; max-width: 22ch; border: 0; padding: 0; }
 .sub { font-size: var(--text-lg); color: var(--ink2); max-width: 60ch; margin: 0 0 48px; }
 .sub code { font-size: .9em; color: var(--ink); }
@@ -282,6 +287,8 @@ h2 { font-size: clamp(var(--text-xl), 4vw, var(--text-2xl)); line-height: 1.15; 
 .hero { padding: 88px 0 72px; }
 .hero .wrap { display: grid; grid-template-columns: 1.1fr .9fr; gap: 64px; align-items: center; }
 .hero .wrap > * { min-width: 0; }
+.visual { padding: 0 0 64px; }
+.visual :deep(.flow) { margin: 0; }
 .lede { font-size: var(--text-lg); color: var(--ink2); margin: 0 0 32px; max-width: 34em; }
 .hero .ctas { margin-top: 24px; }
 .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }

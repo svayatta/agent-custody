@@ -32,6 +32,8 @@ export default withMermaid(
       "site/advanced.md": "advanced.md",
       "site/how-it-works.md": "how-it-works.md",
       "site/early-access.md": "early-access.md",
+      "site/hosted-log.md": "hosted-log.md",
+      "site/status.md": "status.md",
       "site/security.md": "security.md",
       "site/pricing.md": "pricing.md",
       "site/privacy.md": "privacy.md",
@@ -60,6 +62,14 @@ export default withMermaid(
       ["meta", { name: "theme-color", content: "#b45309" }],
       ["meta", { property: "og:title", content: "agent-custody" }],
       ["meta", { property: "og:description", content: "Proof of what your AI agents did. Give your agents real power, without losing control of them." }],
+      ["meta", { property: "og:image", content: "https://agent-custody.dev/og.png" }],
+      ["meta", { property: "og:image:width", content: "1200" }],
+      ["meta", { property: "og:image:height", content: "630" }],
+      ["meta", { property: "og:image:alt", content: "agent-custody: Proof of what your AI agents did. Give your agents real power, without losing control of them." }],
+      ["meta", { name: "twitter:card", content: "summary_large_image" }],
+      ["meta", { name: "twitter:title", content: "agent-custody" }],
+      ["meta", { name: "twitter:description", content: "Proof of what your AI agents did. Give your agents real power, without losing control of them." }],
+      ["meta", { name: "twitter:image", content: "https://agent-custody.dev/og.png" }],
     ],
     // The conformance vectors are published as files next to the spec, straight from the receipts package.
     buildEnd(siteConfig) {
@@ -172,7 +182,8 @@ export default withMermaid(
             const candidates = [beside, `${beside}.md`, resolve(root, path!), `${resolve(root, path!)}.md`];
             const abs = candidates.find((c) => existsSync(c)) ?? beside;
             const target = posix.normalize(relative(root, abs).split("\\").join("/"));
-            const page = sitePath(target);
+            // a package README is an overview page on the site, but its anchors exist only in the README itself
+            const page = hash && /(^|\/)README\.md$/.test(target) ? null : sitePath(target);
             if (page) {
               tokens[idx]!.attrSet("href", page + (hash ? `#${hash}` : ""));
             } else {

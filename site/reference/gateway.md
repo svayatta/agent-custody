@@ -1,5 +1,7 @@
 # The gateway
 
+> Every field, route, and flag. How it works and when to use it is in [the guide](/receipts/usage).
+
 A separate process between the agent and its tools. The agent connects to it as an MCP server and sees only the tools its grant names; the gateway checks the grant, fetches the facts the policy needs, evaluates the policy, forwards or refuses the call, and issues a signed receipt whose hash goes to the log. For tools named in `precommit`, the authorization is logged before the call is forwarded. Tools named in `approvals` also require short-lived human signatures over the exact action.
 
 ## The config file

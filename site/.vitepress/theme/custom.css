@@ -41,4 +41,16 @@
 }
 /* The default theme draws its buttons as pills; the shared button has the small radius. */
 .VPButton, .NotFound .link { border-radius: var(--radius-sm) !important; }
-.vp-doc table { display: table; width: 100%; }
+/* A table spans the column where it fits. On a phone it keeps VitePress's own layout, a block that scrolls sideways
+   inside itself, so a wide table never makes the whole page scroll. */
+@media (min-width: 768px) { .vp-doc table { display: table; width: 100%; } }
+
+/* A button inside a docs page keeps the shared button's colours; the docs link colour would paint it the same as its
+   background. */
+.vp-doc a.btn { color: var(--accent-ink); text-decoration: none; }
+.vp-doc a.btn.quiet { color: var(--ink); }
+/* A page that is a tool or a set of plans, not a column of prose, takes the width of the page (pageClass: wide). */
+@media (min-width: 960px) {
+  .wide .VPDoc:not(.has-sidebar) .container { max-width: 1104px; }
+  .wide .VPDoc:not(.has-sidebar) .content { max-width: 1104px; }
+}

@@ -1,5 +1,7 @@
 # The egress witness
 
+> How it works and when to use it. Every field, route, and flag is in [the reference](../../../site/reference/egress.md).
+
 The gateway holds an agent's tool credentials and receipts every call made through it. An agent that has a credential of its own, or that calls a public API with none, can go around it. The egress witness is for those connections. It is an HTTP forward proxy in the agent's network path, the [door](door.md) turned around to face outbound traffic. For each connection that does not go to the gateway, it:
 
 - identifies the agent by a proxy credential it checks;

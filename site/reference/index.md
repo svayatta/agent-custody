@@ -2,24 +2,26 @@
 
 Every feature of agent-custody, how to use it, and the exact request and response of every function and endpoint. The narrative guides on [agent-custody.dev](https://agent-custody.dev/guide/getting-started) explain why; these pages say what goes in and what comes out.
 
-## The pieces
+## Reference pages
 
-| piece | package | what it is | reference |
-| --- | --- | --- | --- |
-| Gateway | `@agent-custody/receipts` | a process between the agent and its tools: checks the grant and the policy, forwards or denies, issues a receipt | [gateway](./gateway) |
-| Egress witness | `@agent-custody/receipts` | a forward proxy for a locked-down agent's calls around the gateway: identifies the agent by proxy credential, decides by policy per destination, relays or refuses, issues a receipt; never sees payloads | [egress](./egress) |
-| ACS Guardian | `@agent-custody/receipts` | an OWASP Agent Control Standard Guardian for `steps/toolCallRequest` and `steps/toolCallResult`: decides by Cedar policy, answers allow or deny, and issues a receipt for each decision; the agent can skip it, so it proves the decision, not enforcement | [acs](./acs) |
-| Door | `@agent-custody/receipts` | a reverse proxy in front of your own site or API: classifies every arrival, decides by policy per route, relays or refuses, issues a receipt | [door](./door) |
-| SDK | `@agent-custody/receipts` | the same issuer inside the agent's process, for tools that are plain functions; adapters for the frameworks | [TypeScript SDK](./sdk-typescript) |
-| Sidecar | `@agent-custody/receipts` | the SDK as a local HTTP API, for agents in any language | [sidecar](./sidecar) |
-| Python | `agent-custody` on PyPI | the sidecar client, framework adapters, and the memory client | [Python](./python) |
-| Claude Code | `@agent-custody/receipts` | a hook that records every tool call of a session | [Claude Code](./claude-code) |
-| Log | `@agent-custody/receipts` | the transparency log: a file, or a server, or the hosted one; the client the gateway uses | [log API](./log-api) |
-| Verifier | `@agent-custody/receipts` | checks a receipt, audits a log, monitors a log, exports a tenant | [verify and audit](./verify) |
-| Hosted log | log.agent-custody.dev | tenants, plans, the portal, the API keys | [hosted](./hosted) |
-| Memory | `@agent-custody/state` | the fact ledger and the memory server behind the gateway; write-through stores | [memory](./memory) |
-| Explain, review, pack | `@agent-custody/state` | one action explained, a review page, a fact's custody pack, blast radius, evals, retention | [explain and packs](./state-tools) |
-| Command line | both packages | every command and flag | [CLI](./cli) |
+What each component is for, and when you need it, is on [Components](/guide/pieces). Each one has a reference page:
+
+| component | package | reference |
+| --- | --- | --- |
+| Gateway | `@agent-custody/receipts` | [gateway](./gateway) |
+| Egress witness | `@agent-custody/receipts` | [egress](./egress) |
+| ACS Guardian | `@agent-custody/receipts` | [acs](./acs) |
+| Door | `@agent-custody/receipts` | [door](./door) |
+| SDK | `@agent-custody/receipts` | [TypeScript SDK](./sdk-typescript) |
+| Sidecar | `@agent-custody/receipts` | [sidecar](./sidecar) |
+| Python | `agent-custody` on PyPI | [Python](./python) |
+| Claude Code | `@agent-custody/receipts` | [Claude Code](./claude-code) |
+| Log | `@agent-custody/receipts` | [log API](./log-api) |
+| Verifier | `@agent-custody/receipts` | [verify and audit](./verify) |
+| Hosted log | log.agent-custody.dev | [hosted](./hosted) |
+| Memory | `@agent-custody/state` | [memory](./memory) |
+| Explain, review, pack | `@agent-custody/state` | [explain and packs](./state-tools) |
+| Command line | both packages | [CLI](./cli) |
 
 ## Install
 

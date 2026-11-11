@@ -1,12 +1,14 @@
+---
+sidebar: false
+aside: false
+---
+
 # Contact
 
 **Charioteer Consulting Ltd** operates agent-custody and the hosted log.
 
-| for | write to |
-| --- | --- |
-| The hosted log, pricing, a tenant | partha@charioteerconsulting.com, or the [early-access form](/early-access) |
-| A security problem | partha@charioteerconsulting.com, per [SECURITY.md](https://github.com/svayatta/agent-custody/blob/main/SECURITY.md); acknowledgement within two working days |
-| A bug or a question about the packages | [GitHub issues](https://github.com/svayatta/agent-custody/issues) |
-| Privacy, data access, deletion | partha@charioteerconsulting.com, see [privacy](/privacy) |
+Write to **partha@charioteerconsulting.com** for anything: the hosted log and pricing, a tenant, a security problem (per [SECURITY.md](https://github.com/svayatta/agent-custody/blob/main/SECURITY.md), acknowledged within two working days), and privacy, data access, or deletion (see [privacy](/privacy)).
 
-The log's status is the [monitor workflow](https://github.com/svayatta/agent-custody/actions/workflows/monitor.yml), which checks it from outside every ten minutes. The [security questionnaire](/security) is the page to send a procurement team.
+A bug or a question about the packages goes to [GitHub issues](https://github.com/svayatta/agent-custody/issues).
+
+The log's state, and what is not in place yet, is on [status and limits](/status). The [security questionnaire](/security) is the page to send a procurement team.

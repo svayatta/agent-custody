@@ -4,11 +4,13 @@ The log at `log.agent-custody.dev` is the reference log server run by us, for te
 
 ## Plans
 
-| plan | appends a calendar month | price |
-| --- | --- | --- |
-| `free` | 10,000 | $0 |
-| `team` | 1,000,000 | $50 a month |
-| `enterprise` | no allowance | by conversation |
+| plan | appends a calendar month |
+| --- | --- |
+| `free` | 10,000 |
+| `team` | 1,000,000 |
+| `enterprise` | no allowance |
+
+What each plan costs is on [pricing](/pricing).
 
 An append past the allowance is refused:
 
