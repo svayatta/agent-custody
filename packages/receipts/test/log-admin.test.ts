@@ -106,7 +106,7 @@ describe("the admin surface", () => {
     expect((await append(minted.token)).status).toBe(200);
     expect((await append(ADMIN)).status).toBe(401); // the admin token is not a tenant token
     const tokens = (await (await call("GET", "admin/tenants/acme/tokens")).json()) as { label: string; tokenHash: string; revokedAt: string | null }[];
-    expect(tokens).toEqual([{ label: "support fleet", tokenHash: minted.tokenHash, createdAt: expect.any(String), revokedAt: null, tenantId: "acme" }]);
+    expect(tokens).toEqual([{ label: "support fleet", tokenHash: minted.tokenHash, createdAt: expect.any(String), revokedAt: null, lastUsedAt: expect.any(String), tenantId: "acme" }]);
     expect(await (await call("POST", `admin/tenants/acme/tokens/${minted.tokenHash.slice(0, 12)}/revoke`)).json()).toEqual({ revoked: 1 });
     expect((await append(minted.token)).status).toBe(401);
     expect((await call("POST", "admin/tenants/nobody/tokens", { label: "x" })).status).toBe(404);
