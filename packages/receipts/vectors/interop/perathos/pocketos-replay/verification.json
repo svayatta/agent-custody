@@ -1,0 +1,65 @@
+{
+  "path": "session.jsonl",
+  "valid": true,
+  "errors": [],
+  "warnings": [],
+  "session_id": "pocketos-replay",
+  "receipts": 8,
+  "tool_calls": 4,
+  "checkpoints": 2,
+  "signed_checkpoints": 2,
+  "sealed_through": 8,
+  "unsealed_tail": 0,
+  "signers": [
+    "d53f11ff38959d472a2e619b346340b44a79866fb8650d96f22ada467f524707"
+  ],
+  "models": [],
+  "tools": {
+    "Bash": 4
+  },
+  "first_ts": "2026-11-04T08:19:04.700884Z",
+  "last_ts": "2026-11-04T08:19:08.217162Z",
+  "blocked": 2,
+  "anchors": 2,
+  "anchored_through": 8,
+  "anchored_time": "2026-11-04T08:19:09Z",
+  "blocked_calls": [
+    {
+      "seq": 3,
+      "ts": "2026-11-04T08:19:05.192047Z",
+      "tool": "Bash",
+      "rule": "paas.railway"
+    },
+    {
+      "seq": 4,
+      "ts": "2026-11-04T08:19:05.431384Z",
+      "tool": "Bash",
+      "rule": "guard.self-authorize"
+    }
+  ],
+  "allowed_under_precondition": [
+    {
+      "seq": 6,
+      "ts": "2026-11-04T08:19:07.697718Z",
+      "tool": "Bash",
+      "rule": "paas.railway",
+      "precondition": {
+        "id": "d5852e52-6d9f-4642-954f-876039684c10",
+        "scope": "pg-data",
+        "check": "python check_backup.py offsite/prod-backup.db",
+        "manual_reason": null,
+        "created": "2026-11-04T08:19:07Z",
+        "expires": "2026-11-04T08:49:07Z"
+      }
+    }
+  ],
+  "preconditions_missing_from_pack": [],
+  "limits": [
+    "Shows which key sealed the record, not which model ran (the model name is self-reported).",
+    "Event times come from the local clock; only anchored checkpoints have an independent time.",
+    "Tool arguments and outputs are not included, only their SHA-256 hashes.",
+    "A gap in recording (hooks switched off) is not visible in the log.",
+    "The guard matches command patterns; it is a safeguard against accidents, not a sandbox."
+  ],
+  "exported_at": "2026-11-04T08:19:10Z"
+}
