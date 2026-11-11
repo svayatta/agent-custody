@@ -256,12 +256,12 @@ function runs({ k, s }: Line): Run[] {
 
 <style scoped>
 .story {
-  --d-line: var(--line, var(--vp-c-divider));
-  --d-line-2: var(--line-2, var(--vp-c-divider));
-  --d-ink: var(--ink, var(--vp-c-text-1));
-  --d-ink-2: var(--ink-2, var(--vp-c-text-2));
-  --d-bg: var(--bg, var(--vp-c-bg));
-  --d-bg-2: var(--bg-2, var(--vp-c-bg-soft));
+  --d-line: var(--line);
+  --d-line-2: var(--line-strong);
+  --d-ink: var(--ink);
+  --d-ink-2: var(--ink2);
+  --d-bg: var(--vp-c-bg);
+  --d-bg-2: var(--vp-c-bg-soft);
   display: grid;
   grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
   gap: 32px;
@@ -278,14 +278,14 @@ function runs({ k, s }: Line): Run[] {
 }
 .steps button {
   display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 16px; align-items: start;
-  width: 100%; margin: 0; padding: 14px 16px; border: 0; border-radius: 10px;
+  width: 100%; margin: 0; padding: 14px 16px; border: 0; border-radius: var(--radius-md);
   background: transparent; color: var(--d-ink); font: inherit; text-align: left; cursor: pointer;
 }
 .steps button:hover { background: var(--d-bg-2); }
 .steps button.on { background: var(--d-bg); box-shadow: 0 0 0 1px var(--d-line); }
-.steps button:focus-visible { outline: 2px solid var(--brand, var(--vp-c-brand-1)); outline-offset: 2px; }
+.steps button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .dot {
-  position: relative; z-index: 1; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+  position: relative; z-index: 1; width: 32px; height: 32px; border-radius: var(--radius-full); display: grid; place-items: center;
   font: 600 13px var(--sans, var(--vp-font-family-base)); background: var(--d-bg); border: 1px solid var(--d-line-2); color: var(--d-ink-2);
 }
 .on .dot { background: var(--d-ink); border-color: var(--d-ink); color: var(--d-bg); }
@@ -293,14 +293,14 @@ function runs({ k, s }: Line): Run[] {
 .h { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 4px 0; font-size: 15px; font-weight: 600; line-height: 1.4; }
 .p { display: block; font-size: 14px; line-height: 1.55; color: var(--d-ink-2); }
 
-.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 3px 10px; }
-.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.badge.allow { background: var(--allow-soft, #dcfce7); color: var(--allow, #15803d); }
-.badge.deny { background: var(--deny-soft, #fee2e2); color: var(--deny, #b91c1c); }
+.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; border-radius: var(--radius-full); padding: 3px 10px; }
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: var(--radius-full); background: currentColor; }
+.badge.allow { background: var(--ok-bg); color: var(--ok); }
+.badge.deny { background: var(--bad-bg); color: var(--bad); }
 
-.term { background: var(--term, #1c1917); color: var(--term-ink, #e7e5e4); border-radius: var(--r, 12px); overflow: hidden; }
+.term { background: var(--term, #1c1917); color: var(--term-ink, #e7e5e4); border-radius: var(--radius-md); overflow: hidden; }
 .bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #292524; font: 12px var(--mono, var(--vp-font-family-mono)); color: #a8a29e; }
-.bar i { width: 10px; height: 10px; border-radius: 50%; background: #44403c; display: inline-block; }
+.bar i { width: 10px; height: 10px; border-radius: var(--radius-full); background: #44403c; display: inline-block; }
 .bar span { margin-left: 8px; }
 .term pre {
   margin: 0; padding: 20px; min-height: 34rem; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;

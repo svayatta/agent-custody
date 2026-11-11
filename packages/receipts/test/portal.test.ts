@@ -118,6 +118,7 @@ describe("the tenant portal", () => {
     expect(page).toContain('data-view="setup"');
     expect(page).toContain('rel="icon" href="/favicon.svg"');
     expect(page).toContain('id="themeToggle"');
+    expect(page).toMatch(/id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false"[^>]*><svg/);
     expect(page).toContain(':root[data-theme="dark"]');
     const icon = await fetch(new URL("favicon.svg", portal.url));
     expect(icon.status).toBe(200);
@@ -1154,11 +1155,11 @@ describe("portal navigation", () => {
     expect(page).toContain('<html lang="en">');
     const menu = page.match(/<div id="userMenu" popover>[\s\S]*?<\/div>/)![0];
     expect(menu).toContain('data-view="account"');
-    expect(menu).toContain('<button class="theme" id="themeToggle"');
+    expect(menu).toContain('id="themeToggle"');
     expect(menu).toContain('<button class="quiet" id="signout" type="button"');
     expect(nav).not.toContain("signout");
-    expect(page).toMatch(/<button class="userbtn" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu"/);
-    expect(page).toMatch(/<button class="navbtn" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav"/);
+    expect(page).toMatch(/<button class="userbtn quiet" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu"/);
+    expect(page).toMatch(/<button class="navbtn icon" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav"/);
     // the logo opens Overview; each link to the public site opens in a new tab
     expect(page).toContain('<a class="brand" href="#overview">');
     for (const m of page.matchAll(/<a [^>]*href=\\{0,2}"https:\/\/[^>]*>/g)) expect(m[0]).toMatch(/target=\\{0,2}"_blank\\{0,2}" rel=\\{0,2}"noopener/);
