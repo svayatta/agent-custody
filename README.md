@@ -6,9 +6,9 @@
 
 Give your agents real power, without losing control of them. Your policy checks your agent's actions before they run. What it forbids does not run. Each action that it checks leaves a signed receipt that anyone can verify.
 
-[![An AI agent clears an AML alert, and its own log can be edited. Replayed through agent-custody, the same call is denied before it runs, the refusal is signed, and an auditor verifies the receipt with public keys.](site/public/promo.gif)](https://agent-custody.dev/advanced#product-overview-film)
+[![An AI agent clears an AML alert, and its own log can be edited. Replayed through agent-custody, the same call is denied before it runs, the refusal is signed, and an auditor verifies the receipt with public keys.](site/public/promo.gif)](https://agent-custody.dev/how-it-works#product-overview-film)
 
-*An agent cleared an alert, and its own log was the only record. Replayed through agent-custody, the call is denied, and an auditor can prove it. [Watch the 30-second film with sound](https://agent-custody.dev/advanced#product-overview-film).*
+*An agent cleared an alert, and its own log was the only record. Replayed through agent-custody, the call is denied, and an auditor can prove it. [Watch the 30-second film with sound](https://agent-custody.dev/how-it-works#product-overview-film).*
 
 agent-custody is infrastructure to authorize the actions of AI agents and to account for them:
 
@@ -62,7 +62,7 @@ cd agent-custody && bun install && bun run demo
 - A payout is refused: the tool is not in the grant.
 - An auditor verifies all four receipts with public keys and a copy of the log. Then someone edits the first receipt to make the refund look smaller, and the verification fails.
 
-The demo needs Node 22 and Bun. The [refund demo](site/advanced.md#the-refund-demo) shows the output step by step. For production payments, read [safe financial operations](packages/receipts/docs/financial-operations.md) (budgets, idempotency, and reconciliation with the provider), [human approvals](packages/receipts/docs/approvals.md) (one or two people approve the exact payment), and [completeness](packages/receipts/docs/completeness.md) (the provider's records matched against the receipts, so an action that went around the gateway shows up).
+The demo needs Node 22 and Bun. The [refund demo](site/how-it-works.md#the-refund-demo) shows the output step by step. For production payments, read [safe financial operations](packages/receipts/docs/financial-operations.md) (budgets, idempotency, and reconciliation with the provider), [human approvals](packages/receipts/docs/approvals.md) (one or two people approve the exact payment), and [completeness](packages/receipts/docs/completeness.md) (the provider's records matched against the receipts, so an action that went around the gateway shows up).
 
 The gateway covers only the calls that go through it. A credential in the agent's own environment goes around it: [the egress witness](#calls-that-go-around-the-gateway-the-egress-witness) and lockdown close that route. The [threat model](packages/receipts/docs/threat-model.md) lists the other limits.
 
@@ -174,14 +174,14 @@ Each receipt is an observed bypass, not a record of what was done. A permitted h
 
 ## Advanced
 
-The sections above are the two ways to start. The rest of the product is below and on the [advanced page](site/advanced.md): the gateway with grants and Cedar policy, the transparency log, the state package for agent memory, the hosted log, and the other frameworks and languages.
+The sections above are the two ways to start. The rest of the product is below and on [How it works](site/how-it-works.md): the gateway with grants and Cedar policy, the transparency log, the state package for agent memory, the hosted log, and the other frameworks and languages.
 
-### What each piece is for, and when you need it
+### Components
 
 <!-- #region pieces -->
-Each part exists because a specific thing goes wrong without it. Use the table to decide what to turn on.
+Each component exists because a specific thing goes wrong without it. Use the table to decide what to turn on.
 
-| piece | the failure it prevents | you need it when |
+| component | the failure it prevents | you need it when |
 | --- | --- | --- |
 | **SDK interceptor** (`@agent-custody/receipts`, in the agent's process) | The only record of what an agent did is its own log: mutable, unsigned, written by the thing you are trying to check. | Any agent that calls tools. Turn it on first; it is a hook or a wrapped function. It is honest about being self-reported: every field is labelled `claimed`. |
 | **Gateway** (`@agent-custody/receipts`, a separate process between agent and tools: MCP servers, REST APIs described as tools, or other agents reached over A2A) | An in-process hook can be skipped, and a policy that reads the agent's own arguments can be fed lies. | The call moves money, touches production, or handles personal data, or a security owner has to sign off on what agents may do. Denied calls never reach the tool and still produce a receipt. For tools named in `precommit`, the gateway logs a signed authorization before forwarding and withholds the call if the log will not take it, so the evidence exists before the side effect does. Only calls through the gateway are covered; a credential in the agent's own environment bypasses it, and under egress lockdown the egress witness receipts that connection. |
@@ -279,14 +279,14 @@ This whole loop is one runnable file, [packages/state/examples/02-receipt-to-bel
 - Answer a security questionnaire with a file: which artefact supplies evidence for which SOC 2, ISO 27001, UK GDPR, EU AI Act, FINRA, MAS, Colorado, DORA, CSA AICM, OWASP, and ISO 42001 requirement, with dates, primary sources, and what a receipt does not supply. [compliance.md](packages/receipts/docs/compliance.md)
 - Give a security reviewer the attacker's view: who could make a receipt false, what stops them, and what is not defended. [threat-model.md](packages/receipts/docs/threat-model.md)
 - Log to a server the operator does not control, so tree heads are signed by a key that is not yours. [verification.md](packages/receipts/docs/verification.md)
-- Verify a receipt in the browser, nothing uploaded, and check a second implementation against the published conformance vectors. [agent-custody.dev/verify](https://agent-custody.dev/verify), [vectors](https://agent-custody.dev/receipt/vectors)
+- [Verify a receipt](https://agent-custody.dev/verify) in your browser, nothing uploaded, and check a second implementation against the published conformance vectors. [agent-custody.dev/verify](https://agent-custody.dev/verify), [vectors](https://agent-custody.dev/receipt/vectors)
 - Prove a log was never rewritten: keep any receipt's tree head, later audit that the log still extends it. [verification.md](packages/receipts/docs/verification.md)
 - Run the console for a gateway: config, tools, receipts with a verdict each, a policy editor that replays recorded calls before it saves, and grant revocation, as a service of its own. [console.md](packages/receipts/docs/console.md).
 - Configure the gateway: who may use which tools, where the tools live, a worked example, and `agent-custody check` to validate a config before it starts. [configuration.md](packages/receipts/docs/configuration.md).
 - Run one shared gateway for every agent on a host or cluster: a container image for amd64 and arm64, compose, Kubernetes, and systemd recipes, a starter config, and egress lockdown manifests for the agents (`deploy/gateway/lockdown`, [credential custody and lockdown](site/guide/credential-custody.md)). [deploy/gateway](deploy/gateway/README.md).
 - See how it fits together, with diagrams: what runs on the customer's side, what is hosted, the sequence of a call, onboarding, revocation, and verification. [Architecture](site/guide/architecture.md).
 - Where each piece runs, sized, with what interception does not reach. [Deployment](https://agent-custody.dev/guide/deployment). What each release changed: [changelog](CHANGELOG.md).
-- Register a tenant on the hosted log at [app.agent-custody.dev](https://app.agent-custody.dev/#register) and get a log and a first key at once: free for ten thousand appends a month, [$50 a month](https://agent-custody.dev/pricing) for a million, a dashboard with usage against the plan, keys, and every action taken on the tenant, and an export that takes everything with you.
+- Register a tenant on the hosted log at [app.agent-custody.dev](https://app.agent-custody.dev/#register) and get a log and a first key at once: a free plan to start and [paid plans](https://agent-custody.dev/pricing) for more, a dashboard with usage against the plan, keys, and every action taken on the tenant, and an export that takes everything with you.
 - The reference at [agent-custody.dev/reference](https://agent-custody.dev/reference/): every feature, and the exact request and response of every function, endpoint, MCP tool, and command.
 - Want a log run by someone who is not you? [deploy/](deploy/README.md) has the container, a docker compose file for one VM, and Kubernetes manifests to run it on a machine the operator does not control; or take a tenant on the one we run, at [log.agent-custody.dev](https://agent-custody.dev/early-access), on the [Free or Team plan](https://agent-custody.dev/pricing).
 - Agents in Python, Go, Java, Rust, or anything else: the gateway is an MCP server and needs nothing from your language; for in-process receipts run the sidecar and use the Python package or a forty-line client. [sdk.md](packages/receipts/docs/sdk.md#other-languages-the-sidecar)

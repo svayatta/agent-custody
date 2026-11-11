@@ -1,4 +1,4 @@
-# Payload-bound human approvals
+# Human approvals
 
 A delegation lets an agent use a tool. A human approval authorizes one exact call: this principal, this agent, this tool, and every argument, until a short expiry. The gateway requires the signed approval before forwarding a protected call. A flag such as `approved: true` in the arguments has no authority.
 

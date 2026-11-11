@@ -1,5 +1,7 @@
 # The ACS Guardian
 
+> How it works and when to use it. Every field, route, and flag is in [the reference](../../../site/reference/acs.md).
+
 The [OWASP Agent Control Standard](https://github.com/GenAI-Security-Project/agent-control-standard) (ACS) is a wire contract between an agent and a separate policy point. Before the agent acts, its instrumentation sends a JSON-RPC 2.0 hook, such as `steps/toolCallRequest`, to a **Guardian**. The Guardian answers `allow`, `deny`, `modify`, `ask`, or `defer`, and the agent is expected to honor the answer. `agent-custody acs` is a Guardian for two of those hooks. It decides each one with a Cedar policy and returns the decision with a signed, logged receipt (`issuer.kind: "guardian"`). A third party can check that receipt with the Guardian's public key alone.
 
 This is a spike: enough to show the two fit together. It is not an ACS-Core conformant Guardian. The list of what it leaves out is [below](#what-it-does-not-implement). It was written against the ACS repository at commit `db457a8` (`version.txt` 0.1.4, schemas under `specification/v0.1.0/`).

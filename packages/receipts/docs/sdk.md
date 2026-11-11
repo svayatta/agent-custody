@@ -1,4 +1,4 @@
-# The interceptor SDK
+# SDK and framework hooks
 
 The gateway sees only MCP traffic. The SDK sees whatever the agent framework lets it hook, from inside the agent's own process. It issues the same receipt format, verified by the same command, with one difference a verifier cannot miss: the receipt names its issuer as `sdk`, and every field is `claimed`.
 

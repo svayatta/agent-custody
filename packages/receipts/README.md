@@ -382,7 +382,7 @@ The design is several producers feeding one verifier. The SDK is the top of the 
 - Completeness from the provider's side (issue #178): `agent-custody completeness` lists Stripe's refunds, payouts, or transfers over a window with the auditor's own read-only key, and matches each to a verified receipt by the provider's object id. It reports actions with no receipt, receipts the provider does not have, amount, currency, and beneficiary mismatches, calls forwarded without an outcome receipt, and receipts it cannot match ([completeness](docs/completeness.md), example 35).
 
 **Next, in the order it pays off**
-
+<!-- #region receipts-next -->
 The first three close the gap between a log the operator cannot rewrite and a record the operator cannot shape.
 
 1. Run the anchor for log.agent-custody.dev on mainnet: a funded key held only by the anchor service on the host, its records served beside the checkpoints, its address and each tenant's log id published in the welcome sheet and on the security page, and the monitor checking it. The code is done. [Issue #176](https://github.com/svayatta/agent-custody/issues/176).
@@ -392,3 +392,4 @@ The first three close the gap between a log the operator cannot rewrite and a re
 5. Post-quantum signatures: ML-DSA beside Ed25519 in the same DSSE envelope, hybrid by default when a PQ key is present, in every signed artefact and in the browser verifier. [Issue #11](https://github.com/svayatta/agent-custody/issues/11).
 6. Receiver attestation for agent-to-agent calls: the delegate signs its answer for the receipt, as a signing upstream does today.
 7. SD-JWT redaction, then ZK proofs of policy compliance. Not before.
+<!-- #endregion receipts-next -->

@@ -15,6 +15,7 @@ import { postgresCheckpoints, type CheckpointStore } from "./checkpoints.ts";
 import { DESIGN_CSS, LOGO_MARK as MARK } from "./design.ts";
 import { welcomeSheet } from "./log-admin.ts";
 import { clientAddress } from "./log-sink.ts";
+import { SITE_NAV, siteUrl } from "./site-links.ts";
 import { PLAN_QUOTAS, RateLimiter, type Plan, type PostgresLike, type PostgresTenancy } from "./log-store.ts";
 import { oidcAuthorizeUrl, oidcExchange, pkce, samlAuthorizeUrl, samlValidate, type OidcConfig, type SamlConfig, type SsoIdentity } from "./sso.ts";
 
@@ -1632,6 +1633,9 @@ ${DESIGN_CSS}
 const resultPage = (title: string, body: string, head = "") =>
   `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${head}<title>${title}</title>${RESULT_STYLE}<main><a class="brand" href="/">${MARK}agent-custody</a><h1>${title}</h1>${body}</main>`;
 
+// the website's one nav list, on the dashboard's own host
+const DASHBOARD_NAV = SITE_NAV.map((l) => `<a href="${siteUrl(l.link)}" target="_blank" rel="noopener">${l.text}</a>`).join("");
+
 const PORTAL_PAGE = `<!doctype html>
 <html lang="en">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1773,8 +1777,9 @@ ${DESIGN_CSS}
   .toast { position: fixed; right: var(--space-4); bottom: var(--space-4); z-index: 20; max-width: min(26rem, calc(100vw - 2rem)); padding: var(--space-3) var(--space-4); background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: var(--radius-sm); box-shadow: var(--shadow); } .toast.err { border-left-color: var(--bad); } .toast:empty { visibility: hidden; }
   dialog.confirm { padding: 0; width: min(28rem, calc(100vw - 2rem)); } dialog.confirm form { padding: var(--space-5); } dialog.confirm h2 { margin: 0 0 var(--space-2); overflow-wrap: anywhere; } dialog.confirm p:empty { display: none; }
   dialog.confirm .acts { display: flex; justify-content: flex-end; gap: var(--space-3); margin-top: var(--space-5); flex-wrap: wrap; } dialog.confirm .choice { display: grid; grid-template-columns: auto 1fr; column-gap: var(--space-3); margin: var(--space-3) 0; font-weight: 400; cursor: pointer; } dialog.confirm .choice input { width: auto; margin: .2rem 0 0; } dialog.confirm .choice span { grid-column: 2; color: var(--ink2); font-size: var(--text-sm); }
+  abbr[title] { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
 </style>
-<div class="top"><button class="navbtn icon" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Navigation" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><a class="brand" href="#overview"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links"><a href="https://agent-custody.dev/guide/getting-started" target="_blank" rel="noopener">Guide</a><a href="https://docs.agent-custody.dev/reference/" target="_blank" rel="noopener">Docs</a><a href="https://agent-custody.dev/verify" target="_blank" rel="noopener">Verify a receipt</a></span><button class="userbtn quiet" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu">Account</button><div id="userMenu" popover><span class="who" id="who" data-acct></span><a href="#account" data-view="account" data-acct>Security</a><button class="theme icon" id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Dark mode"><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Dark mode</button><button class="quiet" id="signout" type="button" data-acct>Sign out</button></div></div>
+<div class="top"><button class="navbtn icon" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Navigation" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><a class="brand" href="#overview"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links">${DASHBOARD_NAV}</span><button class="userbtn quiet" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu">Account</button><div id="userMenu" popover><span class="who" id="who" data-acct></span><a href="#account" data-view="account" data-acct>Security</a><button class="theme icon" id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Dark mode"><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Dark mode</button><button class="quiet" id="signout" type="button" data-acct>Sign out</button></div></div>
 <div id="notice" class="notice" hidden></div>
 <section id="auth" class="auth split" hidden>
   <aside class="pitch">
@@ -1818,7 +1823,7 @@ ${DESIGN_CSS}
     <label>Work email for single sign-on<input name="email" type="email" autocomplete="email" required></label>
     <button class="quiet" type="submit">Continue with single sign-on</button>
   </form>
-  <p class="muted fine">The free plan is ten thousand appends a month, no card. Your gateway sends only hashes; nothing you log here can be read by us.</p>
+  <p class="muted fine">The free plan is ten thousand <abbr title="An append is one receipt hash your gateway writes to your log.">appends</abbr> a month, no card. Your gateway sends only hashes; nothing you log here can be read by us.</p>
   </div>
 </section>
 <section id="onboard" class="auth split" hidden>
@@ -1853,7 +1858,7 @@ ${DESIGN_CSS}
   ${MARK}
   <h1>Your tenant is ready</h1>
   <p class="muted">That was step 1 of 4. Steps 2 to 4 take you to your first receipt in this log. Everything here is under <b>Setup</b> in the dashboard whenever you need it again.</p>
-  <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst" data-copy>Copy key</button> <button type="button" id="savedFirst">I saved the key</button></div>
+  <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst" data-copy>Copy API key</button> <button type="button" id="savedFirst">I saved the key</button></div>
   <p><button id="toDash">Go to the dashboard</button></p>
   </div>
   <div id="firstSetup"></div>
@@ -1886,9 +1891,9 @@ ${DESIGN_CSS}
         <div class="card" id="cUsed"><div class="k">Appends this month</div><div class="v" id="vUsed">–</div><div class="s" id="sUsed"></div></div>
         <div class="card" id="cSize"><div class="k">Receipts in your log</div><div class="v" id="vSize">–</div><div class="s">leaf hashes, all time</div></div>
         <div class="card" id="cKeys"><div class="k">Active keys</div><div class="v" id="vKeys">–</div><div class="s" id="sKeys"></div></div>
-        <div class="card" id="cCp"><div class="k">Latest checkpoint</div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
+        <div class="card" id="cCp"><div class="k"><abbr title="A checkpoint is the log's size and root hash, signed and published apart from the log, so anyone can check later that it was never rewritten.">Latest checkpoint</abbr></div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
       </div>
-      <p class="muted">Tree heads on this log are signed by our key; there is no second, independent witness yet. Every receipt you log here is checkable by anyone with your gateway's public key and ours: <a href="https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not" target="_blank" rel="noopener">what a receipt proves and what it does not</a>.</p>
+      <p class="muted">Tree heads on this log are signed by our key; there is no second, independent witness yet. Every receipt you log here is checkable by anyone with your gateway's public key and ours: <a href="https://github.com/svayatta/agent-custody/tree/main/packages/receipts#what-a-receipt-proves-and-what-it-does-not" target="_blank" rel="noopener">what a receipt proves and what it does not</a>.</p>
       <h2>Your log</h2>
       <div class="panel"><table><tbody id="urls"></tbody></table></div>
     </div>
@@ -1905,14 +1910,14 @@ ${DESIGN_CSS}
     </div>
     <div data-pane="keys" hidden>
       <h1>API keys</h1>
-      <p class="muted">A key is a bearer token that your gateway sends with each append. You see a key one time, when you create it; we keep only its hash. To rotate a key without a gap, create the new key before you revoke the old one.</p>
-      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Create key</button></form>
-        <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted" data-copy>Copy key</button> <button type="button" id="savedMinted">I saved the key</button></div>
+      <p class="muted">An API key is what your gateway sends with each append. You see it one time, when you create it; we keep only its hash. To rotate without a gap, create the new API key before you revoke the old one.</p>
+      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Create API key</button></form>
+        <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted" data-copy>Copy API key</button> <button type="button" id="savedMinted">I saved the key</button></div>
         <table style="margin-top:1rem"><thead><tr><th>label</th><th>created</th><th>last used</th><th>state</th><th></th></tr></thead><tbody id="keyRows"></tbody></table></div>
     </div>
     <div data-pane="policies" hidden>
       <h1>Policies</h1>
-      <p class="muted">Publish each Cedar policy version that your gateway loads, and the <code>policyDigest</code> of a receipt reads as its name, such as "refunds-v3". Enforcement stays on your machines: the gateway never reads this page. <a href="https://docs.agent-custody.dev/reference/hosted#policies-names-for-the-digests-receipts-carry" target="_blank" rel="noopener">How policy names work</a></p>
+      <p class="muted">Publish each <abbr title="Cedar is the policy language the gateway uses to allow or deny each tool call.">Cedar</abbr> policy version that your gateway loads, and the <code>policyDigest</code> of a receipt reads as its name, such as "refunds-v3". Enforcement stays on your machines: the gateway never reads this page. <a href="https://agent-custody.dev/reference/hosted#policies-names-for-the-digests-receipts-carry" target="_blank" rel="noopener">How policy names work</a></p>
       <p><button type="button" id="policyNew">Publish version</button></p>
       <div class="panel"><table><thead><tr><th>name</th><th>digest</th><th>bytes</th><th>published</th><th>by</th><th></th></tr></thead><tbody id="policyRows"></tbody></table></div>
       <div class="panel"><h2>Match a receipt</h2><p class="muted">Paste a receipt file, or just its <code>policyDigest</code>, to see which published version decided it.</p><form id="matchForm"><label>Receipt JSON or digest<textarea id="matchIn" rows="3" spellcheck="false"></textarea></label><button type="submit" class="quiet">Match</button></form><p class="msg" id="matchOut"></p></div>
@@ -1962,7 +1967,7 @@ ${DESIGN_CSS}
     </div>
     <div data-pane="export" hidden>
       <h1>Export</h1>
-      <p class="muted">Everything the log holds about you, any time, with your key: every leaf hash as a log file the verifier reads offline, the signed head, the published keys, the checkpoints, your usage, and the actions taken on your tenant. It checks itself before writing.</p>
+      <p class="muted">Everything the log holds about you, any time, with your key: every <abbr title="A leaf is one entry in the log: the hash of one receipt.">leaf</abbr> hash as a log file the verifier reads offline, the signed head, the published keys, the checkpoints, your usage, and the actions taken on your tenant. It checks itself before writing.</p>
       <div class="snip"><pre id="exportCmd"></pre><button type="button" class="quiet" data-copy>Copy</button></div>
     </div>
     <div data-pane="setup" hidden>
@@ -2089,7 +2094,7 @@ ${DESIGN_CSS}
   const authTab = (signUp) => {
     registering = signUp;
     $("tabSignIn").setAttribute("aria-selected", String(!signUp)); $("tabSignUp").setAttribute("aria-selected", String(signUp));
-    $("authTitle").textContent = signUp ? "Create an account" : "Sign in"; $("authGo").textContent = signUp ? "Create account" : "Sign in";
+    $("authTitle").textContent = signUp ? "Sign up" : "Sign in"; $("authGo").textContent = signUp ? "Sign up" : "Sign in";
     $("authNote").hidden = !signUp; $("pwRule").hidden = !signUp; $("forgotOpen").hidden = signUp || !MAIL; $("ssoSwap").hidden = signUp; $("ssoForm").hidden = true;
     $("password").autocomplete = signUp ? "new-password" : "current-password";
     $("authForm").hidden = false; $("forgotForm").hidden = true; $("authMsg").textContent = "";
@@ -2143,7 +2148,7 @@ ${DESIGN_CSS}
       "<h2>After the first receipt</h2>" + step("", "Hand this to whoever verifies your receipts", "<p>Both commands fetch this log's published keys and pin them; <code>--log-id</code> makes sure the tree heads are this log's.</p>" + snip(s.verify) + snip(s.audit)) +
       step("", "Take your data, any time", "<p>Every leaf hash, the signed head, the keys, the checkpoints, your usage, and the actions taken on your tenant, checked against each other and written as a log copy the verifier reads offline.</p>" + snip(s.export)) +
       "<h2>Your log's addresses</h2><div class=panel><table class=addr><tbody>" + [["Your log", s.log], ["Log id on tree heads", s.logId], ["Your checkpoints", s.checkpoints || "published after your first append"], ["The log's keys", s.keys + (s.keyid ? " (current keyid " + s.keyid.slice(0, 12) + "…)" : "")]].map(([k, v]) => "<tr><th>" + esc(k) + "</th><td class=mono>" + esc(v) + "</td></tr>").join("") + "</tbody></table></div>" +
-      "<h2>What this log does not do</h2><p class=muted>Hold receipt contents; forge a receipt, since your gateway key signs those; or, today, countersign with a second independent witness. <a href=\\"https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not\\" target=\\"_blank\\" rel=\\"noopener\\">What a receipt proves and what it does not.</a></p>";
+      "<h2>What this log does not do</h2><p class=muted>Hold receipt contents; forge a receipt, since your gateway key signs those; or, today, countersign with a second independent witness. <a href=\\"https://github.com/svayatta/agent-custody/tree/main/packages/receipts#what-a-receipt-proves-and-what-it-does-not\\" target=\\"_blank\\" rel=\\"noopener\\">What a receipt proves and what it does not.</a></p>";
   };
   document.addEventListener("click", (e) => {
     const b = e.target.closest("button[data-copy]"); if (b) { const was = b.dataset.was || b.textContent; b.dataset.was = was; navigator.clipboard.writeText(b.previousElementSibling.textContent).then(() => { b.textContent = "Copied"; setTimeout(() => { b.textContent = was; }, 1500); }, () => toast("Copy failed. Select the text and copy it by hand.", false)); return; }

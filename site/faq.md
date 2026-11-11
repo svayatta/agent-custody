@@ -79,9 +79,9 @@ No. Policy evaluation is Cedar, or Rego compiled from a file, evaluated in the g
 
 The gateway does not read prompts, so it cannot detect an injection. It does not need to. An injection that succeeds makes the agent call a tool it should not; the gateway evaluates that call against the policy and the facts it fetched itself, and denies it before the tool hears anything. The denial is a receipt with the arguments the agent tried, which is what your investigation wants. The film on the home page shows exactly this case.
 
-## Who can read the portal and the admin page?
+## Who can read the dashboard and the admin page?
 
-The portal at app.agent-custody.dev holds your account, your tenant, hashed API keys, usage counts, and the policy versions you chose to publish. The admin page is ours, behind one secret, and shows tenants, usage, and the contact details people gave at registration. Neither holds a receipt. The [privacy page](/privacy) is the full list.
+The dashboard at app.agent-custody.dev holds your account, your tenant, hashed API keys, usage counts, and the policy versions you chose to publish. The admin page is ours, behind one secret, and shows tenants, usage, and the contact details people gave at registration. Neither holds a receipt. The [privacy page](/privacy) is the full list.
 
 ## Can I run all of it myself?
 

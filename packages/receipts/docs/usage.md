@@ -1,4 +1,6 @@
-# Usage guide: the gateway
+# Running the gateway
+
+> How it works and when to use it. Every field, route, and flag is in [the reference](../../../site/reference/gateway.md).
 
 This page covers the gateway, the out-of-process producer. For the in-process interceptor that hooks Claude Code, the Claude Agent SDK, or any framework's tool functions, see [sdk.md](sdk.md).
 

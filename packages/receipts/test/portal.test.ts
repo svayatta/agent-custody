@@ -167,7 +167,9 @@ describe("the tenant portal", () => {
     expect(page.headers.get("content-security-policy")).toMatch(/default-src 'none'/);
     const html = await page.text();
     expect(html).toContain("API keys");
-    expect(html).toContain("https://docs.agent-custody.dev/reference/");
+    // the website's one nav, on the dashboard's host: every link absolute, and no second docs host
+    for (const [text, href] of [["Product", "https://agent-custody.dev/"], ["Docs", "https://agent-custody.dev/guide/getting-started"], ["Pricing", "https://agent-custody.dev/pricing"], ["Blog", "https://agent-custody.dev/blog/"], ["Verify a receipt", "https://agent-custody.dev/verify"]]) expect(html).toContain(`<a href="${href}" target="_blank" rel="noopener">${text}</a>`);
+    expect(html).not.toContain("docs.agent-custody.dev");
     expect(html).toContain("https://agent-custody.dev/verify");
   });
 
@@ -253,7 +255,7 @@ describe("the tenant portal", () => {
     expect(page).toContain('<a href="#activity" data-view="activity">');
     expect(page).not.toMatch(/id="activity"/);
     for (const a of AUDIT_ACTIONS) expect(page).toContain(`"${a}": (`);
-    expect(page).toContain('<button type="submit">Create key</button>');
+    expect(page).toContain('<button type="submit">Create API key</button>');
     expect(page).not.toContain("Mint key");
     expect(page).toContain('<dialog id="publishDialog"');
     expect(page).toContain('<dialog id="policyView"');

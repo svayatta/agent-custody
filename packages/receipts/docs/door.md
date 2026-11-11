@@ -1,4 +1,6 @@
-# The door: a receipted reverse proxy in front of your own site or API
+# The door
+
+> How it works and when to use it. Every field, route, and flag is in [the reference](../../../site/reference/door.md).
 
 The gateway stands between an agent and the tools it uses. The door stands between the world and your own HTTP surface: a website, an API, a form. Every arrival, a browser, an API client, a crawler, or an agent acting for someone, is classified by what it presented, decided by a Cedar policy for the route it hit, relayed to your origin or refused, and receipted either way. The receipt is the same signed, logged, independently verifiable receipt the gateway issues, with `issuer.kind: "door"`.
 
@@ -33,21 +35,7 @@ agent-custody door --config door.json --port 8780
 }
 ```
 
-| field | meaning |
-| --- | --- |
-| `identity.keyFile` | the door's Ed25519 key; signs every receipt. From `agent-custody keygen` |
-| `origin.url` | where allowed arrivals are relayed: the site or API behind the door. `headers` and `headerEnv` add headers to every relayed request, the latter from the environment, so the origin can require a secret only the door holds. `timeoutMs` bounds one relayed request, default 30 s. A path in the URL (`https://host/api/v1`) is kept: the arrival's path goes under it, and a redirect from the origin to a place under it comes back as a door path |
-| `routes` | what the policy sees as the action. `path` is exact (`/refunds`), a prefix (`/api/*`), or `*`; `methods` narrows it, default every method. The first route that matches wins; an arrival no route matches is the action `unmatchedRoute`, default `other`. The match reads the path as the origin will: percent-decoded once, so `/%61dmin` falls under `/admin/*`, and with empty segments merged, so `//admin/users` and `/admin//users` fall under it too (nginx, Apache, and many frameworks merge them). A trailing slash matches as none: `/refunds/` falls under `/refunds`. The origin is sent that merged, decoded form, trailing slash kept, so the door and the origin read one path. A path with a segment that does not decode, or decodes to a slash or a backslash, falls under `unmatchedRoute` and is never relayed |
-| `trustedPrincipalKeys` | public keys of principals whose signed grants the door accepts as a passport. Without any, no arrival can be `verified` |
-| `policyFile` | the Cedar policy, re-read when the file changes; one that does not parse is refused and the policy in force stays |
-| `mode` | `enforce` (default) refuses what the policy denies. `observe` relays everything and records the decision with `enforced: false` |
-| `trustProxy` | behind one reverse proxy you run: the arrival's address is the last in `X-Forwarded-For`, the one your proxy appended; everything before it is what the client sent. The proxy's `X-Forwarded-For`, `-Proto`, and `-Host` are kept on the relay, with the door's own socket address appended, and the other client-address headers (`Forwarded`, `X-Real-IP`, `True-Client-IP`, `CF-Connecting-IP`, every `X-Forwarded-*`) are relayed as the proxy sent them. Without `trustProxy` the client wrote all of these: the door drops them and sets `X-Forwarded-For`, `-Host`, `-Proto`, and `X-Real-IP` itself |
-| `maxBodyBytes` | the largest request body the door relays; a larger one gets 413 and a `withheld` receipt once the policy has allowed it. Default 1 MiB |
-| `maxResponseBytes` | the largest origin response the door relays; see [what the arrival gets back](#what-the-arrival-gets-back). Default 32 MiB |
-| `maxInFlight` | arrivals handled at once. Each holds its body and the origin's answer in memory until it is answered, so this bounds the door's memory at about `maxInFlight × (maxBodyBytes + maxResponseBytes)`. Past it the next arrival gets 503 with `Retry-After: 1` before its body is read: it is not decided, relayed, or receipted. Default 256 |
-| `precommit` | route names whose arrivals are committed to the log before they are relayed whatever their method, or `["*"]`. Every arrival whose method is not GET, HEAD, or OPTIONS is committed regardless; see [before the origin hears of it](#before-the-origin-hears-of-it). Default `[]` |
-| `challenge` | the human branch: `{ provider: "turnstile" or "hcaptcha", siteKey, secretEnv, hostnames, action?, header?, timeoutMs?, maxInFlight? }`. `hostnames` lists the hosts of the pages that render the widget, `action` (Turnstile only) the widget's action, and `maxInFlight` (default 64) how many checks may wait on the provider at once. A token an arrival sends in `header` (default `x-agent-custody-challenge`) is verified with the provider, and the outcome is the arrival's `challenge` signal; see [challenging a human](#challenging-a-human). The secret comes from the environment variable, read at startup; missing is a startup error |
-| `receiptsDir`, `logFile` or `log`, `otel`, `splunk`, `capture`, `captureKeyEnv` | as for the [gateway](configuration.md): where receipts and the log go, exporters, and private evidence per route. A remote `log` needs `log.keys`, because its answer is checked before a request is relayed. Unlike the gateway, the door withholds by default: see [what a receipt records](#what-a-receipt-records-of-the-query-and-the-body) |
+Every field of the config, with its type and default, is in [the door reference](../../../site/reference/door.md#config).
 
 `agent-custody check --config door.json` reads a door config the way the door would: unknown keys, the key, the principal keys, the policy (including a permit that names an agent without requiring a verified arrival, see below), the routes, what is precommitted, the challenge provider or its absence, the origin's scheme, every credential variable the door reads at startup (origin headers, the log, Splunk, OTel, the capture key, the challenge secret), and the paths. It exits 1 on an error.
 

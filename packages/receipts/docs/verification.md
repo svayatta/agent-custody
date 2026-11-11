@@ -1,4 +1,4 @@
-# Verifying a receipt
+# How verification works
 
 A verifier needs three things and no network access:
 
