@@ -3,7 +3,7 @@
 // inserted or reordered receipt, a forged or missing seal, an untrusted signer, and a cut the head witness reveals.
 // The logs here are written from the spec by a small writer in this file, not by Perathos itself.
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -201,6 +201,36 @@ describe("verifyPerathosLog", () => {
     (last.signature as Receipt).verify_key = "ff".repeat(32);
     last.receipt_hash = perathosReceiptHash(last);
     expect(failed(verifyPerathosLog(jsonl(bad)))).toEqual(["checkpoint signatures verify"]);
+  });
+});
+
+describe("a log written by Perathos itself", () => {
+  // the interop vector: a sample evidence pack's session log, copied byte for byte from the Perathos repository,
+  // with the report of Perathos's own verifier beside it
+  const dir = resolve(import.meta.dirname, "..", "vectors", "interop", "perathos", "pocketos-replay");
+  const log = readFileSync(join(dir, "session.jsonl"), "utf8");
+  const head = JSON.parse(readFileSync(join(dir, "session.head.json"), "utf8")) as { seq: number; receipt_hash: string };
+  const theirs = JSON.parse(readFileSync(join(dir, "verification.json"), "utf8")) as Record<string, unknown>;
+  const key = (theirs.signers as string[])[0]!;
+
+  it("verifies with the recorder's key and the head witness, and agrees with Perathos's own verifier on every count", () => {
+    const r = verifyPerathosLog(log, { trustedKeys: [key], head: perathosHead(readFileSync(join(dir, "session.head.json"), "utf8")) });
+    expect(failed(r)).toEqual([]);
+    expect(theirs.valid).toBe(true);
+    expect({ session: r.session, receipts: r.receipts, toolCalls: r.toolCalls, checkpoints: r.checkpoints, sealedThrough: r.sealedThrough, unsealedTail: r.unsealedTail, signers: r.signers, firstTs: r.firstTs, lastTs: r.lastTs, denied: r.denied })
+      .toEqual({ session: theirs.session_id, receipts: theirs.receipts, toolCalls: theirs.tool_calls, checkpoints: theirs.checkpoints, sealedThrough: theirs.sealed_through, unsealedTail: theirs.unsealed_tail, signers: theirs.signers, firstTs: theirs.first_ts, lastTs: theirs.last_ts, denied: theirs.blocked });
+  });
+
+  it("refuses the same log with one receipt edited, with its tail cut, or against another key", () => {
+    const lines = log.trimEnd().split("\n");
+    const edited = lines.map((l, i) => (i === 2 ? l.replace('"tool":"Bash"', '"tool":"Read"') : l));
+    expect(edited[2]).not.toBe(lines[2]);
+    expect(failed(verifyPerathosLog(edited.join("\n"), { trustedKeys: [key] }))).toEqual(["receipt_hash recomputes"]);
+    const firstCheckpoint = lines.findIndex((l) => l.includes('"kind":"checkpoint"'));
+    const cut = lines.slice(0, firstCheckpoint + 1).join("\n");
+    expect(verifyPerathosLog(cut, { trustedKeys: [key] }).ok).toBe(true);
+    expect(failed(verifyPerathosLog(cut, { trustedKeys: [key], head }))).toEqual(["the head witness's checkpoint is in the log"]);
+    expect(failed(verifyPerathosLog(log, { trustedKeys: [owner.hex] }))).toEqual(["every signer is a trusted key"]);
   });
 });
 

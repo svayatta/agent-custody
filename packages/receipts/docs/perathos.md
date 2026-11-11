@@ -87,7 +87,11 @@ Both use Ed25519, SHA-256, and canonical JSON with sorted keys that matches RFC 
 ## Not read yet
 
 - RFC 3161 anchors (`perathos.anchor/v1`): verifying a timestamp token means parsing the authority's signed response and chaining it to a pinned root certificate.
-- Perathos evidence packs, which bundle logs, anchors, and preconditions.
+- The rest of a Perathos evidence pack: its signed manifest, anchors, and preconditions. The session log inside a pack is read as above. The head witness file also carries a signature that the spec does not define, which is not checked.
 - Signed preconditions (`perathos.precondition/v1`) and Gate approvals.
 
-The tests in `test/perathos.test.ts` write logs from the spec. Example 45 does the same and shows a cut log caught by its head witness and an edited guard decision caught by the chain.
+## Tested against a log Perathos wrote
+
+`vectors/interop/perathos/pocketos-replay/` holds the session log, head witness, and verifier report from the sample evidence pack in the Perathos repository, copied byte for byte with their licence ([the vector's README](../vectors/interop/perathos/README.md)). `verify-perathos` verifies that log with the recorder's key and the head witness, and agrees with Perathos's own verifier on the session, the receipt, call, and checkpoint counts, the sealed range, the signer, the times, and the two calls the guard blocked. The same log with one receipt edited, cut back to its first checkpoint against the head witness, or checked against another key, fails. So our canonical JSON matches their writer's, and their signatures are hex.
+
+The other tests in `test/perathos.test.ts` write logs from the spec, to reach each rule. Example 45 does the same and shows a cut log caught by its head witness and an edited guard decision caught by the chain.

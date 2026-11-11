@@ -301,7 +301,7 @@ src/rest.ts        the REST connector: an HTTP API described as tools, standing 
 src/a2a.ts         agents delegating to agents: a remote A2A agent as an upstream, and the gateway serving A2A itself in front of it
 src/upstream.ts    attested execution: an upstream signs its result for the receipt; the verifier checks it with the upstream key
 src/capture.ts     private evidence: per-tool capture rules applied by the issuer to the whole statement, withheld values as salted commitments or encrypted under the customer's key, restore and reveal
-vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them
+vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them; `interop/` holds other projects' records, copied as they wrote them and never regenerated
 src/verify.ts      offline verification, the human-readable report, and the audit that a later log extends an earlier one
 src/claude-init.ts `init claude-code`: the agent key, the observe-mode config, the starter policy, and the three hooks merged into the settings file with absolute paths
 src/deny-report.ts `report`: verifies the receipts of an SDK config and lists the calls the policy would have denied
