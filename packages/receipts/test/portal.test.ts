@@ -167,7 +167,7 @@ describe("the tenant portal", () => {
     expect(page.headers.get("content-security-policy")).toMatch(/default-src 'none'/);
     const html = await page.text();
     expect(html).toContain("API keys");
-    expect(html).toContain("https://docs.agent-custody.dev/reference/");
+    expect(html).toContain("https://agent-custody.dev/reference/");
     expect(html).toContain("https://agent-custody.dev/verify");
   });
 
