@@ -88,6 +88,11 @@ describe("auditSessions", () => {
     expect(() => parseSince("last week", NOW)).toThrow(/--since takes 7d, 24h, 30m, or a date/);
   });
 
+  it("is importable from the package root, as the reference documents", async () => {
+    const pkg = await import("../src/index.ts");
+    for (const name of ["auditSessions", "formatSessionAudit", "parseSince", "defaultTranscriptDir"]) expect(typeof (pkg as Record<string, unknown>)[name]).toBe("function");
+  });
+
   it("finds Claude Code's transcripts where Claude Code keeps them, and says so when there are none", () => {
     expect(defaultTranscriptDir({ CLAUDE_CONFIG_DIR: "/cfg" })).toBe("/cfg/projects");
     expect(defaultTranscriptDir({})).toMatch(/\.claude\/projects$/);
