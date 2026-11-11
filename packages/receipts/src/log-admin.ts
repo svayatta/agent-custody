@@ -7,6 +7,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { RateLimiter, type PostgresTenancy, PLANS, type Plan } from "./log-store.ts";
+import { DESIGN_CSS } from "./design.ts";
 import { clientAddress } from "./log-sink.ts";
 import type { PortalStore } from "./portal.ts";
 
@@ -215,37 +216,31 @@ const ADMIN_PAGE = `<!doctype html>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <script>(() => { try { const t = localStorage.getItem("agent-custody-theme"); if (t === "dark" || t === "light") document.documentElement.dataset.theme = t; } catch {} })();</script>
 <style>
-  :root { color-scheme: light dark; --ink: #1b2430; --ink2: #5b6b7a; --line: #d7dfe5; --bg: #fafbfc; --panel: #ffffff; --accent: #0f6e63; --warn: #8a5a00; --warnbg: #fbf1dc; --mono: ui-monospace, Menlo, monospace; }
-  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink: #e6ecf0; --ink2: #9fb0bd; --line: #27333c; --bg: #0e1418; --panel: #151d23; --accent: #4fc3b0; --warn: #e2b862; --warnbg: #2d2412; } }
-  :root[data-theme="dark"] { --ink: #e6ecf0; --ink2: #9fb0bd; --line: #27333c; --bg: #0e1418; --panel: #151d23; --accent: #4fc3b0; --warn: #e2b862; --warnbg: #2d2412; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, sans-serif; }
+${DESIGN_CSS}
   main { max-width: 72rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-  h1 { font-size: 1.4rem; margin: 0 0 .25rem; } h2 { font-size: 1.05rem; margin: 2rem 0 .75rem; }
+  h1 { margin: 0 0 .25rem; } h2 { margin: 2rem 0 .75rem; }
   .sub { color: var(--ink2); margin: 0 0 1.5rem; }
   .row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: end; }
   label { display: grid; gap: .25rem; font-size: .85rem; color: var(--ink2); }
-  input { font: inherit; padding: .45rem .6rem; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); min-width: 14rem; }
-  button { font: inherit; padding: .5rem .9rem; border: 1px solid var(--accent); border-radius: 4px; background: var(--accent); color: #fff; cursor: pointer; }
-  button.quiet { background: transparent; color: var(--accent); }
-  button:disabled { opacity: .5; cursor: default; }
+  input { min-width: 14rem; }
   table { border-collapse: collapse; width: 100%; font-size: .93rem; }
   th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; color: var(--ink2); }
-  code, pre { font-family: var(--mono); font-size: .86em; }
-  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: .9rem 1rem; overflow-x: auto; white-space: pre-wrap; }
-  .once { border-left: 3px solid var(--warn); background: var(--warnbg); padding: .8rem 1rem; border-radius: 0 4px 4px 0; margin: 1rem 0; }
-  .muted { color: var(--ink2); } .err { color: #b3261e; } .ok { color: var(--accent); }
+  th { font-size: var(--text-xs); font-weight: 600; color: var(--ink2); } th::first-letter { text-transform: uppercase; }
+  code, pre { font-size: .86em; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .9rem 1rem; overflow-x: auto; white-space: pre-wrap; }
+  .once { border-left: 3px solid var(--warn); background: var(--warn-bg); padding: .8rem 1rem; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; margin: 1rem 0; }
+  .muted { color: var(--ink2); } .err { color: var(--bad); } .ok { color: var(--ok); }
   .tok { font-family: var(--mono); font-size: 1.05rem; word-break: break-all; user-select: all; }
   .head { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
-  button.theme { background: transparent; color: var(--ink2); border: 1px solid var(--line); padding: .25rem .6rem; font-size: .8rem; border-radius: 4px; } button.theme:hover { color: var(--ink); }
+  #themeToggle[aria-pressed="true"] .moon, #themeToggle[aria-pressed="false"] .sun { display: none; }
   [hidden] { display: none !important; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .6rem; margin: 0 0 1rem; }
-  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: .6rem .8rem; }
-  .stat b { display: block; font-size: 1.4rem; font-variant-numeric: tabular-nums; } .stat span { color: var(--ink2); font-size: .8rem; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .6rem; margin: .8rem 0 1rem; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-md); padding: .6rem .8rem; }
+  .stat b { display: block; font-size: var(--text-xl); font-variant-numeric: tabular-nums; } .stat span { color: var(--ink2); font-size: .8rem; }
 </style>
 <main>
   <div class="head"><div><h1>Log admin</h1>
-  <p class="sub" id="where">Tenants and tokens on this log.</p></div><button class="theme" id="themeToggle" type="button">Dark mode</button></div>
+  <p class="sub" id="where">Tenants and tokens on this log.</p></div><button class="theme icon" id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Dark mode"><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button></div>
   <section id="app">
     <h2>Registrations</h2>
     <div class="row"><label>month<input id="rmonth" type="month"></label><button class="quiet" id="loadRegs">Show</button><a id="rcsv" class="quiet" href="#" style="align-self:center">Download CSV</a></div>
@@ -298,7 +293,7 @@ const ADMIN_PAGE = `<!doctype html>
   const say = (t, cls) => { $("msg").textContent = t; $("msg").className = cls || "muted"; };
   // Light or dark by choice, kept in this browser; unset, the page follows the system. The button says where it is going.
   const themeNow = () => document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  const themeLabel = () => { $("themeToggle").textContent = themeNow() === "dark" ? "Light mode" : "Dark mode"; };
+  const themeLabel = () => { $("themeToggle").setAttribute("aria-pressed", String(themeNow() === "dark")); };
   $("themeToggle").onclick = () => { const next = themeNow() === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; try { localStorage.setItem("agent-custody-theme", next); } catch {} themeLabel(); };
   themeLabel();
   const loadTenants = async () => {
