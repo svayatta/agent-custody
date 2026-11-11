@@ -70,6 +70,14 @@ The gateway covers only the calls that go through it. A credential in the agent'
 
 This is for engineers who run Claude Code against repositories and systems that touch production. One command adds a hook to Claude Code. The hook checks each shell command, file edit, and MCP tool call against a deny list before the call runs. The starter list covers force push, `rm -rf` on `/` and `~`, `terraform destroy`, and `drop database`.
 
+Before you install anything, see what it would have caught in your last week of Claude Code. This reads the transcripts Claude Code keeps on your machine; it installs nothing, writes nothing, and sends nothing:
+
+```bash
+npx -y @agent-custody/receipts audit-sessions --since 7d
+```
+
+Then install the hook:
+
 ```bash
 npm install -g @agent-custody/receipts
 agent-custody init claude-code
@@ -279,7 +287,7 @@ This whole loop is one runnable file, [packages/state/examples/02-receipt-to-bel
 - See how it fits together, with diagrams: what runs on the customer's side, what is hosted, the sequence of a call, onboarding, revocation, and verification. [Architecture](site/guide/architecture.md).
 - Where each piece runs, sized, with what interception does not reach. [Deployment](https://agent-custody.dev/guide/deployment). What each release changed: [changelog](CHANGELOG.md).
 - Register a tenant on the hosted log at [app.agent-custody.dev](https://app.agent-custody.dev/#register) and get a log and a first key at once: free for ten thousand appends a month, [$50 a month](https://agent-custody.dev/pricing) for a million, a dashboard with usage against the plan, keys, and every action taken on the tenant, and an export that takes everything with you.
-- The reference at [docs.agent-custody.dev](https://docs.agent-custody.dev/): every feature, and the exact request and response of every function, endpoint, MCP tool, and command.
+- The reference at [agent-custody.dev/reference](https://agent-custody.dev/reference/): every feature, and the exact request and response of every function, endpoint, MCP tool, and command.
 - Want a log run by someone who is not you? [deploy/](deploy/README.md) has the container, a docker compose file for one VM, and Kubernetes manifests to run it on a machine the operator does not control; or take a tenant on the one we run, at [log.agent-custody.dev](https://agent-custody.dev/early-access), on the [Free or Team plan](https://agent-custody.dev/pricing).
 - Agents in Python, Go, Java, Rust, or anything else: the gateway is an MCP server and needs nothing from your language; for in-process receipts run the sidecar and use the Python package or a forty-line client. [sdk.md](packages/receipts/docs/sdk.md#other-languages-the-sidecar)
 - Step-by-step examples in the receipts package and more in the state package: [receipts tutorials](packages/receipts/docs/tutorials.md), [state examples](packages/state/examples).

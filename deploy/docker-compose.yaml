@@ -125,21 +125,6 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
-  # docs.<domain>: the site built from this checkout, served as static files behind Caddy at DOCS_HOST.
-  # `deploy/update-docs.sh` rebuilds it after a git pull.
-  docs:
-    profiles: ["public"]
-    build:
-      context: ..
-      dockerfile: deploy/docs.Dockerfile
-    image: agent-custody-docs:local
-    # built here, never pulled: keeps `docker compose pull` from failing on an image no registry has
-    pull_policy: build
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "5" }
-
   caddy:
     profiles: ["public"]
     image: caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
@@ -154,6 +139,7 @@ services:
       CHECKPOINTS_HOST: ${CHECKPOINTS_HOST:-}
       # every host block in the Caddyfile has a *.localhost default, so an unset host is harmless, never a crash
       PORTAL_HOST: ${PORTAL_HOST:-}
+      # the retired docs host: Caddy answers it with a permanent redirect to the website
       DOCS_HOST: ${DOCS_HOST:-}
       ADMIN_HOST: ${ADMIN_HOST:-}
     ports:

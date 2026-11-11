@@ -25,6 +25,7 @@ import { createDoorHost, serveDoor } from "./door.ts";
 import { createEgressHost, serveEgress } from "./egress.ts";
 import { draftEgressPolicy } from "./egress-draft.ts";
 import { createAcsGuardian } from "./acs.ts";
+import { auditSessions, defaultTranscriptDir, formatSessionAudit, parseSince } from "./session-audit.ts";
 import { formatPerathosReport, perathosHead, verifyPerathosLog } from "./perathos.ts";
 import { serveA2a } from "./a2a.ts";
 import { PortalStore, sendFollowUps, servePortal, type MailOptions, type OAuthOptions, type Role, type StripeOptions } from "./portal.ts";
@@ -122,6 +123,8 @@ const USAGE = `agent-custody <command>
   init claude-code [--dir <dir>] [--user] [--enforce] [--log-url <url> [--log-id <id>] [--log-token-env NAME] [--log-key <pub>]]
                                                    one command for your own Claude Code sessions: an agent key, sdk.json in observe mode, a starter deny
                                                    policy, and the three hooks in .claude/settings.local.json (--user: ~/.claude/settings.json). Safe to run twice
+  audit-sessions [--since 7d|24h|<date>|all] [--dir <claude projects dir>] [--policy <file.cedar>] [--counts] [--json]
+          a read-only preview: which of your past Claude Code tool calls the policy would have denied, from the transcripts; writes nothing
   report  --config <sdk.json>                      the calls that the policy would have denied, from the receipts: tool, command or path, rule, receipt id;
                                                    a receipt that does not verify is counted apart. Exits 1 when any receipt does not verify
   hook    [--config <sdk.json>]        Claude Code hook command; reads the event on stdin (or AGENT_CUSTODY_CONFIG)
@@ -439,6 +442,19 @@ async function main(argv: string[]): Promise<number> {
         ...(values["log-token-env"] ? { logTokenEnv: values["log-token-env"] } : {}),
         ...(values["log-key"] ? { logKey: values["log-key"] } : {}),
       });
+      return 0;
+    }
+    case "audit-sessions": {
+      const { values } = parseArgs({ args: rest, options: { since: { type: "string", default: "7d" }, dir: { type: "string" }, policy: { type: "string" }, json: { type: "boolean", default: false }, counts: { type: "boolean", default: false } } });
+      if (values.policy && isRegoFile(values.policy)) throw new Error("audit-sessions reads a Cedar policy; a Rego policy needs opa, which writes files");
+      const templateUrl = new URL("../templates/claude-code.cedar", import.meta.url);
+      const audit = auditSessions({
+        dir: values.dir ?? defaultTranscriptDir(),
+        policyText: readFileSync(values.policy ?? templateUrl, "utf8"),
+        policyName: values.policy ?? "the init claude-code template",
+        ...(values.since === "all" ? {} : { since: parseSince(values.since) }),
+      });
+      console.log(values.json ? JSON.stringify(audit, null, 2) : formatSessionAudit(audit, { counts: values.counts }));
       return 0;
     }
     case "report": {
