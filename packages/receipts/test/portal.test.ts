@@ -167,7 +167,9 @@ describe("the tenant portal", () => {
     expect(page.headers.get("content-security-policy")).toMatch(/default-src 'none'/);
     const html = await page.text();
     expect(html).toContain("API keys");
-    expect(html).toContain("https://agent-custody.dev/reference/");
+    // the website's one nav, on the dashboard's host: every link absolute, and no second docs host
+    for (const [text, href] of [["Product", "https://agent-custody.dev/"], ["Docs", "https://agent-custody.dev/guide/getting-started"], ["Pricing", "https://agent-custody.dev/pricing"], ["Blog", "https://agent-custody.dev/blog/"], ["Verify a receipt", "https://agent-custody.dev/verify"]]) expect(html).toContain(`<a href="${href}" target="_blank" rel="noopener">${text}</a>`);
+    expect(html).not.toContain("docs.agent-custody.dev");
     expect(html).toContain("https://agent-custody.dev/verify");
   });
 
@@ -253,7 +255,7 @@ describe("the tenant portal", () => {
     expect(page).toContain('<a href="#activity" data-view="activity">');
     expect(page).not.toMatch(/id="activity"/);
     for (const a of AUDIT_ACTIONS) expect(page).toContain(`"${a}": (`);
-    expect(page).toContain('<button type="submit">Create key</button>');
+    expect(page).toContain('<button type="submit">Create API key</button>');
     expect(page).not.toContain("Mint key");
     expect(page).toContain('<dialog id="publishDialog"');
     expect(page).toContain('<dialog id="policyView"');
@@ -1567,7 +1569,7 @@ describe("portal navigation", () => {
     expect([...nav.matchAll(/class="group(?: help)?">([^<]+)</g)].map((m) => m[1])).toEqual(["Monitor", "Log", "Organisation", "Help"]);
     expect([...nav.matchAll(/data-view="([^"]+)"/g)].map((m) => m[1])).toEqual(["overview", "usage", "activity", "setup", "keys", "policies", "export", "members", "billing"]);
     const help = nav.slice(nav.indexOf('class="group help"'));
-    expect([...help.matchAll(/class="help" href="https:[^>]*>([^<]+)</g)].map((m) => m[1])).toEqual(["Guide", "Docs", "Verify a receipt"]);
+    expect([...help.matchAll(/class="help" href="https:[^>]*>([^<]+)</g)].map((m) => m[1])).toEqual(["Product", "Docs", "Pricing", "Blog", "Verify a receipt"]);
     expect(page).toContain('<html lang="en">');
     const menu = page.match(/<div id="userMenu" popover>[\s\S]*?<\/button><\/div><\/div>/)![0];
     expect([...menu.matchAll(/<(?:a|button) class="row[^"]*"[^>]*>/g)]).toHaveLength(3);

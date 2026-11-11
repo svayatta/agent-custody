@@ -1,4 +1,6 @@
-# What each piece is for, and when you need it
+# Components
+
+The words on this page are defined in the [glossary](/guide/glossary).
 
 <!--@include: ../../README.md#pieces-->
 
@@ -17,4 +19,4 @@
 
 The anchor and the witness both ship in the package. Neither runs for our hosted log yet: the anchor needs a funded key on mainnet, and the witness needs an operator who is not us. [Anchoring](/receipts/anchoring) says what an anchor proves, including the window before the next anchor, and [verifying a receipt](/receipts/verification) covers the witness.
 
-The full list of claims, who can check each, and against whom, is the [proof table](/receipts/#what-a-receipt-proves-and-what-it-does-not). What the gateway does not cover is on the [deployment page](/guide/deployment#what-the-gateway-does-not-cover). A hosted log is [running and taking tenants](/early-access).
+The full list of claims, who can check each, and against whom, is the [proof table](https://github.com/svayatta/agent-custody/tree/main/packages/receipts#what-a-receipt-proves-and-what-it-does-not). What the gateway does not cover is on the [deployment page](/guide/deployment#what-the-gateway-does-not-cover). A hosted log is [running and taking tenants](/early-access).

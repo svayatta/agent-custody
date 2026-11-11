@@ -4,11 +4,13 @@ The log at `log.agent-custody.dev` is the reference log server run by us, for te
 
 ## Plans
 
-| plan | appends a calendar month | price |
-| --- | --- | --- |
-| `free` | 10,000 | $0 |
-| `team` | 1,000,000 | $50 a month |
-| `enterprise` | no allowance | by conversation |
+| plan | appends a calendar month |
+| --- | --- |
+| `free` | 10,000 |
+| `team` | 1,000,000 |
+| `enterprise` | no allowance |
+
+What each plan costs is on [pricing](/pricing).
 
 An append past the allowance is refused:
 
@@ -20,7 +22,7 @@ Retry-After: <seconds to the start of next month>
 
 The gateway's log client retries a 429 three times with backoff and then treats the append as failed. A pre-committed call and a financial operation are not forwarded: the call returns an error. Any other call is forwarded and returns its real result marked `log-pending`, and its receipt waits in the outbox until the log takes it. In strict mode every call is pre-committed. See [pricing](https://agent-custody.dev/pricing).
 
-## Registering: the portal
+## Signing up: the dashboard
 
 `https://app.agent-custody.dev/` is one page. Registering creates the account, the tenant, and its first key, shown once. The page's own API, which any HTTP client may use with the session cookie it sets:
 
@@ -83,7 +85,7 @@ A write route that is not in this table needs `admin`. The last owner of a tenan
 
 ### Portal navigation
 
-The sidebar has three groups. Monitor holds Overview, Usage, and Activity. Log holds Setup, API keys, Policies, and Export. Organisation holds Members and Billing. The top bar of a signed-in user shows the logo mark (a link to Overview), a slash, the tenant name as the main label, and the plan as a small badge. The product name is not in the bar; it stays in the accessible name of the logo link ("agent-custody, Overview") and in the tab title. Three quiet links to the guide, the docs, and the receipt verifier follow, then the Account button. The Account button is a round avatar with the first letter of the address. Its accessible name is "Account menu for" followed by the address. The Account menu is one list of rows: a header with the address, the tenant, and the role; Security (two-step sign-in); the theme control, which shows On or Off; and Sign out. On a narrow screen the sidebar is a drawer that the menu button opens. The drawer ends with a Help group that holds the three links, so the top bar is one row: the menu button, the logo mark, the tenant name, and the avatar. Below 30rem the plan badge hides, and the Account menu header shows the plan. The sign-in, onboarding, and welcome screens show the product name next to the logo and show no tenant and no avatar. The Account button there holds only the theme control.
+The sidebar has three groups. Monitor holds Overview, Usage, and Activity. Log holds Setup, API keys, Policies, and Export. Organisation holds Members and Billing. The top bar of a signed-in user shows the logo mark (a link to Overview), a slash, the tenant name as the main label, and the plan as a small badge. The product name is not in the bar; it stays in the accessible name of the logo link ("agent-custody, Overview") and in the tab title. The website links (Product, Docs, Pricing, Blog, and Verify a receipt) are quiet links before the avatar. The Account button is a round avatar with the first letter of the address. Its accessible name is "Account menu for" followed by the address. The Account menu is one list of rows: a header with the address, the tenant, and the role; Security (two-step sign-in); the theme control, which shows On or Off; and Sign out. On a narrow screen the sidebar is a drawer that the menu button opens. The drawer ends with a Help group that holds the three links, so the top bar is one row: the menu button, the logo mark, the tenant name, and the avatar. Below 30rem the plan badge hides, and the Account menu header shows the plan. The sign-in, onboarding, and welcome screens show the product name next to the logo and show no tenant and no avatar. The Account button there holds only the theme control.
 
 The address bar names the view: `/#policies` opens Policies after sign-in, and the Back and Forward buttons of the browser change the view. An unknown name opens Overview.
 
@@ -123,7 +125,7 @@ Two emails follow a registration when the operator has mail configured: the setu
 
 ## Policies: names for the digests receipts carry
 
-Enforcement is local: the gateway reads its Cedar file and writes the file's SHA-256 into every receipt as `policyDigest`. The portal's Policies page lets a tenant publish each version they deploy under a name, so a digest reads as "refunds-v3" here, in the match tool (paste a receipt or a digest), and in the export's `policies.json`. Nothing on this page is read by the gateway, and the hosted log never evaluates a policy. Every publish and removal is in the tenant's audit trail.
+Enforcement is local: the gateway reads its Cedar file and writes the file's SHA-256 into every receipt as `policyDigest`. The dashboard's Policies page lets a tenant publish each version they deploy under a name, so a digest reads as "refunds-v3" here, in the match tool (paste a receipt or a digest), and in the export's `policies.json`. Nothing on this page is read by the gateway, and the hosted log never evaluates a policy. Every publish and removal is in the tenant's audit trail.
 
 The portal's Activity page shows the audit trail as sentences, such as "You created the key 'first key'", in the reader's time zone, with the UTC time on hover. The Billing page shows the three plans of the [pricing page](https://agent-custody.dev/pricing), and a test keeps their names, prices, and limits equal to that page and to the server's plan limits.
 

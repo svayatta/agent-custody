@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#fafaf9"/>
+  <rect x="0" y="0" width="1200" height="8" fill="#b45309"/>
+  <g transform="translate(96,96) scale(1.25)">
+    <rect width="64" height="64" rx="14" fill="#b45309"/>
+    <path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/>
+    <path d="M25 20h14M25 27h14" stroke="#b45309" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="#b45309" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="192" y="152" font-family="Inter, Helvetica, Arial, sans-serif" font-size="40" font-weight="600" fill="#1c1917">agent-custody</text>
+  <text x="96" y="330" font-family="Inter, Helvetica, Arial, sans-serif" font-size="76" font-weight="700" fill="#1c1917" letter-spacing="-2">Proof of what your</text>
+  <text x="96" y="416" font-family="Inter, Helvetica, Arial, sans-serif" font-size="76" font-weight="700" fill="#1c1917" letter-spacing="-2">AI agents did.</text>
+  <text x="96" y="492" font-family="Inter, Helvetica, Arial, sans-serif" font-size="34" fill="#57534e">Give your agents real power, without losing control of them.</text>
+  <text x="96" y="566" font-family="Inter, Helvetica, Arial, sans-serif" font-size="28" font-weight="600" fill="#b45309">agent-custody.dev</text>
+</svg>

@@ -26,7 +26,7 @@ For tools that are plain functions, the SDK hooks the framework the agent alread
 
 ## The memory server: the belief ledger, behind the gateway
 
-The memory server is not for logging. It is the belief ledger's interface, exposed as MCP tools because that is how agents use memory, and it runs as one of the gateway's upstreams so that every write and read inherits the policy check and the receipt. Over stdio it serves one gateway; over HTTP with a bearer token it is one shared ledger for many gateways and, if allowed, direct writers, which is when quarantine does its work. Teams that only want receipts for actions never run it. [The memory server](/state/#the-memory-server).
+The memory server is not for logging. It is the belief ledger's interface, exposed as MCP tools because that is how agents use memory, and it runs as one of the gateway's upstreams so that every write and read inherits the policy check and the receipt. Over stdio it serves one gateway; over HTTP with a bearer token it is one shared ledger for many gateways and, if allowed, direct writers, which is when quarantine does its work. Teams that only want receipts for actions never run it. [The memory server](/reference/memory).
 
 ## What the gateway does not cover
 

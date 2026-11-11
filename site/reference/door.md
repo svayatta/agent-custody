@@ -1,5 +1,7 @@
 # The door
 
+> Every field, route, and flag. How it works and when to use it is in [the guide](/receipts/door).
+
 A reverse proxy in front of your own website, API, or forms. Where the [gateway](./gateway) sits between an agent and its tools, the door sits between the world and your HTTP surface. Every arrival is classified by what it presented, decided by a Cedar policy for the route it hit, relayed to your origin or refused, and receipted either way with the same signed, logged receipt, `issuer.kind: "door"`. The guide is [the door](/receipts/door); this page is the exact contract.
 
 ## Config

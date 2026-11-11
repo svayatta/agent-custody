@@ -62,7 +62,7 @@ export function welcomeSheet(o: { tenant: string; logId: string; publicUrl: stri
     "a log copy that verify --log and audit --log read with no server.",
     "",
     "What this log does not do: hold receipt contents, forge a receipt (your gateway key signs those), or, today,",
-    "countersign with a second independent witness. The proof table: https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not",
+    "countersign with a second independent witness. The proof table: https://github.com/svayatta/agent-custody/tree/main/packages/receipts#what-a-receipt-proves-and-what-it-does-not",
   ];
   return lines.join("\n");
 }

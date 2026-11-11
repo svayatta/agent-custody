@@ -1,5 +1,7 @@
 # Configuring the gateway
 
+> A walk through the gateway's config files. Every field, with its type, is in [the gateway reference](../../../site/reference/gateway.md).
+
 Who may use which tools, and where those tools live, is set in three files and a few environment variables. This page is the map: what each one decides, how they fit together, a worked example with two agents on one shared gateway, how it all works in the Docker image, and how to check a config before you start. The full list of config keys is in [the gateway reference](/reference/gateway); the Cedar and Rego languages are in [policies.md](policies.md).
 
 ## What you configure, and where

@@ -1,4 +1,4 @@
-# Completeness: matching the provider's records against the receipts
+# Completeness
 
 A verified receipt proves what went through the gateway. Nothing on the gateway's side can see an action that never went through it: whoever holds the Stripe key can issue a refund straight through Stripe's API. The provider's own record is the only place that action shows. `agent-custody completeness` lets an auditor check it, with a read-only key of their own.
 

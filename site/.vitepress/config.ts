@@ -2,6 +2,7 @@ import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
 import { cpSync, existsSync } from "node:fs";
 import { dirname, posix, relative, resolve } from "node:path";
+import { SITE_NAV } from "../../packages/receipts/src/site-links.ts";
 
 // The site is generated from the repository's own markdown. Nothing here is a second copy of the docs.
 const REPO = "https://github.com/svayatta/agent-custody/blob/main/";
@@ -10,7 +11,6 @@ const REPO = "https://github.com/svayatta/agent-custody/blob/main/";
 function sitePath(repoPath: string): string | null {
   const m = (re: RegExp) => repoPath.match(re);
   let x: RegExpMatchArray | null;
-  if (repoPath === "README.md") return "/repo";
   if (repoPath === "CHANGELOG.md") return "/changelog";
   if (repoPath === "packages/receipts/README.md") return "/receipts/";
   if ((x = m(/^packages\/receipts\/docs\/([^/]+)\.md$/))) return `/receipts/${x[1]}`;
@@ -25,12 +25,15 @@ export default withMermaid(
     title: "agent-custody",
     description: "Proof of what your AI agents did. Give your agents real power, without losing control of them.",
     srcDir: "..",
-    srcExclude: ["deploy/**", "site/verifier/**", "**/node_modules/**", "**/dist/**", "**/examples-out/**", "**/demo-out/**", "**/.venv/**", "**/target/**", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md", "packages/receipts/examples/**", "packages/state/examples/**", "packages/python/tests/**", "site/README.md"],
+    srcExclude: ["deploy/**", "site/verifier/**", "**/node_modules/**", "**/dist/**", "**/examples-out/**", "**/demo-out/**", "**/.venv/**", "**/target/**", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md", "README.md", "packages/receipts/README.md", "packages/state/README.md", "packages/python/README.md", "packages/receipts/examples/**", "packages/state/examples/**", "packages/python/tests/**", "site/README.md"],
     rewrites: {
       "site/index.md": "index.md",
       "site/verify.md": "verify.md",
       "site/advanced.md": "advanced.md",
+      "site/how-it-works.md": "how-it-works.md",
       "site/early-access.md": "early-access.md",
+      "site/hosted-log.md": "hosted-log.md",
+      "site/status.md": "status.md",
       "site/security.md": "security.md",
       "site/pricing.md": "pricing.md",
       "site/privacy.md": "privacy.md",
@@ -43,12 +46,12 @@ export default withMermaid(
       "site/reference/:page": "reference/:page",
       "site/guide/:page": "guide/:page",
       "site/receipt/:page": "receipt/:page",
-      "README.md": "repo.md",
       "CHANGELOG.md": "changelog.md",
-      "packages/receipts/README.md": "receipts/index.md",
+      "site/receipts/index.md": "receipts/index.md",
       "packages/receipts/docs/:page": "receipts/:page",
-      "packages/state/README.md": "state/index.md",
-      "packages/python/README.md": "python/index.md",
+      "site/state/index.md": "state/index.md",
+      "site/python/index.md": "python/index.md",
+      "site/roadmap.md": "roadmap.md",
     },
     cleanUrls: true,
     head: [
@@ -59,6 +62,14 @@ export default withMermaid(
       ["meta", { name: "theme-color", content: "#b45309" }],
       ["meta", { property: "og:title", content: "agent-custody" }],
       ["meta", { property: "og:description", content: "Proof of what your AI agents did. Give your agents real power, without losing control of them." }],
+      ["meta", { property: "og:image", content: "https://agent-custody.dev/og.png" }],
+      ["meta", { property: "og:image:width", content: "1200" }],
+      ["meta", { property: "og:image:height", content: "630" }],
+      ["meta", { property: "og:image:alt", content: "agent-custody: Proof of what your AI agents did. Give your agents real power, without losing control of them." }],
+      ["meta", { name: "twitter:card", content: "summary_large_image" }],
+      ["meta", { name: "twitter:title", content: "agent-custody" }],
+      ["meta", { name: "twitter:description", content: "Proof of what your AI agents did. Give your agents real power, without losing control of them." }],
+      ["meta", { name: "twitter:image", content: "https://agent-custody.dev/og.png" }],
     ],
     // The conformance vectors are published as files next to the spec, straight from the receipts package.
     buildEnd(siteConfig) {
@@ -70,78 +81,85 @@ export default withMermaid(
     lastUpdated: false,
     themeConfig: {
       logo: "/logo.svg?v=2",
-      // Six entries. Receipts, State, Python, the spec, and security live in the sidebar under Docs.
-      nav: [
-        { text: "Product", link: "/" },
-        { text: "Docs", link: "/guide/getting-started" },
-        { text: "Advanced", link: "/advanced" },
-        { text: "Pricing", link: "/pricing" },
-        { text: "Verify", link: "/verify" },
-        { text: "Sign in", link: "https://app.agent-custody.dev/" },
-      ],
+      // The one nav list, shared with the landing page and the dashboard (packages/receipts/src/site-links.ts).
+      nav: SITE_NAV.map((l) => ({ ...l })),
+      // One docs sidebar, a learning path from first run to reference, each page listed once. The label of each
+      // entry is the page's H1, which is also its title (site/sidebar.test.ts checks both). Pages that the top nav
+      // or the footer links (pricing, legal, trust, the changelog) are not in it. The blog has its own.
       sidebar: {
-        "/reference/": [
+        "/blog/": [
+          { text: "Blog", items: [{ text: "Blog", link: "/blog/" }, { text: "Risk-tiered merges, with evidence", link: "/blog/risk-tiered-merges-with-evidence" }, { text: "Logs are claims. Receipts are evidence.", link: "/blog/logs-are-claims" }] },
+        ],
+        "/": [
+          { text: "Start", items: [
+            { text: "Getting started", link: "/guide/getting-started" },
+            { text: "Incident replay", link: "/guide/incident-replay" },
+            { text: "Put the door in front of a site", link: "/receipts/door-quickstart" },
+          ] },
+          { text: "Concepts", items: [
+            { text: "Components", link: "/guide/pieces" },
+            { text: "How verification works", link: "/receipts/verification" },
+            { text: "Architecture", link: "/guide/architecture" },
+            { text: "Threat model", link: "/receipts/threat-model" },
+            { text: "What the evidence satisfies", link: "/receipts/compliance" },
+            { text: "Glossary", link: "/guide/glossary" },
+          ] },
+          { text: "Set up", items: [
+            { text: "SDK and framework hooks", link: "/receipts/sdk" },
+            { text: "Python SDK", link: "/python/" },
+            { text: "Running the gateway", link: "/receipts/usage" },
+            { text: "Configuring the gateway", link: "/receipts/configuration" },
+            { text: "Gateway console", link: "/receipts/console" },
+            { text: "Human approvals", link: "/receipts/approvals" },
+            { text: "Writing policies", link: "/receipts/policies" },
+            { text: "Deployment", link: "/guide/deployment" },
+            { text: "Verifying receipts on a pull request", link: "/receipts/github-action" },
+          ] },
+          { text: "Advanced", items: [
+            { text: "Credential custody and egress lockdown", link: "/guide/credential-custody" },
+            { text: "The egress witness", link: "/receipts/egress" },
+            { text: "Writing egress policies", link: "/guide/egress-policies" },
+            { text: "The door", link: "/receipts/door" },
+            { text: "Door signals", link: "/receipts/door-signals" },
+            { text: "Safe financial operations", link: "/receipts/financial-operations" },
+            { text: "Completeness", link: "/receipts/completeness" },
+            { text: "Anchoring the log on a chain", link: "/receipts/anchoring" },
+            { text: "The ACS Guardian", link: "/receipts/acs" },
+            { text: "Fact ledger", link: "/state/" },
+            { text: "What a receipt costs", link: "/receipts/performance" },
+          ] },
+          { text: "Tutorials", items: [
+            { text: "Tutorials", link: "/receipts/tutorials" },
+            { text: "A real Codex agent, a wrong plan, and recovery", link: "/receipts/codex-recovery" },
+          ] },
           { text: "Reference", items: [
-            { text: "Overview", link: "/reference/" },
+            { text: "Reference", link: "/reference/" },
             { text: "The gateway", link: "/reference/gateway" },
             { text: "The door", link: "/reference/door" },
             { text: "The egress witness", link: "/reference/egress" },
             { text: "The ACS Guardian", link: "/reference/acs" },
-            { text: "TypeScript SDK", link: "/reference/sdk-typescript" },
-            { text: "Sidecar HTTP API", link: "/reference/sidecar" },
+            { text: "The TypeScript SDK", link: "/reference/sdk-typescript" },
+            { text: "The sidecar", link: "/reference/sidecar" },
             { text: "Python", link: "/reference/python" },
-            { text: "Claude Code and Agent SDK", link: "/reference/claude-code" },
-            { text: "Log API", link: "/reference/log-api" },
+            { text: "Claude Code and the Claude Agent SDK", link: "/reference/claude-code" },
+            { text: "The log API", link: "/reference/log-api" },
             { text: "Verify, audit, export", link: "/reference/verify" },
-            { text: "Hosted log and portal", link: "/reference/hosted" },
-            { text: "Memory: ledger and server", link: "/reference/memory" },
-            { text: "Explain, review, packs", link: "/reference/state-tools" },
+            { text: "The hosted log", link: "/reference/hosted" },
+            { text: "Memory: the ledger and the memory server", link: "/reference/memory" },
+            { text: "Explain, review, packs, blast radius, evals, retention", link: "/reference/state-tools" },
             { text: "Command line", link: "/reference/cli" },
+            { text: "Receipt specification, v0.2", link: "/receipt/v0.2" },
+            { text: "Conformance vectors", link: "/receipt/vectors" },
+            { text: "Aligning with IETF SCITT", link: "/receipts/scitt" },
           ] },
-          { text: "Guides", items: [{ text: "Getting started", link: "/guide/getting-started" }, { text: "Put the door in front of a site", link: "/receipts/door-quickstart" }, { text: "Architecture", link: "/guide/architecture" }, { text: "Deployment", link: "/guide/deployment" }, { text: "Credential custody and lockdown", link: "/guide/credential-custody" }, { text: "Writing policies", link: "/receipts/policies" }, { text: "Writing egress policies", link: "/guide/egress-policies" }, { text: "Verifying a receipt", link: "/receipts/verification" }] },
+          { text: "Roadmap", items: [
+            { text: "Roadmap", link: "/roadmap" },
+            { text: "Payment mandates and agent identity (planned)", link: "/receipts/mandates" },
+          ] },
         ],
-        "/": [
-        { text: "Start here", items: [
-          { text: "Advanced: everything else", link: "/advanced" },
-          { text: "What each piece is for", link: "/guide/pieces" },
-          { text: "FAQ: where the data goes", link: "/faq" },
-          { text: "Use cases, with their policies", link: "/use-cases" },
-          { text: "Getting started", link: "/guide/getting-started" },
-          { text: "An incident replay", link: "/guide/incident-replay" },
-          { text: "Architecture", link: "/guide/architecture" }, { text: "Deployment", link: "/guide/deployment" },
-          { text: "Credential custody and lockdown", link: "/guide/credential-custody" },
-          { text: "Agent sessions in this repository", link: "/custody" },
-          { text: "Changelog", link: "/changelog" },
-        ] },
-        { text: "Writing", items: [{ text: "All pieces", link: "/blog/" }, { text: "Risk-tiered merges, with evidence", link: "/blog/risk-tiered-merges-with-evidence" }, { text: "Logs are claims. Receipts are evidence.", link: "/blog/logs-are-claims" }] },
-        { text: "Receipts", items: [
-          { text: "Overview", link: "/receipts/" },
-          { text: "Tutorials", link: "/receipts/tutorials" },
-          { text: "Configuring the gateway", link: "/receipts/configuration" },
-          { text: "The gateway console", link: "/receipts/console" },
-          { text: "The gateway", link: "/receipts/usage" },
-          { text: "The door", link: "/receipts/door" },
-          { text: "Door signals", link: "/receipts/door-signals" },
-          { text: "The egress witness", link: "/receipts/egress" },
-          { text: "Writing egress policies", link: "/guide/egress-policies" },
-          { text: "The ACS Guardian", link: "/receipts/acs" },
-          { text: "Live Codex recovery demo", link: "/receipts/codex-recovery" },
-          { text: "Payload-bound approvals", link: "/receipts/approvals" },
-          { text: "The interceptor SDK and other languages", link: "/receipts/sdk" },
-          { text: "Writing policies", link: "/receipts/policies" },
-          { text: "Verifying a receipt", link: "/receipts/verification" },
-          { text: "Receipts on a pull request", link: "/receipts/github-action" },
-          { text: "What the evidence satisfies", link: "/receipts/compliance" },
-          { text: "Threat model", link: "/receipts/threat-model" },
-        ] },
-        { text: "State", items: [{ text: "The fact ledger", link: "/state/" }] },
-        { text: "Python", items: [{ text: "The Python client", link: "/python/" }] },
-        { text: "Specification", items: [{ text: "Receipt v0.2", link: "/receipt/v0.2" }, { text: "Conformance vectors", link: "/receipt/vectors" }] },
-        { text: "Tools", items: [{ text: "Verify a receipt in the browser", link: "/verify" }] },
-        { text: "Hosted", items: [{ text: "Register", link: "https://app.agent-custody.dev/#register" }, { text: "Pricing", link: "/pricing" }, { text: "The hosted log", link: "/early-access" }, { text: "Security questionnaire", link: "/security" }, { text: "Privacy", link: "/privacy" }, { text: "Terms for early access", link: "/terms" }, { text: "Contact", link: "/contact" }] },
-      ] },
+      },
       socialLinks: [{ icon: "github", link: "https://github.com/svayatta/agent-custody" }, { icon: "npm", link: "https://www.npmjs.com/org/agent-custody" }],
-      footer: { message: 'Apache-2.0 · <a href="https://github.com/svayatta/agent-custody">GitHub</a> · <a href="https://www.npmjs.com/org/agent-custody">npm</a> · <a href="https://pypi.org/project/agent-custody/">PyPI</a> · <a href="/reference/">Docs</a> · <a href="/faq">FAQ</a> · <a href="/use-cases">Use cases</a> · <a href="/blog/">Writing</a> · <a href="/security">Security</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/contact">Contact</a>', copyright: "Charioteer Consulting Ltd" },
+      // The footer is SiteFooter.vue, mounted by Layout.vue on every page.
       search: { provider: "local" },
     },
     markdown: {
@@ -164,7 +182,8 @@ export default withMermaid(
             const candidates = [beside, `${beside}.md`, resolve(root, path!), `${resolve(root, path!)}.md`];
             const abs = candidates.find((c) => existsSync(c)) ?? beside;
             const target = posix.normalize(relative(root, abs).split("\\").join("/"));
-            const page = sitePath(target);
+            // a package README is an overview page on the site, but its anchors exist only in the README itself
+            const page = hash && /(^|\/)README\.md$/.test(target) ? null : sitePath(target);
             if (page) {
               tokens[idx]!.attrSet("href", page + (hash ? `#${hash}` : ""));
             } else {
