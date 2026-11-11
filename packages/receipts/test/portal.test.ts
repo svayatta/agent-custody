@@ -453,25 +453,50 @@ describe("the founder's note", () => {
     expect(founderNote({ name: "Solo", tenant: "t", company: null, portalUrl: "https://p/", unsubscribeUrl: "https://p/unsubscribe?token=x" }).text).toContain("What are you building?");
   });
 
-  it("an opt-out link sets a flag on the account, and the hourly job leaves that account alone; a bad token changes nothing", async () => {
+  it("the opt-out link shows a confirm page on GET and changes nothing; only a POST sets the flag, from the form or from a one-click request; a bad token is refused on both", async () => {
     const store = new PortalStore(db);
     const t0 = new Date("2026-10-05T07:00:00Z");
-    const u = await store.createUser("quiet@example.com", "a-long-enough-password", { name: "Quiet One", company: "Quiet" });
-    await tenancy.addTenant("quiet", "quiet", "test");
-    await store.addMember(u.id, "quiet");
-    await db.query("UPDATE portal_users SET created_at = $2 WHERE id = $1", [u.id, new Date(t0.getTime() - 2 * 3_600_000).toISOString()]);
+    const mk = async (email: string, tenant: string) => {
+      const u = await store.createUser(email, "a-long-enough-password", { name: "Quiet One", company: "Quiet" });
+      await tenancy.addTenant(tenant, tenant, "test");
+      await store.addMember(u.id, tenant);
+      await db.query("UPDATE portal_users SET created_at = $2 WHERE id = $1", [u.id, new Date(t0.getTime() - 2 * 3_600_000).toISOString()]);
+      return u;
+    };
+    const u = await mk("quiet@example.com", "quiet");
+    const v = await mk("loud@example.com", "loud");
     const mail = { apiKey: "re", from: "team@example.test", fetch: (async () => new Response("{}", { status: 200 })) as typeof fetch };
     const dry = () => sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", secret: SECRET, now: t0, dryRun: true, log: () => {} });
+    const at = (token: string, method: string, body?: string) => fetch(new URL(`unsubscribe?token=${token}`, portal.url), { method, ...(body ? { headers: { "content-type": "application/x-www-form-urlencoded" }, body } : {}) });
+    const tok = signSession(SECRET, `unsub:${u.id}`);
     expect((await dry()).sent).toContain("quiet@example.com");
-    const at = (token: string, method = "GET") => fetch(new URL(`unsubscribe?token=${token}`, portal.url), { method });
-    expect((await at("nope")).status).toBe(400);
-    expect((await at(signSession(SECRET, `verify:${u.id}`))).status).toBe(400);
+
+    // a scanner's GET opens the page and opts nobody out
+    const get = await at(tok, "GET");
+    expect(get.status).toBe(200);
+    expect(get.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'");
+    const html = await get.text();
+    expect(html).toMatch(new RegExp(`<form method="post" action="/unsubscribe\\?token=${tok.replace(/\./g, "\\.")}"`));
+    expect(html).toContain("Stop these emails</button>");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("You are unsubscribed");
     expect((await dry()).sent).toContain("quiet@example.com");
-    const ok = await at(signSession(SECRET, `unsub:${u.id}`), "POST");
-    expect(ok.status).toBe(200);
-    expect(await ok.text()).toContain("You are unsubscribed");
-    expect((await at(signSession(SECRET, `unsub:${u.id}`))).status).toBe(200);
+
+    // a bad token, a token of another purpose, and a token of no account are refused on both methods and change nothing
+    for (const bad of ["nope", signSession(SECRET, `verify:${u.id}`), signSession(SECRET, "unsub:no-such-user")]) {
+      for (const method of ["GET", "POST"]) expect((await at(bad, method)).status).toBe(400);
+    }
+    expect((await dry()).sent).toEqual(expect.arrayContaining(["quiet@example.com", "loud@example.com"]));
+
+    // the form posts with no body to read; the provider's one-click request posts the form-encoded body
+    const form = await at(tok, "POST");
+    expect(form.status).toBe(200);
+    expect(await form.text()).toContain("You are unsubscribed");
     expect((await dry()).sent).not.toContain("quiet@example.com");
+    expect((await dry()).sent).toContain("loud@example.com");
+    const one = await at(signSession(SECRET, `unsub:${v.id}`), "POST", "List-Unsubscribe=One-Click");
+    expect(one.status).toBe(200);
+    expect((await dry()).sent).not.toContain("loud@example.com");
   });
 });
 

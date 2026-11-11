@@ -886,9 +886,17 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         void send(verificationMail(user));
         return json(r.status, r.body, cookie);
       }
+      // A GET changes nothing: a mail scanner opens the link before the person does. The opt-out is the POST, from the form below or from a mail provider's one-click request. The body of that request is not read.
       if ((req.method === "GET" || req.method === "POST") && url.pathname === "/unsubscribe") {
-        const who = readSession(o.secret, url.searchParams.get("token") ?? undefined);
-        if (!who?.startsWith("unsub:") || !(await store.optOutOfFollowUps(who.slice("unsub:".length)))) return page(400, "Link not valid", "This link is not valid or has expired. Reply to the email and we stop the messages by hand.");
+        const token = url.searchParams.get("token") ?? "";
+        const who = readSession(o.secret, token);
+        const userId = who?.startsWith("unsub:") ? who.slice("unsub:".length) : null;
+        if (!userId || !(await store.user(userId))) return page(400, "Link not valid", "This link is not valid or has expired. Reply to the email and we stop the messages by hand.");
+        if (req.method === "GET") {
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'" });
+          return void res.end(resultPage("Stop these emails?", `<p>Press the button to stop the automatic messages about getting started that agent-custody sends to this account.</p><form method="post" action="/unsubscribe?token=${encodeURIComponent(token)}" style="margin-top:1.25rem"><button type="submit" style="font:inherit;font-weight:600;padding:.6rem 1.2rem;border:0;border-radius:8px;background:var(--accent);color:var(--panel);cursor:pointer">Stop these emails</button></form>`));
+        }
+        await store.optOutOfFollowUps(userId);
         return page(200, "You are unsubscribed", "You get no more automatic messages about getting started from agent-custody. Messages about your account, such as a sign-in or invite email, still arrive.");
       }
       if (req.method === "GET" && url.pathname === "/verify-email") {
