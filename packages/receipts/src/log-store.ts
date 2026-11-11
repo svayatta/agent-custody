@@ -236,16 +236,20 @@ export interface TokenRecord {
   tokenHash: string;
   createdAt: string;
   revokedAt: string | null;
+  /** the last append with this token, to within a minute; null when never used since the column came */
+  lastUsedAt: string | null;
 }
 
 const sha256hex = (s: string) => createHash("sha256").update(s).digest("hex");
+
+export const AUDIT_ACTIONS = ["tenant.add", "tenant.disable", "tenant.plan", "token.add", "token.revoke", "policy.add", "policy.remove", "sso.set", "sso.remove", "user.mfa-reset"] as const;
 
 /** One administrative action: who did what to which tenant, when. Written by every mutation and never deleted. */
 export interface AuditEntry {
   id: number;
   at: string;
   actor: string;
-  action: "tenant.add" | "tenant.disable" | "tenant.plan" | "token.add" | "token.revoke" | "policy.add" | "policy.remove" | "sso.set" | "sso.remove" | "user.mfa-reset";
+  action: (typeof AUDIT_ACTIONS)[number];
   tenantId: string | null;
   detail: Record<string, unknown>;
 }
@@ -260,6 +264,7 @@ export class PostgresTenancy {
   private readonly logs = new Map<string, PostgresLog>();
   private readonly tenantCache = new Map<string, { at: number; tenant: Tenant | null }>();
   private readonly tokenCache = new Map<string, number>();
+  private readonly tokenUseNoted = new Map<string, number>();
   private readonly quotaCache = new Map<string, { at: number; used: number }>();
   private readonly quotas: Readonly<Record<Plan, number | null>>;
   private ready: Promise<void> | null = null;
@@ -278,6 +283,7 @@ export class PostgresTenancy {
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}tenants (id TEXT PRIMARY KEY, log_id TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), disabled_at TIMESTAMPTZ)`);
         await this.client.query(`ALTER TABLE ${p}tenants ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free'`);
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}tokens (token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES ${p}tenants(id), label TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ)`);
+        await this.client.query(`ALTER TABLE ${p}tokens ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ`);
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}audit (id BIGSERIAL PRIMARY KEY, at TIMESTAMPTZ NOT NULL DEFAULT now(), actor TEXT NOT NULL, action TEXT NOT NULL, tenant_id TEXT, detail JSONB NOT NULL DEFAULT '{}')`);
         // named policy versions a tenant chose to publish, so a receipt's policy digest can be read as a name; enforcement never reads this table
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}policies (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES ${p}tenants(id), name TEXT NOT NULL, digest TEXT NOT NULL, text TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), created_by TEXT NOT NULL, UNIQUE (tenant_id, digest))`);
@@ -292,13 +298,11 @@ export class PostgresTenancy {
     await this.client.query(`INSERT INTO ${this.prefix}audit (actor, action, tenant_id, detail) VALUES ($1, $2, $3, $4)`, [actor ?? "unattributed", action, tenantId, JSON.stringify(detail)]);
   }
 
-  /** Administrative actions, newest first; for one tenant when given. What the admin page shows and a tenant's export carries. */
-  async audit(opts: { tenant?: string; limit?: number } = {}): Promise<AuditEntry[]> {
+  /** Administrative actions, newest first; for one tenant when given, and only entries older than the id `before` when given. What the admin page shows and a tenant's export carries. */
+  async audit(opts: { tenant?: string; limit?: number; before?: number } = {}): Promise<AuditEntry[]> {
     await this.init();
-    const limit = Math.min(Math.max(1, opts.limit ?? 200), 1000);
-    const rows = (opts.tenant
-      ? await this.client.query(`SELECT id, at, actor, action, tenant_id, detail FROM ${this.prefix}audit WHERE tenant_id = $1 ORDER BY id DESC LIMIT ${limit}`, [opts.tenant])
-      : await this.client.query(`SELECT id, at, actor, action, tenant_id, detail FROM ${this.prefix}audit ORDER BY id DESC LIMIT ${limit}`)).rows as Record<string, unknown>[];
+    const limit = Math.min(Math.max(1, Math.trunc(opts.limit ?? 200)), 1000);
+    const rows = (await this.client.query(`SELECT id, at, actor, action, tenant_id, detail FROM ${this.prefix}audit WHERE ($1::text IS NULL OR tenant_id = $1) AND ($2::bigint IS NULL OR id < $2) ORDER BY id DESC LIMIT ${limit}`, [opts.tenant ?? null, opts.before ?? null])).rows as Record<string, unknown>[];
     return rows.map((r) => ({ id: Number(r.id), at: new Date(r.at as string).toISOString(), actor: String(r.actor), action: r.action as AuditEntry["action"], tenantId: r.tenant_id === null || r.tenant_id === undefined ? null : String(r.tenant_id), detail: (typeof r.detail === "string" ? JSON.parse(r.detail) : r.detail) as Record<string, unknown> }));
   }
 
@@ -324,11 +328,21 @@ export class PostgresTenancy {
     const hash = sha256hex(token);
     const key = `${tenantId}:${hash}`;
     const at = this.tokenCache.get(key);
-    if (at && Date.now() - at < 30_000) return true;
-    const rows = (await this.client.query(`SELECT 1 FROM ${this.prefix}tokens WHERE token_hash = $1 AND tenant_id = $2 AND revoked_at IS NULL`, [hash, tenantId])).rows;
-    if (rows.length === 0) return false;
-    this.tokenCache.set(key, Date.now());
+    if (!(at && Date.now() - at < 30_000)) {
+      const rows = (await this.client.query(`SELECT 1 FROM ${this.prefix}tokens WHERE token_hash = $1 AND tenant_id = $2 AND revoked_at IS NULL`, [hash, tenantId])).rows;
+      if (rows.length === 0) return false;
+      this.tokenCache.set(key, Date.now());
+    }
+    this.noteTokenUse(hash);
     return true;
+  }
+
+  // At most one write a minute per token per process, off the append's path: a failure costs only the "last used" time.
+  private noteTokenUse(hash: string): void {
+    const now = Date.now();
+    if (now - (this.tokenUseNoted.get(hash) ?? 0) < 60_000) return;
+    this.tokenUseNoted.set(hash, now);
+    this.client.query(`UPDATE ${this.prefix}tokens SET last_used_at = now() WHERE token_hash = $1`, [hash]).catch(() => this.tokenUseNoted.delete(hash));
   }
 
   /** The tenant's log, one instance per tenant per process. */
@@ -486,7 +500,7 @@ export class PostgresTenancy {
   }
   async listTokens(tenantId: string): Promise<TokenRecord[]> {
     await this.init();
-    return ((await this.client.query(`SELECT tenant_id, label, token_hash, created_at, revoked_at FROM ${this.prefix}tokens WHERE tenant_id = $1 ORDER BY created_at`, [tenantId])).rows as Record<string, unknown>[]).map((r) => ({ tenantId: String(r.tenant_id), label: String(r.label), tokenHash: String(r.token_hash), createdAt: new Date(r.created_at as string).toISOString(), revokedAt: r.revoked_at ? new Date(r.revoked_at as string).toISOString() : null }));
+    return ((await this.client.query(`SELECT tenant_id, label, token_hash, created_at, revoked_at, last_used_at FROM ${this.prefix}tokens WHERE tenant_id = $1 ORDER BY created_at`, [tenantId])).rows as Record<string, unknown>[]).map((r) => ({ tenantId: String(r.tenant_id), label: String(r.label), tokenHash: String(r.token_hash), createdAt: new Date(r.created_at as string).toISOString(), revokedAt: r.revoked_at ? new Date(r.revoked_at as string).toISOString() : null, lastUsedAt: r.last_used_at ? new Date(r.last_used_at as string).toISOString() : null }));
   }
 }
 

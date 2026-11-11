@@ -12,7 +12,7 @@ import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafe
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { postgresCheckpoints, type CheckpointStore } from "./checkpoints.ts";
-import { DESIGN_CSS } from "./design.ts";
+import { DESIGN_CSS, LOGO_MARK as MARK } from "./design.ts";
 import { welcomeSheet } from "./log-admin.ts";
 import { clientAddress } from "./log-sink.ts";
 import { PLAN_QUOTAS, RateLimiter, type Plan, type PostgresLike, type PostgresTenancy } from "./log-store.ts";
@@ -33,6 +33,8 @@ export interface MailOptions {
   from: string;
   /** an operator address that gets a note per registration, with the contact details */
   notify?: string;
+  /** where a reply goes, when it is not the sender */
+  replyTo?: string;
   /** the endpoint; Resend's by default */
   url?: string;
   fetch?: typeof fetch;
@@ -325,6 +327,8 @@ export class PortalStore {
         for (const c of PROFILE_COLUMNS) await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS ${c} TEXT`);
         // when the founder's note went out, so it goes once
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS followed_up_at TIMESTAMPTZ`);
+        // when the person asked for no more automatic mail about getting started
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS follow_up_opt_out_at TIMESTAMPTZ`);
         // when the address was confirmed; a provider sign-in links to a password account only once this is set
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ`);
         // a provider identity linked to an account: GitHub or Google's stable subject, and the verified email it gave
@@ -399,10 +403,14 @@ export class PortalStore {
     await this.init();
     const rows = (await this.client.query(
       `SELECT u.id, u.email, u.name, u.company, m.tenant_id, u.created_at FROM ${this.p}users u JOIN ${this.p}members m ON m.user_id = u.id
-       WHERE u.followed_up_at IS NULL AND u.name IS NOT NULL AND u.created_at <= $1 AND u.created_at >= $2 ORDER BY u.created_at`,
+       WHERE u.followed_up_at IS NULL AND u.follow_up_opt_out_at IS NULL AND u.name IS NOT NULL AND u.created_at <= $1 AND u.created_at >= $2 ORDER BY u.created_at`,
       [new Date(o.now.getTime() - o.minAgeMs).toISOString(), new Date(o.now.getTime() - o.maxAgeMs).toISOString()],
     )).rows as Record<string, unknown>[];
     return rows.map((r) => ({ id: String(r.id), email: String(r.email), name: String(r.name), company: r.company == null ? null : String(r.company), tenantId: String(r.tenant_id), createdAt: new Date(r.created_at as string).toISOString() }));
+  }
+  async optOutOfFollowUps(userId: string): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`UPDATE ${this.p}users SET follow_up_opt_out_at = COALESCE(follow_up_opt_out_at, now()) WHERE id = $1 RETURNING id`, [userId])).rows.length > 0;
   }
   async markFollowedUp(userId: string, at = new Date()): Promise<void> {
     await this.init();
@@ -732,11 +740,62 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ENFORCED = "Your organisation signs in through its identity provider. Use Sign in with single sign-on";
 const RESERVED = new Set(["default", "admin", "api", "www", "log", "checkpoints", "app", "portal", "stripe", "health", "t"]);
 
+const LOGO_URL = "https://agent-custody.dev/apple-touch-icon.png";
+const escapeHtml = (v: string) => v.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+
+export interface MailContent {
+  heading: string;
+  /** the line that an inbox shows beside the subject */
+  preheader?: string;
+  paragraphs: string[];
+  /** a block that keeps its line breaks and uses a fixed-width font */
+  code?: string;
+  /** the one action of the message */
+  button?: { label: string; url: string };
+  footer?: (string | { label: string; url: string })[];
+}
+
+/** Builds the HTML part and the plain-text part of one message from the same fields. Every value in the HTML is escaped, and only an http or https URL becomes a link. */
+export function renderMail(c: MailContent): { html: string; text: string } {
+  const link = (url: string) => (/^https?:\/\//i.test(url) ? escapeHtml(url) : null);
+  const button = c.button && link(c.button.url) ? c.button : undefined;
+  const footer = (c.footer ?? []).filter((f) => typeof f === "string" || link(f.url));
+  const text = [
+    c.heading, "",
+    ...c.paragraphs.flatMap((p) => [p, ""]),
+    ...(c.code ? [c.code, ""] : []),
+    ...(button ? [`${button.label}:`, button.url, ""] : []),
+    ...footer.map((f) => (typeof f === "string" ? f : `${f.label}: ${f.url}`)),
+    "agent-custody",
+  ].join("\n");
+  const font = `-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif`;
+  const p = (v: string, style: string, cls = "ink") => `<p class="${cls}" style="margin:0 0 16px;font:15px/1.55 ${font};${style}">${escapeHtml(v)}</p>`;
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(c.heading)}</title>
+<style>@media (prefers-color-scheme: dark) { .bg { background: #0c0a09 !important; } .card { background: #1c1917 !important; border-color: #292524 !important; } .ink { color: #fafaf9 !important; } .mute { color: #a8a29e !important; } .code { background: #0c0a09 !important; border-color: #292524 !important; color: #fafaf9 !important; } .btn { background: #f59e0b !important; } .btn a { color: #1c1917 !important; } .lnk { color: #f59e0b !important; } }</style></head>
+<body class="bg" style="margin:0;padding:0;background:#fafaf9">
+${c.preheader ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;mso-hide:all">${escapeHtml(c.preheader)}</div>` : ""}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="bg" style="background:#fafaf9"><tr><td align="center" style="padding:24px 12px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="card" style="max-width:560px;background:#ffffff;border:1px solid #e7e5e4;border-radius:8px">
+<tr><td style="padding:24px 28px 4px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding-right:10px"><img src="${LOGO_URL}" width="32" height="32" alt="logo" style="display:block;border:0;border-radius:6px"></td><td class="ink" style="font:700 17px/1 ${font};letter-spacing:.02em;color:#1c1917">agent-custody</td></tr></table></td></tr>
+<tr><td style="padding:20px 28px 8px"><h1 class="ink" style="margin:0 0 16px;font:700 22px/1.3 ${font};color:#1c1917">${escapeHtml(c.heading)}</h1>
+${c.paragraphs.map((v) => p(v, "color:#1c1917")).join("\n")}
+${c.code ? `<pre class="code ink" style="margin:0 0 16px;padding:12px;background:#fafaf9;border:1px solid #e7e5e4;border-radius:6px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#1c1917;white-space:pre-wrap;word-break:break-word">${escapeHtml(c.code)}</pre>` : ""}
+${button ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 16px"><tr><td class="btn" bgcolor="#b45309" style="background:#b45309;border-radius:6px"><a href="${link(button.url)}" style="display:inline-block;padding:12px 24px;font:600 15px/1 ${font};color:#ffffff;text-decoration:none">${escapeHtml(button.label)}</a></td></tr></table>
+${p("The button does not work? Copy this link into your browser:", "font-size:13px;margin-bottom:4px;color:#57534e", "mute")}<p class="mute" style="margin:0 0 16px;font:13px/1.5 ${font};word-break:break-all"><a href="${link(button.url)}" class="lnk" style="color:#b45309">${escapeHtml(button.url)}</a></p>` : ""}
+</td></tr>
+<tr><td style="padding:8px 28px 24px;border-top:1px solid #e7e5e4">
+${footer.map((f) => (typeof f === "string" ? `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#57534e">${escapeHtml(f)}</p>` : `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#57534e"><a href="${link(f.url)}" class="lnk" style="color:#b45309">${escapeHtml(f.label)}</a></p>`)).join("\n")}
+</td></tr></table></td></tr></table></body></html>`;
+  return { html, text };
+}
+
 /** One message through the provider. Best effort: a refusal or a failure is reported through `log`, never thrown. Returns whether it was accepted. */
-export async function deliverMail(mail: MailOptions, m: { to: string; subject: string; text: string }, log: (message: string) => void = console.error): Promise<boolean> {
+export async function deliverMail(mail: MailOptions, m: { to: string; subject: string; text: string; html?: string; headers?: Record<string, string> }, log: (message: string) => void = console.error): Promise<boolean> {
   const f = mail.fetch ?? fetch;
   try {
-    const r = await f(mail.url ?? "https://api.resend.com/emails", { method: "POST", headers: { authorization: `Bearer ${mail.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ from: mail.from, to: [m.to], subject: m.subject, text: m.text }), signal: AbortSignal.timeout(10_000) });
+    const body = { from: mail.from, to: [m.to], subject: m.subject, text: m.text, ...(m.html ? { html: m.html } : {}), ...(mail.replyTo ? { reply_to: mail.replyTo } : {}), ...(m.headers ? { headers: m.headers } : {}) };
+    const r = await f(mail.url ?? "https://api.resend.com/emails", { method: "POST", headers: { authorization: `Bearer ${mail.apiKey}`, "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
     if (r.ok) return true;
     log(`agent-custody portal: mail to ${m.to} refused: ${r.status} ${(await r.text()).slice(0, 200)}`);
   } catch (e) {
@@ -745,45 +804,57 @@ export async function deliverMail(mail: MailOptions, m: { to: string; subject: s
   return false;
 }
 
+const UNSUBSCRIBE_TTL_MS = 365 * 86_400_000;
+
 /**
  * The founder's note, sent about an hour after a registration by `sendFollowUps`, once. Written to get the first
  * receipt appended: it asks which stack they are on, offers to do the integration, and says to start in observe mode.
+ * The signer is a setting; the default is the team.
  */
-export function founderNote(o: { name: string; tenant: string; company: string | null; portalUrl: string; from: string }): { subject: string; text: string } {
+export function founderNote(o: { name: string; tenant: string; company: string | null; portalUrl: string; unsubscribeUrl: string; signer?: string; signerRole?: string }): { subject: string; text: string; html: string; headers: Record<string, string> } {
   const first = o.name.trim().split(/\s+/)[0] || o.name;
-  const signer = o.from.replace(/^.*<|>.*$/g, "");
-  return {
-    subject: "Welcome to agent-custody, and one question",
-    text: [
-      `Hi ${first},`, "",
-      `Thanks for registering ${o.tenant} on agent-custody. I am Partha, the founder; you will get me, not a queue.`, "",
-      "One question so I can help rather than guess: which stack are your agents on, and what do they touch? Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, plain Python, or an MCP host. If you tell me, I will send the exact config for it, and if it is quicker, I will do the integration with you on a call: twenty minutes gets a first receipt into your log and verified in the browser.", "",
-      'Two things worth knowing from the start. Run it in observe mode first, "mode": "observe" in the config: nothing is blocked, and each receipt records what the policy would have denied, so you tune the policy against real traffic before turning it on. And the log only ever receives a hash per receipt; the receipts stay on your machines.', "",
-      `You are on the free plan, ten thousand appends a month, no card. If you hit that, tell me and I move you up while we talk. The setup sheet is under Setup in the dashboard whenever you need it: ${o.portalUrl}`, "",
-      `What are you building${o.company ? ` at ${o.company}` : ""}? I would like to know what you want the receipts to prove, and to whom.`, "",
-      "Partha", `agent-custody.dev · ${signer}`,
-    ].join("\n"),
-  };
+  const subject = "Welcome to agent-custody, and one question";
+  // A named signer writes as one person; the default team signature writes as "we".
+  const [I, We, me, intro] = o.signer ? ["I", "I", "me", `I am ${o.signer}${o.signerRole ? `, the ${o.signerRole.toLowerCase()}` : ""}; you will get me, not a queue.`] : ["we", "We", "us", "You are writing to a person, not to a queue."];
+  const mail = renderMail({
+    heading: "One question about your agents",
+    preheader: `Which stack are your agents on? ${We} send the exact config.`,
+    paragraphs: [
+      `Hi ${first},`,
+      `Thanks for registering ${o.tenant} on agent-custody. ${intro}`,
+      `One question so that ${I} can help rather than guess: which stack are your agents on, and what do they touch? Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, plain Python, or an MCP host. If you tell ${me}, ${I} send the exact config for it. If it is quicker, ${I} do the integration with you on a call: twenty minutes gets a first receipt into your log and verified in the browser.`,
+      'Two things to know from the start. Run it in observe mode first, "mode": "observe" in the config: nothing is blocked, and each receipt records what the policy would have denied, so you tune the policy against real traffic before you turn it on. And the log only receives a hash per receipt; the receipts stay on your machines.',
+      `You are on the free plan: ten thousand appends a month, no card. If you hit that limit, tell ${me} and ${I} move you up while we talk.`,
+      `What are you building${o.company ? ` at ${o.company}` : ""}? ${We} would like to know what you want the receipts to prove, and to whom. Reply to this email.`,
+      `${o.signer ?? "The agent-custody team"}${o.signerRole ? `, ${o.signerRole}` : ""}`,
+    ],
+    button: { label: "Open the setup sheet", url: o.portalUrl },
+    footer: ["You get this one note because you registered a tenant on agent-custody. We send no other automatic messages about getting started.", { label: "Do not send me these messages", url: o.unsubscribeUrl }],
+  });
+  return { subject, ...mail, headers: { "List-Unsubscribe": `<${o.unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } };
 }
 
 /**
  * Sends the founder's note to every account registered between an hour and a week ago that has not had it, and
- * marks each one. Accounts on the operator's own mail domains are marked without a message. Idempotent: run it hourly.
+ * marks each one. Accounts on the operator's own mail domains and accounts that opted out are skipped without a message.
+ * `secret` is the portal's secret: it signs the opt-out link. Idempotent: run it hourly.
  */
-export async function sendFollowUps(store: PortalStore, mail: MailOptions, o: { portalUrl: string; now?: Date; minAgeMs?: number; maxAgeMs?: number; dryRun?: boolean; log?: (message: string) => void } = { portalUrl: "https://app.agent-custody.dev/" }): Promise<{ sent: string[]; skipped: string[]; failed: string[] }> {
+export async function sendFollowUps(store: PortalStore, mail: MailOptions, o: { portalUrl: string; secret: string; signer?: string; signerRole?: string; now?: Date; minAgeMs?: number; maxAgeMs?: number; dryRun?: boolean; log?: (message: string) => void }): Promise<{ sent: string[]; skipped: string[]; failed: string[] }> {
   const log = o.log ?? console.error;
   const now = o.now ?? new Date();
   const own = new Set([mail.from, mail.notify ?? ""].map((a) => a.replace(/^.*<|>.*$/g, "").split("@")[1]?.toLowerCase()).filter(Boolean));
   const sent: string[] = [];
   const skipped: string[] = [];
   const failed: string[] = [];
+  const portalUrl = o.portalUrl.replace(/\/?$/, "/");
   for (const u of await store.pendingFollowUps({ now, minAgeMs: o.minAgeMs ?? 3_600_000, maxAgeMs: o.maxAgeMs ?? 7 * 86_400_000 })) {
     if (own.has(u.email.split("@")[1]?.toLowerCase() ?? "")) {
       if (!o.dryRun) await store.markFollowedUp(u.id, now);
       skipped.push(u.email);
       continue;
     }
-    const note = founderNote({ name: u.name, tenant: u.tenantId, company: u.company, portalUrl: o.portalUrl, from: mail.from });
+    const unsubscribeUrl = `${portalUrl}unsubscribe?token=${signSession(o.secret, `unsub:${u.id}`, UNSUBSCRIBE_TTL_MS)}`;
+    const note = founderNote({ name: u.name, tenant: u.tenantId, company: u.company, portalUrl, unsubscribeUrl, ...(o.signer ? { signer: o.signer } : {}), ...(o.signerRole ? { signerRole: o.signerRole } : {}) });
     if (o.dryRun) { sent.push(u.email); continue; }
     if (await deliverMail(mail, { to: u.email, ...note }, log)) {
       await store.markFollowedUp(u.id, now);
@@ -812,28 +883,44 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   const sheet = (tenant: string, logId: string) => welcomeSheet({ tenant, logId, publicUrl: base, ...(o.checkpointsUrl ? { checkpointsUrl: o.checkpointsUrl } : {}), ...(o.keyid ? { keyid: o.keyid } : {}) });
   const portalBase = (o.portalUrl ?? "http://localhost/").replace(/\/?$/, "/");
   // Mail is best effort and off the request path: a provider outage is logged, never a failed registration.
-  const send = async (m: { to: string; subject: string; text: string }) => { if (o.mail) await deliverMail(o.mail, m, log); };
+  const send = async (m: { to: string; subject: string; text: string; html: string }) => (o.mail ? deliverMail(o.mail, m, log) : false);
   /** The verification link: a signed, single-purpose token good for a day. Until it is used, a provider sign-in for this address will not link to the account. */
-  const verificationMail = (u: PortalUser) => ({
-    to: u.email,
-    subject: "Verify your email address for agent-custody",
-    text: ["Hello,", "", "Please confirm this address for your agent-custody account by opening the link below. It is good for 24 hours.", "", `${portalBase}verify-email?token=${signSession(o.secret, `verify:${u.id}`, 86_400_000)}`, "", "If you did not create an account, ignore this mail; nothing was created in your name that works without it.", "", "agent-custody"].join("\n"),
-  });
+  const verificationMail = (u: PortalUser) => {
+    const subject = "Verify your email address for agent-custody";
+    return { to: u.email, subject, ...renderMail({
+      heading: "Confirm your email address",
+      preheader: "Confirm this address for your agent-custody account. The link is good for 24 hours.",
+      paragraphs: ["Hello,", "Confirm this address for your agent-custody account. The link is good for 24 hours."],
+      button: { label: "Confirm email address", url: `${portalBase}verify-email?token=${signSession(o.secret, `verify:${u.id}`, 86_400_000)}` },
+      footer: ["If you did not create an account, ignore this email. Nothing that works without this step was created in your name."],
+    }) };
+  };
 
-  const resetMail = (to: string, token: string) => ({
-    to,
-    subject: "Reset your agent-custody password",
-    text: ["Hello,", "", "Someone asked to reset the password of your agent-custody account. Open the link below to set a new password. The link works one time, for one hour.", "", `${portalBase}reset-password?token=${token}`, "", "If you did not ask for this, ignore this mail. Your password stays the same.", "", "agent-custody"].join("\n"),
-  });
+  const resetMail = (to: string, token: string) => ({ to, subject: "Reset your agent-custody password", ...renderMail({
+    heading: "Reset your password",
+    preheader: "The link works one time, for one hour.",
+    paragraphs: ["Hello,", "Someone asked to reset the password of your agent-custody account. Use the button below to set a new password. The link works one time, for one hour."],
+    button: { label: "Set a new password", url: `${portalBase}reset-password?token=${token}` },
+    footer: ["If you did not ask for this, ignore this email. Your password stays the same."],
+  }) });
 
-  const welcomeMail = (to: string, name: string, tenant: string, logId: string) => send({ to, subject: `Your agent-custody log "${tenant}" is ready`, text: [
-    `Hello ${name},`, "",
-    `Your tenant "${tenant}" is live on the hosted log. Your API key was shown once when you registered and is not in this email; if it is gone, mint another under API keys at ${portalBase}.`, "",
-    "Everything below is under Setup in the dashboard whenever you need it.", "",
-    sheet(tenant, logId), "",
-    `Dashboard: ${portalBase}`, "Getting started: https://agent-custody.dev/guide/getting-started", "Questions: reply to this email.",
-  ].join("\n") });
-  const notifyMail = (p: Profile & { email: string; tenant: string }) => o.mail?.notify ? send({ to: o.mail.notify, subject: `New registration: ${p.company} (${p.tenant})`, text: [`${p.name}${p.role ? `, ${p.role}` : ""} at ${p.company} registered tenant "${p.tenant}".`, "", `email     ${p.email}`, `phone     ${p.phone ?? "-"}`, `telegram  ${p.telegram ? `@${p.telegram}` : "-"}`, "", "The Registrations section of the admin page has the same, with their usage."].join("\n") }) : Promise.resolve();
+  const welcomeMail = (to: string, name: string, tenant: string, logId: string) => send({ to, subject: `Your agent-custody log "${tenant}" is ready`, ...renderMail({
+    heading: `Your log "${tenant}" is ready`,
+    preheader: "Your tenant is live on the hosted log. The setup sheet is below.",
+    paragraphs: [
+      `Hello ${name},`,
+      `Your tenant "${tenant}" is live on the hosted log. Your API key was shown once when you registered and is not in this email. If it is gone, create another under API keys in the dashboard.`,
+      "The setup sheet is below. It is also under Setup in the dashboard.",
+    ],
+    code: sheet(tenant, logId),
+    button: { label: "Open the dashboard", url: portalBase },
+    footer: ["Getting started: https://agent-custody.dev/guide/getting-started", "Questions? Reply to this email."],
+  }) });
+  const notifyMail = (p: Profile & { email: string; tenant: string }) => o.mail?.notify ? send({ to: o.mail.notify, subject: `New registration: ${p.company} (${p.tenant})`, ...renderMail({
+    heading: `New registration: ${p.company}`,
+    paragraphs: [`${p.name}${p.role ? `, ${p.role}` : ""} at ${p.company} registered tenant "${p.tenant}".`, "The Registrations section of the admin page has the same, with their usage."],
+    code: [`email     ${p.email}`, `phone     ${p.phone ?? "-"}`, `telegram  ${p.telegram ? `@${p.telegram}` : "-"}`].join("\n"),
+  }) }) : Promise.resolve(false);
   const exportCommand = (tenant: string) => `npx @agent-custody/receipts log-export --log-url ${base} --tenant ${tenant} --token-env AGENT_CUSTODY_LOG_TOKEN --out custody-export/`;
   // The welcome sheet as data: what the page renders as numbered steps, at registration and again under Setup.
   const setupFor = (tenant: string, logId: string) => {
@@ -851,6 +938,8 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       export: exportCommand(tenant),
     };
   };
+
+  const keyList = async (tenantId: string) => (await o.tenancy.listTokens(tenantId)).map((k) => ({ label: k.label, hash: k.tokenHash.slice(0, 12), createdAt: k.createdAt, revokedAt: k.revokedAt, lastUsedAt: k.lastUsedAt }));
 
   return async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -908,7 +997,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'" });
         const providers = JSON.stringify((["github", "google"] as const).filter((p) => !!o.oauth?.[p]));
-        return void res.end(PORTAL_PAGE.replace("__LOG_BASE__", base.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!)).replace("__PROVIDERS__", providers).replace("__MAIL__", String(!!o.mail)));
+        return void res.end(PORTAL_PAGE.replace("__LOG_BASE__", base.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!)).replace("__PROVIDERS__", providers).replace("__MAIL__", String(!!o.mail)).replace("__PLANS__", PLANS_JSON));
       }
 
       // ---- Stripe's webhook: the only caller that is not a browser with a session ----
@@ -1012,6 +1101,19 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         const r = await onboard(user, parsed);
         void send(verificationMail(user));
         return json(r.status, r.body, cookie);
+      }
+      // A GET changes nothing: a mail scanner opens the link before the person does. The opt-out is the POST, from the form below or from a mail provider's one-click request. The body of that request is not read.
+      if ((req.method === "GET" || req.method === "POST") && url.pathname === "/unsubscribe") {
+        const token = url.searchParams.get("token") ?? "";
+        const who = readSession(o.secret, token);
+        const userId = who?.startsWith("unsub:") ? who.slice("unsub:".length) : null;
+        if (!userId || !(await store.user(userId))) return page(400, "Link not valid", "This link is not valid or has expired. Reply to the email and we stop the messages by hand.");
+        if (req.method === "GET") {
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'" });
+          return void res.end(resultPage("Stop these emails?", `<p>Press the button to stop the automatic messages about getting started that agent-custody sends to this account.</p><form method="post" action="/unsubscribe?token=${encodeURIComponent(token)}" style="margin-top:1.25rem"><button type="submit" style="font:inherit;font-weight:600;padding:.6rem 1.2rem;border:0;border-radius:8px;background:var(--accent);color:var(--panel);cursor:pointer">Stop these emails</button></form>`));
+        }
+        await store.optOutOfFollowUps(userId);
+        return page(200, "You are unsubscribed", "You get no more automatic messages about getting started from agent-custody. Messages about your account, such as a sign-in or invite email, still arrive.");
       }
       if (req.method === "GET" && url.pathname === "/verify-email") {
         const who = readSession(o.secret, url.searchParams.get("token") ?? undefined);
@@ -1355,10 +1457,19 @@ document.getElementById("f").onsubmit = async (e) => {
           const u = await o.tenancy.usage(month);
           months.push({ month, appends: u.tenants.find((t) => t.id === tenantId)?.appends ?? 0 });
         }
-        const keys = (await o.tenancy.listTokens(tenantId)).map((k) => ({ label: k.label, hash: k.tokenHash.slice(0, 12), createdAt: k.createdAt, revokedAt: k.revokedAt }));
+        const keys = await keyList(tenantId);
         const audit = await o.tenancy.audit({ tenant: tenantId, limit: 50 });
         const billing = await store.billing(tenantId);
         return json(200, { tenant: tenantId, logId: tenant.logId, plan: q.plan, used: q.used, quota: q.quota, treeSize: size, rootHash: size ? await backend.root(size) : null, latestCheckpoint: latest ? { treeSize: latest.treeSize, signedAt: latest.signedAt } : null, months, keys, audit, billing: billing ? { status: billing.status } : null, urls: { log: `${base}t/${tenantId}/`, keys: `${base}.well-known/agent-custody-log.json`, checkpoints: o.checkpointsUrl ? `${o.checkpointsUrl.replace(/\/?$/, "/")}${tenantId}/latest.json` : null }, exportCommand: exportCommand(tenantId), welcome: sheet(tenantId, tenant.logId), setup: setupFor(tenantId, tenant.logId), stripe: !!o.stripe });
+      }
+      if (req.method === "GET" && url.pathname === "/api/audit") {
+        const limit = url.searchParams.get("limit") ?? "25";
+        const before = url.searchParams.get("before");
+        if (!/^\d{1,3}$/.test(limit) || +limit < 1 || +limit > 100) return json(400, { error: "limit is a whole number from 1 to 100" });
+        if (before !== null && !/^[1-9]\d{0,15}$/.test(before)) return json(400, { error: "before is the id of an entry, a positive whole number" });
+        const entries = await o.tenancy.audit({ tenant: tenantId, limit: +limit + 1, ...(before ? { before: +before } : {}) });
+        const more = entries.length > +limit;
+        return json(200, { entries: entries.slice(0, +limit), next: more ? entries[+limit - 1]!.id : null });
       }
       if (req.method === "GET" && url.pathname === "/api/members") return json(200, { members: await store.members(tenantId), invites: await store.invitesOf(tenantId) });
       const ownerOnly = (...roles: string[]) => myRole !== "owner" && roles.includes("owner");
@@ -1373,8 +1484,14 @@ document.getElementById("f").onsubmit = async (e) => {
         if (ownerOnly(role, ...(await store.invitesOf(tenantId)).filter((i) => i.email === email).map((i) => i.role))) return json(403, OWNER_ONLY);
         await store.invite(tenantId, email, role as Role, user.email);
         log(`agent-custody portal: ${user.email} invited ${email} to tenant ${tenantId} as ${role}`);
-        void send({ to: email, subject: `You are invited to ${tenantId} on agent-custody`, text: [`${user.email} invited you to the agent-custody tenant "${tenantId}" as ${role}.`, "", `Create an account or sign in with this address at ${portalBase}, verify the address, and accept the invite. The invite is good for seven days.`, "", "agent-custody"].join("\n") });
-        return json(200, { invited: email, role });
+        const emailSent = await send({ to: email, subject: `You are invited to ${tenantId} on agent-custody`, ...renderMail({
+          heading: `Join "${tenantId}" on agent-custody`,
+          preheader: `${user.email} invited you as ${role}. The invite is good for seven days.`,
+          paragraphs: [`${user.email} invited you to the agent-custody tenant "${tenantId}" as ${role}.`, `Sign in, or create an account, with this address: ${email}. Verify the address. The first screen then shows the invite with an Accept button. The invite is good for seven days.`],
+          button: { label: "Accept the invite", url: portalBase },
+          footer: ["If you do not know the person who invited you, ignore this email."],
+        }) });
+        return json(200, { invited: email, role, emailSent });
       }
       if (req.method === "POST" && url.pathname === "/api/invites/remove") {
         const email = String((await jsonBody()).email ?? "").trim().toLowerCase();
@@ -1402,7 +1519,7 @@ document.getElementById("f").onsubmit = async (e) => {
         return json(200, { removed: true });
       }
       if (req.method === "GET" && url.pathname === "/api/keys") {
-        return json(200, { keys: (await o.tenancy.listTokens(tenantId)).map((k) => ({ label: k.label, hash: k.tokenHash.slice(0, 12), createdAt: k.createdAt, revokedAt: k.revokedAt })) });
+        return json(200, { keys: await keyList(tenantId) });
       }
       if (req.method === "POST" && url.pathname === "/api/keys") {
         const b = await jsonBody();
@@ -1490,9 +1607,15 @@ export function servePortal(o: PortalOptions, opts: { port: number; host?: strin
 }
 
 // ---- the page: one file, no framework, no outside requests ----
+/** The plan cards of the Billing page. The appends come from PLAN_QUOTAS; a test keeps the names, prices, and appends equal to site/pricing.md. */
+export const PLAN_CARDS: readonly { plan: Plan; name: string; price: string; points: string[] }[] = [
+  { plan: "free", name: "Free", price: "$0", points: ["One tenant on the shared log", "Export and audit trail", "Community support on GitHub"] },
+  { plan: "team", name: "Team", price: "$50 a month", points: ["One tenant on the shared log", "Export and audit trail", "Email support, answer within two working days"] },
+  { plan: "enterprise", name: "Enterprise", price: "by conversation", points: ["A dedicated log, your signing key, your region", "A named contact and a stated response time", "A signed agreement and a DPA"] },
+];
+const PLANS_JSON = JSON.stringify(PLAN_CARDS.map((c) => ({ ...c, appends: PLAN_QUOTAS[c.plan] })));
 const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#b45309"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="#b45309" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="#b45309" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-const MARK = '<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect class="tile" width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path class="ink" d="M25 20h14M25 27h14" stroke-width="2.6" stroke-linecap="round"/><path class="ink" d="M25 37.5l5 4.5 9.5-10" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 // The small pages outside the app (errors, results, the address check) share the brand without the app's script.
 const RESULT_STYLE = `<style>
@@ -1569,13 +1692,24 @@ ${DESIGN_CSS}
   table { border-collapse: collapse; width: 100%; font-size: .92rem; }
   th, td { text-align: left; padding: .55rem .75rem .55rem 0; border-bottom: 1px solid var(--line); vertical-align: middle; } tbody tr:last-child > * { border-bottom: 0; }
   td button:not(.link) { min-height: 2rem; padding: 0 .7rem; font-size: var(--text-xs); } td select { min-height: 2rem; }
-  #audit td:nth-child(-n+3) { white-space: nowrap; } #audit td:last-child { min-width: 16rem; overflow-wrap: anywhere; font-size: .86rem; }
+  .feed { list-style: none; margin: 0; padding: 0; } .feed li { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-4); padding: var(--space-2) 0; border-bottom: 1px solid var(--line); } .feed li:last-child { border-bottom: 0; }
+  .feed time { flex: none; color: var(--ink2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+  progress { display: block; width: 100%; height: .5rem; margin: var(--space-2) 0; appearance: none; border: 0; border-radius: var(--radius-full); background: var(--soft); color: var(--accent); overflow: hidden; }
+  progress::-webkit-progress-bar { background: var(--soft); } progress::-webkit-progress-value { background: currentColor; } progress::-moz-progress-bar { background: currentColor; }
+  progress.warn { color: var(--warn); } progress.bad { color: var(--bad); }
+  .plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
+  .card.plan { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-5); } .card.plan.now { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .plan h2 { margin: 0; display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); } .plan .price { font-size: var(--text-xl); font-weight: 700; } .plan .price::first-letter { text-transform: uppercase; }
+  .plan ul { margin: 0; padding-left: var(--space-5); color: var(--ink2); } .plan .act { margin-top: auto; padding-top: var(--space-3); } .plan .act p { margin: 0; }
+  #policyView { width: min(48rem, calc(100vw - 2rem)); max-width: none; } #policyView pre { max-height: 60vh; overflow: auto; } #publishDialog { width: min(40rem, calc(100vw - 2rem)); max-width: none; } dialog h2 { margin-top: 0; }
   th { font-size: var(--text-xs); font-weight: 600; color: var(--ink2); } th::first-letter { text-transform: uppercase; }
   code, pre, .mono { font-size: .86em; }
   pre { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .8rem .9rem; overflow-x: auto; white-space: pre-wrap; }
-  .bars { display: grid; grid-template-columns: repeat(6, 1fr); gap: .6rem; align-items: end; height: 9rem; }
-  .bar { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; font-size: .75rem; color: var(--ink2); }
+  .bars { display: grid; grid-template-columns: repeat(6, 1fr); height: 11rem; }
+  .bar { display: flex; flex-direction: column; align-items: center; height: 100%; font-size: .75rem; color: var(--ink2); }
+  .bar .col { position: relative; flex: 1; width: 100%; display: flex; justify-content: center; align-items: flex-end; border-bottom: 1px solid var(--line); }
   .bar i { display: block; width: 70%; max-width: 4rem; background: var(--accent); border-radius: var(--radius-sm) var(--radius-sm) 0 0; min-height: 2px; }
+  .bar s { position: absolute; left: 0; right: 0; border-top: 2px dashed var(--bad); }
   .bar b { font-weight: 400; font-variant-numeric: tabular-nums; margin-top: .3rem; }
   label { display: grid; gap: .25rem; font-size: .85rem; color: var(--ink2); margin: 0 0 .8rem; }
   label .opt { font-size: var(--text-xs); margin-left: .3rem; } label .hint { font-size: .8rem; line-height: 1.45; } label .hint code { font-family: var(--mono); font-size: .9em; }
@@ -1649,13 +1783,10 @@ ${DESIGN_CSS}
   [hidden] { display: none !important; }
   @media (max-width: 48rem) { .layout { grid-template-columns: 1fr; } main { padding: 1.25rem 1rem 2rem; }
     .cards { grid-template-columns: 1fr 1fr; gap: .6rem; } .card { padding: .75rem .85rem; } .card .k { font-size: var(--text-xs); } .card .v { font-size: var(--text-xl); } .card .s { font-size: .8rem; line-height: 1.35; }
-    table:has(#urls), #urls, table:has(#audit), #audit { display: block; } table:has(#audit) thead { display: none; }
+    table:has(#urls), #urls { display: block; } .feed li { flex-direction: column; gap: var(--space-1); }
     #urls tr { display: grid; gap: .15rem; padding: .55rem 0; border-bottom: 1px solid var(--line); } #urls tr:last-child { border-bottom: 0; }
     #urls th, #urls td { padding: 0; border: 0; } #urls td { overflow-wrap: anywhere; font-size: .8rem; }
-    #audit tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .15rem .75rem; padding: .65rem 0; border-bottom: 1px solid var(--line); } #audit tr:last-child { border-bottom: 0; }
-    #audit td { min-width: 0; padding: 0; border: 0; white-space: normal; }
-    #audit td:nth-child(3) { grid-area: 1 / 1; font-weight: 600; } #audit td:nth-child(1) { grid-area: 1 / 2; color: var(--ink2); font-size: .8rem; white-space: nowrap; }
-    #audit td:nth-child(2), #audit td:nth-child(4), #audit td[colspan] { grid-column: 1 / -1; font-size: .8rem; } #audit td:nth-child(2) { color: var(--ink2); } }
+    }
   .toast { position: fixed; right: var(--space-4); bottom: var(--space-4); z-index: 20; max-width: min(26rem, calc(100vw - 2rem)); padding: var(--space-3) var(--space-4); background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: var(--radius-sm); box-shadow: var(--shadow); } .toast.err { border-left-color: var(--bad); } .toast:empty { visibility: hidden; }
   dialog.confirm { padding: 0; width: min(28rem, calc(100vw - 2rem)); } dialog.confirm form { padding: var(--space-5); } dialog.confirm h2 { margin: 0 0 var(--space-2); overflow-wrap: anywhere; } dialog.confirm p:empty { display: none; }
   dialog.confirm .acts { display: flex; justify-content: flex-end; gap: var(--space-3); margin-top: var(--space-5); flex-wrap: wrap; } dialog.confirm .choice { display: grid; grid-template-columns: auto 1fr; column-gap: var(--space-3); margin: var(--space-3) 0; font-weight: 400; cursor: pointer; } dialog.confirm .choice input { width: auto; margin: .2rem 0 0; } dialog.confirm .choice span { grid-column: 2; color: var(--ink2); font-size: var(--text-sm); }
@@ -1775,7 +1906,7 @@ ${DESIGN_CSS}
       <div class="cards" id="ovCards">
         <div class="card" id="cUsed"><div class="k">Appends this month</div><div class="v" id="vUsed">–</div><div class="s" id="sUsed"></div></div>
         <div class="card" id="cSize"><div class="k">Receipts in your log</div><div class="v" id="vSize">–</div><div class="s">leaf hashes, all time</div></div>
-        <div class="card" id="cKeys"><div class="k">Live keys</div><div class="v" id="vKeys">–</div><div class="s" id="sKeys"></div></div>
+        <div class="card" id="cKeys"><div class="k">Active keys</div><div class="v" id="vKeys">–</div><div class="s" id="sKeys"></div></div>
         <div class="card" id="cCp"><div class="k">Latest checkpoint</div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
       </div>
       <p class="muted">Tree heads on this log are signed by our key; there is no second, independent witness yet. Every receipt you log here is checkable by anyone with your gateway's public key and ours: <a href="https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not" target="_blank" rel="noopener">what a receipt proves and what it does not</a>.</p>
@@ -1784,27 +1915,30 @@ ${DESIGN_CSS}
     </div>
     <div data-pane="activity" hidden>
       <h1>Activity</h1>
-      <div class="panel"><table><thead><tr><th>when</th><th>who</th><th>action</th><th>detail</th></tr></thead><tbody id="audit"></tbody></table></div>
+      <p class="muted">Every change to your tenant, newest first. Times are in your time zone. Hold the pointer on a time to see it in UTC.</p>
+      <div class="panel"><ul class="feed" id="activityFeed"></ul></div>
+      <p><button type="button" class="quiet" id="activityMore" hidden>Show older</button></p>
     </div>
     <div data-pane="usage" hidden>
       <h1>Usage</h1>
-      <div class="panel"><div class="bars" id="bars"></div></div>
-      <p class="muted" id="usageNote"></p>
+      <div class="panel"><h2>This month</h2><p id="usageNow"></p><progress id="usageBar" aria-label="Appends this month against the plan limit"></progress></div>
+      <div class="panel"><h2>Last six months</h2><div class="bars" id="bars"></div><p class="muted" id="usageNote"></p></div>
     </div>
     <div data-pane="keys" hidden>
       <h1>API keys</h1>
-      <p class="muted">A key is a bearer token your gateway presents on append. It is shown once when minted; we keep only its hash. Mint a second key before revoking the first to rotate without a gap.</p>
-      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Mint key</button></form>
+      <p class="muted">A key is a bearer token that your gateway sends with each append. You see a key one time, when you create it; we keep only its hash. To rotate a key without a gap, create the new key before you revoke the old one.</p>
+      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Create key</button></form>
         <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted" data-copy>Copy key</button> <button type="button" id="savedMinted">I saved the key</button></div>
-        <table style="margin-top:1rem"><thead><tr><th>label</th><th>hash</th><th>created</th><th>state</th><th></th></tr></thead><tbody id="keyRows"></tbody></table></div>
+        <table style="margin-top:1rem"><thead><tr><th>label</th><th>created</th><th>last used</th><th>state</th><th></th></tr></thead><tbody id="keyRows"></tbody></table></div>
     </div>
     <div data-pane="policies" hidden>
       <h1>Policies</h1>
-      <p class="muted">Enforcement stays on your machines: the gateway reads its Cedar file locally and writes the file's SHA-256 into every receipt as <code>policyDigest</code>. This page gives those digests names. Publish each version you deploy, byte for byte as the gateway loads it, and a receipt's digest reads as "refunds-v3" instead of a hash, here and in your export. We never evaluate a policy and nothing here is read by the gateway.</p>
-      <div class="panel"><form id="policyForm"><label>Name for this version<input id="policyName" placeholder="refunds-v3" maxlength="80" required></label><label>Policy text, exactly as the gateway's file<textarea id="policyText" rows="8" spellcheck="false" placeholder="permit(principal, action == Action::&quot;stripe.refund&quot;, resource) when { context.args.amount <= 100000 };" required></textarea></label><button type="submit">Publish version</button> <span class="muted" id="policyDigestPreview"></span></form></div>
-      <div class="panel"><h2>Match a receipt</h2><p class="muted">Paste a receipt file, or just its <code>policyDigest</code>, to see which published version decided it.</p><form id="matchForm"><label>Receipt JSON or digest<textarea id="matchIn" rows="3" spellcheck="false"></textarea></label><button type="submit" class="quiet">Match</button></form><p class="msg" id="matchOut"></p></div>
+      <p class="muted">Publish each Cedar policy version that your gateway loads, and the <code>policyDigest</code> of a receipt reads as its name, such as "refunds-v3". Enforcement stays on your machines: the gateway never reads this page. <a href="https://docs.agent-custody.dev/reference/hosted#policies-names-for-the-digests-receipts-carry" target="_blank" rel="noopener">How policy names work</a></p>
+      <p><button type="button" id="policyNew">Publish version</button></p>
       <div class="panel"><table><thead><tr><th>name</th><th>digest</th><th>bytes</th><th>published</th><th>by</th><th></th></tr></thead><tbody id="policyRows"></tbody></table></div>
-      <div class="panel" id="policyView" hidden><h2 id="policyViewName"></h2><pre id="policyViewText"></pre></div>
+      <div class="panel"><h2>Match a receipt</h2><p class="muted">Paste a receipt file, or just its <code>policyDigest</code>, to see which published version decided it.</p><form id="matchForm"><label>Receipt JSON or digest<textarea id="matchIn" rows="3" spellcheck="false"></textarea></label><button type="submit" class="quiet">Match</button></form><p class="msg" id="matchOut"></p></div>
+      <dialog id="publishDialog" aria-labelledby="publishTitle"><form id="policyForm"><h2 id="publishTitle">Publish a policy version</h2><label>Name for this version<input id="policyName" placeholder="refunds-v3" maxlength="80" required></label><label>Policy text, exactly as the gateway's file<textarea id="policyText" rows="10" spellcheck="false" placeholder="permit(principal, action == Action::&quot;stripe.refund&quot;, resource) when { context.args.amount <= 100000 };" required></textarea></label><p class="muted" id="policyDigestPreview"></p><button type="submit">Publish</button> <button type="button" class="quiet" id="publishCancel">Cancel</button><p class="msg" id="publishMsg"></p></form></dialog>
+      <dialog id="policyView" aria-labelledby="policyViewName"><h2 id="policyViewName"></h2><pre id="policyViewText"></pre><button type="button" class="quiet" id="policyViewClose">Close</button></dialog>
     </div>
     <div data-pane="members" hidden>
       <h1>Members</h1>
@@ -1842,7 +1976,9 @@ ${DESIGN_CSS}
     </div>
     <div data-pane="billing" hidden>
       <h1>Billing</h1>
-      <div class="panel" id="billingPanel"></div>
+      <div class="panel" id="billingNow"></div>
+      <div class="plans" id="plans"></div>
+      <p class="muted">The prices and limits are the same as on the <a href="https://agent-custody.dev/pricing" target="_blank" rel="noopener">pricing page</a>. No plan has an availability commitment yet.</p>
       <p class="msg" id="billingMsg"></p>
     </div>
     <div data-pane="export" hidden>
@@ -1909,6 +2045,40 @@ ${DESIGN_CSS}
     if (id !== "app") { document.title = "agent-custody"; setDrawer(false); }
   };
   const PROVIDERS = __PROVIDERS__;
+  const PLANS = __PLANS__;
+  const PLAN_NAMES = Object.fromEntries(PLANS.map((p) => [p.plan, p.name]));
+  let myEmail = "";
+  let keyList = [];
+  let activityNext = null;
+  const when = (iso) => "<time datetime=\\"" + esc(iso) + "\\" title=\\"" + esc(iso.slice(0, 16).replace("T", " ")) + " UTC\\">" + esc(new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })) + "</time>";
+  const actor = (a) => a === "portal:" + myEmail ? "You" : a.startsWith("portal:") ? a.slice(7) : a.startsWith("stripe:") ? "Stripe billing" : a.startsWith("cli:") ? "The operator" : a === "unattributed" ? "Someone" : a;
+  const keyName = (prefix) => { const k = keyList.find((k) => prefix && k.hash.startsWith(String(prefix).slice(0, 12))); return k ? "the key '" + k.label + "'" : "the key " + prefix; };
+  const SENTENCES = {
+    "tenant.add": (d) => "created the tenant" + (d.logId ? " with the log id '" + d.logId + "'" : ""),
+    "tenant.disable": () => "disabled the tenant",
+    "tenant.plan": (d) => "moved the tenant to the " + (PLAN_NAMES[d.plan] || d.plan) + " plan",
+    "token.add": (d) => "created the key '" + d.label + "'",
+    "token.revoke": (d) => d.revoked === 0 ? "tried to revoke " + keyName(d.hashPrefix) + ", but no active key matched" : "revoked " + keyName(d.hashPrefix),
+    "policy.add": (d) => "published the policy version '" + d.name + "'",
+    "policy.remove": (d) => "removed the policy version '" + d.name + "'",
+    "sso.set": (d) => "set up single sign-on" + (d.protocol ? " (" + String(d.protocol).toUpperCase() + ")" : ""),
+    "sso.remove": () => "removed single sign-on",
+    "user.mfa-reset": (d) => "turned off two-step sign-in for " + (d.email || "a member"),
+  };
+  const sentence = (e) => { const d = e.detail || {}; return actor(e.actor) + " " + (Object.hasOwn(SENTENCES, e.action) ? SENTENCES[e.action](d) : "did '" + e.action + "'" + (Object.keys(d).length ? " (" + Object.entries(d).map(([k, v]) => k + ": " + v).join(", ") + ")" : "")) + "."; };
+  const feed = (entries) => entries.map((e) => "<li><span title=\\"" + esc(e.action + " " + JSON.stringify(e.detail || {})) + "\\">" + esc(sentence(e)) + "</span>" + when(e.at) + "</li>").join("");
+  const loadActivity = async (older) => {
+    try {
+      const r = await api("GET", "/api/audit?limit=25" + (older ? "&before=" + activityNext : ""));
+      if (older) $("activityFeed").insertAdjacentHTML("beforeend", feed(r.entries)); else $("activityFeed").innerHTML = feed(r.entries) || "<li class=muted>Nothing yet.</li>";
+      activityNext = r.next; $("activityMore").hidden = r.next === null;
+    } catch (err) { toast(err.message, false); }
+  };
+  $("activityMore").onclick = () => loadActivity(true);
+  const meter = (bar, used, quota) => { bar.hidden = quota === null; if (quota === null) return; bar.max = quota; bar.value = Math.min(used, quota); bar.className = used >= quota ? "bad" : used >= .8 * quota ? "warn" : ""; };
+  const resets = () => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toLocaleDateString(undefined, { day: "numeric", month: "long", timeZone: "UTC" }); };
+  const usedLine = (o) => fmt(o.used) + (o.quota === null ? " appends this month. Your plan has no limit." : " of " + fmt(o.quota) + " appends this month (" + Math.floor(100 * o.used / o.quota) + "%). The count resets on " + resets() + ", UTC.");
+  const monthName = (m) => new Date(m + "-01T00:00:00Z").toLocaleDateString(undefined, { month: "short", year: "numeric", timeZone: "UTC" });
   const MAIL = __MAIL__;
   const ICONS = { github: "<svg viewBox='0 0 16 16' aria-hidden='true'><path fill='currentColor' d='M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z'/></svg>", google: "<svg viewBox='0 0 48 48' aria-hidden='true'><path fill='#EA4335' d='M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z'/><path fill='#4285F4' d='M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z'/><path fill='#FBBC05' d='M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z'/><path fill='#34A853' d='M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z'/></svg>" };
   if (PROVIDERS.length) { $("providers").innerHTML = PROVIDERS.map((p) => "<a href='/auth/" + p + "'>" + ICONS[p] + "Continue with " + (p === "github" ? "GitHub" : "Google") + "</a>").join("") + "<p class=or>or with email</p>"; $("providers").hidden = false; }
@@ -1990,7 +2160,7 @@ ${DESIGN_CSS}
   const renderSetup = (el, s, atRegistration) => {
     const n = atRegistration ? 1 : 0;
     el.innerHTML =
-      step(n + 1, "Keep the key where your gateway runs", (atRegistration ? "<p>Your first key is shown once; we keep only its hash. Put it in the environment of the machine that runs your gateway or SDK. The command below holds your key:</p>" : "<p>Your key was shown once at registration. If it is gone, mint another under <a href=\\"#keys\\" data-view=\\"keys\\">API keys</a>. It lives in the environment of the machine that runs your gateway or SDK:</p>") + snip(s.env)) +
+      step(n + 1, "Keep the key where your gateway runs", (atRegistration ? "<p>Your first key is shown once; we keep only its hash. Put it in the environment of the machine that runs your gateway or SDK. The command below holds your key:</p>" : "<p>Your key was shown once at registration. If it is gone, create another under <a href=\\"#keys\\" data-view=\\"keys\\">API keys</a>. It lives in the environment of the machine that runs your gateway or SDK:</p>") + snip(s.env)) +
       step(n + 2, "Point your gateway or SDK at your log", "<p>Add this to <code>gateway.json</code> or <code>sdk.json</code>. <code>hashOnly</code> means this log receives the hash of each receipt and never the receipt.</p>" + snip(s.config)) +
       step(n + 3, "Send the first receipt", "<p>Run your agent through the gateway once. The <a href=\\"#overview\\" data-view=\\"overview\\">Overview</a> shows the append within seconds, and the first signed checkpoint follows within minutes. New to the gateway? <a href=\\"https://agent-custody.dev/guide/getting-started\\" target=\\"_blank\\" rel=\\"noopener\\">Getting started</a> takes ten minutes.</p>") +
       "<h2>After the first receipt</h2>" + step("", "Hand this to whoever verifies your receipts", "<p>Both commands fetch this log's published keys and pin them; <code>--log-id</code> makes sure the tree heads are this log's.</p>" + snip(s.verify) + snip(s.audit)) +
@@ -2018,19 +2188,26 @@ ${DESIGN_CSS}
     $("cCp").className = "card " + (o.latestCheckpoint ? (Date.now() - Date.parse(o.latestCheckpoint.signedAt) < 7 * 3600e3 ? "ok" : "warn") : "warn");
     $("vCp").textContent = o.latestCheckpoint ? "size " + fmt(o.latestCheckpoint.treeSize) : "none yet"; $("sCp").textContent = o.latestCheckpoint ? "signed " + ago(o.latestCheckpoint.signedAt) : "published after your first append";
     $("urls").innerHTML = [["Append here", o.urls.log], ["Log id on tree heads", o.logId], ["The log's keys", o.urls.keys], ["Your checkpoints", o.urls.checkpoints || "(not published)"], ["Current root", o.rootHash || "none until the first append"]].map(([k, v]) => "<tr><th>" + esc(k) + "</th><td class=mono>" + esc(v) + "</td></tr>").join("");
-    $("audit").innerHTML = o.audit.map((e) => "<tr><td>" + esc(e.at.replace("T", " ").slice(0, 16)) + "</td><td class=mono>" + esc(e.actor) + "</td><td>" + esc(e.action) + "</td><td class=muted>" + esc(Object.entries(e.detail).map(([k, v]) => k + "=" + v).join(" ")) + "</td></tr>").join("") || "<tr><td colspan=4 class=muted>nothing yet</td></tr>";
-    const max = Math.max(1, ...o.months.map((m) => m.appends));
-    $("bars").innerHTML = o.months.map((m) => "<div class=bar><span class=mono>" + fmt(m.appends) + "</span><i style=\\"height:" + Math.max(2, Math.round(100 * m.appends / max)) + "%\\"></i><b>" + esc(m.month.slice(2)) + "</b></div>").join("");
-    $("usageNote").textContent = "Appends per calendar month, UTC. Your plan allows " + (o.quota === null ? "any number" : fmt(o.quota)) + " a month; the count resets on the first.";
-    $("keyRows").innerHTML = o.keys.map((k) => "<tr><td>" + esc(k.label) + "</td><td class=mono>" + esc(k.hash) + "</td><td>" + esc(k.createdAt.slice(0, 10)) + "</td><td>" + (k.revokedAt ? "revoked " + esc(k.revokedAt.slice(0, 10)) : "live") + "</td><td>" + (k.revokedAt || !can("admin") ? "" : "<button class=quiet data-revoke=\\"" + esc(k.hash) + "\\">Revoke</button>") + "</td></tr>").join("");
-    $("billingPanel").innerHTML = o.plan === "free"
-      ? "<p>You are on the <b>free</b> plan: ten thousand appends a month, no card.</p><p>The <b>team</b> plan is <b>$50 a month</b>: a million appends, email support within two working days, the same export and audit trail. No availability commitment yet, and the design fails closed: when the log is unreachable your gateway withholds pre-committed calls.</p>" + (o.stripe ? (can("owner") ? "<button id=upgrade>Upgrade to team, $50/month</button>" : "<p class=muted>An owner upgrades the plan.</p>") : "<p class=muted>Card payments are not switched on for this portal yet; email us and we move the plan by hand.</p>")
-      : "<p>You are on the <b>" + esc(o.plan) + "</b> plan" + (o.billing ? " (subscription " + esc(o.billing.status) + ")" : "") + ".</p>" + (o.stripe && o.billing && can("owner") ? "<button class=quiet id=manage>Manage billing</button>" : "");
+    keyList = o.keys;
+    const max = 1.15 * Math.max(1, o.quota || 0, ...o.months.map((m) => m.appends));
+    $("bars").innerHTML = o.months.map((m) => "<div class=bar><span class=mono>" + fmt(m.appends) + "</span><div class=col><i style=\\"height:" + Math.max(1, Math.round(100 * m.appends / max)) + "%\\"></i>" + (o.quota === null ? "" : "<s style=\\"bottom:" + (100 * o.quota / max) + "%\\"></s>") + "</div><b>" + esc(monthName(m.month)) + "</b></div>").join("");
+    $("usageNote").textContent = "Appends per calendar month, UTC. " + (o.quota === null ? "Your plan has no limit." : "The dashed line is your plan limit, " + fmt(o.quota) + " appends a month.");
+    $("usageNow").textContent = usedLine(o); meter($("usageBar"), o.used, o.quota);
+    $("keyRows").innerHTML = o.keys.map((k) => "<tr><td><span title=\\"Hash " + esc(k.hash) + "\\">" + esc(k.label) + "</span></td><td>" + when(k.createdAt) + "</td><td>" + (k.lastUsedAt ? when(k.lastUsedAt) : "<span class=muted>never</span>") + "</td><td>" + (k.revokedAt ? "Revoked " + when(k.revokedAt) : "Active") + "</td><td>" + (k.revokedAt || !can("admin") ? "" : "<button class=quiet data-revoke=\\"" + esc(k.hash) + "\\" data-label=\\"" + esc(k.label) + "\\">Revoke</button>") + "</td></tr>").join("");
+    $("billingNow").innerHTML = "<p>You are on the <b>" + esc(PLAN_NAMES[o.plan] || o.plan) + "</b> plan" + (o.billing ? " (subscription " + esc(o.billing.status) + ")" : "") + ". " + esc(usedLine(o)) + "</p><progress id=billingBar aria-label=\\"Appends this month against the plan limit\\"></progress>";
+    meter($("billingBar"), o.used, o.quota);
+    $("plans").innerHTML = PLANS.map((p) => {
+      const now = p.plan === o.plan;
+      const act = now ? (o.stripe && o.billing && can("owner") ? "<button class=quiet id=manage>Manage billing</button>" : "")
+        : p.plan === "team" && o.plan === "free" ? (o.stripe ? (can("owner") ? "<button id=upgrade>Upgrade to Team</button>" : "<p class=muted>An owner upgrades the plan.</p>") : "<p class=muted>Card payments are off on this portal. Email us and we move the plan by hand.</p>")
+        : p.plan === "enterprise" ? "<a class=\\"btn quiet\\" href=\\"https://agent-custody.dev/contact\\" target=\\"_blank\\" rel=\\"noopener\\">Contact us</a>" : "";
+      return "<div class=\\"card plan" + (now ? " now" : "") + "\\"" + (now ? " aria-current=true" : "") + "><h2>" + esc(p.name) + (now ? " <span class=pill>Current plan</span>" : "") + "</h2><div class=price>" + esc(p.price) + "</div><div class=muted>" + (p.appends === null ? "No append limit" : fmt(p.appends) + " appends a month") + "</div><ul>" + p.points.map((x) => "<li>" + esc(x) + "</li>").join("") + "</ul><div class=act>" + act + "</div></div>";
+    }).join("");
     $("exportCmd").textContent = o.exportCommand; renderSetup($("setupPane"), o.setup, false);
     const up = $("upgrade"); if (up) up.onclick = async () => { try { const r = await api("POST", "/api/checkout", {}); location.href = r.url; } catch (err) { $("billingMsg").className = "msg err"; $("billingMsg").textContent = err.message; } };
     const mg = $("manage"); if (mg) mg.onclick = async () => { try { const r = await api("POST", "/api/billing-portal", {}); location.href = r.url; } catch (err) { $("billingMsg").className = "msg err"; $("billingMsg").textContent = err.message; } };
   };
-  const load = async () => { render(await api("GET", "/api/overview")); await loadPolicies(); await loadMembers(); };
+  const load = async () => { render(await api("GET", "/api/overview")); await loadPolicies(); await loadMembers(); await loadActivity(false); };
   const recoveryLeft = (n) => { $("recoveryLeft").textContent = n === 1 ? "1 recovery code is left." : n + " recovery codes are left."; };
   const showCodes = (codes) => { $("recoveryCodes").textContent = codes.join("\\n"); $("recoveryBox").hidden = false; recoveryLeft(codes.length); };
   const mfaShow = (on, left) => { $("mfaState").textContent = on ? "on" : "off"; $("mfaStart").hidden = on; $("mfaOffForm").hidden = !on; $("recoveryForm").hidden = !on; $("mfaSetupBox").hidden = true; if (!on) $("recoveryBox").hidden = true; if (left !== undefined) recoveryLeft(left); };
@@ -2057,7 +2234,7 @@ ${DESIGN_CSS}
     $("inviteRows").innerHTML = r.invites.map((i) => "<tr><td>" + esc(i.email) + "</td><td>" + esc(ROLE_LABEL[i.role]) + "</td><td class=mono>" + esc(i.invitedBy) + "</td><td>" + esc(i.createdAt.slice(0, 10)) + "</td><td>" + (can("admin") ? "<button class=link data-rminvite=\\"" + esc(i.email) + "\\">Cancel</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>none</td></tr>";
   };
   const membersDo = async (path, body, done) => { try { await api("POST", path, body); toast(done, true); } catch (err) { toast(err.message, false); } await loadMembers(); };
-  $("inviteForm").onsubmit = (e) => { e.preventDefault(); membersDo("/api/members", { email: $("inviteEmail").value, role: $("inviteRole").value }, "Invite sent to " + $("inviteEmail").value + ".").then(() => { $("inviteEmail").value = ""; }); };
+  $("inviteForm").onsubmit = async (e) => { e.preventDefault(); const to = $("inviteEmail").value; try { const r = await api("POST", "/api/members", { email: to, role: $("inviteRole").value }); toast(r.emailSent ? "Invite sent to " + to + "." : "The invite is saved, but the email did not go out to " + to + ". Ask them to sign in at " + location.origin + "/ with that address and accept the invite.", r.emailSent); $("inviteEmail").value = ""; } catch (err) { toast(err.message, false); } await loadMembers(); };
   document.addEventListener("click", async (e) => {
     const cell = (b) => b.closest("tr").cells[0].textContent;
     const ch = e.target.closest("button[data-setrole]");
@@ -2073,7 +2250,7 @@ ${DESIGN_CSS}
       const me = await api("GET", "/api/me");
       accountNotice(me);
       if (me.tenant === null) { $("onboardWho").textContent = me.email; $("invites").hidden = !(me.invites || []).length; $("inviteList").innerHTML = (me.invites || []).map((i) => "<p>Join <b>" + esc(i.tenant) + "</b> as " + esc(i.role) + " <button type=button data-accept=\\"" + esc(i.tenant) + "\\">Accept</button></p>").join(""); if (me.profile) { for (const k of ["name", "company", "role"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
-      $("who").textContent = $("userEmail").textContent = me.email; $("avatar").textContent = me.email.charAt(0); $("whoMeta").textContent = me.tenant + " \u00b7 " + me.role; $("whoPlan").textContent = me.plan + " plan"; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyForm").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa, me.recoveryCodes); show("app"); await load(); route();
+      $("who").textContent = me.email; myEmail = me.email; $("avatar").textContent = me.email.charAt(0); $("whoMeta").textContent = me.tenant + " \u00b7 " + me.role; $("whoPlan").textContent = me.plan + " plan"; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyNew").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa, me.recoveryCodes); show("app"); await load(); route();
     }
     catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) authTab(true); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { $("loadErr").textContent = err.message.charAt(0).toUpperCase() + err.message.slice(1) + "."; show("loadFail"); } }
   };
@@ -2098,10 +2275,13 @@ ${DESIGN_CSS}
     $("policyRows").innerHTML = r.policies.map((p) => "<tr><td>" + esc(p.name) + "</td><td class=mono>" + esc(p.digest.slice(0, 16)) + "…</td><td>" + p.bytes + "</td><td>" + esc(p.createdAt.slice(0, 10)) + "</td><td class=mono>" + esc(p.createdBy.replace(/^portal:/, "")) + "</td><td><button class=link data-viewpol=\\"" + esc(p.id) + "\\">View</button>" + (can("reviewer") ? " <button class=link data-rmpol=\\"" + esc(p.id) + "\\">Remove</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=6 class=muted>No versions published yet. Receipts keep their digests either way; a name is for the people reading them.</td></tr>";
   };
   $("policyText").oninput = async () => { const t = $("policyText").value; $("policyDigestPreview").textContent = t ? "sha256 " + (await sha256hex(t)).slice(0, 16) + "…" : ""; };
+  $("policyNew").onclick = () => { $("publishMsg").textContent = ""; $("publishDialog").showModal(); };
+  $("publishCancel").onclick = () => $("publishDialog").close();
+  $("policyViewClose").onclick = () => $("policyView").close();
   $("policyForm").onsubmit = async (e) => {
-    e.preventDefault();
-    try { const r = await api("POST", "/api/policies", { name: $("policyName").value, text: $("policyText").value }); toast("Published version " + r.policy.name + " (digest " + r.policy.digest.slice(0, 16) + "…).", true); $("policyName").value = ""; $("policyText").value = ""; $("policyDigestPreview").textContent = ""; await loadPolicies(); }
-    catch (err) { toast(err.message, false); }
+    e.preventDefault(); $("publishMsg").textContent = "";
+    try { const r = await api("POST", "/api/policies", { name: $("policyName").value, text: $("policyText").value }); $("publishDialog").close(); toast("Published version " + r.policy.name + " (digest " + r.policy.digest.slice(0, 16) + "…).", true); $("policyName").value = ""; $("policyText").value = ""; $("policyDigestPreview").textContent = ""; await loadPolicies(); await loadActivity(false); }
+    catch (err) { note("publishMsg", err.message, false); }
   };
   $("matchForm").onsubmit = async (e) => {
     e.preventDefault(); $("matchOut").className = "msg";
@@ -2113,8 +2293,8 @@ ${DESIGN_CSS}
     } catch (err) { $("matchOut").className = "msg err"; $("matchOut").textContent = err.message; }
   };
   document.addEventListener("click", async (e) => {
-    const v = e.target.closest("button[data-viewpol]"); if (v) { try { const r = await api("GET", "/api/policies/" + v.dataset.viewpol); $("policyViewName").textContent = r.policy.name + " · " + r.policy.digest; $("policyViewText").textContent = r.policy.text; $("policyView").hidden = false; } catch (err) { toast(err.message, false); } return; }
-    const rm = e.target.closest("button[data-rmpol]"); if (rm && await ask({ title: "Remove version " + rm.closest("tr").cells[0].textContent + "?", text: "Receipts keep their digests. Only the name goes.", ok: "Remove version", danger: true })) { try { await api("POST", "/api/policies/" + rm.dataset.rmpol + "/remove", {}); $("policyView").hidden = true; await loadPolicies(); toast("Version removed.", true); } catch (err) { toast(err.message, false); } }
+    const v = e.target.closest("button[data-viewpol]"); if (v) { try { const r = await api("GET", "/api/policies/" + v.dataset.viewpol); $("policyViewName").textContent = r.policy.name + " · " + r.policy.digest; $("policyViewText").textContent = r.policy.text; $("policyView").showModal(); } catch (err) { toast(err.message, false); } return; }
+    const rm = e.target.closest("button[data-rmpol]"); if (rm && await ask({ title: "Remove version " + rm.closest("tr").cells[0].textContent + "?", text: "Receipts keep their digests. Only the name goes.", ok: "Remove version", danger: true })) { try { await api("POST", "/api/policies/" + rm.dataset.rmpol + "/remove", {}); await loadPolicies(); await loadActivity(false); toast("Version removed.", true); } catch (err) { toast(err.message, false); } }
   });
   $("mintForm").onsubmit = async (e) => {
     e.preventDefault();

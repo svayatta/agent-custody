@@ -11,8 +11,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { PGlite } from "@electric-sql/pglite";
 import { generateKeyPair } from "../src/crypto.ts";
 import { httpLog, postgresResolver, serveLog, type RunningLog } from "../src/log-sink.ts";
-import { PostgresTenancy } from "../src/log-store.ts";
-import { founderNote, PortalStore, qrMatrix, qrSvg, readSession, readSessionVia, ROLES, sendFollowUps, servePortal, signSession, totp, verifyStripeSignature, type Role, type RunningPortal } from "../src/portal.ts";
+import { readFileSync } from "node:fs";
+import { AUDIT_ACTIONS, PLAN_QUOTAS, PostgresTenancy } from "../src/log-store.ts";
+import { founderNote, PLAN_CARDS, PortalStore, qrMatrix, qrSvg, renderMail, readSession, readSessionVia, ROLES, sendFollowUps, servePortal, signSession, totp, verifyStripeSignature, type Role, type RunningPortal } from "../src/portal.ts";
 import { policyDigest } from "../src/policy.ts";
 import { standInIdp } from "../scripts/idp-standin.ts";
 
@@ -21,7 +22,7 @@ let tenancy: PostgresTenancy;
 let log: RunningLog;
 let portal: RunningPortal;
 const stripeCalls: { path: string; body: URLSearchParams }[] = [];
-const mails: { to: string[]; subject: string; text: string; from: string }[] = [];
+const mails: { to: string[]; subject: string; text: string; html: string; from: string; reply_to?: string; headers?: Record<string, string> }[] = [];
 /** who GitHub says the signed-in user is; a test changes it to play another person */
 let gh = { id: 4242, email: "Octo@Example.com" };
 // GitHub's and Google's endpoints, stood in: a code becomes a token, a token becomes a subject and a verified email
@@ -51,7 +52,7 @@ beforeAll(async () => {
   tenancy = new PostgresTenancy(db, { quotas: { free: 3 } });
   await tenancy.addTenant("default", "log.example.test");
   log = await serveLog(postgresResolver(tenancy), generateKeyPair(), { port: 0 });
-  portal = await servePortal({ tenancy, client: db, secret: SECRET, publicUrl: log.url, checkpointsUrl: "https://checkpoints.example.test/", keyid: "abc123", portalUrl: "https://app.example.test/", stripe: { secretKey: "sk_test_x", webhookSecret: WHSEC, priceTeam: "price_team", fetch: stripeFetch }, mail: { apiKey: "re_test", from: "hello@example.test", notify: "sales@example.test", fetch: mailFetch }, oauth: { github: { clientId: "gh_id", clientSecret: "gh_secret" }, google: { clientId: "g_id", clientSecret: "g_secret" }, fetch: oauthFetch }, log: () => {} }, { port: 0 });
+  portal = await servePortal({ tenancy, client: db, secret: SECRET, publicUrl: log.url, checkpointsUrl: "https://checkpoints.example.test/", keyid: "abc123", portalUrl: "https://app.example.test/", stripe: { secretKey: "sk_test_x", webhookSecret: WHSEC, priceTeam: "price_team", fetch: stripeFetch }, mail: { apiKey: "re_test", from: "hello@example.test", notify: "sales@example.test", replyTo: "team@example.test", fetch: mailFetch }, oauth: { github: { clientId: "gh_id", clientSecret: "gh_secret" }, google: { clientId: "g_id", clientSecret: "g_secret" }, fetch: oauthFetch }, log: () => {} }, { port: 0 });
 }, 60_000);
 
 afterAll(async () => {
@@ -105,6 +106,8 @@ describe("the tenant portal", () => {
     expect(mails[2]!.text).toMatch(/verify-email\?token=/);
     expect(mails[0]!.text).toContain("t/acme/");
     expect(mails[0]!.text).toContain("Hello Dana Ortiz");
+    expect(mails.every((m) => m.reply_to === "team@example.test" && m.html.startsWith("<!doctype html>"))).toBe(true);
+    expect(mails[2]!.html).toContain("Confirm email address");
     expect(mails[0]!.text).not.toContain(r.json.token);
     expect(mails[1]!.text).toContain("+44 20 7946 0000");
     expect(mails[1]!.text).toContain("@dana_ortiz");
@@ -142,6 +145,7 @@ describe("the tenant portal", () => {
     expect(o.json.keys).toHaveLength(1);
     expect(o.json.audit.map((e: any) => e.action)).toEqual(["token.add", "tenant.add"]);
     expect(o.json.audit[1].actor).toBe("portal:dana@example.com");
+    await vi.waitFor(async () => expect((await b.call("GET", "/api/keys")).json.keys[0].lastUsedAt).toMatch(/^\d{4}-/));
     expect(o.json.urls.checkpoints).toBe("https://checkpoints.example.test/acme/latest.json");
   });
 
@@ -228,6 +232,44 @@ describe("the tenant portal", () => {
     // an old timestamp is refused even with a valid mac
     const stale = `t=${Math.floor(Date.now() / 1000) - 3600},v1=${createHmac("sha256", WHSEC).update(`${Math.floor(Date.now() / 1000) - 3600}.${deleted}`).digest("hex")}`;
     expect(verifyStripeSignature(stale, deleted, WHSEC)).toBe(false);
+  });
+
+  it("pages the activity with a validated limit and cursor, and the page has the Activity view, a sentence for every audit action, and the plan cards", async () => {
+    const b = browser();
+    await b.call("POST", "/api/login", { email: "dana@example.com", password: "a-long-enough-password" });
+    const all = (await tenancy.audit({ tenant: "acme" })).map((e) => e.id);
+    const seen: number[] = [];
+    let before: number | null = null;
+    do {
+      const r = await b.call("GET", `/api/audit?limit=2${before ? `&before=${before}` : ""}`);
+      expect(r.status).toBe(200);
+      expect(r.json.entries.length).toBeLessThanOrEqual(2);
+      seen.push(...r.json.entries.map((e: any) => e.id));
+      before = r.json.next;
+    } while (before !== null);
+    expect(seen).toEqual(all);
+    for (const q of ["limit=0", "limit=101", "limit=abc", "limit=", "before=0", "before=-1", "before=1e3", "before=x"]) expect((await b.call("GET", `/api/audit?${q}`)).status).toBe(400);
+    const page = await (await fetch(portal.url)).text();
+    expect(page).toContain('<a href="#activity" data-view="activity">');
+    expect(page).not.toMatch(/id="activity"/);
+    for (const a of AUDIT_ACTIONS) expect(page).toContain(`"${a}": (`);
+    expect(page).toContain('<button type="submit">Create key</button>');
+    expect(page).not.toContain("Mint key");
+    expect(page).toContain('<dialog id="publishDialog"');
+    expect(page).toContain('<dialog id="policyView"');
+    expect(page).toContain('<progress id="usageBar"');
+    expect(page).not.toContain("__PLANS__");
+    expect(page).toContain('"plan":"team","name":"Team","price":"$50 a month"');
+  });
+
+  it("the plan cards agree with the server's plan limits and with the pricing page", () => {
+    const md = readFileSync(new URL("../../../site/pricing.md", import.meta.url), "utf8").split("\n");
+    const cells = (line: string) => line.split("|").slice(1, -1).map((c) => c.trim().replace(/\*\*/g, ""));
+    const row = (name: string) => cells(md.find((l) => l.startsWith(`| **${name}**`))!).slice(1);
+    expect(PLAN_CARDS.map((c) => c.plan)).toEqual(Object.keys(PLAN_QUOTAS));
+    expect(PLAN_CARDS.map((c) => c.name)).toEqual(cells(md.find((l) => l.startsWith("| | Free"))!).slice(1));
+    expect(PLAN_CARDS.map((c) => c.price)).toEqual(row("Price"));
+    expect(PLAN_CARDS.map((c) => PLAN_QUOTAS[c.plan]?.toLocaleString("en-US") ?? "no allowance")).toEqual(row("Appends a month"));
   });
 
   it("password hashing is scrypt with a fresh salt, and a stored hash never verifies the wrong password", () => {
@@ -427,18 +469,18 @@ describe("the founder's note", () => {
     await mk("fresh@example.com", "Fresh One", "fresh", new Date(t0.getTime() - 10 * 60_000));           // ten minutes old: not yet
     await mk("old@example.com", "Old One", "oldco", new Date(t0.getTime() - 9 * 86_400_000));           // nine days old: too late, left alone
     await mk("ops@example.test", "Us", "usco", new Date(t0.getTime() - 3 * 3_600_000));                  // our own domain: marked, not written to
-    const captured: { to: string[]; subject: string; text: string }[] = [];
+    const captured: { to: string[]; subject: string; text: string; html: string; headers: Record<string, string> }[] = [];
     let refuse = false;
     const mailFetch: typeof fetch = async (_u, init) => { if (refuse) return new Response("nope", { status: 500 }); captured.push(JSON.parse(String(init?.body))); return new Response("{}", { status: 200 }); };
-    const mail = { apiKey: "re", from: "Partha <partha@example.test>", notify: "partha@example.test", fetch: mailFetch };
-    const dry = await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", now: t0, dryRun: true, log: () => {} });
+    const mail = { apiKey: "re", from: "Team <team@example.test>", notify: "team@example.test", fetch: mailFetch };
+    const dry = await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", secret: SECRET, now: t0, dryRun: true, log: () => {} });
     expect(dry.sent).toEqual(["burak@example.com"]);
     expect(captured).toHaveLength(0);
     refuse = true;
-    const first = await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", now: t0, log: () => {} });
+    const first = await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", secret: SECRET, now: t0, log: () => {} });
     expect(first).toEqual({ sent: [], skipped: ["ops@example.test"], failed: ["burak@example.com"] });
     refuse = false;
-    const second = await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", now: t0, log: () => {} });
+    const second = await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", secret: SECRET, now: t0, log: () => {} });
     expect(second).toEqual({ sent: ["burak@example.com"], skipped: [], failed: [] });
     expect(captured).toHaveLength(1);
     expect(captured[0]!.to).toEqual(["burak@example.com"]);
@@ -447,11 +489,89 @@ describe("the founder's note", () => {
     expect(captured[0]!.text).toContain("registering zyai");
     expect(captured[0]!.text).toContain("at Co zyai?");
     expect(captured[0]!.text).toContain('"mode": "observe"');
-    expect(captured[0]!.text).toContain("partha@example.test");
+    expect(captured[0]!.text).toContain("The agent-custody team");
+    expect(captured[0]!.text).not.toMatch(/Partha/);
+    expect(captured[0]!.html).toContain("Do not send me these messages");
+    const optOut = /(https:\/\/app\.example\.test\/unsubscribe\?token=\S+)/.exec(captured[0]!.text)![1]!;
+    expect(captured[0]!.headers).toEqual({ "List-Unsubscribe": `<${optOut}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" });
     // once only, and the ten-minute-old one becomes due later
-    expect((await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", now: t0, log: () => {} })).sent).toEqual([]);
-    expect((await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", now: new Date(t0.getTime() + 2 * 3_600_000), log: () => {} })).sent).toContain("fresh@example.com"); // other tests' registrations may be due too
-    expect(founderNote({ name: "Solo", tenant: "t", company: null, portalUrl: "https://p/", from: "x@y.z" }).text).toContain("What are you building?");
+    expect((await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", secret: SECRET, now: t0, log: () => {} })).sent).toEqual([]);
+    expect((await sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", secret: SECRET, signer: "Ada Rowe", signerRole: "Founder", now: new Date(t0.getTime() + 2 * 3_600_000), log: () => {} })).sent).toContain("fresh@example.com"); // other tests' registrations may be due too
+    expect(captured.at(-1)!.text).toContain("Ada Rowe, Founder");
+    expect(captured.at(-1)!.text).toContain("I am Ada Rowe, the founder; you will get me, not a queue.");
+    expect(captured.at(-1)!.text).not.toMatch(/\bwe (send|do|move)\b/);
+    expect(founderNote({ name: "Solo", tenant: "t", company: null, portalUrl: "https://p/", unsubscribeUrl: "https://p/unsubscribe?token=x" }).text).toContain("What are you building?");
+  });
+
+  it("the opt-out link shows a confirm page on GET and changes nothing; only a POST sets the flag, from the form or from a one-click request; a bad token is refused on both", async () => {
+    const store = new PortalStore(db);
+    const t0 = new Date("2026-10-05T07:00:00Z");
+    const mk = async (email: string, tenant: string) => {
+      const u = await store.createUser(email, "a-long-enough-password", { name: "Quiet One", company: "Quiet" });
+      await tenancy.addTenant(tenant, tenant, "test");
+      await store.addMember(u.id, tenant);
+      await db.query("UPDATE portal_users SET created_at = $2 WHERE id = $1", [u.id, new Date(t0.getTime() - 2 * 3_600_000).toISOString()]);
+      return u;
+    };
+    const u = await mk("quiet@example.com", "quiet");
+    const v = await mk("loud@example.com", "loud");
+    const mail = { apiKey: "re", from: "team@example.test", fetch: (async () => new Response("{}", { status: 200 })) as typeof fetch };
+    const dry = () => sendFollowUps(store, mail, { portalUrl: "https://app.example.test/", secret: SECRET, now: t0, dryRun: true, log: () => {} });
+    const at = (token: string, method: string, body?: string) => fetch(new URL(`unsubscribe?token=${token}`, portal.url), { method, ...(body ? { headers: { "content-type": "application/x-www-form-urlencoded" }, body } : {}) });
+    const tok = signSession(SECRET, `unsub:${u.id}`);
+    expect((await dry()).sent).toContain("quiet@example.com");
+
+    // a scanner's GET opens the page and opts nobody out
+    const get = await at(tok, "GET");
+    expect(get.status).toBe(200);
+    expect(get.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'");
+    const html = await get.text();
+    expect(html).toMatch(new RegExp(`<form method="post" action="/unsubscribe\\?token=${tok.replace(/\./g, "\\.")}"`));
+    expect(html).toContain("Stop these emails</button>");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("You are unsubscribed");
+    expect((await dry()).sent).toContain("quiet@example.com");
+
+    // a bad token, a token of another purpose, and a token of no account are refused on both methods and change nothing
+    for (const bad of ["nope", signSession(SECRET, `verify:${u.id}`), signSession(SECRET, "unsub:no-such-user")]) {
+      for (const method of ["GET", "POST"]) expect((await at(bad, method)).status).toBe(400);
+    }
+    expect((await dry()).sent).toEqual(expect.arrayContaining(["quiet@example.com", "loud@example.com"]));
+
+    // the form posts with no body to read; the provider's one-click request posts the form-encoded body
+    const form = await at(tok, "POST");
+    expect(form.status).toBe(200);
+    expect(await form.text()).toContain("You are unsubscribed");
+    expect((await dry()).sent).not.toContain("quiet@example.com");
+    expect((await dry()).sent).toContain("loud@example.com");
+    const one = await at(signSession(SECRET, `unsub:${v.id}`), "POST", "List-Unsubscribe=One-Click");
+    expect(one.status).toBe(200);
+    expect((await dry()).sent).not.toContain("loud@example.com");
+  });
+});
+
+describe("the email template", () => {
+  it("builds the HTML and the text from the same fields: one button, a link below it, the logo with its size and alt text, a title, and a preheader", () => {
+    const m = renderMail({ heading: "Confirm it", preheader: "Short summary", paragraphs: ["Hello,", "Do the thing."], button: { label: "Do it", url: "https://app.example.test/go?a=1&b=2" }, footer: ["A footer line.", { label: "Opt out", url: "https://app.example.test/out" }] });
+    expect(m.html).toContain("<title>Confirm it</title>");
+    expect(m.html).toMatch(/<img src="https:\/\/agent-custody\.dev\/[^"]+\.png" width="32" height="32" alt="logo"/);
+    expect(m.html).toContain("max-width:560px");
+    expect(m.html).toContain('href="https://app.example.test/go?a=1&amp;b=2"');
+    expect(m.html.match(/>Do it</g)).toHaveLength(1);
+    expect(m.html.match(/href="https:\/\/app\.example\.test\/go/g)).toHaveLength(2);
+    expect(m.html).not.toMatch(/<script|<link|@import|@font-face|url\(/i);
+    expect(m.text).toBe(["Confirm it", "", "Hello,", "", "Do the thing.", "", "Do it:", "https://app.example.test/go?a=1&b=2", "", "A footer line.", "Opt out: https://app.example.test/out", "agent-custody"].join("\n"));
+  });
+
+  it("escapes every value in the HTML and links only an http or https URL", () => {
+    const evil = `<script>alert(1)</script> "x" 'y' &`;
+    const m = renderMail({ heading: evil, preheader: evil, paragraphs: [evil], code: evil, button: { label: evil, url: `https://x.test/"><script>alert(2)</script>` }, footer: [evil, { label: evil, url: `https://x.test/" onmouseover="alert(3)` }] });
+    expect(m.html).not.toContain("<script");
+    expect(m.html).not.toMatch(/"\s*onmouseover=/);
+    expect(m.html).toContain("&lt;script&gt;alert(1)&lt;/script&gt; &quot;x&quot; &#39;y&#39; &amp;");
+    const bad = renderMail({ heading: "h", paragraphs: ["p"], button: { label: "Go", url: "javascript:alert(1)" }, footer: [{ label: "Out", url: "data:text/html,x" }] });
+    expect(bad.html).not.toMatch(/javascript:|data:text/);
+    expect(bad.text).not.toMatch(/javascript:|data:text/);
   });
 });
 
@@ -525,6 +645,16 @@ describe("roles, invites, and two-step sign-in", () => {
     expect(list.members[0].joinedAt).toEqual(expect.any(String));
   });
 
+  it("a hostile name and company reach the welcome email only as escaped text", async () => {
+    const before = mails.length;
+    const r = await hit("POST", "/api/register", { email: "evil@hostile.example", password: "a-long-enough-password", tenant: "hostile-co", name: `<script>alert(1)</script> "Eve"`, company: `<img src=x onerror=alert(2)> & Co` }, undefined, "10.7.7.7");
+    expect(r.status).toBe(200);
+    await new Promise((res) => setTimeout(res, 50));
+    const welcome = mails.slice(before).find((m) => m.to[0] === "evil@hostile.example" && /is ready/.test(m.subject))!;
+    expect(welcome.html).not.toMatch(/<script|<img src=x/);
+    expect(welcome.html).toContain("&lt;script&gt;alert(1)&lt;/script&gt; &quot;Eve&quot;");
+  });
+
   it("the last owner cannot demote or remove themselves; with a second owner they can leave", async () => {
     await tenancy.addTenant("rbac2b", "rbac2b", "test");
     const first = await account("a@rbac2b.example", "rbac2b", "owner");
@@ -542,12 +672,28 @@ describe("roles, invites, and two-step sign-in", () => {
     await tenancy.addTenant("rbac3", "rbac3", "test");
     const owner = await account("o@rbac3.example", "rbac3", "owner");
     const before = mails.length;
-    expect((await hit("POST", "/api/members", { email: "New@Rbac3.example", role: "reviewer" }, owner.cookie)).json).toEqual({ invited: "new@rbac3.example", role: "reviewer" });
+    expect((await hit("POST", "/api/members", { email: "New@Rbac3.example", role: "reviewer" }, owner.cookie)).json).toEqual({ invited: "new@rbac3.example", role: "reviewer", emailSent: true });
     expect((await hit("POST", "/api/members", { email: "new@rbac3.example", role: "readonly" }, owner.cookie)).status).toBe(200);
     await new Promise((r) => setTimeout(r, 50));
     expect(mails.slice(before).map((m) => m.to[0])).toEqual(["new@rbac3.example", "new@rbac3.example"]);
     expect(mails[before]!.text).toContain("https://app.example.test/");
+    expect(mails[before]!.html).toContain('href="https://app.example.test/"');
+    expect(mails[before]!.html).toContain("Accept the invite");
+    expect(mails[before]!.html).not.toMatch(/token=/);
     expect((await hit("GET", "/api/members", undefined, owner.cookie)).json.invites).toMatchObject([{ email: "new@rbac3.example", role: "readonly", invitedBy: "o@rbac3.example" }]);
+
+    // a refused delivery keeps the invite, tells the inviter, and leaks no provider text
+    const refusing = await servePortal({ tenancy, client: db, secret: SECRET, publicUrl: log.url, portalUrl: "https://app.example.test/", mail: { apiKey: "re_test", from: "hello@example.test", fetch: async () => new Response("provider-internal-detail", { status: 500 }) }, log: () => {} }, { port: 0 });
+    try {
+      const failed = await fetch(new URL("api/members", refusing.url), { method: "POST", headers: { "content-type": "application/json", cookie: owner.cookie }, body: JSON.stringify({ email: "nomail@rbac3.example", role: "readonly" }) });
+      expect(failed.status).toBe(200);
+      const text = await failed.text();
+      expect(JSON.parse(text)).toEqual({ invited: "nomail@rbac3.example", role: "readonly", emailSent: false });
+      expect(text).not.toContain("provider-internal-detail");
+      expect((await hit("GET", "/api/members", undefined, owner.cookie)).json.invites.map((i: any) => i.email)).toContain("nomail@rbac3.example");
+    } finally { await refusing.close(); }
+    expect(await (await fetch(p2.url)).text()).toContain("The invite is saved, but the email did not go out to");
+    await hit("POST", "/api/invites/remove", { email: "nomail@rbac3.example" }, owner.cookie);
 
     const invitee = await account("new@rbac3.example", undefined, "owner", false);
     expect((await hit("GET", "/api/me", undefined, invitee.cookie)).json).toMatchObject({ tenant: null, invites: [{ tenant: "rbac3", role: "readonly" }] });
