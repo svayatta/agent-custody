@@ -38,12 +38,12 @@ PROVENANCE: perathos.receipt/v1, recorded by hooks inside the agent's host (clau
 
 | flag | effect |
 | --- | --- |
-| `--key <hex>` | pins the recorder's Ed25519 public key (repeatable); a checkpoint signed by any other key fails |
+| `--key <hex>` | pins the recorder's Ed25519 public key (repeatable); a checkpoint signed by any other key fails. Without it, a session sealed by more than one key fails, and the report warns that no key was pinned |
 | `--head <file>` | the head witness, `{ "seq", "receipt_hash" }` of the latest checkpoint; a log cut back to an earlier checkpoint fails |
 | `--allow-unsigned` | accepts a log with no checkpoint, or an unsigned one, and reports each as a warning |
 | `--json` | the report as JSON |
 
-It exits 0 when the log is valid and 1 when it is not. Receipts after the last checkpoint are reported as an unsealed tail, not an error, because the session may still be running. From code: `verifyPerathosLog(text, { trustedKeys?, allowUnsigned?, head? })` and `formatPerathosReport(report)`.
+It exits 0 when the log is valid and 1 when it is not. Receipts after the last checkpoint whose signature verified are reported as an unsealed tail, not an error, because the session may still be running; an unsigned checkpoint, or one whose signature fails, seals nothing. The head witness file is checked for shape first. From code: `verifyPerathosLog(text, { trustedKeys?, allowUnsigned?, head? })` and `formatPerathosReport(report)`.
 
 ## What it checks
 
@@ -56,7 +56,7 @@ Rules 1 to 9 of the spec:
 5. One `session_id` throughout, and `ts` never goes back. Every `ts` must be in the spec's form, `YYYY-MM-DDTHH:MM:SS.mmmmmmZ`: in that fixed-width UTC form, string order is time order. A `ts` without the microseconds or with an offset could be an earlier instant that sorts as later, and a receipt after the last checkpoint has no signature to stop it, so any other form fails.
 6. Every checkpoint signature verifies: Ed25519 over the 32 raw bytes of `receipt_hash`, by the key in `signer`, which `signature.verify_key` must equal.
 7. At least one checkpoint, and every checkpoint signed. A checkpoint with `signer_error` is named as a signer failure, which explains a missing signature and does not excuse it.
-8. With `--key`, every signer is a pinned key.
+8. With `--key`, every signer is a pinned key. Without it, one key must seal the whole session: someone without the recorder's key could otherwise append receipts after its last checkpoint and seal them with a key of their own. Pin two keys for a rotation you vouch for. Without `--key` the report also warns that a valid result shows only that the log is consistent with itself, not who sealed it, as our own `verify` requires `--issuer-key` for the same reason.
 9. With `--head`, the log holds the head witness's checkpoint.
 
 ## What a valid log proves

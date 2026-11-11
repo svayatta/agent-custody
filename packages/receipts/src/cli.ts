@@ -25,7 +25,7 @@ import { createDoorHost, serveDoor } from "./door.ts";
 import { createEgressHost, serveEgress } from "./egress.ts";
 import { draftEgressPolicy } from "./egress-draft.ts";
 import { createAcsGuardian } from "./acs.ts";
-import { formatPerathosReport, verifyPerathosLog } from "./perathos.ts";
+import { formatPerathosReport, perathosHead, verifyPerathosLog } from "./perathos.ts";
 import { serveA2a } from "./a2a.ts";
 import { PortalStore, sendFollowUps, servePortal, type MailOptions, type OAuthOptions, type Role, type StripeOptions } from "./portal.ts";
 import type { OidcConfig, SamlConfig } from "./sso.ts";
@@ -759,7 +759,7 @@ async function main(argv: string[]): Promise<number> {
       const report = verifyPerathosLog(readFileSync(positionals[0]!, "utf8"), {
         ...(values.key ? { trustedKeys: values.key } : {}),
         allowUnsigned: values["allow-unsigned"],
-        ...(values.head ? { head: JSON.parse(readFileSync(values.head, "utf8")) as { seq: number; receipt_hash: string } } : {}),
+        ...(values.head ? { head: perathosHead(readFileSync(values.head, "utf8")) } : {}),
       });
       console.log(values.json ? JSON.stringify(report, null, 2) : formatPerathosReport(report));
       return report.ok ? 0 : 1;

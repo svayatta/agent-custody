@@ -84,6 +84,13 @@ function signatureOk(r: Receipt): string | null {
   }
 }
 
+/** The head witness file, `{ "seq", "receipt_hash" }`, checked for shape. */
+export function perathosHead(text: string): { seq: number; receipt_hash: string } {
+  const h = JSON.parse(text) as Record<string, unknown>;
+  if (!h || typeof h !== "object" || !Number.isInteger(h.seq) || (h.seq as number) < 1 || typeof h.receipt_hash !== "string" || !HEX64.test(h.receipt_hash)) throw new Error('the head witness must be { "seq": <integer from 1>, "receipt_hash": <64 hex> }');
+  return { seq: h.seq as number, receipt_hash: h.receipt_hash };
+}
+
 /** Check a Perathos session log (JSON Lines) against rules 1 to 9 of the v1 spec. */
 export function verifyPerathosLog(text: string, opts: PerathosOptions = {}): PerathosReport {
   const checks: PerathosCheck[] = [];
@@ -107,6 +114,7 @@ export function verifyPerathosLog(text: string, opts: PerathosOptions = {}): Per
   const format: string[] = [], seq: string[] = [], chain: string[] = [], hashes: string[] = [], order: string[] = [], sigs: string[] = [], unsigned: string[] = [];
   const signers = new Set<string>();
   const checkpoints: Receipt[] = [];
+  const sealed: Receipt[] = [];
   let signerFailures = 0;
   receipts.forEach((r, i) => {
     const at = `seq ${String(r.seq ?? i + 1)}`;
@@ -127,7 +135,10 @@ export function verifyPerathosLog(text: string, opts: PerathosOptions = {}): Per
     }
     const problem = signatureOk(r);
     if (problem) sigs.push(`${at}: ${problem}`);
-    else signers.add(r.signer as string);
+    else {
+      signers.add(r.signer as string);
+      sealed.push(r);
+    }
   });
   add("format is perathos.receipt/v1 with a known kind", format);
   add("seq is 1, 2, 3, ... in file order", seq);
@@ -143,6 +154,10 @@ export function verifyPerathosLog(text: string, opts: PerathosOptions = {}): Per
   if (opts.trustedKeys) {
     const trusted = new Set(opts.trustedKeys.map((k) => k.toLowerCase()));
     add("every signer is a trusted key", [...signers].filter((k) => !trusted.has(k)).map((k) => `untrusted signer ${k.slice(0, 12)}`));
+  } else {
+    // without a pinned key, a second key could seal receipts appended after the recorder's last checkpoint
+    add("one key seals the session (no --key given)", signers.size > 1 ? [`${signers.size} keys sealed this session: ${[...signers].map((k) => k.slice(0, 12)).join(", ")}; pin the recorder's key with --key`] : []);
+    warnings.push("no key pinned: a VALID result shows the log is consistent with itself, not who sealed it; pin the recorder's key with --key");
   }
   if (opts.head) {
     const h = opts.head;
@@ -150,7 +165,8 @@ export function verifyPerathosLog(text: string, opts: PerathosOptions = {}): Per
     add("the head witness's checkpoint is in the log", found ? [] : [`no checkpoint at seq ${h.seq} with that receipt_hash: the log was cut or replaced`]);
   }
 
-  const last = checkpoints.at(-1);
+  // only a checkpoint whose signature verified seals what comes before it
+  const last = sealed.at(-1);
   const sealedThrough = typeof last?.seq === "number" ? last.seq : 0;
   const agent = typeof receipts[0]?.agent === "string" ? (receipts[0].agent as string) : null;
   return {
