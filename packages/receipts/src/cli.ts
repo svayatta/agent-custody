@@ -26,6 +26,7 @@ import { createEgressHost, serveEgress } from "./egress.ts";
 import { draftEgressPolicy } from "./egress-draft.ts";
 import { createAcsGuardian } from "./acs.ts";
 import { auditSessions, defaultTranscriptDir, formatSessionAudit, parseSince } from "./session-audit.ts";
+import { formatPerathosReport, perathosHead, verifyPerathosLog } from "./perathos.ts";
 import { serveA2a } from "./a2a.ts";
 import { PortalStore, sendFollowUps, servePortal, type MailOptions, type OAuthOptions, type Role, type StripeOptions } from "./portal.ts";
 import type { OidcConfig, SamlConfig } from "./sso.ts";
@@ -133,6 +134,8 @@ const USAGE = `agent-custody <command>
   log     --file <log.jsonl> --key <log.key> [--port 8787] [--host 127.0.0.1] [--token-env <NAME>]   reference log server
   verify  <bundle.json> --issuer-key <pub> [--principal-key <pub>] [--approval-key <pub>] [--log-key <pub> | --log-url <url>] [--log-id <id>] [--require-strict] [--upstream-key <pub>] [--stripe-secret-env NAME] [--github-secret-env NAME] [--log <log.jsonl>] [--disclose <file>] [--capture-key-env NAME] [--json]
           verify --markdown <dir|bundle.json>... --issuer-key <pub>   one Markdown table for a directory of bundles; exit 1 when one does not verify or none exists
+  verify-perathos <session.jsonl> [--key <hex>]... [--allow-unsigned] [--head <session.head.json>] [--json]
+          check another project's record format, a Perathos session log (perathos.receipt/v1), against its spec; exit 1 when it is not valid
   export  --receipts <dir> --out <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--since <ISO time>] [--allow-clear]
                                                    copies the verified receipt bundles that keep their values private into a directory for a pull request, byte for byte.
                                                    Reads only <id>.json at the top level; never salts/, outbox/, or *.authorization.json. Exits 1 when it refuses a receipt, and when it copies none
@@ -760,6 +763,22 @@ async function main(argv: string[]): Promise<number> {
       publisher?.stop();
       await running.close();
       return 0;
+    }
+    case "verify-perathos": {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { key: { type: "string", multiple: true }, "allow-unsigned": { type: "boolean", default: false }, head: { type: "string" }, json: { type: "boolean", default: false } },
+      });
+      if (positionals.length !== 1) throw new Error("verify-perathos needs one session log");
+      for (const k of values.key ?? []) if (!/^[0-9a-fA-F]{64}$/.test(k)) throw new Error(`--key takes an Ed25519 public key as 64 hex characters; got "${k}"`);
+      const report = verifyPerathosLog(readFileSync(positionals[0]!, "utf8"), {
+        ...(values.key ? { trustedKeys: values.key } : {}),
+        allowUnsigned: values["allow-unsigned"],
+        ...(values.head ? { head: perathosHead(readFileSync(values.head, "utf8")) } : {}),
+      });
+      console.log(values.json ? JSON.stringify(report, null, 2) : formatPerathosReport(report));
+      return report.ok ? 0 : 1;
     }
     case "verify": {
       const { values, positionals } = parseArgs({

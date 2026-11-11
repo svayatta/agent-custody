@@ -39,6 +39,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
 - [What a receipt costs](docs/performance.md): each step of the issuer's hot path in microseconds, measured with `bun run bench`, what is and is not fsynced, and where the time goes
 - [Aligning with IETF SCITT](docs/scitt.md): the receipt as a SCITT signed statement, the log as a transparency service, our RFC 9162 proofs as COSE Receipts (RFC 9942), what differs and the options for each, an agent-action profile, and the steps toward the working group
+- [Reading a Perathos log](docs/perathos.md): `verify-perathos` checks another project's agent records, a Perathos session log, against its spec; what a valid log proves and does not, and how its fields map onto an agent-custody receipt
 
 ## Getting started
 
@@ -300,7 +301,7 @@ src/rest.ts        the REST connector: an HTTP API described as tools, standing 
 src/a2a.ts         agents delegating to agents: a remote A2A agent as an upstream, and the gateway serving A2A itself in front of it
 src/upstream.ts    attested execution: an upstream signs its result for the receipt; the verifier checks it with the upstream key
 src/capture.ts     private evidence: per-tool capture rules applied by the issuer to the whole statement, withheld values as salted commitments or encrypted under the customer's key, restore and reveal
-vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them
+vectors/           conformance vectors: receipts, keys, logs, proofs, and expected verdicts; `bun run vectors` regenerates them; `interop/` holds other projects' records, copied as they wrote them and never regenerated
 src/verify.ts      offline verification, the human-readable report, and the audit that a later log extends an earlier one
 src/claude-init.ts `init claude-code`: the agent key, the observe-mode config, the starter policy, and the three hooks merged into the settings file with absolute paths
 src/deny-report.ts `report`: verifies the receipts of an SDK config and lists the calls the policy would have denied
