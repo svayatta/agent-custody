@@ -1582,19 +1582,30 @@ describe("portal navigation", () => {
     expect(nav).not.toContain("signout");
     expect(page).toMatch(/<button class="userbtn quiet" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu"/);
     expect(page).toContain('id="avatar"');
-    expect(page).toContain('id="userEmail"');
+    // the account button holds only the avatar, so it shows no address and no chevron
+    const bar = page.match(/<div class="top">[\s\S]*?<div id="userMenu"/)![0];
+    expect(bar).not.toContain('id="userEmail"');
+    expect(bar).not.toContain('class="chev"');
+    // the logo mark is the link to Overview and carries the product name; the wordmark shows only when nobody is signed in
+    expect(bar).toContain('<a class="brand" href="#overview" aria-label="agent-custody, Overview">');
+    expect(bar).toContain('<span data-out>agent-custody</span>');
+    expect(bar).not.toMatch(/<span data-acct[^>]*>agent-custody/);
+    // the tenant is the main label and the plan a quiet badge, after the logo
+    expect(bar.indexOf('id="tenantTag" class="tenant"')).toBeGreaterThan(bar.indexOf('</a>'));
+    expect(bar).toContain('id="planTag" class="badge"');
     expect(page).toMatch(/<button class="navbtn icon" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav"/);
     // the logo opens Overview; each link to the public site opens in a new tab
-    expect(page).toContain('<a class="brand" href="#overview">');
     for (const m of page.matchAll(/<a [^>]*href=\\{0,2}"https:\/\/[^>]*>/g)) expect(m[0]).toMatch(/target=\\{0,2}"_blank\\{0,2}" rel=\\{0,2}"noopener/);
   });
 
   it("the script names the Account button for the signed-in address and fills the avatar and the menu header", async () => {
     const script = (await getPage()).match(/<script>([\s\S]*?)<\/script>\s*$/)![1]!;
-    expect(script).toContain('"Account menu for " + $("userEmail").textContent');
+    expect(script).toContain('"Account menu for " + myEmail');
+    expect(script).toContain('$("planTag").textContent = cap(o.plan)');
+    expect(script).toContain('el.toggleAttribute("hidden", id === "app")');
     expect(script).toContain('$("avatar").textContent = me.email.charAt(0)');
     expect(script).toContain('$("whoMeta").textContent = me.tenant');
-    expect(script).toContain('$("whoPlan").textContent = me.plan');
+    expect(script).toContain('$("whoPlan").textContent = cap(me.plan)');
   });
 
   it("one hashchange listener drives the view, sets the title, and scrolls to the top", async () => {
