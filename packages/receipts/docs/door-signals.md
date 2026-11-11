@@ -1,4 +1,4 @@
-# Door signals: what each one does and does not mean
+# Door signals
 
 The door records one fact for every arrival, `arrival`, and gives it to the policy as `context.facts.arrival`. Every field in it is a signal: something the door observed, labelled by how far it was checked. None of them is a verdict. This page says, for each signal, what it establishes, what it does not, and how a policy should read it. The door's guide is [the door](door.md); the contract is the [reference](https://agent-custody.dev/reference/door).
 

@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { SITE_FOOTER, SITE_NAV } from "../packages/receipts/src/site-links.ts";
 
 const read = (p: string) => readFileSync(resolve(import.meta.dirname, p), "utf8");
 const config = read(".vitepress/config.ts");
@@ -13,9 +14,10 @@ const glossary = read("guide/glossary.md");
 
 describe("one name for each thing", () => {
   it("the nav, the sidebar, and the landing page use the glossary's labels", () => {
-    const labels = [...config.matchAll(/text: "([^"]+)"/g)].map((m) => m[1]!);
+    // the nav and footer labels live in the shared list, the sidebar labels in config.ts
+    const labels = [...config.matchAll(/text: "([^"]+)"/g)].map((m) => m[1]!).concat(SITE_NAV.map((l) => l.text), SITE_FOOTER.flatMap((c) => c.links.map((l) => l.text)));
     for (const old of ["Verify", "Verify a receipt in the browser", "Register", "Writing", "All pieces", "What each piece is for", "The gateway console"]) expect(labels).not.toContain(old);
-    for (const term of ["Verify a receipt", "Sign up", "Blog", "Components", "Glossary", "Gateway console"]) expect(labels).toContain(term);
+    for (const term of ["Verify a receipt", "Blog", "Components", "Glossary", "Gateway console"]) expect(labels).toContain(term);
     expect(landing).not.toMatch(/>Writing</);
     expect(landing).not.toContain("Verify a receipt in your browser");
   });

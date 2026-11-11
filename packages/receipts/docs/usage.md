@@ -1,4 +1,4 @@
-# Usage guide: the gateway
+# Running the gateway
 
 This page covers the gateway, the out-of-process producer. For the in-process interceptor that hooks Claude Code, the Claude Agent SDK, or any framework's tool functions, see [sdk.md](sdk.md).
 
