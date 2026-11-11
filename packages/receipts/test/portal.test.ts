@@ -1131,3 +1131,45 @@ describe("request validation and features that are not configured", () => {
     await expect(store.setSso({ tenant: "guards-a", protocol: "oidc", config: { issuer: "https://idp.example", clientId: "c", clientSecret: "s" } as any, domains: ["not a domain"], defaultRole: "readonly", enforced: false })).rejects.toThrow(/email domains/);
   });
 });
+
+describe("portal navigation", () => {
+  const getPage = async () => (await fetch(portal.url)).text();
+
+  it("no element id equals a view name, because the browser scrolls to an element whose id equals the hash", async () => {
+    const page = await getPage();
+    const views = [...page.matchAll(/data-pane="([^"]+)"/g)].map((m) => m[1]!);
+    const ids = new Set([...page.matchAll(/\bid=["']?([\w-]+)/g)].map((m) => m[1]!));
+    expect(views.length).toBeGreaterThanOrEqual(9);
+    expect(views.filter((v) => ids.has(v))).toEqual([]);
+    // every view has a link, in the sidebar or in the user menu
+    const linked = [...page.matchAll(/<a href="#\w+" data-view="(\w+)"/g)].map((m) => m[1]!);
+    expect([...new Set(linked)].sort()).toEqual([...views].sort());
+  });
+
+  it("the sidebar has three groups, the user menu holds security, theme, and sign out, and the head names the language and the view", async () => {
+    const page = await getPage();
+    const nav = page.match(/<nav[\s\S]*?<\/nav>/)![0];
+    expect([...nav.matchAll(/class="group">([^<]+)</g)].map((m) => m[1])).toEqual(["Monitor", "Log", "Organisation"]);
+    expect([...nav.matchAll(/data-view="([^"]+)"/g)].map((m) => m[1])).toEqual(["overview", "usage", "activity", "setup", "keys", "policies", "export", "members", "billing"]);
+    expect(page).toContain('<html lang="en">');
+    const menu = page.match(/<div id="userMenu" popover>[\s\S]*?<\/div>/)![0];
+    expect(menu).toContain('data-view="account"');
+    expect(menu).toContain('<button class="theme" id="themeToggle"');
+    expect(menu).toContain('<button class="quiet" id="signout" type="button"');
+    expect(nav).not.toContain("signout");
+    expect(page).toMatch(/<button class="userbtn" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu"/);
+    expect(page).toMatch(/<button class="navbtn" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav"/);
+    // the logo opens Overview; each link to the public site opens in a new tab
+    expect(page).toContain('<a class="brand" href="#overview">');
+    for (const m of page.matchAll(/<a [^>]*href=\\{0,2}"https:\/\/[^>]*>/g)) expect(m[0]).toMatch(/target=\\{0,2}"_blank\\{0,2}" rel=\\{0,2}"noopener/);
+  });
+
+  it("one hashchange listener drives the view, sets the title, and scrolls to the top", async () => {
+    const script = (await getPage()).match(/<script>([\s\S]*?)<\/script>\s*$/)![1]!;
+    expect(script.match(/addEventListener\("hashchange"/g)).toHaveLength(1);
+    expect(script).not.toContain("location.hash = name");
+    expect(script).toContain("document.title = TITLES[name]");
+    expect(script).toContain("scrollTo(0, 0)");
+    expect(script).toContain('e.key === "Escape"');
+  });
+});

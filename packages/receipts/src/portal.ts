@@ -1231,6 +1231,7 @@ const resultPage = (title: string, body: string, head = "") =>
   `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${head}<title>${title}</title>${RESULT_STYLE}<main><a class="brand" href="/">${MARK}agent-custody</a><h1>${title}</h1>${body}</main>`;
 
 const PORTAL_PAGE = `<!doctype html>
+<html lang="en">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agent-custody</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -1244,7 +1245,6 @@ const PORTAL_PAGE = `<!doctype html>
   .top { display: flex; align-items: center; gap: 1rem; padding: .7rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel); }
   .brand { font-weight: 700; letter-spacing: .04em; display: inline-flex; align-items: center; gap: .5rem; color: var(--ink); text-decoration: none; } .brand svg { width: 20px; height: 20px; display: block; } .brand rect { fill: var(--accent); }
   .top .links { margin-left: auto; display: flex; gap: .9rem; font-size: .9rem; } .top .links a { color: var(--accent); text-decoration: none; }
-  .top .who { color: var(--ink2); font-size: .9rem; margin-left: .5rem; }
   button.theme { background: transparent; color: var(--ink2); border: 1px solid var(--line); padding: .25rem .6rem; font-size: .8rem; border-radius: 4px; } button.theme:hover { color: var(--ink); }
   .pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font: 600 .72rem/1.6 var(--mono); letter-spacing: .06em; text-transform: uppercase; background: var(--accent-bg); color: var(--accent); }
   .notice { padding: .6rem 1.25rem; font-size: .9rem; color: var(--ink); background: var(--accent-bg); border-bottom: 1px solid var(--line); } .notice a, .notice button { margin-left: .6rem; } .notice button { font: inherit; background: none; border: 1px solid var(--line); border-radius: 4px; padding: .1rem .5rem; color: var(--ink); cursor: pointer; }
@@ -1257,6 +1257,14 @@ const PORTAL_PAGE = `<!doctype html>
   nav a { display: flex; justify-content: space-between; gap: .5rem; padding: .45rem 1.25rem; color: var(--ink); text-decoration: none; border-left: 3px solid transparent; }
   nav a:hover { background: var(--bg); } nav a.on { border-left-color: var(--accent); background: var(--accent-bg); font-weight: 600; }
   nav a span.n { color: var(--ink2); font-family: var(--mono); font-size: .8rem; }
+  .navbtn { display: none; padding: .3rem .6rem; font-size: 1.1rem; line-height: 1; } .userbtn { padding: .3rem .8rem; font-size: .85rem; }
+  #userMenu { position: fixed; inset: auto; margin: 0; min-width: 14rem; max-width: calc(100vw - 1rem); padding: .5rem; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink); box-shadow: 0 8px 24px rgb(0 0 0 / .18); }
+  #userMenu:popover-open { display: grid; gap: .25rem; }
+  #userMenu .who { padding: .3rem .5rem; color: var(--ink2); font-size: .85rem; overflow-wrap: anywhere; }
+  #userMenu a { padding: .45rem .5rem; border-radius: 6px; color: var(--ink); text-decoration: none; font-weight: 400; } #userMenu a:hover { background: var(--bg); }
+  #userMenu button { width: 100%; text-align: left; }
+  @media (max-width: 48rem) { .navbtn { display: inline-flex; } nav { position: fixed; z-index: 10; inset: 0 auto 0 0; width: min(18rem, 85vw); overflow-y: auto; visibility: hidden; transform: translateX(-100%); } nav.open { visibility: visible; transform: none; box-shadow: 0 0 0 100vmax rgb(0 0 0 / .45); } }
+  @media (max-width: 48rem) and (prefers-reduced-motion: no-preference) { nav { transition: transform .2s, visibility 0s .2s; } nav.open { transition: transform .2s, visibility 0s; } }
   main { padding: 2rem 2rem 3rem; max-width: 72rem; min-width: 0; }
   h1 { font-size: 1.5rem; letter-spacing: -.02em; margin: 0 0 1rem; } h2 { font: 600 .72rem/1.4 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink2); margin: 1.5rem 0 .6rem; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .9rem; }
@@ -1333,7 +1341,7 @@ const PORTAL_PAGE = `<!doctype html>
   .auth .msg.err:not(:empty), .auth .msg.ok:not(:empty) { padding: .55rem .8rem; border-radius: 8px; border: 1px solid; }
   .auth .msg.err:not(:empty) { border-color: color-mix(in srgb, var(--bad) 40%, var(--panel)); background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
   .auth .msg.ok:not(:empty) { border-color: color-mix(in srgb, var(--ok) 40%, var(--panel)); background: color-mix(in srgb, var(--ok) 8%, var(--panel)); }
-  @media (max-width: 30rem) { .top { flex-wrap: wrap; row-gap: .4rem; } .brand, button.theme { white-space: nowrap; } button.theme { margin-left: auto; } .top .links { order: 1; flex-basis: 100%; margin-left: 0; font-size: .85rem; } .top .who, #planTag { display: none !important; } .auth { --pad: 1.25rem; margin: 1rem .75rem 2rem; border-radius: 12px; } .auth::before { border-radius: 12px 12px 0 0; } .auth .fine { border-radius: 0 0 12px 12px; } .auth h1 { font-size: 1.4rem; } }
+  @media (max-width: 30rem) { .top { flex-wrap: wrap; row-gap: .4rem; } .brand { white-space: nowrap; } .userbtn { margin-left: auto; } .top .links { order: 1; flex-basis: 100%; margin-left: 0; font-size: .85rem; } #planTag, #tenantTag { display: none !important; } .auth { --pad: 1.25rem; margin: 1rem .75rem 2rem; border-radius: 12px; } .auth::before { border-radius: 12px 12px 0 0; } .auth .fine { border-radius: 0 0 12px 12px; } .auth h1 { font-size: 1.4rem; } }
   .step { display: grid; grid-template-columns: 2rem 1fr; gap: .2rem .8rem; padding: 1rem 0; border-top: 1px solid var(--line); }
   .step .n { font: 700 .85rem/1.6 var(--mono); color: var(--accent); }
   .step h3 { margin: 0 0 .3rem; font-size: 1rem; } .step p { margin: 0 0 .5rem; color: var(--ink2); font-size: .92rem; }
@@ -1345,7 +1353,7 @@ const PORTAL_PAGE = `<!doctype html>
   .msg { min-height: 1.4rem; margin: .6rem 0; color: var(--ink2); } .panel > .msg:empty { display: none; } .msg.err { color: var(--bad); } .msg.ok { color: var(--ok); }
   .muted { color: var(--ink2); }
   [hidden] { display: none !important; }
-  @media (max-width: 48rem) { .layout { grid-template-columns: 1fr; } nav { display: flex; overflow-x: auto; padding: 0 .3rem; border-right: 0; border-bottom: 1px solid var(--line); } nav .group { display: none; } nav a { flex: none; white-space: nowrap; border-left: 0; border-bottom: 3px solid transparent; } main { padding: 1.25rem 1rem 2rem; } nav a.on { border-bottom-color: var(--accent); }
+  @media (max-width: 48rem) { .layout { grid-template-columns: 1fr; } main { padding: 1.25rem 1rem 2rem; }
     .cards { grid-template-columns: 1fr 1fr; gap: .6rem; } .card { padding: .75rem .85rem; } .card .k { font-size: .6rem; letter-spacing: .06em; } .card .v { font-size: 1.4rem; } .card .s { font-size: .8rem; line-height: 1.35; }
     table:has(#urls), #urls, table:has(#audit), #audit { display: block; } table:has(#audit) thead { display: none; }
     #urls tr { display: grid; gap: .15rem; padding: .55rem 0; border-bottom: 1px solid var(--line); } #urls tr:last-child { border-bottom: 0; }
@@ -1355,7 +1363,8 @@ const PORTAL_PAGE = `<!doctype html>
     #audit td:nth-child(3) { grid-area: 1 / 1; font-weight: 600; } #audit td:nth-child(1) { grid-area: 1 / 2; color: var(--ink2); font-size: .8rem; white-space: nowrap; }
     #audit td:nth-child(2), #audit td:nth-child(4), #audit td[colspan] { grid-column: 1 / -1; font-size: .8rem; } #audit td:nth-child(2) { color: var(--ink2); } }
 </style>
-<div class="top"><a class="brand" href="https://agent-custody.dev/"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links"><a href="https://agent-custody.dev/guide/getting-started">Guide</a><a href="https://docs.agent-custody.dev/reference/">Docs</a><a href="https://agent-custody.dev/verify">Verify a receipt</a></span><span class="who" id="who"></span><button class="theme" id="themeToggle" type="button">Dark mode</button></div>
+<div class="top"><button class="navbtn" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Navigation" hidden>&#9776;</button><a class="brand" href="#overview"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links"><a href="https://agent-custody.dev/guide/getting-started" target="_blank" rel="noopener">Guide</a><a href="https://docs.agent-custody.dev/reference/" target="_blank" rel="noopener">Docs</a><a href="https://agent-custody.dev/verify" target="_blank" rel="noopener">Verify a receipt</a></span><button class="userbtn" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu">Account</button><div id="userMenu" popover><span class="who" id="who" data-acct></span><a href="#account" data-view="account" data-acct>Security</a><button class="theme" id="themeToggle" type="button">Dark mode</button><button class="quiet" id="signout" type="button" data-acct>Sign out</button></div></div>
+
 <div id="notice" class="notice" hidden></div>
 <section id="auth" class="auth split" hidden>
   <aside class="pitch">
@@ -1434,20 +1443,19 @@ const PORTAL_PAGE = `<!doctype html>
   <div id="firstSetup"></div>
 </section>
 <div class="layout" id="app" hidden>
-  <nav>
+  <nav id="nav" aria-label="Main">
     <div class="group">Monitor</div>
     <a href="#overview" data-view="overview">Overview</a>
     <a href="#usage" data-view="usage">Usage</a>
-    <div class="group">Configure</div>
+    <a href="#activity" data-view="activity">Activity</a>
+    <div class="group">Log</div>
     <a href="#setup" data-view="setup">Setup</a>
     <a href="#keys" data-view="keys">API keys <span class="n" id="nKeys"></span></a>
     <a href="#policies" data-view="policies">Policies <span class="n" id="nPolicies"></span></a>
+    <a href="#export" data-view="export">Export</a>
+    <div class="group">Organisation</div>
     <a href="#members" data-view="members">Members <span class="n" id="nMembers"></span></a>
     <a href="#billing" data-view="billing">Billing</a>
-    <a href="#export" data-view="export">Export</a>
-    <div class="group">Account</div>
-    <a href="#account" data-view="account">Two-step sign-in</a>
-    <a href="#" id="signout">Sign out</a>
   </nav>
   <main>
     <div data-pane="overview">
@@ -1458,10 +1466,12 @@ const PORTAL_PAGE = `<!doctype html>
         <div class="card" id="cKeys"><div class="k">Live keys</div><div class="v" id="vKeys">–</div><div class="s" id="sKeys"></div></div>
         <div class="card" id="cCp"><div class="k">Latest checkpoint</div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
       </div>
-      <p class="muted">Tree heads on this log are signed by our key; there is no second, independent witness yet. Every receipt you log here is checkable by anyone with your gateway's public key and ours: <a href="https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not">what a receipt proves and what it does not</a>.</p>
+      <p class="muted">Tree heads on this log are signed by our key; there is no second, independent witness yet. Every receipt you log here is checkable by anyone with your gateway's public key and ours: <a href="https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not" target="_blank" rel="noopener">what a receipt proves and what it does not</a>.</p>
       <h2>Your log</h2>
       <div class="panel"><table><tbody id="urls"></tbody></table></div>
-      <h2>Recent activity</h2>
+    </div>
+    <div data-pane="activity" hidden>
+      <h1>Activity</h1>
       <div class="panel"><table><thead><tr><th>when</th><th>who</th><th>action</th><th>detail</th></tr></thead><tbody id="audit"></tbody></table></div>
     </div>
     <div data-pane="usage" hidden>
@@ -1474,7 +1484,7 @@ const PORTAL_PAGE = `<!doctype html>
       <p class="muted">A key is a bearer token your gateway presents on append. It is shown once when minted; we keep only its hash. Mint a second key before revoking the first to rotate without a gap.</p>
       <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Mint key</button></form>
         <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted">Copy key</button></div>
-        <table style="margin-top:1rem"><thead><tr><th>label</th><th>hash</th><th>created</th><th>state</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
+        <table style="margin-top:1rem"><thead><tr><th>label</th><th>hash</th><th>created</th><th>state</th><th></th></tr></thead><tbody id="keyRows"></tbody></table></div>
       <p class="msg" id="keysMsg"></p>
     </div>
     <div data-pane="policies" hidden>
@@ -1482,7 +1492,7 @@ const PORTAL_PAGE = `<!doctype html>
       <p class="muted">Enforcement stays on your machines: the gateway reads its Cedar file locally and writes the file's SHA-256 into every receipt as <code>policyDigest</code>. This page gives those digests names. Publish each version you deploy, byte for byte as the gateway loads it, and a receipt's digest reads as "refunds-v3" instead of a hash, here and in your export. We never evaluate a policy and nothing here is read by the gateway.</p>
       <div class="panel"><form id="policyForm"><label>Name for this version<input id="policyName" placeholder="refunds-v3" maxlength="80" required></label><label>Policy text, exactly as the gateway's file<textarea id="policyText" rows="8" spellcheck="false" placeholder="permit(principal, action == Action::&quot;stripe.refund&quot;, resource) when { context.args.amount <= 100000 };" required></textarea></label><button type="submit">Publish version</button> <span class="muted" id="policyDigestPreview"></span></form></div>
       <div class="panel"><h2>Match a receipt</h2><p class="muted">Paste a receipt file, or just its <code>policyDigest</code>, to see which published version decided it.</p><form id="matchForm"><label>Receipt JSON or digest<textarea id="matchIn" rows="3" spellcheck="false"></textarea></label><button type="submit" class="quiet">Match</button></form><p class="msg" id="matchOut"></p></div>
-      <div class="panel"><table><thead><tr><th>name</th><th>digest</th><th>bytes</th><th>published</th><th>by</th><th></th></tr></thead><tbody id="policies"></tbody></table></div>
+      <div class="panel"><table><thead><tr><th>name</th><th>digest</th><th>bytes</th><th>published</th><th>by</th><th></th></tr></thead><tbody id="policyRows"></tbody></table></div>
       <div class="panel" id="policyView" hidden><h2 id="policyViewName"></h2><pre id="policyViewText"></pre></div>
       <p class="msg" id="policiesMsg"></p>
     </div>
@@ -1490,7 +1500,7 @@ const PORTAL_PAGE = `<!doctype html>
       <h1>Members</h1>
       <p class="muted">An owner manages everything, billing and owners included. An admin manages keys and members below owner. A reviewer publishes policy versions. A read-only member only looks. An invited person creates an account with the invited address, verifies it, and accepts on the first screen. An invite is good for seven days.</p>
       <div class="panel" id="inviteBox" hidden><form id="inviteForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Email<input id="inviteEmail" type="email" required></label><label style="margin:0">Role<select id="inviteRole"></select></label><button type="submit">Invite</button></form></div>
-      <div class="panel"><table><thead><tr><th>member</th><th>role</th><th>joined</th><th>two-step</th><th></th></tr></thead><tbody id="members"></tbody></table></div>
+      <div class="panel"><table><thead><tr><th>member</th><th>role</th><th>joined</th><th>two-step</th><th></th></tr></thead><tbody id="memberRows"></tbody></table></div>
       <h2>Pending invites</h2>
       <div class="panel"><table><thead><tr><th>email</th><th>role</th><th>invited by</th><th>sent</th><th></th></tr></thead><tbody id="inviteRows"></tbody></table></div>
       <p class="msg" id="membersMsg"></p>
@@ -1543,15 +1553,36 @@ const PORTAL_PAGE = `<!doctype html>
   const ROLES = ["readonly", "reviewer", "admin", "owner"];
   const can = (least) => ROLES.indexOf(myRole) >= ROLES.indexOf(least);
   const note = (id, text, ok) => { $(id).className = "msg " + (ok ? "ok" : "err"); $(id).textContent = text; };
-  const show = (id) => { for (const s of ["auth", "onboard", "welcome", "app"]) $(s).hidden = s !== id; };
+  const show = (id) => {
+    for (const s of ["auth", "onboard", "welcome", "app"]) $(s).hidden = s !== id;
+    $("menuBtn").hidden = id !== "app";
+    for (const el of document.querySelectorAll("[data-acct]")) el.hidden = id !== "app";
+    if (id !== "app") { document.title = "agent-custody"; setDrawer(false); }
+  };
   const PROVIDERS = __PROVIDERS__;
   const ICONS = { github: "<svg viewBox='0 0 16 16' aria-hidden='true'><path fill='currentColor' d='M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z'/></svg>", google: "<svg viewBox='0 0 48 48' aria-hidden='true'><path fill='#EA4335' d='M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z'/><path fill='#4285F4' d='M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z'/><path fill='#FBBC05' d='M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z'/><path fill='#34A853' d='M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z'/></svg>" };
   if (PROVIDERS.length) { $("providers").innerHTML = PROVIDERS.map((p) => "<a href='/auth/" + p + "'>" + ICONS[p] + "Continue with " + (p === "github" ? "GitHub" : "Google") + "</a>").join("") + "<p class=or>or with email</p>"; $("providers").hidden = false; }
-  const view = (name) => {
+  const TITLES = { overview: "Overview", usage: "Usage", activity: "Activity", setup: "Setup", keys: "API keys", policies: "Policies", export: "Export", members: "Members", billing: "Billing", account: "Security" };
+  const route = () => {
+    if ($("app").hidden) return;
+    const h = location.hash.slice(1), name = Object.hasOwn(TITLES, h) ? h : "overview";
     for (const p of document.querySelectorAll("[data-pane]")) p.hidden = p.dataset.pane !== name;
     for (const a of document.querySelectorAll("nav a[data-view]")) a.classList.toggle("on", a.dataset.view === name);
-    location.hash = name;
+    document.title = TITLES[name] + " \u00b7 agent-custody";
+    if (h !== name) history.replaceState(null, "", "#" + name);
+    scrollTo(0, 0);
   };
+  addEventListener("hashchange", route);
+  const setDrawer = (open, refocus) => {
+    $("nav").classList.toggle("open", open); $("menuBtn").setAttribute("aria-expanded", open);
+    if (open) $("nav").querySelector("a").focus(); else if (refocus) $("menuBtn").focus();
+  };
+  const drawerOpen = () => $("nav").classList.contains("open");
+  $("menuBtn").onclick = () => setDrawer(!drawerOpen());
+  matchMedia("(max-width: 48rem)").onchange = () => setDrawer(false);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drawerOpen()) setDrawer(false, true); });
+  $("userMenu").addEventListener("beforetoggle", (e) => { if (e.newState === "open") { const r = $("userBtn").getBoundingClientRect(); $("userMenu").style.top = r.bottom + 6 + "px"; $("userMenu").style.right = document.documentElement.clientWidth - r.right + "px"; } });
+  $("userMenu").addEventListener("toggle", (e) => $("userBtn").setAttribute("aria-expanded", e.newState === "open"));
   const LOG_BASE = $("tenantPreview").textContent.replace("t/<tenant>/", "");
   const slug = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
   let tenantEdited = false;
@@ -1593,19 +1624,19 @@ const PORTAL_PAGE = `<!doctype html>
     el.innerHTML =
       step(1, "Keep the key where your gateway runs", (atRegistration ? "<p>Your first key is shown once; we keep only its hash. Put it in the environment of the machine that runs your gateway or SDK:</p>" : "<p>Your key was shown once at registration. If it is gone, mint another under <a href=\\"#keys\\" data-view=\\"keys\\">API keys</a>. It lives in the environment of the machine that runs your gateway or SDK:</p>") + snip(s.env)) +
       step(2, "Point your gateway or SDK at your log", "<p>Add this to <code>gateway.json</code> or <code>sdk.json</code>. <code>hashOnly</code> means this log receives the hash of each receipt and never the receipt.</p>" + snip(s.config)) +
-      step(3, "Send the first receipt", "<p>Run your agent through the gateway once. The <a href=\\"#overview\\" data-view=\\"overview\\">Overview</a> shows the append within seconds, and the first signed checkpoint follows within minutes. New to the gateway? <a href=\\"https://agent-custody.dev/guide/getting-started\\">Getting started</a> takes ten minutes.</p>") +
+      step(3, "Send the first receipt", "<p>Run your agent through the gateway once. The <a href=\\"#overview\\" data-view=\\"overview\\">Overview</a> shows the append within seconds, and the first signed checkpoint follows within minutes. New to the gateway? <a href=\\"https://agent-custody.dev/guide/getting-started\\" target=\\"_blank\\" rel=\\"noopener\\">Getting started</a> takes ten minutes.</p>") +
       step(4, "Hand this to whoever verifies your receipts", "<p>Both commands fetch this log's published keys and pin them; <code>--log-id</code> makes sure the tree heads are this log's.</p>" + snip(s.verify) + snip(s.audit)) +
       step(5, "Take your data, any time", "<p>Every leaf hash, the signed head, the keys, the checkpoints, your usage, and the actions taken on your tenant, checked against each other and written as a log copy the verifier reads offline.</p>" + snip(s.export)) +
       "<h2>Your log's addresses</h2><div class=panel><table class=addr><tbody>" + [["Your log", s.log], ["Log id on tree heads", s.logId], ["Your checkpoints", s.checkpoints || "published after your first append"], ["The log's keys", s.keys + (s.keyid ? " (current keyid " + s.keyid.slice(0, 12) + "…)" : "")]].map(([k, v]) => "<tr><th>" + esc(k) + "</th><td class=mono>" + esc(v) + "</td></tr>").join("") + "</tbody></table></div>" +
-      "<h2>What this log does not do</h2><p class=muted>Hold receipt contents; forge a receipt, since your gateway key signs those; or, today, countersign with a second independent witness. <a href=\\"https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not\\">What a receipt proves and what it does not.</a></p>";
+      "<h2>What this log does not do</h2><p class=muted>Hold receipt contents; forge a receipt, since your gateway key signs those; or, today, countersign with a second independent witness. <a href=\\"https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not\\" target=\\"_blank\\" rel=\\"noopener\\">What a receipt proves and what it does not.</a></p>";
   };
   document.addEventListener("click", (e) => {
     const b = e.target.closest("button[data-copy]"); if (b) { navigator.clipboard.writeText(b.previousElementSibling.textContent).then(() => { b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy"; }, 1500); }); return; }
-    const a = e.target.closest("a[data-view]"); if (a && a.closest("main")) { e.preventDefault(); view(a.dataset.view); }
+    if (drawerOpen() && !e.target.closest("#menuBtn") && (!e.target.closest("nav") || e.target.closest("nav a"))) setDrawer(false);
+    if (e.target.closest("#userMenu a")) $("userMenu").hidePopover();
   });
   $("toDash").onclick = () => enter();
-  $("signout").onclick = async (e) => { e.preventDefault(); await api("POST", "/api/logout", {}); location.hash = ""; show("auth"); };
-  for (const a of document.querySelectorAll("nav a[data-view]")) a.onclick = (e) => { e.preventDefault(); view(a.dataset.view); };
+  $("signout").onclick = async () => { $("userMenu").hidePopover(); await api("POST", "/api/logout", {}); location.hash = ""; show("auth"); };
   const render = (o) => {
     $("tenantTag").textContent = o.tenant; $("tenantTag").hidden = false; $("planTag").textContent = o.plan + " plan"; $("planTag").hidden = false;
     const pct = o.quota ? o.used / o.quota : 0;
@@ -1620,7 +1651,7 @@ const PORTAL_PAGE = `<!doctype html>
     const max = Math.max(1, ...o.months.map((m) => m.appends));
     $("bars").innerHTML = o.months.map((m) => "<div class=bar><span class=mono>" + fmt(m.appends) + "</span><i style=\\"height:" + Math.max(2, Math.round(100 * m.appends / max)) + "%\\"></i><b>" + esc(m.month.slice(2)) + "</b></div>").join("");
     $("usageNote").textContent = "Appends per calendar month, UTC. Your plan allows " + (o.quota === null ? "any number" : fmt(o.quota)) + " a month; the count resets on the first.";
-    $("keys").innerHTML = o.keys.map((k) => "<tr><td>" + esc(k.label) + "</td><td class=mono>" + esc(k.hash) + "</td><td>" + esc(k.createdAt.slice(0, 10)) + "</td><td>" + (k.revokedAt ? "revoked " + esc(k.revokedAt.slice(0, 10)) : "live") + "</td><td>" + (k.revokedAt || !can("admin") ? "" : "<button class=quiet data-revoke=\\"" + esc(k.hash) + "\\">Revoke</button>") + "</td></tr>").join("");
+    $("keyRows").innerHTML = o.keys.map((k) => "<tr><td>" + esc(k.label) + "</td><td class=mono>" + esc(k.hash) + "</td><td>" + esc(k.createdAt.slice(0, 10)) + "</td><td>" + (k.revokedAt ? "revoked " + esc(k.revokedAt.slice(0, 10)) : "live") + "</td><td>" + (k.revokedAt || !can("admin") ? "" : "<button class=quiet data-revoke=\\"" + esc(k.hash) + "\\">Revoke</button>") + "</td></tr>").join("");
     $("billingPanel").innerHTML = o.plan === "free"
       ? "<p>You are on the <b>free</b> plan: ten thousand appends a month, no card.</p><p>The <b>team</b> plan is <b>$50 a month</b>: a million appends, email support within two working days, the same export and audit trail. No availability commitment yet, and the design fails closed: when the log is unreachable your gateway withholds pre-committed calls.</p>" + (o.stripe ? (can("owner") ? "<button id=upgrade>Upgrade to team, $50/month</button>" : "<p class=muted>An owner upgrades the plan.</p>") : "<p class=muted>Card payments are not switched on for this portal yet; email us and we move the plan by hand.</p>")
       : "<p>You are on the <b>" + esc(o.plan) + "</b> plan" + (o.billing ? " (subscription " + esc(o.billing.status) + ")" : "") + ".</p>" + (o.stripe && o.billing && can("owner") ? "<button class=quiet id=manage>Manage billing</button>" : "");
@@ -1638,7 +1669,7 @@ const PORTAL_PAGE = `<!doctype html>
     const r = await api("GET", "/api/members");
     $("nMembers").textContent = r.members.length;
     $("inviteRole").innerHTML = roleOptions("readonly");
-    $("members").innerHTML = r.members.map((m) => "<tr><td>" + esc(m.email) + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<select data-setrole=" + m.id + ">" + roleOptions(m.role) + "</select>" : esc(m.role)) + "</td><td>" + esc(m.joinedAt.slice(0, 10)) + "</td><td>" + (m.mfa ? "on" : "off") + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<button class=link data-rmmember=" + m.id + ">Remove</button>" : "") + "</td></tr>").join("");
+    $("memberRows").innerHTML = r.members.map((m) => "<tr><td>" + esc(m.email) + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<select data-setrole=" + m.id + ">" + roleOptions(m.role) + "</select>" : esc(m.role)) + "</td><td>" + esc(m.joinedAt.slice(0, 10)) + "</td><td>" + (m.mfa ? "on" : "off") + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<button class=link data-rmmember=" + m.id + ">Remove</button>" : "") + "</td></tr>").join("");
     $("inviteRows").innerHTML = r.invites.map((i) => "<tr><td>" + esc(i.email) + "</td><td>" + esc(i.role) + "</td><td class=mono>" + esc(i.invitedBy) + "</td><td>" + esc(i.createdAt.slice(0, 10)) + "</td><td>" + (can("admin") ? "<button class=link data-rminvite=\\"" + esc(i.email) + "\\">Cancel</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>none</td></tr>";
   };
   const membersDo = async (path, body, done) => { try { await api("POST", path, body); note("membersMsg", done, true); await loadMembers(); } catch (err) { note("membersMsg", err.message, false); await loadMembers(); } };
@@ -1654,7 +1685,7 @@ const PORTAL_PAGE = `<!doctype html>
       const me = await api("GET", "/api/me");
       accountNotice(me);
       if (me.tenant === null) { $("onboardWho").textContent = me.email; $("invites").hidden = !(me.invites || []).length; $("inviteList").innerHTML = (me.invites || []).map((i) => "<p>Join <b>" + esc(i.tenant) + "</b> as " + esc(i.role) + " <button type=button data-accept=\\"" + esc(i.tenant) + "\\">Accept</button></p>").join(""); if (me.profile) { for (const k of ["name", "company", "role", "phone", "telegram"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
-      $("who").textContent = me.email; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyForm").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa); show("app"); await load(); view((location.hash || "#overview").slice(1) || "overview");
+      $("who").textContent = me.email; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyForm").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa); show("app"); await load(); route();
     }
     catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) $("authSwap").click(); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { show("app"); $("who").textContent = err.message; } }
   };
@@ -1672,7 +1703,7 @@ const PORTAL_PAGE = `<!doctype html>
   const loadPolicies = async () => {
     const r = await api("GET", "/api/policies");
     $("nPolicies").textContent = r.policies.length || "";
-    $("policies").innerHTML = r.policies.map((p) => "<tr><td>" + esc(p.name) + "</td><td class=mono>" + esc(p.digest.slice(0, 16)) + "…</td><td>" + p.bytes + "</td><td>" + esc(p.createdAt.slice(0, 10)) + "</td><td class=mono>" + esc(p.createdBy.replace(/^portal:/, "")) + "</td><td><button class=link data-viewpol=\\"" + esc(p.id) + "\\">View</button>" + (can("reviewer") ? " <button class=link data-rmpol=\\"" + esc(p.id) + "\\">Remove</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=6 class=muted>No versions published yet. Receipts keep their digests either way; a name is for the people reading them.</td></tr>";
+    $("policyRows").innerHTML = r.policies.map((p) => "<tr><td>" + esc(p.name) + "</td><td class=mono>" + esc(p.digest.slice(0, 16)) + "…</td><td>" + p.bytes + "</td><td>" + esc(p.createdAt.slice(0, 10)) + "</td><td class=mono>" + esc(p.createdBy.replace(/^portal:/, "")) + "</td><td><button class=link data-viewpol=\\"" + esc(p.id) + "\\">View</button>" + (can("reviewer") ? " <button class=link data-rmpol=\\"" + esc(p.id) + "\\">Remove</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=6 class=muted>No versions published yet. Receipts keep their digests either way; a name is for the people reading them.</td></tr>";
   };
   $("policyText").oninput = async () => { const t = $("policyText").value; $("policyDigestPreview").textContent = t ? "sha256 " + (await sha256hex(t)).slice(0, 16) + "…" : ""; };
   $("policyForm").onsubmit = async (e) => {
