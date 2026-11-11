@@ -122,6 +122,37 @@ The receipt does not change. It keeps the policy ids and the policy digest, and 
 
 When the denial receipt cannot be issued, the call is blocked all the same, and the reason ends with `(no receipt: <why>)` in place of the receipt id. `<why>` names the kind of failure and nothing more. In TypeScript it is `the receipt could not be recorded`. In Python it is `the sidecar could not be reached`, `the sidecar answered HTTP <status>`, `the sidecar refused the request`, `the sidecar's answer was malformed`, or `an unexpected <exception type>`. The reason goes into the model's context, and the error behind it can carry a log or sidecar URL with credentials in it, or the text of an upstream answer. So the error itself goes to stderr in TypeScript and to the `agent_custody` logger at `WARNING` in Python, never into the reason, and the URL in it is shown without its user, password, or query string. Every adapter that answers a deny with text works this way: Claude Code, the Claude Agent SDK and OpenAI Agents in both languages, OpenClaw, DeepSeek Harness, Hermes, Google ADK, and CrewAI. OpenAI Agents in both languages and CrewAI used to raise the error when the denial receipt failed; they now return the denial text, as the others do, and the tool still does not run. The Vercel AI `wrapTools` and `issuer.wrap` throw `PolicyDeniedError`, which needs a receipt id, so there a failed denial receipt still rejects with the log's error.
 
+### Before you install: your past sessions
+
+```bash
+npx -y @agent-custody/receipts audit-sessions --since 7d
+```
+
+This reads the transcripts Claude Code already keeps on the machine (`~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects`), takes every tool call in the window, and evaluates it against the starter policy that `init claude-code` installs, or `--policy <file.cedar>`. It installs no hook, writes no file, and makes no network request, so you can see what the policy would have caught before you decide to install anything.
+
+```text
+Read 4 tool calls in 1 session.
+Policy: the init claude-code template.
+
+The policy would have denied 2 calls:
+
+  Bash: git push --force origin main
+    reason:  force push rewrites shared history (git push --force-with-lease is allowed)
+    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && ( context.args.command like "*git push --force *" || context.args.comm… [policy1]
+    when:    2026-11-09T10:04:52.000Z  session 4f3a91c2  in shop
+
+  Bash: terraform destroy -auto-approve
+    reason:  terraform destroy deletes infrastructure
+    rule:    forbid(principal, action == Action::"Bash", resource) when { context.args has command && context.args.command like "*terraform destroy*" } [policy5]
+    when:    2026-11-10T16:20:40.000Z  session 4f3a91c2  in shop
+
+PREVIEW: these are the agent host's own transcripts, not receipts. Nothing here is signed or logged, and a transcript can be edited. For a receipt of each call, signed and logged, run: agent-custody init claude-code
+```
+
+`--since` takes `7d`, `24h`, `30m`, a date, or `all`. `--counts` prints only the numbers per rule, with no command, path, session, or project, so the output can be shared. `--json` gives the whole result. A call that a forbid rule matched is counted as that rule's denial, even when another rule errored on the same call. A call that no forbid matched, but on which a rule errored (a value Cedar cannot hold, such as a float, or an attribute the call does not have), is listed apart: the hook denies such a call, but no rule decided it. A policy that does not parse is refused with the parse error and exit 1, since otherwise every call would be denied by the error and nothing by a rule. Under a default-deny policy, a call no permit matched is shown as `no permit matched (default deny)`. `--counts` names the policy by its file name only. A Rego policy is refused, because compiling one runs `opa`, which writes files.
+
+A transcript is the agent host's own account and can be edited, so this is a preview of what the policy catches, not evidence. The hooks that `init claude-code` installs make a signed receipt of each call.
+
 ### The report
 
 ```bash
