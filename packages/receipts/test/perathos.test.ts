@@ -232,6 +232,12 @@ describe("a log written by Perathos itself", () => {
     expect(failed(verifyPerathosLog(cut, { trustedKeys: [key], head }))).toEqual(["the head witness's checkpoint is in the log"]);
     expect(failed(verifyPerathosLog(log, { trustedKeys: [owner.hex] }))).toEqual(["every signer is a trusted key"]);
   });
+
+  it("counts nothing as sealed when every checkpoint is signed by a key other than the one pinned", () => {
+    // the signatures verify, but by a key the auditor did not vouch for: invalid, and nothing sealed
+    expect(verifyPerathosLog(log, { trustedKeys: [owner.hex] })).toMatchObject({ ok: false, sealedThrough: 0, unsealedTail: 8 });
+    expect(verifyPerathosLog(log, { trustedKeys: [key] })).toMatchObject({ ok: true, sealedThrough: 8, unsealedTail: 0 });
+  });
 });
 
 describe("agent-custody verify-perathos", () => {
