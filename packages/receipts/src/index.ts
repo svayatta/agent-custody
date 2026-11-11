@@ -16,6 +16,8 @@ export type { DraftAgent, DraftDestination, DraftSkip, EgressPolicyDraft } from 
 export type { Destination, EgressEnd, EgressHost, EgressOptions, EgressResult, EgressServerOptions, RunningEgress } from "./egress.ts";
 export { ACS_ERROR, ACS_GUARDIAN_VERSION, ACS_METHODS, ACS_RECEIPT_KEY, ACS_STEP_FACT, ACS_VERSION, acsEntryHash, createAcsGuardian } from "./acs.ts";
 export type { AcsGuardian, AcsMethod, AcsResponse } from "./acs.ts";
+export { formatPerathosReport, PERATHOS_RECEIPT_V1, perathosReceiptHash, verifyPerathosLog } from "./perathos.ts";
+export type { PerathosCheck, PerathosOptions, PerathosReport } from "./perathos.ts";
 export { loadAcsGuardianConfig } from "./config.ts";
 export type { AcsGuardianConfig } from "./config.ts";
 export type { Arrival, ArrivalChallenge, ArrivalClass, ArrivalRate, ChallengeCheck, Classified, DoorHost, DoorOptions, DoorServerOptions, RateTracker, RateTrackerLimits, RunningDoor } from "./door.ts";

@@ -39,6 +39,7 @@ Anyone holding the public keys can verify a receipt offline. The agent is not tr
 - [Threat model](docs/threat-model.md): every party who could make a receipt false, the move, what stops it, and whether that is a property of the evidence or of the deployment; and what is not defended
 - [What a receipt costs](docs/performance.md): each step of the issuer's hot path in microseconds, measured with `bun run bench`, what is and is not fsynced, and where the time goes
 - [Aligning with IETF SCITT](docs/scitt.md): the receipt as a SCITT signed statement, the log as a transparency service, our RFC 9162 proofs as COSE Receipts (RFC 9942), what differs and the options for each, an agent-action profile, and the steps toward the working group
+- [Reading a Perathos log](docs/perathos.md): `verify-perathos` checks another project's agent records, a Perathos session log, against its spec; what a valid log proves and does not, and how its fields map onto an agent-custody receipt
 
 ## Getting started
 
