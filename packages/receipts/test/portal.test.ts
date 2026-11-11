@@ -120,6 +120,7 @@ describe("the tenant portal", () => {
     expect(page).toContain('data-view="setup"');
     expect(page).toContain('rel="icon" href="/favicon.svg"');
     expect(page).toContain('id="themeToggle"');
+    expect(page).toMatch(/id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false"[^>]*><svg/);
     expect(page).toContain(':root[data-theme="dark"]');
     const icon = await fetch(new URL("favicon.svg", portal.url));
     expect(icon.status).toBe(200);
