@@ -80,7 +80,7 @@ A write route that is not in this table needs `admin`. The last owner of a tenan
 
 ### Portal navigation
 
-The sidebar has three groups. Monitor holds Overview, Usage, and Activity. Log holds Setup, API keys, Policies, and Export. Organisation holds Members and Billing. The user menu at the top right holds the signed-in address, Security (two-step sign-in), the theme control, and Sign out. On a narrow screen the sidebar is a drawer that the menu button opens.
+The sidebar has three groups. Monitor holds Overview, Usage, and Activity. Log holds Setup, API keys, Policies, and Export. Organisation holds Members and Billing. The top bar shows the logo, the tenant (quiet text after a thin separator), the plan (a pill), and three quiet links to the guide, the docs, and the receipt verifier. The Account button at the right shows an avatar with the first letter of the address. On a wide screen it also shows the address and a chevron. Its accessible name is "Account menu for" followed by the address. The Account menu is one list of rows: a header with the address, the tenant, and the role; Security (two-step sign-in); the theme control, which shows On or Off; and Sign out. On a narrow screen the sidebar is a drawer that the menu button opens. The drawer ends with a Help group that holds the three links, so the top bar is one row: the menu button, the logo, and the avatar. The Account menu header then also shows the plan. The sign-in, onboarding, and welcome screens show no avatar, and the Account button there holds only the theme control.
 
 The address bar names the view: `/#policies` opens Policies after sign-in, and the Back and Forward buttons of the browser change the view. An unknown name opens Overview.
 
