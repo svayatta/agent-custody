@@ -1601,6 +1601,8 @@ describe("portal navigation", () => {
   it("the script names the Account button for the signed-in address and fills the avatar and the menu header", async () => {
     const script = (await getPage()).match(/<script>([\s\S]*?)<\/script>\s*$/)![1]!;
     expect(script).toContain('"Account menu for " + myEmail');
+    // a signed-out screen shows no tenant and no plan of the earlier session
+    expect(script).toContain('if (id !== "app") { $("tenantTag").hidden = true; $("planTag").hidden = true; }');
     expect(script).toContain('$("planTag").textContent = cap(o.plan)');
     expect(script).toContain('el.toggleAttribute("hidden", id === "app")');
     expect(script).toContain('$("avatar").textContent = me.email.charAt(0)');

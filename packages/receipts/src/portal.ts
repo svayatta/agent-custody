@@ -2042,6 +2042,7 @@ ${DESIGN_CSS}
     $("menuBtn").hidden = id !== "app";
     for (const el of document.querySelectorAll("[data-acct]")) el.toggleAttribute("hidden", id !== "app");
     for (const el of document.querySelectorAll("[data-out]")) el.toggleAttribute("hidden", id === "app");
+    if (id !== "app") { $("tenantTag").hidden = true; $("planTag").hidden = true; }
     $("userBtn").setAttribute("aria-label", id === "app" ? "Account menu for " + myEmail : "Appearance");
     if (id !== "app") { document.title = "agent-custody"; setDrawer(false); }
   };
