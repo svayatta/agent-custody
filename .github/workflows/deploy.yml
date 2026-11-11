@@ -1,4 +1,5 @@
-# Deploys the log's host by hand, from the Actions tab: "docs" rebuilds the docs site, a published version such as
+# Deploys the log's host by hand, from the Actions tab: "docs" brings the host's checkout to main and applies its proxy
+# config (the docs host redirects to the website), a published version such as
 # 0.8.0 moves log, signer, and portal to that image and then checks the log from outside. It runs over SSH with a key
 # that can run only deploy/upgrade.sh (deploy/README.md says how to set it up), and does nothing until the repository
 # variable DEPLOY_HOST is set.

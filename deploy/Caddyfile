@@ -56,15 +56,11 @@
 	reverse_proxy log:8787
 }
 
-# The documentation site. DOCS_HOST comes from .env; unset, a *.localhost name nobody reaches, never an empty key.
+# The retired documentation host. The website at agent-custody.dev is the one copy of the docs; an old docs.<domain>
+# link gets a permanent redirect to the same path there. DOCS_HOST comes from .env; unset, a *.localhost name nobody
+# reaches, never an empty key.
 {$DOCS_HOST:docs.localhost} {
-	encode gzip
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options nosniff
-		-Server
-	}
-	reverse_proxy docs:80
+	redir https://agent-custody.dev{uri} permanent
 }
 
 # The tenant portal. PORTAL_HOST comes from .env; unset, the block binds a *.localhost name Caddy serves with an

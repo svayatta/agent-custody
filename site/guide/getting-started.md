@@ -6,6 +6,14 @@ Two paths. The **SDK path** records what the agent's own process reports: the qu
 
 For your own Claude Code sessions, one command does the setup and prints each step: an agent key, a config in observe mode, a starter deny policy (force push, `rm -rf` on `/`, `~`, and `$HOME`, `terraform destroy`, `drop database`), and the three hooks.
 
+To see first what that policy would have caught, read your last week of Claude Code sessions. It reads the transcripts Claude Code keeps on your machine; it installs nothing, writes nothing, and sends nothing. A transcript is not a receipt, so this is a preview ([auditing past sessions](/reference/claude-code#auditing-past-sessions)):
+
+```bash
+npx -y @agent-custody/receipts audit-sessions --since 7d
+```
+
+Then install:
+
 ```bash
 npm install -g @agent-custody/receipts
 agent-custody init claude-code

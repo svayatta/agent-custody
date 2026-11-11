@@ -8,7 +8,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { structuralProblem, verifyBundle, type ReceiptBundle, type VerifyOptions, type VerifyResult } from "@agent-custody/receipts";
+import { DESIGN_CSS, structuralProblem, verifyBundle, type ReceiptBundle, type VerifyOptions, type VerifyResult } from "@agent-custody/receipts";
 import { buildActionPack, decodeStatement, formatExplain, type ActionPack } from "./explain.ts";
 import type { Ledger } from "./ledger.ts";
 import { matchesReceiptSearch, receiptSearchTerms, validateReceiptSearch, type ReceiptSearch } from "./search.ts";
@@ -80,28 +80,23 @@ export function scanReceipts(o: ReviewOptions, query: ReceiptSearch = o.search ?
 
 export const listReceipts = (o: ReviewOptions, query: ReceiptSearch = o.search ?? {}): ReceiptRow[] => scanReceipts(o, query).rows;
 
-const STYLE = `
-  :root { color-scheme: light dark; --ink: #1b2430; --ink2: #5b6b7a; --line: #d7dfe5; --bg: #fafbfc; --panel: #ffffff; --accent: #0f6e63; --bad: #b3261e; --mono: ui-monospace, Menlo, monospace; }
-  @media (prefers-color-scheme: dark) { :root { --ink: #e6ecf0; --ink2: #9fb0bd; --line: #27333c; --bg: #0e1418; --panel: #151d23; --accent: #4fc3b0; --bad: #ff8a80; } }
-  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, sans-serif; }
+const STYLE = `${DESIGN_CSS}
   main { max-width: 74rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-  h1 { font-size: 1.4rem; margin: 0 0 .25rem; } h2 { font-size: 1.05rem; margin: 1.75rem 0 .6rem; }
+  h1 { margin: 0 0 .25rem; } h2 { margin: 1.75rem 0 .6rem; }
   .sub { color: var(--ink2); margin: 0 0 1.25rem; }
-  a { color: var(--accent); }
   table { border-collapse: collapse; width: 100%; font-size: .93rem; }
   th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
-  th { font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; color: var(--ink2); }
-  code, pre, .mono { font-family: var(--mono); font-size: .88em; }
-  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: .9rem 1rem; overflow-x: auto; white-space: pre-wrap; }
+  th { font-size: var(--text-xs); font-weight: 600; color: var(--ink2); } th::first-letter { text-transform: uppercase; }
+  code, pre, .mono { font-size: .88em; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .9rem 1rem; overflow-x: auto; white-space: pre-wrap; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: .45rem 1.25rem; margin: 0; }
-  dt { font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; color: var(--ink2); padding-top: .15rem; }
+  dt { font-size: var(--text-xs); font-weight: 600; color: var(--ink2); padding-top: .15rem; } dt::first-letter { text-transform: uppercase; }
   dd { margin: 0; white-space: pre-wrap; }
-  .ok { color: var(--accent); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; } .muted { color: var(--ink2); }
+  .ok { color: var(--ok); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; } .muted { color: var(--ink2); }
   .wrap { overflow-x: auto; }
-  form { display: flex; flex-wrap: wrap; gap: .8rem; padding: 1rem; border: 1px solid var(--line); margin-bottom: 1rem; }
-  label { display: grid; gap: .25rem; font-size: .85rem; }
-  input, button { font: inherit; padding: .45rem; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 3px; }
-  button { cursor: pointer; align-self: end; }
+  form { display: flex; flex-wrap: wrap; gap: .8rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); margin-bottom: 1rem; }
+  label { display: grid; gap: .25rem; font-size: var(--text-xs); font-weight: 600; color: var(--ink2); }
+  form button { align-self: end; }
   [hidden] { display: none !important; }
   @media (max-width: 40rem) { dl { grid-template-columns: 1fr; } }
 `;
@@ -163,7 +158,7 @@ export function renderIndex(rows: ReceiptRow[], o: ReviewOptions, link: (id: str
 <p class="sub"><span id="receipt-count">${rows.length} receipt(s)</span> in ${esc(o.receiptsDir)}${withKeys ? ", each checked against the keys given" : ", not checked: start the review with the gateway's and principal's public keys to verify"}${o.ledger ? "; beliefs from the ledger" : "; no ledger, so what depended on a call is not known here"}.</p>
 ${unreadable ? `<p class="bad" role="alert">${unreadable} file(s) could not be read and are not in this list.</p>\n` : ""}<form id="receipt-search" method="get">
 ${([['transaction', 'Transaction ID', 're_… / pi_… / charge ID'], ['customer', 'Customer ID', 'cust_…'], ['agent', 'Agent', 'support-agent'], ['from', 'From (inclusive)', '2026-10-14T00:00:00Z'], ['to', 'To (inclusive)', '2026-10-15T00:00:00Z']] as const).map(([name, label, placeholder]) => `<label>${label}<input name="${name}" value="${esc(o.search?.[name] ?? "")}" placeholder="${placeholder}"${name === 'from' || name === 'to' ? ' pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}T.+(Z|[+-][0-9]{2}:[0-9]{2})"' : ''}></label>`).join("\n")}
-<button type="submit">Search receipts</button>${staticPage ? '<button type="reset">Clear filters</button>' : '<a href="/?transaction=&amp;customer=&amp;agent=&amp;from=&amp;to=">Clear filters</a>'}
+<button type="submit">Search receipts</button>${staticPage ? '<button class="quiet" type="reset">Clear filters</button>' : '<a href="/?transaction=&amp;customer=&amp;agent=&amp;from=&amp;to=">Clear filters</a>'}
 </form>
 <p class="muted">Filters combine and match exact IDs. Search covers public arguments, results and gateway facts; identifiers withheld by a capture rule are unavailable.${staticPage ? ' This export searches only the receipts included here.' : ''}</p>
 <p id="search-error" role="alert" class="bad"></p>

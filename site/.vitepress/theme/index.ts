@@ -4,6 +4,7 @@ import Layout from "./Layout.vue";
 import Verifier from "./Verifier.vue";
 import EarlyAccess from "./EarlyAccess.vue";
 import Flow from "./Flow.vue";
+import "./tokens.css";
 import "./custom.css";
 
 export default {
