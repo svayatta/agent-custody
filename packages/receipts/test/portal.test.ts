@@ -155,7 +155,9 @@ describe("the tenant portal", () => {
     expect(page.headers.get("content-security-policy")).toMatch(/default-src 'none'/);
     const html = await page.text();
     expect(html).toContain("API keys");
-    expect(html).toContain("https://docs.agent-custody.dev/reference/");
+    // the website's one nav, on the dashboard's host: every link absolute, and no second docs host
+    for (const [text, href] of [["Product", "https://agent-custody.dev/"], ["Docs", "https://agent-custody.dev/guide/getting-started"], ["Pricing", "https://agent-custody.dev/pricing"], ["Blog", "https://agent-custody.dev/blog/"], ["Verify a receipt", "https://agent-custody.dev/verify"]]) expect(html).toContain(`<a href="${href}">${text}</a>`);
+    expect(html).not.toContain("docs.agent-custody.dev");
     expect(html).toContain("https://agent-custody.dev/verify");
   });
 

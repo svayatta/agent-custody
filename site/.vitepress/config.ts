@@ -2,6 +2,7 @@ import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
 import { cpSync, existsSync } from "node:fs";
 import { dirname, posix, relative, resolve } from "node:path";
+import { SITE_NAV } from "../../packages/receipts/src/site-links.ts";
 
 // The site is generated from the repository's own markdown. Nothing here is a second copy of the docs.
 const REPO = "https://github.com/svayatta/agent-custody/blob/main/";
@@ -70,15 +71,8 @@ export default withMermaid(
     lastUpdated: false,
     themeConfig: {
       logo: "/logo.svg?v=2",
-      // Six entries. Receipts, State, Python, the spec, and security live in the sidebar under Docs.
-      nav: [
-        { text: "Product", link: "/" },
-        { text: "Docs", link: "/guide/getting-started" },
-        { text: "Advanced", link: "/advanced" },
-        { text: "Pricing", link: "/pricing" },
-        { text: "Verify a receipt", link: "/verify" },
-        { text: "Sign in", link: "https://app.agent-custody.dev/" },
-      ],
+      // The one nav list, shared with the landing page and the dashboard (packages/receipts/src/site-links.ts).
+      nav: SITE_NAV.map((l) => ({ ...l })),
       sidebar: {
         "/reference/": [
           { text: "Reference", items: [
@@ -142,7 +136,7 @@ export default withMermaid(
         { text: "Hosted", items: [{ text: "Sign up", link: "https://app.agent-custody.dev/#register" }, { text: "Pricing", link: "/pricing" }, { text: "The hosted log", link: "/early-access" }, { text: "Security questionnaire", link: "/security" }, { text: "Privacy", link: "/privacy" }, { text: "Terms for early access", link: "/terms" }, { text: "Contact", link: "/contact" }] },
       ] },
       socialLinks: [{ icon: "github", link: "https://github.com/svayatta/agent-custody" }, { icon: "npm", link: "https://www.npmjs.com/org/agent-custody" }],
-      footer: { message: 'Apache-2.0 · <a href="https://github.com/svayatta/agent-custody">GitHub</a> · <a href="https://www.npmjs.com/org/agent-custody">npm</a> · <a href="https://pypi.org/project/agent-custody/">PyPI</a> · <a href="/reference/">Docs</a> · <a href="/faq">FAQ</a> · <a href="/use-cases">Use cases</a> · <a href="/blog/">Writing</a> · <a href="/security">Security</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/contact">Contact</a>', copyright: "Charioteer Consulting Ltd" },
+      // The footer is SiteFooter.vue, mounted by Layout.vue on every page.
       search: { provider: "local" },
     },
     markdown: {

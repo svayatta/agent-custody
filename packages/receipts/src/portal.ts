@@ -14,6 +14,7 @@ import type { AddressInfo } from "node:net";
 import { postgresCheckpoints, type CheckpointStore } from "./checkpoints.ts";
 import { welcomeSheet } from "./log-admin.ts";
 import { clientAddress } from "./log-sink.ts";
+import { SITE_NAV, siteUrl } from "./site-links.ts";
 import { PLAN_QUOTAS, RateLimiter, type Plan, type PostgresLike, type PostgresTenancy } from "./log-store.ts";
 import { oidcAuthorizeUrl, oidcExchange, pkce, samlAuthorizeUrl, samlValidate, type OidcConfig, type SamlConfig, type SsoIdentity } from "./sso.ts";
 
@@ -1230,6 +1231,9 @@ const RESULT_STYLE = `<style>
 const resultPage = (title: string, body: string, head = "") =>
   `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${head}<title>${title}</title>${RESULT_STYLE}<main><a class="brand" href="/">${MARK}agent-custody</a><h1>${title}</h1>${body}</main>`;
 
+// the website's one nav list, on the dashboard's own host
+const DASHBOARD_NAV = SITE_NAV.map((l) => `<a href="${siteUrl(l.link)}">${l.text}</a>`).join("");
+
 const PORTAL_PAGE = `<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agent-custody</title>
@@ -1356,7 +1360,7 @@ const PORTAL_PAGE = `<!doctype html>
     #audit td:nth-child(2), #audit td:nth-child(4), #audit td[colspan] { grid-column: 1 / -1; font-size: .8rem; } #audit td:nth-child(2) { color: var(--ink2); } }
   abbr[title] { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
 </style>
-<div class="top"><a class="brand" href="https://agent-custody.dev/"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links"><a href="https://agent-custody.dev/guide/getting-started">Guide</a><a href="https://docs.agent-custody.dev/reference/">Docs</a><a href="https://agent-custody.dev/verify">Verify a receipt</a></span><span class="who" id="who"></span><button class="theme" id="themeToggle" type="button">Dark mode</button></div>
+<div class="top"><a class="brand" href="https://agent-custody.dev/"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links">${DASHBOARD_NAV}</span><span class="who" id="who"></span><button class="theme" id="themeToggle" type="button">Dark mode</button></div>
 <div id="notice" class="notice" hidden></div>
 <section id="auth" class="auth split" hidden>
   <aside class="pitch">

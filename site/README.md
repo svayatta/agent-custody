@@ -15,6 +15,7 @@ The gateway reference and receipt specification cover financial operation outcom
 
 ## Rules for site changes
 
+- One top nav and one footer on every page. The lists are in `packages/receipts/src/site-links.ts`: `config.ts` builds the docs nav from it, `Landing.vue` and `NotFound.vue` render it, `SiteFooter.vue` is mounted on the landing page and under every docs page by `Layout.vue`, and the dashboard (`portal.ts`) prints the same nav with absolute links. Change a link there, never in one page. In-page anchors do not go in the top bar. On a phone the landing page and the docs pages both put the links and the two actions in a menu.
 - One name for each thing, as [the glossary](guide/glossary.md) defines it: "Verify a receipt", "Hosted log" (the product), "Dashboard" (app.agent-custody.dev), "Gateway console" (the local tool), "Sign up", "Sign in", "API key", "Blog" and "posts", "Components". Command names and flags, such as `agent-custody portal` and `--token-env`, keep their names. A new term goes into the glossary first.
 
 - `bun run site:build` must pass. It fails on dead links.
