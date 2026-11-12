@@ -1,6 +1,6 @@
 # Reading a Perathos log
 
-[Perathos](https://github.com/perathos-protocol/perathos) records an agent's tool calls from hooks inside the agent's host (Claude Code, Cursor, or its MCP proxy), hash-chains them into a session log, and seals turns with Ed25519 checkpoints. `agent-custody verify-perathos` checks such a log against the verification rules of the Perathos receipt spec (`docs/specs/RECEIPT_V1.md` in their repository), so an auditor can check either project's records with one tool. The reader was written from that spec alone, not from Perathos code.
+[Perathos](https://github.com/perathos-protocol/perathos) records an agent's tool calls, from hooks inside the agent's host (Claude Code or Cursor) or from its MCP proxy, a separate process in front of an MCP server. It hash-chains them into a session log and seals them with Ed25519 checkpoints: the hooks at the end of each turn, the proxy every `--seal-every` calls and when the client disconnects or the server exits. `agent-custody verify-perathos` checks such a log against the verification rules of the Perathos receipt spec (`docs/specs/RECEIPT_V1.md` in their repository), so an auditor can check either project's records with one tool. The reader was written from that spec alone, not from Perathos code.
 
 The two formats record different things, and the report says which one it read. This page lists what the reader checks, what a valid log proves, and how the fields of the two formats correspond.
 
@@ -39,7 +39,7 @@ PROVENANCE: perathos.receipt/v1, recorded on the agent's host (claude-code) by h
 | flag | effect |
 | --- | --- |
 | `--key <hex>` | pins the recorder's Ed25519 public key (repeatable); a checkpoint signed by any other key fails. Without it, a session sealed by more than one key fails, and the report warns that no key was pinned |
-| `--head <file>` | the head witness, `{ "seq", "receipt_hash" }` of the latest checkpoint; a log cut back to an earlier checkpoint fails |
+| `--head <file>` | the head witness, `{ "seq", "receipt_hash" }` of the latest checkpoint (the file also holds its `session_id`, its `ts`, and a copy of its `signature`); a log cut back to an earlier checkpoint fails |
 | `--allow-unsigned` | accepts a log with no checkpoint, or an unsigned one, and reports each as a warning |
 | `--json` | the report as JSON |
 
@@ -47,7 +47,7 @@ It exits 0 when the log is valid and 1 when it is not. Receipts after the last c
 
 ## What it checks
 
-Rules 1 to 9 of the spec:
+Rules 1 to 9 of the spec. Two checks go beyond the spec's verification rules and Perathos's own verifier: the fixed `ts` form in rule 5 (the spec's field table gives that form, but its rules and its verifier check only that `ts` never decreases), and, in rule 8, one key for the whole session when no key is pinned (Perathos's own verifier warns when more than one key signed, and does not fail the log).
 
 1. Every line is a JSON object, `v` is `perathos.receipt/v1`, and `kind` is `pre`, `post`, or `checkpoint`.
 2. `seq` runs 1, 2, 3, and so on in file order.
@@ -63,7 +63,7 @@ Rules 1 to 9 of the spec:
 
 The holder of the checkpoint key sealed this exact sequence, and nothing up to the last checkpoint was edited, removed, inserted, or reordered since. Whoever holds a call's arguments or result can show that they match the recorded hash.
 
-It does not prove that an enforcement point outside the agent saw each call. The recorder runs in the agent's host and the key sits there, so the log is as trustworthy as that host. Times are the host's clock. The `model` field is self-reported. The spec lists the rest, including a recorder that was not running for part of a session.
+It does not prove that an enforcement point outside the agent saw each call. The recorder runs in the agent's host. With the default local signer the checkpoint key is a file on that host; with a remote signer (Vault, Cloud KMS, or a signing command) the key stays in the service, but the credential to use it is usually reachable from the host. So the log is as trustworthy as that host. A cut after the last checkpoint cannot be shown if the head witness was also deleted and no copy of the anchors is kept elsewhere. Times are the host's clock. The `model` field is self-reported. The spec lists the rest, including a recorder that was not running for part of a session: a hook that failed to write a receipt shows up only in the local, unsigned `~/.perathos/errors.log`.
 
 ## How the two formats correspond
 
@@ -78,20 +78,23 @@ It does not prove that an enforcement point outside the agent saw each call. The
 | `tool`, `args_hash`, `result_hash` | `tool.name`, `request.argsDigest`, `outcome.resultDigest` | agent-custody can also carry the arguments, or withhold a field behind a salted commitment or an encrypted value ([private evidence](usage.md#private-evidence)) |
 | `status` | `outcome.status` | `ok` or `error` against `executed`, `failed`, `denied`, `error`, or `withheld` |
 | `model` | `model.id` | self-reported in both; agent-custody marks it `claimed` |
-| `guard.decision`, `guard.rule` | `policy.decision`, `policy.reasons`, `policy.policyDigest` | a guard rule against a Cedar or Rego policy pinned by its digest |
-| `guard.precondition` (a person-signed safety check) | `delegation` (a principal-signed grant) and `approval` (a payload-bound approval) | both are authority signed by someone other than the agent |
-| `perathos.anchor/v1` (RFC 3161) | the log's checkpoints, witness, and chain anchor ([anchoring](anchoring.md)) | independent time against an independent copy of the log head |
+| `guard.decision`, `guard.rule` | `policy.decision`, `policy.reasons`, `policy.policyDigest` | a guard rule against a Cedar or Rego policy pinned by its digest. A denied call is a `pre` with `decision: "deny"` and no `post`; the rule `guard.error` means the guard failed and denied the call; a rule prefixed `script:` or `write:` matched inside a script the command runs or writes |
+| `guard.precondition` (the hash of a signed safety check) | `delegation` (a principal-signed grant) | signed by a listed approver key, or by the local recorder key when no approver is listed; scoped to a target and reusable until it expires, like a grant |
+| `guard.approval` (the hash of a Perathos Gate receipt) | `approval` (a payload-bound approval) | names a Gate receipt recording a passkey approval; the Gate receipt's `request.args_hash` equals the `pre` receipt's `args_hash`. `perathos evidence verify` checks that binding; this reader does not yet |
+| `perathos.anchor/v1` (RFC 3161) | the log's checkpoints, witness, and chain anchor ([anchoring](anchoring.md)) | a timestamp token is an upper bound on when a checkpoint existed; it shows a cut log only when a copy of the anchors is kept off the recording machine, where agent-custody shows one by consistency with an independently held RFC 9162 tree head |
+
+Two Perathos fields have no counterpart above: `event` on a checkpoint names what sealed it (a hook event such as `Stop`, or `mcp-periodic` and `mcp-end` from the proxy), and `result_from: "payload"` on a Cursor `post` means the result hash was taken over the hook payload, because Cursor sent no output.
 
 Both use Ed25519, SHA-256, and canonical JSON with sorted keys that matches RFC 8785 for these bodies. The structures differ, so a shared schema would lose detail on both sides. The common ground both can map to is IETF SCITT ([aligning with SCITT](scitt.md)).
 
 ## Not read yet
 
 - RFC 3161 anchors (`perathos.anchor/v1`): verifying a timestamp token means parsing the authority's signed response and chaining it to a pinned root certificate.
-- The rest of a Perathos evidence pack: its signed manifest, anchors, and preconditions. The session log inside a pack is read as above. The head witness file also carries a signature that the spec does not define, which is not checked.
+- The rest of a Perathos evidence pack: its signed manifest, anchors, and preconditions. The session log inside a pack is read as above. The head witness file also carries `session_id`, `ts`, and `signature` (a copy of the checkpoint's own signature), which the spec does not define and which are not checked.
 - Signed preconditions (`perathos.precondition/v1`) and Gate approvals.
 
 ## Tested against a log Perathos wrote
 
-`vectors/interop/perathos/pocketos-replay/` holds the session log, head witness, and verifier report from the sample evidence pack in the Perathos repository, copied byte for byte with their licence ([the vector's README](../vectors/interop/perathos/README.md)). `verify-perathos` verifies that log with the recorder's key and the head witness, and agrees with Perathos's own verifier on the session, the receipt, call, and checkpoint counts, the sealed range, the signer, the times, and the two calls the guard blocked. The same log with one receipt edited, cut back to its first checkpoint against the head witness, or checked against another key, fails. So our canonical JSON matches their writer's, and their signatures are hex.
+`vectors/interop/perathos/pocketos-replay/` holds the session log, head witness, and verifier report from the sample evidence pack in the Perathos repository, copied byte for byte with their licence ([the vector's README](../vectors/interop/perathos/README.md)). `verify-perathos` verifies that log with the recorder's key and the head witness, and agrees with Perathos's own verifier on the session, the receipt, call, and checkpoint counts, the sealed range, the signer, the times, and the two calls the guard blocked. The same log with one receipt edited, cut back to its first checkpoint against the head witness, or checked against another key, fails. So our canonical JSON matches their writer's, and their signatures are hex. Perathos also publishes [test vectors for the receipt spec](https://github.com/perathos-protocol/perathos/tree/main/docs/specs/vectors/receipt_v1): a valid log and three that must fail, each with the verdict and error its verifier gives.
 
 The other tests in `test/perathos.test.ts` write logs from the spec, to reach each rule. Example 45 does the same and shows a cut log caught by its head witness and an edited guard decision caught by the chain.
