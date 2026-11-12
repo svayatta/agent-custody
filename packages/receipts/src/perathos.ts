@@ -3,7 +3,8 @@
  * verification rules of their published spec (docs/specs/RECEIPT_V1.md in perathos-protocol/perathos). Written from
  * that spec alone, so a Perathos log and an agent-custody receipt can be checked with one tool, each for what it proves.
  *
- * A Perathos log is recorded by hooks inside the agent's host and sealed by checkpoints signed with a key held there.
+ * A Perathos log is recorded on the agent's host, by hooks or an MCP proxy, and sealed by checkpoints signed with a key
+ * that is on that host or, with a remote signer, usable from it.
  * A valid log shows that the key holder sealed this sequence and nothing up to the last checkpoint changed since. It
  * does not show that an enforcement point outside the agent saw each call, which is what an agent-custody receipt
  * attests, so the report says which kind of evidence it is. RFC 3161 anchors are not checked here.
@@ -186,7 +187,7 @@ export function verifyPerathosLog(text: string, opts: PerathosOptions = {}): Per
     signerFailures,
     firstTs: typeof receipts[0]?.ts === "string" ? (receipts[0].ts as string) : null,
     lastTs: typeof receipts.at(-1)?.ts === "string" ? (receipts.at(-1)!.ts as string) : null,
-    provenance: `perathos.receipt/v1, recorded by hooks inside the agent's host (${agent ?? "unknown"}); the checkpoint key is held on that host, so a valid log shows that the key holder sealed this sequence, not that an enforcement point outside the agent saw each call; times are the host's clock, and RFC 3161 anchors were not checked`,
+    provenance: `perathos.receipt/v1, recorded on the agent's host (${agent ?? "unknown"}) by hooks or an MCP proxy; the checkpoint key, or the credential for a remote signer, is on that host, so a valid log shows that the key holder sealed this sequence, not that an enforcement point outside the agent saw each call; times are the host's clock, and RFC 3161 anchors were not checked`,
   };
 }
 

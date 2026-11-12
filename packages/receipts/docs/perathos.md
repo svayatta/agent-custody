@@ -33,7 +33,7 @@ signers         be58168fa007
 time            2026-11-04T08:19:00.000000Z to 2026-11-04T08:19:06.000000Z (host clock)
 denied          1 call(s) stopped by the guard
 
-PROVENANCE: perathos.receipt/v1, recorded by hooks inside the agent's host (claude-code); the checkpoint key is held on that host, so a valid log shows that the key holder sealed this sequence, not that an enforcement point outside the agent saw each call; times are the host's clock, and RFC 3161 anchors were not checked
+PROVENANCE: perathos.receipt/v1, recorded on the agent's host (claude-code) by hooks or an MCP proxy; the checkpoint key, or the credential for a remote signer, is on that host, so a valid log shows that the key holder sealed this sequence, not that an enforcement point outside the agent saw each call; times are the host's clock, and RFC 3161 anchors were not checked
 ```
 
 | flag | effect |

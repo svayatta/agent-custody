@@ -43,8 +43,9 @@ describe("verifyPerathosLog", () => {
     const r = verifyPerathosLog(jsonl(session()), { trustedKeys: [owner.hex] });
     expect(failed(r)).toEqual([]);
     expect(r).toMatchObject({ ok: true, session: "s-1", agent: "claude-code", receipts: 7, toolCalls: 3, checkpoints: 2, signers: [owner.hex], sealedThrough: 7, unsealedTail: 0, denied: 1 });
-    // a Perathos log is recorded inside the agent's host, with the key held there: the report must not read as gateway attestation
-    expect(r.provenance).toContain("inside the agent's host");
+    // a Perathos log is recorded on the agent's host, with the key or its credential there: the report must not read as gateway attestation
+    expect(r.provenance).toContain("recorded on the agent's host");
+    expect(r.provenance).toContain("not that an enforcement point outside the agent saw each call");
     expect(r.provenance).toContain("not that an enforcement point outside the agent saw each call");
     const text = formatPerathosReport(r);
     expect(text).toContain("RESULT: VALID");
@@ -251,7 +252,10 @@ describe("agent-custody verify-perathos", () => {
     const ok = run([join(dir, "s-1.jsonl"), "--key", owner.hex, "--head", join(dir, "s-1.head.json")]);
     expect(ok.status).toBe(0);
     expect(ok.stdout).toContain("RESULT: VALID");
-    expect(ok.stdout).toContain("PROVENANCE: perathos.receipt/v1, recorded by hooks inside the agent's host (claude-code)");
+    expect(ok.stdout).toContain("PROVENANCE: perathos.receipt/v1, recorded on the agent's host (claude-code) by hooks or an MCP proxy");
+    // A remote signer (Vault, Cloud KMS, a signing command) keeps the key off the host, but the credential to use it is
+    // still there, so the report must not let an auditor read a remotely signed log as stronger evidence.
+    expect(ok.stdout).toContain("the checkpoint key, or the credential for a remote signer, is on that host");
     writeFileSync(join(dir, "cut.jsonl"), jsonl(log.slice(0, 4)));
     const cut = run([join(dir, "cut.jsonl"), "--head", join(dir, "s-1.head.json"), "--json"]);
     expect(cut.status).toBe(1);
