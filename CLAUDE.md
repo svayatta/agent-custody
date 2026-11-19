@@ -11,7 +11,7 @@ Before you work in an area, read its rules:
 
 ## Before a commit
 
-- Update the READMEs in the same commit: the README of each package that the change touches, and the root README when the layout or the package list changes. In `packages/receipts/README.md`, check the intro, the doc links, the supported hosts table, the quick start, the layout block, and the Plan section (move finished items to Done, renumber Next).
+- Update the READMEs in the same commit: the README of each package that the change touches, the root README when the package list changes, and the layout block in `CONTRIBUTING.md` when the layout changes. In `packages/receipts/README.md`, check the intro, the doc links, the supported hosts table, the quick start, the layout block, and the Plan section (move finished items to Done, renumber Next).
 - A new adapter, command, flag, or check gets its documentation in `packages/receipts/docs/` in the same commit.
 - A new or changed public function, route, MCP tool, or CLI flag updates its page in `site/reference/` in the same commit.
 - A new module or adapter in `packages/receipts` or `packages/state` gets an example in that package's `examples/`, which ends by printing `OK`. In receipts, it also gets a row in `docs/tutorials.md`.
@@ -31,4 +31,4 @@ Before you work in an area, read its rules:
 - Tests never use the network. A timeout on a loaded machine is not a failure.
 - Regenerate `packages/receipts/vectors/` only when the receipt format or a check changes, never to make a test pass. A check added or renamed in `src/verify.ts` gets the same change in `site/verifier/verify-web.ts`.
 
-On a machine with `~/.config/agent-custody/hook.sh`, the custody hook in `.claude/` makes each tool call of a session a receipt and refuses force pushes. On any other machine it does nothing. "Agent sessions in this repository" in the root README explains it.
+On a machine with `~/.config/agent-custody/hook.sh`, the custody hook in `.claude/` makes each tool call of a session a receipt and refuses force pushes. On any other machine it does nothing. `site/custody.md` ("Agent sessions in this repository") explains it.
