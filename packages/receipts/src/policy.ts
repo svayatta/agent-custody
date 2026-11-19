@@ -84,6 +84,16 @@ export function reservedCedarForm(value: unknown, path = "args"): string | null 
   return null;
 }
 
+/**
+ * A fact as Cedar can read it: JSON null has no Cedar form and refuses the whole context, so a null field is left out
+ * and reads as absent (`has` is false). Real APIs return nulls for unset fields; the receipt keeps the fact as observed.
+ */
+export function cedarFactValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.filter((v) => v !== null).map(cedarFactValue);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== null).map(([k, v]) => [k, cedarFactValue(v)]));
+  return value;
+}
+
 interface ParsedPolicy {
   /** the id the policy set is preparsed under in cedar-wasm; unused when parseErrors is non-empty */
   slot: string;

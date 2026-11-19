@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { evaluate, policyDigest, type PolicyRequest } from "../src/policy.ts";
+import { cedarFactValue, evaluate, policyDigest, type PolicyRequest } from "../src/policy.ts";
 import { POLICY } from "../scripts/fixture.ts";
 
 const req = (tool: string, args: Record<string, unknown>, facts: Record<string, unknown> = {}) => ({
@@ -92,5 +92,18 @@ describe("Cedar policy kept parsed", () => {
       if (answer.type === "failure") expect(d).toEqual({ decision: "deny", reasons: [], errors: answer.errors.map((e) => e.message), policyDigest: policyDigest(POLICY) });
       else expect([d.decision, d.reasons, d.errors.length > 0]).toEqual([answer.response.diagnostics.errors.length > 0 ? "deny" : answer.response.decision, answer.response.diagnostics.reason, answer.response.diagnostics.errors.length > 0]);
     }
+  });
+});
+
+describe("facts with nulls", () => {
+  // A real API record (a Stripe payment intent, a GitHub pull request) has null fields. Passed as observed, Cedar refuses
+  // the whole context and every call is denied whatever the policy says; a null field must read as absent instead.
+  it("leaves null fields out, so a policy reads the rest and `has` is false for the null one", () => {
+    const payment = { id: "pi_1", status: "succeeded", amount_received: 10000, description: null, metadata: { order: null, ref: "A1" }, tags: [null, "x"] };
+    expect(cedarFactValue(payment)).toEqual({ id: "pi_1", status: "succeeded", amount_received: 10000, metadata: { ref: "A1" }, tags: ["x"] });
+    const policy = `permit(principal, action == Action::"stripe.refund", resource) when { context.facts.payment.status == "succeeded" && !(context.facts.payment has description) };`;
+    const ask = (facts: unknown) => evaluate(policy, { agentId: "a", tool: "stripe.refund", context: { args: {}, facts: { payment: facts } } } as PolicyRequest).decision;
+    expect(ask(payment)).toBe("deny");
+    expect(ask(cedarFactValue(payment))).toBe("allow");
   });
 });

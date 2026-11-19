@@ -20,7 +20,7 @@ import { upstreamEvidenceOf } from "./upstream.ts";
 import { restUpstream, type UpstreamClient } from "./rest.ts";
 import { a2aUpstream } from "./a2a.ts";
 import { captureKeyFrom, effectiveRule } from "./capture.ts";
-import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
+import { cedarFactValue, evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
 import { compileRego, evaluateRego, isRegoFile, type RegoPolicy } from "./policy-rego.ts";
 import { createOpaServerPolicy } from "./opa-server.ts";
 import type { ApprovalRecord, AuthorizationBundle, AuthorizationPredicate, FactRecord, OperationEvidence, ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "./receipt.ts";
@@ -532,7 +532,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       } else {
         try {
           ({ facts, templates: factTemplates, results: factResults } = await gatherFacts(tool, args, upstreamMeta));
-          const factValues = Object.fromEntries(Object.entries(facts).map(([k, f]) => [k, f.value]));
+          const factValues = Object.fromEntries(Object.entries(facts).map(([k, f]) => [k, cedarFactValue(f.value)]));
           const request = { agentId: delegation.agent, tool, context: { args, facts: factValues, grant: { principal: delegation.principal, scopes: delegation.scopes } } };
           policy = opaServer ? await opaServer.decide(request) : regoPolicy ? evaluateRego(regoPolicy, pDigest, request) : evaluate(policyText, request);
         } catch (e) {

@@ -25,8 +25,8 @@ const RestToolSchema = z.object({
   path: z.string().min(1),
   /** argument names sent as query parameters, when the default placement is not wanted */
   query: z.array(z.string().min(1)).optional(),
-  /** "none" sends no body even on POST */
-  body: z.enum(["json", "none"]).default("json"),
+  /** "none" sends no body even on POST; "form" sends application/x-www-form-urlencoded, nesting as `a[b]` and `a[0]`, which Stripe's v1 API expects */
+  body: z.enum(["json", "form", "none"]).default("json"),
   /** The gateway supplies its durable operation key in this header; callers cannot choose or override it. */
   idempotencyHeader: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/).optional(),
   /** the JSON Schema the agent sees; default accepts any object */

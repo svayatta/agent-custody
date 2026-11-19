@@ -42,6 +42,7 @@ import { TREEHEAD_TYPE, type AuthorizationBundle, type ReceiptBundle, type TreeH
 import { MerkleLog } from "./log.ts";
 import { createSdkIssuer } from "./sdk/index.ts";
 import { initClaudeCode } from "./claude-init.ts";
+import { initRefunds, runRefunds, STRIPE_KEY_ENV } from "./refunds-init.ts";
 import { denyReport, formatDenyReport } from "./deny-report.ts";
 import { fileURLToPath } from "node:url";
 import { handleHookEvent, type HookInput } from "./sdk/claude.ts";
@@ -125,6 +126,10 @@ const USAGE = `agent-custody <command>
   init claude-code [--dir <dir>] [--user] [--enforce] [--log-url <url> [--log-id <id>] [--log-token-env NAME] [--log-key <pub>]]
                                                    one command for your own Claude Code sessions: an agent key, sdk.json in observe mode, a starter deny
                                                    policy, and the three hooks in .claude/settings.local.json (--user: ~/.claude/settings.json). Safe to run twice
+  init refunds [--dir agent-custody-refunds] [--limit 5000] [--currency gbp] [--ttl-hours 24] [--run]
+                                                   a gateway in front of Stripe refunds: keys, a grant, a refund policy, and a config. --run (with
+                                                   STRIPE_SECRET_KEY, test mode only) makes a test payment, refunds it through the gateway, has an
+                                                   over-limit refund refused, and verifies the receipt
   audit-sessions [--since 7d|24h|<date>|all] [--dir <claude projects dir>] [--policy <file.cedar>] [--counts] [--json]
           a read-only preview: which of your past Claude Code tool calls the policy would have denied, from the transcripts; writes nothing
   report  --config <sdk.json>                      the calls that the policy would have denied, from the receipts: tool, command or path, rule, receipt id;
@@ -421,7 +426,29 @@ async function main(argv: string[]): Promise<number> {
     }
     case "init": {
       const [target, ...args] = rest;
-      if (target !== "claude-code") throw new Error("init needs a target: init claude-code");
+      if (target === "refunds") {
+        const { values } = parseArgs({
+          args,
+          options: {
+            dir: { type: "string", default: "agent-custody-refunds" },
+            limit: { type: "string", default: "5000" },
+            currency: { type: "string", default: "gbp" },
+            "ttl-hours": { type: "string", default: "24" },
+            run: { type: "boolean", default: false },
+            "stripe-url": { type: "string" },
+          },
+        });
+        if (!existsSync(join(resolve(values.dir), "gateway.json"))) {
+          initRefunds({ dir: values.dir, limit: Number(values.limit), currency: values.currency, ttlHours: Number(values["ttl-hours"]), ...(values["stripe-url"] ? { stripeUrl: values["stripe-url"] } : {}) });
+        } else if (!values.run) throw new Error(`${join(resolve(values.dir), "gateway.json")} already exists; add --run to make a test refund with it, or remove ${values.dir}`);
+        if (!values.run) {
+          console.log(`\nNext: export ${STRIPE_KEY_ENV}=sk_test_... and run agent-custody init refunds --dir ${values.dir} --run`);
+          return 0;
+        }
+        const result = await runRefunds({ dir: values.dir });
+        return result.verified && result.refused ? 0 : 1;
+      }
+      if (target !== "claude-code") throw new Error("init needs a target: init claude-code or init refunds");
       const { values } = parseArgs({
         args,
         options: {

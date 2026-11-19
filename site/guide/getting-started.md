@@ -31,6 +31,23 @@ agent-custody report --config ~/.config/agent-custody/sdk.json
 
 `init` prints this command with absolute paths. To enforce the policy, remove the `"mode": "observe"` line from `sdk.json`. The options are on [the Claude Code page](/reference/claude-code#one-command).
 
+## Stripe refunds in one command
+
+For an agent that refunds payments, one command puts the gateway between the agent and Stripe: the gateway's key and a principal's key, a 24-hour grant for `refund-agent`, a refund policy, and the gateway config. The policy permits a refund of at most `--limit` minor units, only against a payment the gateway itself looked up as succeeded, and never more than that payment received. The Stripe key stays in the gateway's environment; the agent never holds it.
+
+```bash
+npx -y @agent-custody/receipts init refunds --dir refunds --limit 5000 --currency gbp
+```
+
+Then see it work in Stripe test mode. `--run` refuses any key that is not a test-mode key:
+
+```bash
+export STRIPE_SECRET_KEY=sk_test_...
+npx -y @agent-custody/receipts init refunds --dir refunds --run
+```
+
+It makes a test payment of twice the limit directly with Stripe, asks the gateway to refund the limit (allowed, sent, receipted), asks for one more than the limit (refused by policy and never sent), and verifies the refund's receipt with the two public keys and the log. It prints the command that runs the gateway for a real agent and the `verify` command anyone can run on the receipt. Edit `policy.cedar` to change the rule; the gateway applies an edit from the next call.
+
 ## Pick your stack
 
 Install the package, make a key and a config once, then add the lines for your framework: Claude Code, the Claude Agent SDK, the OpenAI Agents SDK, LangChain, Vercel AI, OpenClaw, DeepSeek Harness, Hermes, Google ADK, or plain Python. Each produces a receipt in `receipts/` that [the browser verifier](/verify) checks with the `.pub` file.

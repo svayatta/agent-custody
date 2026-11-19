@@ -87,7 +87,7 @@ Under a private capture rule the receipt withholds `approval.envelope` and `appr
 } }
 ```
 
-`{name}` segments in `path` are filled from the call's arguments; the remaining arguments go to the query string on GET and DELETE and to a JSON body otherwise, or `query` names the ones for the query and `body: "none"` sends no body. The response body is the tool result, JSON kept as JSON; a non-2xx status is a failed execution with the API's answer in the receipt.
+`{name}` segments in `path` are filled from the call's arguments; the remaining arguments go to the query string on GET and DELETE and to a JSON body otherwise, or `query` names the ones for the query and `body: "none"` sends no body; `body: "form"` sends `application/x-www-form-urlencoded` instead, nesting objects and arrays as `a[b]` and `a[0]` and leaving out nulls, which is what Stripe's v1 API reads. The response body is the tool result, JSON kept as JSON; a non-2xx status is a failed execution with the API's answer in the receipt.
 
 ### Financial operations
 

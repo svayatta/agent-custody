@@ -12,7 +12,7 @@ For an intercepted call to tool `T` by the agent named in the grant:
 | `action` | `Action::"<T>"` |
 | `resource` | `Tool::"<T>"` |
 | `context.args` | the call's arguments, exactly as the agent sent them. **Provenance: claimed.** |
-| `context.facts` | results of the gateway's own upstream lookups configured in `facts`. **Provenance: observed.** |
+| `context.facts` | results of the gateway's own upstream lookups configured in `facts`. A `null` field is left out, because Cedar has no null, so `context.facts.payment has description` is false when Stripe returned `"description": null`; the receipt keeps the result as returned. **Provenance: observed.** |
 | `context.grant` | `{ principal, scopes }` from the signed delegation. **Provenance: attested.** |
 
 No entity hierarchy or schema is loaded yet, so policies reason about `context` and the three identifiers above.
