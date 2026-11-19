@@ -6,7 +6,7 @@
 
 The decision is the proxy's own, from the same code: the arrival is classified (`verified`, `claimed`, or `unknown`, with a [Web Bot Auth signature](door.md#web-bot-auth-signatures) checked when the config has `webBotAuth`), its body is read up to `maxBodyBytes`, the Cedar policy for its route decides, a request that can change something is committed to the log before your code runs, and every arrival gets a signed, logged receipt with `issuer.kind: "door"`. A refused arrival gets the same answer the proxy gives (403 with the reason, 413, 503, 400), and your code never runs for it.
 
-Use the proxy when the site is not Node, when you cannot change its code, or when you want the door in a separate process from the app. Use the in-process door when the site is Express or Next.js and you would rather not run and secure a second process.
+Use the proxy when the site is not Node, when you cannot change its code, or when you want the door in a separate process from the app. Use the in-process door when the site is Express or Next.js and you would rather not run and secure a second process. A site in Go, Rails, Django, or Spring can keep the door in a separate process and ask it from a middleware instead: [the door in Go, Rails, Django, and Spring](door-languages.md).
 
 ## The config
 

@@ -53,18 +53,18 @@
     }
   ],
   "keyid": {
-    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAEj8F+jbisOb9+9zlHGSGBI14LeUTnJG1DuQXfOiWuRQ=\n-----END PUBLIC KEY-----\n",
-    "keyid": "7a94ecb793868213306a0aff643ced9c6ff265503ab77e9cfb149b8208400eb9"
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA+GNfC94+QIXyufaVfrMAdVSo4VC/b+/gSHMvk1VeObE=\n-----END PUBLIC KEY-----\n",
+    "keyid": "6c6d6643bbe3cdb2a980cbefa5140855c13fcacf6de00d33d6e5c0f790d00e56"
   },
   "dsse": {
-    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAEj8F+jbisOb9+9zlHGSGBI14LeUTnJG1DuQXfOiWuRQ=\n-----END PUBLIC KEY-----\n",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA+GNfC94+QIXyufaVfrMAdVSo4VC/b+/gSHMvk1VeObE=\n-----END PUBLIC KEY-----\n",
     "envelope": {
       "payloadType": "application/vnd.example+json",
       "payload": "eyJoZWxsbyI6IndvcmxkIn0=",
       "signatures": [
         {
-          "keyid": "7a94ecb793868213306a0aff643ced9c6ff265503ab77e9cfb149b8208400eb9",
-          "sig": "k8FdQAn72W3S594mZvtnWX2UTROvZUIFg/R5OXPwpevPMEhrV29XHILvXo/C0vv3YsdVmkItAOK2rrW7HnDtBg=="
+          "keyid": "6c6d6643bbe3cdb2a980cbefa5140855c13fcacf6de00d33d6e5c0f790d00e56",
+          "sig": "KlFH/YMB4oauSD7XDte5HB+j6XubTDcE6amF5rP8V1j7thBpdBLW/ckqC13crLHm2ndXLEgqGZZv557/GlKNDQ=="
         }
       ]
     },

@@ -4,13 +4,13 @@
 # Only the proxy is published, on loopback: the door answers anyone who reaches it, so it stays on the internal network.
 services:
   origin:
-    image: node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    image: node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
     command: ["node", "/srv/origin.mjs"]
     volumes:
       - ./origin.mjs:/srv/origin.mjs:ro
 
   door:
-    image: node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    image: node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
     user: "${DOOR_USER:-1000:1000}"
     command: ["node", "/app/packages/receipts/src/cli.ts", "door", "--config", "/etc/door/door.json", "--host", "0.0.0.0", "--port", "8780"]
     volumes:
@@ -21,7 +21,7 @@ services:
 
   nginx:
     profiles: ["nginx"]
-    image: nginx:1.29.3-alpine@sha256:b3c656d55d7ad751196f21b7fd2e8d4da9cb430e32f646adcf92441b72f82b14
+    image: nginx:1.31.0-alpine@sha256:2f07d83bf561b506400dc183b1b2003803e39efbd22451f848adaba14d28c7c7
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
@@ -30,7 +30,7 @@ services:
 
   envoy:
     profiles: ["envoy"]
-    image: envoyproxy/envoy:v1.36.2@sha256:4972515dd9a069b44beb43cebba7851596e72a8c61cd7a7c33d8f48efc5280ba
+    image: envoyproxy/envoy:v1.40.2@sha256:8de97e654644827d62afdbf7e1d3dc9fee01a8690d410dd1c63a30dc6b6cecbb
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
     ports:
