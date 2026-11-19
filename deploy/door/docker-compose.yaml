@@ -1,0 +1,38 @@
+# The door answering authz checks for stock nginx (--profile nginx) or stock Envoy (--profile envoy), in front of a
+# stand-in origin. demo.sh runs both and verifies the receipts; it sets DOOR_WORK (keys, receipts, log) and DOOR_USER.
+# The door runs the CLI from this checkout (bun install at the root first); a deployment runs the published package.
+# Only the proxy is published, on loopback: the door answers anyone who reaches it, so it stays on the internal network.
+services:
+  origin:
+    image: node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    command: ["node", "/srv/origin.mjs"]
+    volumes:
+      - ./origin.mjs:/srv/origin.mjs:ro
+
+  door:
+    image: node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    user: "${DOOR_USER:-1000:1000}"
+    command: ["node", "/app/packages/receipts/src/cli.ts", "door", "--config", "/etc/door/door.json", "--host", "0.0.0.0", "--port", "8780"]
+    volumes:
+      - ../..:/app:ro
+      - ./door.json:/etc/door/door.json:ro
+      - ./policy.cedar:/etc/door/policy.cedar:ro
+      - ${DOOR_WORK:?set DOOR_WORK to a directory holding keys/door.key and keys/principal.pub}:/work
+
+  nginx:
+    profiles: ["nginx"]
+    image: nginx:1.29.3-alpine@sha256:b3c656d55d7ad751196f21b7fd2e8d4da9cb430e32f646adcf92441b72f82b14
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "127.0.0.1:${DOOR_PROXY_PORT:-8088}:8080"
+    depends_on: [door, origin]
+
+  envoy:
+    profiles: ["envoy"]
+    image: envoyproxy/envoy:v1.36.2@sha256:4972515dd9a069b44beb43cebba7851596e72a8c61cd7a7c33d8f48efc5280ba
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "127.0.0.1:${DOOR_PROXY_PORT:-8088}:8080"
+    depends_on: [door, origin]

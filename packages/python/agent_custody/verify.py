@@ -791,6 +791,12 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
         add("gateway receipt carries a policy decision", isinstance(p.get("policy"), dict))
     if kind == "door":
         add("door receipt carries a policy decision", isinstance(p.get("policy"), dict))
+        # in authz mode the door answers a proxy's check and relays nothing: the receipt is a decision, never a result
+        if p["issuer"].get("framework") == "authz":
+            authz_policy = p.get("policy") if isinstance(p.get("policy"), dict) else None
+            authz_decision = authz_policy.get("decision") if authz_policy else None
+            authz_decided = status == "withheld" or (status == "denied" and authz_decision == "deny")
+            add("door authz decided, relayed nothing", authz_decided, f"{authz_decision}; a decision for the proxy, which relays: the door saw neither the body nor the origin's answer" if authz_decided else f"the receipt says {status} with a policy {authz_decision or 'absent'}")
     if kind == "guardian":
         # a Guardian decides and carries out nothing: an allow is withheld (nothing forwarded), a deny is denied
         policy = p.get("policy") if isinstance(p.get("policy"), dict) else None

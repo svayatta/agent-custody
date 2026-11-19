@@ -32,3 +32,9 @@ updates:
   - package-ecosystem: docker
     directory: /deploy/witness
     schedule: { interval: weekly }
+  - package-ecosystem: docker-compose
+    directory: /deploy/door
+    schedule: { interval: weekly }
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]

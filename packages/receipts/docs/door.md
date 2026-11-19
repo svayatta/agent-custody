@@ -4,7 +4,7 @@
 
 The gateway stands between an agent and the tools it uses. The door stands between the world and your own HTTP surface: a website, an API, a form. Every arrival, a browser, an API client, a crawler, or an agent acting for someone, is classified by what it presented, decided by a Cedar policy for the route it hit, relayed to your origin or refused, and receipted either way. The receipt is the same signed, logged, independently verifiable receipt the gateway issues, with `issuer.kind: "door"`.
 
-New to the door? [Put the door in front of a site](door-quickstart.md) walks through one form in about fifteen minutes. A Node site can run the same decision loop in its own process instead, as Express middleware or around a Next.js route handler: [the door in your Node app](door-middleware.md).
+New to the door? [Put the door in front of a site](door-quickstart.md) walks through one form in about fifteen minutes. A Node site can run the same decision loop in its own process instead, as Express middleware or around a Next.js route handler: [the door in your Node app](door-middleware.md). Already run nginx or Envoy? The door can answer their authz checks instead of relaying, and the site keeps its proxy: [behind nginx or Envoy](#behind-nginx-or-envoy-authz-mode).
 
 This is the first piece of the agent front door. It answers "what may this arrival do here" and "what did it do, provably". It does not yet answer "is this an agent" for web traffic: that is detection, and the door records only what it can check. An agent that wants to be known can say so in a way the door checks: a grant, or a [Web Bot Auth signature](#web-bot-auth-signatures). Read [what the door knows](#what-the-door-knows-about-an-arrival) before writing a policy.
 
@@ -362,9 +362,36 @@ To record more in clear, give the route a rule of its own, as for the gateway ([
 
 ## The receipt
 
-A door receipt is a v0.2 receipt with `issuer.kind: "door"` and `issuer.framework: "http"`. The route is the tool, observed. `request.args` is the arrival as the table above describes it, claimed. `facts.arrival` is the door's observation. When the arrival was verified by a grant, `principal` and `agent` are attested and `delegation` carries the grant. When it was verified by a signature alone, `principal` is `{ id: null, provenance: "claimed" }` and `agent` is the signature agent, observed. Otherwise `principal` is `{ id: null, provenance: "claimed" }` and `agent` is the subject, claimed. `execution.result` for a relayed call is `{ status, contentType?, bodyBytes, bodyDigest }`: the origin's body is never copied into the receipt, only committed to.
+A door receipt is a v0.2 receipt with `issuer.kind: "door"` and `issuer.framework: "http"` (`"authz"` when it answered a proxy's check, [below](#behind-nginx-or-envoy-authz-mode)). The route is the tool, observed. `request.args` is the arrival as the table above describes it, claimed. `facts.arrival` is the door's observation. When the arrival was verified by a grant, `principal` and `agent` are attested and `delegation` carries the grant. When it was verified by a signature alone, `principal` is `{ id: null, provenance: "claimed" }` and `agent` is the signature agent, observed. Otherwise `principal` is `{ id: null, provenance: "claimed" }` and `agent` is the subject, claimed. `execution.result` for a relayed call is `{ status, contentType?, bodyBytes, bodyDigest }`: the origin's body is never copied into the receipt, only committed to.
 
 The verifier runs `door receipt carries a policy decision` in place of the gateway's two checks, and otherwise the same checks: a verified arrival's receipt passes `delegation binds principal and agent` and `executed tool within delegated scope`; an unknown arrival's passes `principal is claimed, not attested`; a receipt that carries an `authorization` passes the authorization checks, including `authorization logged before execution`. Both verifiers, the Python verifier, and `policy simulate` accept door receipts; the conformance vectors `door-unknown-executed`, `door-unknown-denied`, and `door-verified-executed` pin them.
+
+## Behind nginx or Envoy: authz mode
+
+A site that already runs nginx or Envoy need not send its traffic through the door. With `"authz": true` in the config the door relays nothing and has no origin: it answers the proxy's external-auth check for each request, and the proxy relays or refuses. `deploy/door/` has a stock [nginx.conf](../../../deploy/door/nginx.conf) (`auth_request`) and a stock [envoy.yaml](../../../deploy/door/envoy.yaml) (`ext_authz`, HTTP mode), with the door config and policy they run against, and `deploy/door/demo.sh` runs each in front of a stand-in site: an allowed read, a refused refund, a verified agent's refund, and every receipt verified.
+
+```json
+{ "identity": { "keyFile": "keys/door.key" }, "authz": true, "trustProxy": true, "routes": [...], "policyFile": "policy.cedar", "receiptsDir": "receipts", "logFile": "log.jsonl" }
+```
+
+- **What the door reads.** The proxy sets `X-Original-Method` (the original request's method) and `X-Original-URI` (its path and query), and `X-Forwarded-For` (the client's address; `trustProxy` is required, and the door takes the last address), and passes the client's headers the door reads: the grant, `X-Agent-Custody-Agent`, `Signature`, `Signature-Input`, `Signature-Agent`, the challenge header, `User-Agent`, `Accept`, `Content-Type`, and the client's `Host`. The check request's own method and path are the proxy's and are ignored; the door decides, and checks a [Web Bot Auth](#web-bot-auth-signatures) signature, on the original method, target, and `Host`; a check without the two `X-Original-*` headers is answered 400 with no receipt.
+- **What it answers.** 200 with `X-Agent-Custody-Receipt` and `X-Agent-Custody-Class`, which the proxy passes to the origin in place of anything the client sent under those names; 403 on a refusal; 503 when the log refused the authorization of a request that can change something; 400 for a path that does not decode cleanly. nginx relays only on a 2xx, refuses on 401 and 403, and answers 500 for anything else; Envoy relays only on 200 and returns anything else to the client. Both stock configs fail closed when the door is down.
+- **Commit before relay still holds.** Any method but GET, HEAD, and OPTIONS, and any route in `precommit`, is committed to the log before the door answers 200, so the evidence exists before the proxy can relay the request.
+
+**What its receipts record: the decision, not the result.** In authz mode the door never sees the request body or the origin's answer. The proxy holds the body and relays it after the 200, and the answer goes from the origin to the client through the proxy. So:
+
+- `issuer.framework` is `authz`.
+- `request.args` has `method`, `path`, `query`, and `headers`, and no `body`, `bodyBytes`, or `bodyDigest`. A rule on `context.args.body` errors and denies; a rule on an amount belongs at the origin, or in a door that relays.
+- An allow is `execution.status: "withheld"` with the reason "allowed; the door answered the proxy's authz check and relays nothing ...": the door relayed nothing. A deny is `denied`. No authz receipt is ever `executed`, `failed`, or `error`, and none carries a result: whether the proxy relayed the request, and what the origin answered, is in no receipt.
+- The verifier runs `door authz decided, relayed nothing` on such a receipt, in TypeScript, in the browser, and in Python, and the report says the receipt records a decision. A receipt re-signed to claim a result fails it (vector `resigned-door-authz-executed`); vectors `door-authz-allowed`, `door-authz-denied`, and `door-authz-verified-precommitted` pin the honest ones.
+
+**What to get right in the proxy.**
+
+- The door believes the proxy's headers. Let only the proxy reach it: anyone who can reach the door can have it write receipts for requests that never happened, and an allow receipt does not prove that the proxy relayed anything. The stock configs keep the door off the published ports.
+- The proxy sets `X-Original-Method`, `X-Original-URI`, and `X-Forwarded-For` itself, replacing any copy the client sent (nginx `proxy_set_header`, Envoy `headers_to_add` with `use_remote_address: true`). A config that passes the client's copies lets the client choose what the door decides on.
+- The door decides on the path as it normalises it (percent-decoded once, empty segments merged) and refuses a segment that decodes to a slash or a dot segment; the proxy relays the path as the client sent it. Relay it unchanged (nginx `proxy_pass` with no URI part, no Envoy rewrite) and let the origin normalise as the door does, or a path the origin reads differently is a way around a route.
+- The stock configs strip `X-Agent-Custody-Grant` and `X-Agent-Custody-Agent` before the origin. `Authorization` reaches the origin unchanged, since the origin may use it: behind a proxy an agent should send its grant in `X-Agent-Custody-Grant`.
+- Envoy sends the door only the client headers in `allowed_headers`. A new header the policy reads, such as a challenge header under another name, goes into that list.
 
 ## What it does not do yet
 
@@ -377,4 +404,4 @@ The verifier runs `door receipt carries a policy decision` in place of the gatew
 - Stream a request body: the body is read whole, up to `maxBodyBytes`, so that the policy can read it and the receipt can commit to it.
 - Relay a response larger than `maxResponseBytes`, or stream one: the body is relayed whole so that its digest can be recorded. A larger one is not held: reading stops at the limit, the client gets 502, and the receipt records that the origin answered.
 
-Tutorials: [40-door.ts](../examples/40-door.ts), the proxy; [48-door-app.ts](../examples/48-door-app.ts), in-process.
+Tutorials: [40-door.ts](../examples/40-door.ts), the proxy; [48-door-app.ts](../examples/48-door-app.ts), in-process; [49-door-authz.ts](../examples/49-door-authz.ts), behind nginx or Envoy.

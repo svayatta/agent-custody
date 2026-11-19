@@ -6,7 +6,7 @@ What it deploys is the log service from `@agent-custody/receipts` as it runs at 
 
 Operators who log here should set `"hashOnly": true` in their `log` config, so the server commits to receipts without ever holding them; the log file then contains hashes only. Without it, the server stores whole receipt envelopes, arguments and results included, which is fine for your own second machine and not for other people's receipts.
 
-The gateway has its own image and recipes in [gateway/](gateway/README.md): one shared gateway for every agent on a host or cluster. This page is about the log.
+The gateway has its own image and recipes in [gateway/](gateway/README.md): one shared gateway for every agent on a host or cluster. [door/](door/README.md) has stock nginx and Envoy configs that ask the door for a decision on every request. This page is about the log.
 
 ## The image
 
@@ -57,6 +57,7 @@ The volume at `/data` is the whole state: the log and the key. Back it up; a los
 - The profiles `public` (Caddy TLS and the docs site) and `file` (the file-backed log, no Postgres) are off by default. Their variables must stay optional, so that `docker compose config` passes without them.
 - Check with `docker compose -f deploy/docker-compose.yaml config -q` and `kubectl kustomize deploy/k8s`. CI runs both, `shellcheck deploy/*.sh`, `test-upgrade.sh`, and the image smoke test on every pull request that touches `deploy/`. The gateway's files in `deploy/gateway` are checked the same way by the `gateway-image` workflow.
 - `.github/workflows/image.yml` pushes the image to ghcr.io on a `v*` tag or by hand (`gh workflow run image.yml -f version=X`). It uses `GITHUB_TOKEN`, never a personal token. It builds each architecture on a native runner (`ubuntu-24.04-arm` for arm64), then merges the digests into one tag. Do not merge these into one multi-arch job: npm under QEMU emulation dies with SIGILL.
+- `door/` holds a stock `nginx.conf` and a stock `envoy.yaml` and the compose file and `demo.sh` that run them against the door. Keep the configs stock: no module or filter beyond what ships with nginx and Envoy. Each sets `X-Original-Method`, `X-Original-URI`, and `X-Forwarded-For` itself and never passes the client's copies, fails closed when the door is down, passes only the door's `X-Agent-Custody-Receipt` and `X-Agent-Custody-Class` to the origin, and strips the grant and the declared agent name. The door is never published on a port. A change to either config, to the door's authz mode, or to `door.json` must pass `deploy/door/demo.sh`, which the `image` workflow runs on the pull request with `docker compose -f deploy/door/docker-compose.yaml config -q` and `shellcheck deploy/door/*.sh`. The demo's receipts record decisions, not results: a step that claims the origin did or did not see a request checks the origin's own log.
 - The site build excludes `deploy/**`.
 
 ## Deploying from GitHub Actions

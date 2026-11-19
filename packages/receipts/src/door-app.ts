@@ -128,11 +128,12 @@ const toResponse = (a: DoorAnswer) => new Response(a.body, { status: a.status, h
 
 /**
  * The door in-process, from a door config without `origin` (a path, read with `loadDoorConfig`, or a config already
- * loaded). Throws at once on a config the door cannot serve: a missing key, a policy that does not parse, an `origin`.
+ * loaded). Throws at once on a config the door cannot serve: a missing key, a policy that does not parse, an `origin`, `authz`.
  */
 export function door(config: string | DoorConfig, options: DoorAppOptions = {}): InProcessDoor {
   const cfg = typeof config === "string" ? loadDoorConfig(config) : config;
   if (cfg.origin) throw new Error("the in-process door passes an allowed request to the app it runs in, so its config names no origin; origin.url is for the door proxy (`agent-custody door`)");
+  if (cfg.authz) throw new Error("the in-process door passes an allowed request to the app it runs in; authz is for the door answering nginx or Envoy checks (`agent-custody door`)");
   const core = createDoorCore(cfg, { ...options, autoFlush: options.autoFlush ?? true }, MIDDLEWARE_FRAMEWORK);
 
   const middleware = (req: IncomingMessage, res: ServerResponse, next: (err?: unknown) => void): void => {

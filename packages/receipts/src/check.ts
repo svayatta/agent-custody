@@ -70,11 +70,11 @@ function onPath(command: string): boolean {
   return (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync(join(d, command)));
 }
 
-/** True when the file is a door config rather than a gateway config: it names an origin or door routes, which no gateway config has. An in-process door's config has routes and no origin. */
+/** True when the file is a door config rather than a gateway config: it names an origin, door routes, or answers authz checks, which no gateway config does. An in-process door's config has routes and no origin. */
 export function isDoorConfig(configPath: string): boolean {
   try {
     const raw = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
-    return !!raw && typeof raw === "object" && !Array.isArray(raw) && ("origin" in raw || "routes" in raw) && !("upstream" in raw) && !("upstreams" in raw) && !("agents" in raw);
+    return !!raw && typeof raw === "object" && !Array.isArray(raw) && ("origin" in raw || "routes" in raw || "authz" in raw) && !("upstream" in raw) && !("upstreams" in raw) && !("agents" in raw);
   } catch {
     return false;
   }
@@ -163,7 +163,8 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
   add("ok", "precommit", cfg.precommit.includes("*") ? "every arrival is committed to the log before it is relayed" : `every POST, PUT, PATCH, and DELETE${cfg.precommit.length ? `, and every arrival at ${cfg.precommit.join(", ")},` : ""} is committed to the log before it is relayed`);
   if (cfg.routes.length === 0) add("warn", "routes", `no routes: every arrival is the action "${cfg.unmatchedRoute}"`);
   else add("ok", "routes", `${cfg.routes.length} route(s); unmatched arrivals are "${cfg.unmatchedRoute}"`);
-  if (!cfg.origin) add("ok", "origin", "no origin: a config for the door in-process (Express or Next.js); `agent-custody door` needs origin.url");
+  if (cfg.authz) add("ok", "authz", "answers nginx auth_request and Envoy ext_authz checks: the proxy relays, and the receipts record the decision, never the body or the origin's answer");
+  else if (!cfg.origin) add("ok", "origin", "no origin: a config for the door in-process (Express or Next.js); `agent-custody door` needs origin.url, or authz: true behind nginx or Envoy");
   else {
     const origin = new URL(cfg.origin.url);
     if (origin.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)) add("warn", "origin", `${cfg.origin.url} is plain HTTP to a remote host; the relayed traffic is not encrypted on that leg`);

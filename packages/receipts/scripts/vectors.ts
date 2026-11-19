@@ -556,6 +556,37 @@ try {
   } finally { await door.close(); await dhost.close(); await origin.close(); }
 }
 
+// ---- the door answering a proxy's authz check: issuer kind "door", framework "authz", a decision and never a result ----
+{
+  const origin = await startOrigin();
+  const afx = buildDoorFixture(mkdtempSync(join(tmpdir(), "vectors-door-authz-")), origin.url, { authz: true, trustProxy: true });
+  writeFileSync(join(afx.dir, "policy.cedar"), `permit(principal, action == Action::"catalogue", resource);\npermit(principal, action == Action::"refund", resource) when { context.facts.arrival.class == "verified" };\n`);
+  key("door-authz", afx.doorPub);
+  key("door-authz-principal", afx.principalPub);
+  const ahost = await createDoorHost(loadDoorConfig(afx.configFile));
+  const adoor = await serveDoor(ahost, { port: 0, log: () => {} });
+  try {
+    const ask = async (method: string, uri: string, headers: Record<string, string> = {}) => {
+      const res = await fetch(`${adoor.url}/_custody`, { headers: { "x-original-method": method, "x-original-uri": uri, "x-forwarded-for": "203.0.113.7", ...headers } });
+      await res.arrayBuffer();
+      return bundleFile(afx.receiptsDir, res.headers.get(RECEIPT_HEADER)!);
+    };
+    const A = { issuerKeys: ["door-authz"], principalKeys: [] as string[], logKeys: [] as string[] };
+    const allowedRead = await ask("GET", "/catalogue/shoes?colour=red");
+    const refusedRefund = await ask("POST", "/refunds");
+    const grant = createDelegation(afx.principalKey, { version: "0.1", principal: "shop-owner", agent: "shopping-agent", scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() });
+    const allowedRefund = await ask("POST", "/refunds", { authorization: `Bearer ${grantHeader(grant)}` });
+    const alog = logLines(afx.logFile);
+    addCase({ name: "door-authz-allowed", description: "nginx asks the door about a catalogue read (auth_request, X-Original-Method and X-Original-URI). The door answers 200 and relays nothing: the receipt is withheld with the allowed reason, framework `authz`, no body size or digest, and `door authz decided, relayed nothing` passes. It records the decision, never the origin's answer.", bundle: allowedRead, ...A, log: alog });
+    addCase({ name: "door-authz-denied", description: "An unknown arrival's refund, asked about by the proxy, is refused: a denied authz receipt beside a deny decision.", bundle: refusedRefund, ...A, log: alog });
+    addCase({ name: "door-authz-verified-precommitted", description: "A verified agent's refund, asked about by the proxy: a POST, so the authorization is committed to the log before the door answers 200, and the authorization checks run and pass.", bundle: allowedRefund, ...A, principalKeys: ["door-authz-principal"], log: alog });
+    const akey = loadPrivateKey(join(afx.dir, "keys", "door.key"));
+    const claimed = { status: 200, bodyBytes: 2, bodyDigest: "0".repeat(64) };
+    addCase({ name: "resigned-door-authz-executed", description: "An authz receipt re-signed to say the request was executed with an origin result. A door answering an authz check never sees the origin's answer, so `door authz decided, relayed nothing` fails (and the log inclusion of the changed leaf).", bundle: resigned(allowedRead, akey, (st) => { st.predicate.execution = { status: "executed", result: claimed, resultDigest: digestOf(claimed), provenance: "observed" }; }), ...A, log: alog });
+    addCase({ name: "resigned-door-authz-denied-beside-allow", description: "An authz receipt re-signed to say denied while its policy decision says allow: the check fails, as the guardian's does.", bundle: resigned(allowedRead, akey, (st) => { st.predicate.execution = { status: "denied", reason: "no", provenance: "observed" }; }), ...A, log: alog });
+  } finally { await adoor.close(); await ahost.close(); await origin.close(); }
+}
+
 // ---- the egress witness: receipts for connections that went around the gateway, issuer kind "egress" ----
 {
   const echo = await startEcho();

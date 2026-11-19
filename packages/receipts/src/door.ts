@@ -30,6 +30,11 @@ export const CLASS_HEADER = "x-agent-custody-class";
 export const ARRIVAL_FACT = "arrival";
 /** the header an agent may use to name itself without a grant; recorded as claimed, never checked */
 export const AGENT_HEADER = "x-agent-custody-agent";
+/** in authz mode: the original request's method and target, as nginx `auth_request` and Envoy `ext_authz` are configured to send them */
+export const ORIGINAL_METHOD_HEADER = "x-original-method";
+export const ORIGINAL_URI_HEADER = "x-original-uri";
+/** the reason an allowed authz receipt carries: the door decided, and the proxy, not the door, relays */
+export const AUTHZ_ALLOWED_REASON = "allowed; the door answered the proxy's authz check and relays nothing: the proxy relays the request, and the door sees neither its body nor the origin's answer";
 
 export type ArrivalClass = "verified" | "claimed" | "unknown";
 
@@ -310,6 +315,19 @@ function requestUrl(req: DoorRequest): URL {
   return raw.startsWith("/") ? new URL(`http://door${raw}`) : new URL(raw, "http://door");
 }
 
+/**
+ * The original request an authz check asks about, from `X-Original-Method` and `X-Original-URI`, with the check's own
+ * headers and address. The check request's own method and path are the proxy's (nginx sends GET to a fixed location),
+ * so both headers are required, and a check without them is refused rather than decided on the proxy's request.
+ */
+export function authzTarget(req: DoorRequest): DoorRequest | { problem: string } {
+  const method = req.headers[ORIGINAL_METHOD_HEADER];
+  const uri = req.headers[ORIGINAL_URI_HEADER];
+  if (typeof method !== "string" || !/^[A-Za-z]+$/.test(method)) return { problem: `an authz check needs ${ORIGINAL_METHOD_HEADER}, the original request's method` };
+  if (typeof uri !== "string" || !uri.startsWith("/")) return { problem: `an authz check needs ${ORIGINAL_URI_HEADER}, the original request's path and query` };
+  return { method: method.toUpperCase(), url: uri, headers: req.headers, ...(req.headersDistinct ? { headersDistinct: req.headersDistinct } : {}), socket: req.socket };
+}
+
 /** A path without its trailing slash: `/refunds/` and `/refunds` are one route. */
 const bare = (p: string) => (p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p);
 
@@ -521,8 +539,8 @@ export interface DoorCore {
   admit(): boolean;
   release(): void;
   busy(): DoorAnswer;
-  /** `framework`, when given, is the receipt's `issuer.framework` in place of the core's */
-  decide(req: DoorRequest, receiptId: string, read: (max: number) => Promise<BodyRead>, framework?: string): Promise<DoorDecision>;
+  /** `framework`, when given, is the receipt's `issuer.framework` in place of the core's. `read` is null when the door never sees the body (an authz check): the receipt then records none */
+  decide(req: DoorRequest, receiptId: string, read: ((max: number) => Promise<BodyRead>) | null, framework?: string): Promise<DoorDecision>;
   /** a header the door consumed and never passes on: the grant (and `Authorization` when it carried it), the declared agent, the challenge token */
   consumed(name: string, req: DoorRequest, arrival: Arrival): boolean;
   /** writes the receipt; null when it could not be written, after saying why on stderr */
@@ -592,7 +610,7 @@ export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetc
     return policyNow;
   };
 
-  async function decide(req: DoorRequest, receiptId: string, readArrivalBody: (max: number) => Promise<BodyRead>, framework?: string): Promise<DoorDecision> {
+  async function decide(req: DoorRequest, receiptId: string, readArrivalBody: ((max: number) => Promise<BodyRead>) | null, framework?: string): Promise<DoorDecision> {
     const timestamp = new Date().toISOString();
     const url = requestUrl(req);
     const method = (req.method ?? "GET").toUpperCase();
@@ -623,8 +641,8 @@ export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetc
     }
     const { text: policyText, digest: pDigest } = currentPolicy();
 
-    const read = await readArrivalBody(cfg.maxBodyBytes);
-    const body = "body" in read ? read.body : null;
+    const read = readArrivalBody ? await readArrivalBody(cfg.maxBodyBytes) : null;
+    const body = read === null ? Buffer.alloc(0) : "body" in read ? read.body : null;
     const headers: Record<string, string> = {};
     for (const name of RECORDED_HEADERS) {
       const v = req.headers[name];
@@ -643,7 +661,7 @@ export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetc
       query: queryOf(url),
       headers,
       ...(recordedBody !== undefined ? { body: recordedBody } : {}),
-      ...(body ? { bodyBytes: body.length, bodyDigest: sha256Hex(body) } : { bodyBytes: (read as { bytes: number }).bytes, bodyOversized: true }),
+      ...(read === null ? {} : body ? { bodyBytes: body.length, bodyDigest: sha256Hex(body) } : { bodyBytes: (read as { bytes: number }).bytes, bodyOversized: true }),
     };
     const facts: Record<string, FactRecord> = { [ARRIVAL_FACT]: { tool: "door.arrival", args: {}, value: arrival, resultDigest: digestOf(arrival), provenance: "observed" } };
 
@@ -770,7 +788,8 @@ export const sendAnswer = (res: ServerResponse, a: DoorAnswer) => {
 
 /** The door as a reverse proxy: decides each arrival with the shared core, relays an allowed one to the origin, and receipts it before answering. */
 export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {}): Promise<DoorHost> {
-  if (!cfg.origin) throw new Error("the door proxy needs origin.url: the site it relays to. A config without one is for the door in-process (@agent-custody/receipts/door)");
+  if (cfg.authz) return createAuthzHost(cfg, options);
+  if (!cfg.origin) throw new Error("the door proxy needs origin.url: the site it relays to, or authz: true to answer a proxy's authz checks. A config without either is for the door in-process (@agent-custody/receipts/door)");
   const originCfg = cfg.origin;
   const originHeaders: Record<string, string> = { ...(originCfg.headers ?? {}) };
   for (const [header, variable] of Object.entries(originCfg.headerEnv ?? {})) {
@@ -889,6 +908,49 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         res.end(answer.body);
       }
     }
+  }
+
+  return {
+    keyid: core.keyid,
+    policyDigest: core.policyDigest,
+    handle,
+    flushOutbox: core.flushOutbox,
+    pendingReceipts: core.pendingReceipts,
+    async close() {
+      core.close();
+    },
+  };
+}
+
+/**
+ * The door behind nginx `auth_request` or Envoy `ext_authz`: decides each check about the original request with the
+ * shared core, receipts the decision, and answers 200 with the receipt id and class, or the refusal. It relays nothing,
+ * so the receipt records the decision, not the result: an allow is `withheld` with `AUTHZ_ALLOWED_REASON`.
+ */
+function createAuthzHost(cfg: DoorConfig, options: DoorOptions): DoorHost {
+  const core = createDoorCore(cfg, options, "authz");
+
+  async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // a check carries no body: the proxy holds the original's and relays it after the answer
+    req.resume();
+    if (!core.admit()) return sendAnswer(res, core.busy());
+    try {
+      await answerCheck(req, res);
+    } finally {
+      core.release();
+    }
+  }
+
+  async function answerCheck(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // a check that does not say what it is checking is the proxy's misconfiguration, not an arrival: nothing to decide or receipt
+    const original = authzTarget(req);
+    if ("problem" in original) return sendAnswer(res, json(400, {}, { error: original.problem }));
+    const d = await core.decide(original, randomUUID(), null);
+    const execution: Execution = d.refused?.execution ?? { status: "withheld", reason: d.head.policy?.decision === "allow" ? AUTHZ_ALLOWED_REASON : `${AUTHZ_ALLOWED_REASON}. Observe mode: the policy denied it and the denial was not enforced`, provenance: "observed" };
+    const recorded = await core.record(d, execution);
+    if (!recorded) return sendAnswer(res, core.unrecorded(d, execution, true));
+    if (d.refused) return sendAnswer(res, core.refusal(d, recorded.logPending));
+    return sendAnswer(res, json(200, core.mark(d, recorded.logPending), { allowed: true, receipt: d.receiptId }));
   }
 
   return {
