@@ -109,6 +109,7 @@ export default withMermaid(
             { text: "Python SDK", link: "/python/" },
             { text: "Running the gateway", link: "/receipts/usage" },
             { text: "Configuring the gateway", link: "/receipts/configuration" },
+            { text: "Attested gateway keys", link: "/receipts/attestation" },
             { text: "Gateway console", link: "/receipts/console" },
             { text: "Human approvals", link: "/receipts/approvals" },
             { text: "Writing policies", link: "/receipts/policies" },

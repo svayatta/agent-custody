@@ -26,6 +26,14 @@ describe("browser verifier against the conformance vectors", () => {
       expect({ ok: r.ok, failing: r.checks.filter((x) => !x.ok).map((x) => x.name) }).toEqual(c.expected);
     });
   }
+  const attestation = load("attestation.json");
+  for (const c of attestation.cases as any[]) {
+    it(`attestation: ${c.name}`, async () => {
+      const k = (n: string) => publicKeyFromPem(attestation.keys[n].publicKeyPem);
+      const r = await verifyBundle(c.bundle, { issuerKeys: await Promise.all(c.issuerKeys.map(k)), principalKeys: await Promise.all(c.principalKeys.map(k)), attestation: c.attestation });
+      expect({ ok: r.ok, failing: r.checks.filter((x) => !x.ok).map((x) => x.name) }).toEqual(c.expected);
+    });
+  }
   it("prints the same ISSUER line as the CLI verifier for every vector", async () => {
     const line = (report: string) => report.split("\n").find((l) => l.startsWith("ISSUER: "));
     const cliKey = (name: string) => cliKeyFromPem(receipts.keys[name].publicKeyPem);

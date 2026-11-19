@@ -10,7 +10,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { strictRefusals, type FactConfig, type GatewayConfig, type UpstreamConfig } from "./config.ts";
-import { digestOf, dsseVerifiers, dsseVerify, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
+import { digestOf, dsseVerifiers, dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
+import { logAttestation, openAttestationProvider, type AttestationProvider } from "./attestation.ts";
 import { delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { APPROVAL_META_KEY, DEFAULT_APPROVAL_LIFETIME_SECONDS, consumeApproval, verifyApproval, verifyApprovalStatement } from "./approval.ts";
 import { createIssuer, ReceiptPending, type FlushResult, type PreparedReceipt } from "./issue.ts";
@@ -110,6 +111,8 @@ export function upstreamEnv(extra?: Record<string, string>): Record<string, stri
 export interface GatewayOptions {
   /** the log to append to, in place of the one the config names; for embedding and tests */
   log?: LogSink;
+  /** the attestation provider, in place of the one the config names; for tests */
+  attestationProvider?: AttestationProvider;
   /** told about every receipt after it is written, in place of the exporter the config names */
   exporter?: ReceiptExporter;
   /** cancels the start while it is connecting to the upstreams: every upstream already started is closed and the call rejects */
@@ -127,6 +130,8 @@ export interface GatewayOptions {
  */
 export interface GatewayHost {
   keyid: string;
+  /** the attestation bundle of the gateway key, logged once at start, when the config asks for one */
+  attestationFile?: string;
   /** a session for this grant: the grant is verified against the trusted principal keys and its validity window first */
   open(grantEnvelope: Envelope): Gateway;
   /** revokes a grant by its digest: every session under it refuses its next call, and no new session opens for it. Written to the config's revokedGrants file when there is one. */
@@ -155,7 +160,10 @@ export function writeRevokedGrants(path: string, digests: string[]): void {
 }
 
 export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOptions = {}): Promise<GatewayHost> {
-  const gatewayKey = loadPrivateKey(cfg.identity.keyFile);
+  // An attested key is made here and never written: the only copy is this process's memory.
+  const attestationProvider = options.attestationProvider ?? (cfg.attestation ? openAttestationProvider(cfg.attestation) : undefined);
+  if (!attestationProvider && !cfg.identity.keyFile) throw new Error("agent-custody gateway: identity.keyFile is not set, and no attestation is configured");
+  const gatewayKey = attestationProvider ? generateKeyPair() : loadPrivateKey(cfg.identity.keyFile!);
   const trusted = cfg.trustedPrincipalKeys.map(loadPublicKey);
   const approvalKeys = cfg.approvals?.trustedKeys.map(loadPublicKey) ?? [];
   const approvalRule = (tool: string) => cfg.approvals?.tools.find((rule) => rule.tool === tool) ?? cfg.approvals?.tools.find((rule) => rule.tool === "*");
@@ -284,7 +292,9 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
   const sink = options.log ?? openLog(cfg, gatewayKey);
   if (cfg.strict && sink.kind !== "http") throw new Error(`agent-custody gateway: strict mode needs a remote log, and ${sink.where} is a file`);
   const issuer = createIssuer(gatewayKey, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules: cfg.capture, key: captureKey } });
-  const issuedBy = { kind: "gateway" as const, keyid: issuer.keyid, version: GATEWAY_VERSION, ...(cfg.strict ? { strict: true } : {}) };
+  // Logged once per key, before any receipt, so every receipt this key signs can name it.
+  const attested = attestationProvider ? await logAttestation(gatewayKey, attestationProvider, sink, cfg.receiptsDir, GATEWAY_VERSION) : undefined;
+  const issuedBy = { kind: "gateway" as const, keyid: issuer.keyid, version: GATEWAY_VERSION, ...(cfg.strict ? { strict: true } : {}), ...(attested ? { attestation: attested.digest } : {}) };
   const precommit = new Set(cfg.precommit);
   const operationRule = (tool: string) => cfg.operations?.tools.find((rule) => rule.tool === tool);
   const consequential = (tool: string) => !!cfg.strict || !!operationRule(tool) || precommit.has("*") || precommit.has(tool);
@@ -760,6 +770,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
 
   return {
     keyid: issuer.keyid,
+    ...(attested ? { attestationFile: attested.file } : {}),
     open,
     revoke,
     policyDigest: () => currentPolicy().digest,

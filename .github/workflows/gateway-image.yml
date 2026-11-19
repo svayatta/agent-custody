@@ -77,7 +77,7 @@ jobs:
           rm deploy/gateway/.env
       - run: kubectl kustomize deploy/gateway/k8s > /dev/null
       - run: kubectl kustomize deploy/gateway/lockdown/k8s > /dev/null
-      - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh deploy/gateway/lockdown/vm/check-lockdown.sh .github/scripts/*.sh
+      - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh deploy/gateway/tee/local-simulated.sh deploy/gateway/lockdown/vm/check-lockdown.sh .github/scripts/*.sh
       - name: the VM lockdown ruleset and units parse
         run: |
           sudo apt-get install -y -qq nftables > /dev/null

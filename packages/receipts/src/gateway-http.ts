@@ -7,6 +7,7 @@
 // reason in the body. (Not 401: the MCP client transport treats 401 as an OAuth challenge and hides the body.)
 // Bind to loopback or put TLS in front; the transport itself is plain HTTP.
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -120,6 +121,8 @@ export async function serveHttp(host: GatewayHost, opts: HttpGatewayOptions): Pr
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true, sessions: sessions.size, keyid: host.keyid, pendingReceipts: host.pendingReceipts() });
+    // The attestation bundle of an attested key: public, the same file the gateway logged, for a verifier to fetch.
+    if (req.method === "GET" && url.pathname === "/attestation") return host.attestationFile ? json(res, 200, JSON.parse(readFileSync(host.attestationFile, "utf8"))) : json(res, 404, { error: "this gateway's key is not attested" });
     if (url.pathname !== path) return json(res, 404, { error: "not found" });
     try {
       const sid = req.headers["mcp-session-id"];

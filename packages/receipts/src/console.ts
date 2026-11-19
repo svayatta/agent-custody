@@ -136,7 +136,8 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
     const problems: string[] = [];
     const issuerKeys: PublicKeyRef[] = [];
     try {
-      if (existsSync(cfg.identity.keyFile)) {
+      if (!cfg.identity.keyFile) problems.push("the gateway key is attested and lives only in the gateway process; verify its receipts with its attestation");
+      else if (existsSync(cfg.identity.keyFile)) {
         const k = loadPrivateKey(cfg.identity.keyFile);
         issuerKeys.push({ publicKey: k.publicKey, keyid: k.keyid });
       } else problems.push("the gateway key does not exist yet, so receipts cannot be verified");
