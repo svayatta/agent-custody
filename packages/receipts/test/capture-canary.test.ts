@@ -492,4 +492,37 @@ describe("the canary", () => {
       }
     });
   }
+
+  // The door answering a proxy's authz check is another path: the query arrives in X-Original-URI, never in the request line.
+  for (const control of [false, true]) {
+    it(control ? "the authz door control: with arguments kept in clear, the canary in X-Original-URI is in the files, the log, and the exports" : "at an authz door with no capture rule, a secret in the original query reaches nothing in clear: allowed, refused, pre-committed, withheld by the log", async () => {
+      const dir = mkdtempSync(join(tmpdir(), control ? "canary-door-authz-control-" : "canary-door-authz-"));
+      const fx = buildDoorFixture(dir, "http://unused.invalid", { authz: true, trustProxy: true, capture: control ? { "*": { args: { mode: "clear" } } } : undefined });
+      writeFileSync(join(dir, "policy.cedar"), `permit(principal, action == Action::"catalogue", resource);\npermit(principal, action == Action::"refund", resource) when { context.facts.arrival.class == "verified" };\n`);
+      const exports = keepExports();
+      const host = await createDoorHost(loadDoorConfig(fx.configFile), { exporter: exports.exporter });
+      const door = await serveDoor(host, { port: 0, log: () => {} });
+      const refusing: LogSink = { kind: "file", where: "refusing", append: async () => { throw new Error("the log is full"); } };
+      const outboxHost = await createDoorHost(loadDoorConfig(fx.configFile), { exporter: exports.exporter, log: refusing });
+      const outboxDoor = await serveDoor(outboxHost, { port: 0, log: () => {} });
+      const grant = createDelegation(fx.principalKey, { version: "0.1", principal: "shop-owner", agent: "shopping-agent", scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() });
+      const ask = (url: string, method: string, uri: string, headers: Record<string, string> = {}) => fetch(`${url}/_agent_custody`, { headers: { "x-original-method": method, "x-original-uri": uri, "x-forwarded-for": "203.0.113.7", ...headers } });
+      try {
+        const answers = [
+          await ask(door.url, "GET", `/catalogue/shoes?api_key=${CANARY}`),
+          await ask(door.url, "POST", `/refunds?note=${CANARY}`),
+          await ask(door.url, "POST", `/refunds?note=${CANARY}`, { authorization: `Bearer ${grantHeader(grant)}` }),
+          await ask(outboxDoor.url, "POST", `/refunds?note=${CANARY}`, { authorization: `Bearer ${grantHeader(grant)}` }),
+        ];
+        expect(answers.map((a) => a.status)).toEqual([200, 403, 200, 503]);
+        for (const a of answers) expect(a.headers.get(DOOR_RECEIPT_HEADER)).toBeTruthy();
+        const text = [onDisk(fx.receiptsDir, fx.logFile), exports.seen.join("\n")].join("\n");
+        if (control) expect(text).toContain(CANARY);
+        else expect(text).not.toContain(CANARY);
+      } finally {
+        for (const d of [door, outboxDoor]) await d.close();
+        for (const h of [host, outboxHost]) await h.close();
+      }
+    });
+  }
 });

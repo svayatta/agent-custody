@@ -45,6 +45,7 @@ if [ "${ROLE:-log}" = "portal" ]; then
   # MAIL_FROM is an address only (no display name): the arguments are word-split below
   [ -n "${MAIL_API_KEY:-}" ] && portal_args="$portal_args --mail-key-env MAIL_API_KEY --mail-from ${MAIL_FROM:?MAIL_FROM is required with MAIL_API_KEY}"
   [ -n "${MAIL_NOTIFY:-}" ] && portal_args="$portal_args --mail-notify $MAIL_NOTIFY"
+  [ -n "${MAIL_REPLY_TO:-}" ] && portal_args="$portal_args --mail-reply-to $MAIL_REPLY_TO"
   [ -n "${GITHUB_CLIENT_ID:-}" ] && portal_args="$portal_args --github-client-id $GITHUB_CLIENT_ID --github-secret-env GITHUB_CLIENT_SECRET"
   [ -n "${GOOGLE_CLIENT_ID:-}" ] && portal_args="$portal_args --google-client-id $GOOGLE_CLIENT_ID --google-secret-env GOOGLE_CLIENT_SECRET"
   [ "${TRUST_PROXY:-}" = "1" ] && portal_args="$portal_args --trust-proxy"

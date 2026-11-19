@@ -95,7 +95,7 @@ The gateway asks for the token at `/run/container_launcher/teeserver.sock`, `POS
 ## Running it locally (simulated)
 
 ```bash
-node packages/receipts/examples/45-attested-gateway.ts      # in-process, ends with OK
+node packages/receipts/examples/50-attested-gateway.ts      # in-process, ends with OK
 deploy/gateway/tee/local-simulated.sh                        # the real image, in Docker
 ```
 

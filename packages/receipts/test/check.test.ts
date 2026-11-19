@@ -263,6 +263,30 @@ describe("agent-custody check", () => {
     expect(r).toContain("approvals.usedDir");
   });
 
+  it("a regular file in a configured path's ancestor is reported as a paths error", async () => {
+    const fx = fresh();
+    const blocker = join(fx.dir, "blocker-file");
+    writeFileSync(blocker, "regular file");
+    edit(fx.configFile, (c) => {
+      c.receiptsDir = join(blocker, "receipts");
+    });
+    const r = errors(await checkConfig(fx.configFile)).filter((f) => f.check === "paths");
+    expect(r.length).toBeGreaterThan(0);
+    expect(r.some((f) => f.message.includes("receipts cannot be created"))).toBe(true);
+  });
+
+  it("a configured file that already exists, such as a log the gateway has written, still passes", async () => {
+    const fx = fresh();
+    const log = join(fx.dir, "written.jsonl");
+    writeFileSync(log, "");
+    edit(fx.configFile, (c) => {
+      c.logFile = log;
+    });
+    const r = await checkConfig(fx.configFile);
+    expect(errors(r).filter((f) => f.check === "paths")).toEqual([]);
+    expect(r).toContainEqual(finding("ok", "paths", "every path the gateway writes can be written"));
+  });
+
   it("an expired grant is an error", async () => {
     const fx = fresh(-60_000);
     const e = errors(await checkConfig(fx.configFile)).find((f) => f.check === "grant");

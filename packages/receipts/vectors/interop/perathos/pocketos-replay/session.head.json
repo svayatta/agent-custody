@@ -1,0 +1,11 @@
+{
+  "receipt_hash": "f53bd64de64d8b29fc025c7d07f3570d6a1a41c1fe036fb4727cb30c4c1b19b1",
+  "seq": 8,
+  "session_id": "pocketos-replay",
+  "signature": {
+    "algorithm": "ed25519",
+    "signature": "c739672a1fec289190524fe8aff579f53428f96922b701d4db20afb7dcec6d390583fba7544ceb20b60cb9e61bf5315f2684194df499c7aeece4373d15ebd103",
+    "verify_key": "d53f11ff38959d472a2e619b346340b44a79866fb8650d96f22ada467f524707"
+  },
+  "ts": "2026-11-04T08:19:08.217162Z"
+}

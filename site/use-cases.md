@@ -7,7 +7,7 @@ description: "Where a receipt earns its keep, by the kind of team running the ag
 
 Every entry here follows the same shape, because the product does: the call that matters, a policy the gateway evaluates on facts it fetched itself, what the receipt proves, and who outside the team can verify it. No test runs the policies on this page. Each was checked by hand against the Cedar evaluator, with one request it permits and one it refuses. Four of the eight cases have a runnable example behind them. Where there is no example yet, it says so.
 
-The pattern is the same everywhere. The gateway sits between the agent and the tool, in your infrastructure. Nothing about the agent changes. What changes is that the decision is made outside it, and that the record of the decision is signed by a key the agent does not hold and its hash goes to a tamper-evident log, where anyone who kept a checkpoint can detect a rewrite. See [what a receipt proves](/receipts/#what-a-receipt-proves-and-what-it-does-not) for the exact claims.
+The pattern is the same everywhere. The gateway sits between the agent and the tool, in your infrastructure. Nothing about the agent changes. What changes is that the decision is made outside it, and that the record of the decision is signed by a key the agent does not hold and its hash goes to a tamper-evident log, where anyone who kept a checkpoint can detect a rewrite. See [what a receipt proves](https://github.com/svayatta/agent-custody/tree/main/packages/receipts#what-a-receipt-proves-and-what-it-does-not) for the exact claims.
 
 ## Crypto wallets and on-chain agents
 

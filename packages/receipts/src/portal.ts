@@ -8,12 +8,14 @@
 // content-security policy, and every API write requires a JSON body, which with a SameSite=Strict cookie is what
 // keeps a cross-site page from acting as the user. Billing is Stripe Checkout for the team plan; the webhook moves
 // the tenant's plan, and nothing about a card ever passes through here.
-import { createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { postgresCheckpoints, type CheckpointStore } from "./checkpoints.ts";
+import { DESIGN_CSS, LOGO_MARK as MARK } from "./design.ts";
 import { welcomeSheet } from "./log-admin.ts";
 import { clientAddress } from "./log-sink.ts";
+import { SITE_NAV, siteUrl } from "./site-links.ts";
 import { PLAN_QUOTAS, RateLimiter, type Plan, type PostgresLike, type PostgresTenancy } from "./log-store.ts";
 import { oidcAuthorizeUrl, oidcExchange, pkce, samlAuthorizeUrl, samlValidate, type OidcConfig, type SamlConfig, type SsoIdentity } from "./sso.ts";
 
@@ -32,6 +34,8 @@ export interface MailOptions {
   from: string;
   /** an operator address that gets a note per registration, with the contact details */
   notify?: string;
+  /** where a reply goes, when it is not the sender */
+  replyTo?: string;
   /** the endpoint; Resend's by default */
   url?: string;
   fetch?: typeof fetch;
@@ -73,8 +77,10 @@ export interface PortalUser {
   id: string;
   email: string;
   createdAt: string;
-  /** when the address was confirmed: by a verification link, or by a provider that vouched for it; null until then */
+  /** when the address was confirmed: by a verification link, a password reset, or a provider that vouched for it; null until then */
   emailVerifiedAt?: string | null;
+  /** a session or an MFA cookie signed before this time (ms) is not valid: set by a password reset or change */
+  sessionsAfter?: number;
 }
 
 /** A provider sign-in whose verified email belongs to a password account that never verified its address: refused, never linked (issue #103). */
@@ -88,6 +94,15 @@ export class UnverifiedAccountError extends Error {
 
 /** A single sign-on identity that the tenant's rules refuse: another domain, or an account in another tenant. */
 export class SsoRefusedError extends Error {}
+
+/** A request the client got wrong: answered with its status and message. Any other error is answered with a plain 500. */
+class ClientError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 
 /** One tenant's enterprise identity provider. Set by the operator only, because an IdP is trusted for the domains that the operator checked. */
 export interface SsoSetting {
@@ -137,6 +152,158 @@ export function totpStep(key: Buffer, code: string, now = Date.now()): number | 
   return null;
 }
 
+// ---- QR code (ISO/IEC 18004): byte mode, error correction level M, versions 1 to 40; for the two-step setup ----
+// Level M per version: error correction codewords per block, and the number of blocks.
+const QR_ECC = [0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28];
+const QR_BLOCKS = [0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49];
+const gfMul = (x: number, y: number) => {
+  let z = 0;
+  for (let i = 7; i >= 0; i--) z = ((z << 1) ^ ((z >>> 7) * 0x11d)) ^ (((y >>> i) & 1) * x);
+  return z;
+};
+const qrRawModules = (v: number) => {
+  let n = (16 * v + 128) * v + 64;
+  if (v >= 2) {
+    const a = Math.floor(v / 7) + 2;
+    n -= (25 * a - 10) * a - 55;
+    if (v >= 7) n -= 36;
+  }
+  return n;
+};
+/** The modules of the QR code for `text`, true for dark, without the quiet zone. */
+export function qrMatrix(text: string): boolean[][] {
+  const data = [...Buffer.from(text, "utf8")];
+  let v = 1;
+  const capacity = (v: number) => (Math.floor(qrRawModules(v) / 8) - QR_ECC[v]! * QR_BLOCKS[v]!) * 8;
+  while (4 + (v < 10 ? 8 : 16) + data.length * 8 > capacity(v)) if (++v > 40) throw new Error("too long for a QR code");
+  const bits: number[] = [];
+  const put = (val: number, len: number) => { for (let i = len - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+  put(4, 4);
+  put(data.length, v < 10 ? 8 : 16);
+  for (const b of data) put(b, 8);
+  const cap = capacity(v);
+  put(0, Math.min(4, cap - bits.length));
+  put(0, (8 - (bits.length % 8)) % 8);
+  for (let pad = 0xec; bits.length < cap; pad ^= 0xec ^ 0x11) put(pad, 8);
+  const words = Array.from({ length: bits.length / 8 }, (_, i) => parseInt(bits.slice(i * 8, i * 8 + 8).join(""), 2));
+  // Reed-Solomon over GF(256), and the blocks interleaved
+  const eccLen = QR_ECC[v]!;
+  const nBlocks = QR_BLOCKS[v]!;
+  const div = new Array<number>(eccLen).fill(0);
+  div[eccLen - 1] = 1;
+  for (let i = 0, root = 1; i < eccLen; i++, root = gfMul(root, 2)) for (let j = 0; j < eccLen; j++) div[j] = gfMul(div[j]!, root) ^ (div[j + 1] ?? 0);
+  const raw = Math.floor(qrRawModules(v) / 8);
+  const nShort = nBlocks - (raw % nBlocks);
+  const shortLen = Math.floor(raw / nBlocks);
+  const blocks: number[][] = [];
+  for (let i = 0, k = 0; i < nBlocks; i++) {
+    const dat = words.slice(k, k + shortLen - eccLen + (i < nShort ? 0 : 1));
+    k += dat.length;
+    const rem = new Array<number>(eccLen).fill(0);
+    for (const b of dat) {
+      const f = b ^ rem.shift()!;
+      rem.push(0);
+      div.forEach((c, j) => { rem[j]! ^= gfMul(c, f); });
+    }
+    if (i < nShort) dat.push(0);
+    blocks.push([...dat, ...rem]);
+  }
+  const all: number[] = [];
+  for (let i = 0; i < blocks[0]!.length; i++) blocks.forEach((b, j) => { if (i !== shortLen - eccLen || j >= nShort) all.push(b[i]!); });
+  // function patterns
+  const size = v * 4 + 17;
+  const m = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
+  const fixed = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
+  const set = (x: number, y: number, dark: boolean) => { m[y]![x] = dark; fixed[y]![x] = true; };
+  for (let i = 0; i < size; i++) { set(6, i, i % 2 === 0); set(i, 6, i % 2 === 0); }
+  for (const [cx, cy] of [[3, 3], [size - 4, 3], [3, size - 4]] as const) {
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+      const d = Math.max(Math.abs(dx), Math.abs(dy));
+      if (cx + dx >= 0 && cx + dx < size && cy + dy >= 0 && cy + dy < size) set(cx + dx, cy + dy, d !== 2 && d !== 4);
+    }
+  }
+  const align: number[] = [];
+  if (v > 1) {
+    const n = Math.floor(v / 7) + 2;
+    const step = Math.floor((v * 8 + n * 3 + 5) / (n * 4 - 4)) * 2;
+    align.push(6);
+    for (let pos = size - 7; align.length < n; pos -= step) align.splice(1, 0, pos);
+  }
+  for (const [i, ax] of align.entries()) for (const [j, ay] of align.entries()) {
+    if ((i === 0 && j === 0) || (i === 0 && j === align.length - 1) || (i === align.length - 1 && j === 0)) continue;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) set(ax + dx, ay + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+  }
+  const format = (mask: number) => {
+    const d = mask; // level M is 00
+    let r = d;
+    for (let i = 0; i < 10; i++) r = (r << 1) ^ ((r >>> 9) * 0x537);
+    const f = ((d << 10) | r) ^ 0x5412;
+    const bit = (i: number) => ((f >>> i) & 1) === 1;
+    for (let i = 0; i <= 5; i++) set(8, i, bit(i));
+    set(8, 7, bit(6)); set(8, 8, bit(7)); set(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) set(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
+    set(8, size - 8, true);
+  };
+  format(0);
+  if (v >= 7) {
+    let r = v;
+    for (let i = 0; i < 12; i++) r = (r << 1) ^ ((r >>> 11) * 0x1f25);
+    const f = (v << 12) | r;
+    for (let i = 0; i < 18; i++) {
+      const a = size - 11 + (i % 3), b = Math.floor(i / 3), dark = ((f >>> i) & 1) === 1;
+      set(a, b, dark); set(b, a, dark);
+    }
+  }
+  // the codewords, in the zigzag from the bottom right
+  let i = 0;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert++) for (let j = 0; j < 2; j++) {
+      const x = right - j;
+      const y = ((right + 1) & 2) === 0 ? size - 1 - vert : vert;
+      if (!fixed[y]![x] && i < all.length * 8) { m[y]![x] = ((all[i >>> 3]! >>> (7 - (i & 7))) & 1) === 1; i++; }
+    }
+  }
+  // the mask with the lowest penalty
+  const MASKS = [(x: number, y: number) => (x + y) % 2 === 0, (_x: number, y: number) => y % 2 === 0, (x: number) => x % 3 === 0, (x: number, y: number) => (x + y) % 3 === 0, (x: number, y: number) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x: number, y: number) => ((x * y) % 2) + ((x * y) % 3) === 0, (x: number, y: number) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0, (x: number, y: number) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0];
+  const apply = (k: number) => { for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!fixed[y]![x] && MASKS[k]!(x, y)) m[y]![x] = !m[y]![x]; };
+  const penalty = () => {
+    let p = 0, dark = 0;
+    const lines = [...m.map((r) => r.map(Number).join("")), ...m.map((_, x) => m.map((r) => Number(r[x])).join(""))];
+    for (const l of lines) {
+      for (const run of l.match(/0{5,}|1{5,}/g) ?? []) p += run.length - 2;
+      p += 40 * ((l.match(/(?=10111010000|00001011101)/g) ?? []).length);
+    }
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      if (m[y]![x]) dark++;
+      if (x < size - 1 && y < size - 1 && m[y]![x] === m[y]![x + 1] && m[y]![x] === m[y + 1]![x] && m[y]![x] === m[y + 1]![x + 1]) p += 3;
+    }
+    return p + 10 * (Math.ceil(Math.abs(dark * 20 - size * size * 10) / (size * size)) - 1);
+  };
+  let best = 0, least = Infinity;
+  for (let k = 0; k < 8; k++) {
+    apply(k); format(k);
+    const p = penalty();
+    if (p < least) { least = p; best = k; }
+    apply(k);
+  }
+  apply(best); format(best);
+  return m;
+}
+/** The QR code as an SVG, dark on white with a four-module quiet zone, whatever the page's theme. */
+export function qrSvg(text: string): string {
+  const m = qrMatrix(text);
+  const n = m.length + 8;
+  let d = "";
+  m.forEach((row, y) => row.forEach((dark, x) => { if (dark) d += `M${x + 4} ${y + 4}h1v1h-1z`; }));
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${n} ${n}" shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="${n}" height="${n}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+}
+
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+const recoveryHash = (code: string) => sha256(code.toLowerCase().replace(/[^a-z0-9]/g, ""));
+
 export class PortalStore {
   private readonly client: PostgresLike;
   private readonly p: string;
@@ -161,6 +328,8 @@ export class PortalStore {
         for (const c of PROFILE_COLUMNS) await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS ${c} TEXT`);
         // when the founder's note went out, so it goes once
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS followed_up_at TIMESTAMPTZ`);
+        // when the person asked for no more automatic mail about getting started
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS follow_up_opt_out_at TIMESTAMPTZ`);
         // when the address was confirmed; a provider sign-in links to a password account only once this is set
         await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ`);
         // a provider identity linked to an account: GitHub or Google's stable subject, and the verified email it gave
@@ -173,6 +342,10 @@ export class PortalStore {
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}removed (tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (tenant_id, user_id))`);
         // the address too, so the removal holds after the account is made again under a new id
         await this.client.query(`ALTER TABLE ${p}removed ADD COLUMN IF NOT EXISTS email TEXT`);
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS mfa_recovery TEXT[]`);
+        await this.client.query(`ALTER TABLE ${p}users ADD COLUMN IF NOT EXISTS sessions_after BIGINT`);
+        // the SHA-256 of each password reset token; the token itself is only in the mail
+        await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}resets (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES ${p}users(id), expires_at TIMESTAMPTZ NOT NULL)`);
         await this.client.query(`CREATE TABLE IF NOT EXISTS ${p}sso (tenant_id TEXT PRIMARY KEY, protocol TEXT NOT NULL, config TEXT NOT NULL, domains TEXT[] NOT NULL, default_role TEXT NOT NULL, enforced BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
       })();
     }
@@ -202,7 +375,7 @@ export class PortalStore {
     return rows[0] ? PortalStore.asUser(rows[0]) : null;
   }
   private static asUser(r: Record<string, unknown>): PortalUser {
-    return { id: String(r.id), email: String(r.email), createdAt: new Date(r.created_at as string).toISOString(), emailVerifiedAt: r.email_verified_at ? new Date(r.email_verified_at as string).toISOString() : null };
+    return { id: String(r.id), email: String(r.email), createdAt: new Date(r.created_at as string).toISOString(), emailVerifiedAt: r.email_verified_at ? new Date(r.email_verified_at as string).toISOString() : null, ...(r.sessions_after != null ? { sessionsAfter: Number(r.sessions_after) } : {}) };
   }
   async markEmailVerified(userId: string, at = new Date()): Promise<void> {
     await this.init();
@@ -231,10 +404,14 @@ export class PortalStore {
     await this.init();
     const rows = (await this.client.query(
       `SELECT u.id, u.email, u.name, u.company, m.tenant_id, u.created_at FROM ${this.p}users u JOIN ${this.p}members m ON m.user_id = u.id
-       WHERE u.followed_up_at IS NULL AND u.name IS NOT NULL AND u.created_at <= $1 AND u.created_at >= $2 ORDER BY u.created_at`,
+       WHERE u.followed_up_at IS NULL AND u.follow_up_opt_out_at IS NULL AND u.name IS NOT NULL AND u.created_at <= $1 AND u.created_at >= $2 ORDER BY u.created_at`,
       [new Date(o.now.getTime() - o.minAgeMs).toISOString(), new Date(o.now.getTime() - o.maxAgeMs).toISOString()],
     )).rows as Record<string, unknown>[];
     return rows.map((r) => ({ id: String(r.id), email: String(r.email), name: String(r.name), company: r.company == null ? null : String(r.company), tenantId: String(r.tenant_id), createdAt: new Date(r.created_at as string).toISOString() }));
+  }
+  async optOutOfFollowUps(userId: string): Promise<boolean> {
+    await this.init();
+    return (await this.client.query(`UPDATE ${this.p}users SET follow_up_opt_out_at = COALESCE(follow_up_opt_out_at, now()) WHERE id = $1 RETURNING id`, [userId])).rows.length > 0;
   }
   async markFollowedUp(userId: string, at = new Date()): Promise<void> {
     await this.init();
@@ -274,9 +451,32 @@ export class PortalStore {
     if (!r || !PortalStore.checkPassword(password, String(r.password_hash))) return null;
     return { id: String(r.id), email: String(r.email), createdAt: new Date(r.created_at as string).toISOString() };
   }
+  /** A reset token for the account, good for `ttlMs` and once. Only its hash is stored. */
+  async createPasswordReset(userId: string, ttlMs = 3_600_000): Promise<string> {
+    await this.init();
+    const token = randomBytes(32).toString("base64url");
+    await this.client.query(`INSERT INTO ${this.p}resets (token_hash, user_id, expires_at) VALUES ($1, $2, $3)`, [sha256(token), userId, new Date(Date.now() + ttlMs).toISOString()]);
+    return token;
+  }
+  /** The account of a reset token that has not expired, and the token is gone; null otherwise. */
+  async takePasswordReset(token: string): Promise<string | null> {
+    await this.init();
+    const rows = (await this.client.query(`DELETE FROM ${this.p}resets WHERE token_hash = $1 RETURNING user_id, expires_at`, [sha256(token)])).rows as { user_id: string; expires_at: string }[];
+    return rows[0] && new Date(rows[0].expires_at).getTime() > Date.now() ? rows[0].user_id : null;
+  }
+  /** Sets the password, ends every session and MFA cookie signed before `at`, and drops the account's reset tokens. */
+  async setPassword(userId: string, password: string, at = Date.now()): Promise<void> {
+    await this.init();
+    await this.client.query(`UPDATE ${this.p}users SET password_hash = $2, sessions_after = $3 WHERE id = $1`, [userId, PortalStore.hashPassword(password), at]);
+    await this.client.query(`DELETE FROM ${this.p}resets WHERE user_id = $1`, [userId]);
+  }
+  async unlinkIdentities(userId: string): Promise<void> {
+    await this.init();
+    await this.client.query(`DELETE FROM ${this.p}identities WHERE user_id = $1`, [userId]);
+  }
   async user(id: string): Promise<PortalUser | null> {
     await this.init();
-    const rows = (await this.client.query(`SELECT id, email, created_at, email_verified_at FROM ${this.p}users WHERE id = $1`, [id])).rows as Record<string, unknown>[];
+    const rows = (await this.client.query(`SELECT id, email, created_at, email_verified_at, sessions_after FROM ${this.p}users WHERE id = $1`, [id])).rows as Record<string, unknown>[];
     return rows[0] ? PortalStore.asUser(rows[0]) : null;
   }
   async addMember(userId: string, tenantId: string, role: Role = "owner"): Promise<void> {
@@ -328,10 +528,23 @@ export class PortalStore {
     const rows = (await this.client.query(`DELETE FROM ${this.p}invites WHERE tenant_id = $1 AND email = $2 AND created_at > now() - interval '7 days' RETURNING role`, [tenantId, email])).rows as { role: Role }[];
     return rows[0]?.role ?? null;
   }
-  async mfa(userId: string): Promise<{ secret: string | null; enabled: boolean }> {
+  async mfa(userId: string): Promise<{ secret: string | null; enabled: boolean; recoveryCodes: number }> {
     await this.init();
-    const rows = (await this.client.query(`SELECT mfa_secret, mfa_enabled_at FROM ${this.p}users WHERE id = $1`, [userId])).rows as Record<string, unknown>[];
-    return { secret: rows[0]?.mfa_secret ? String(rows[0].mfa_secret) : null, enabled: !!rows[0]?.mfa_enabled_at };
+    const rows = (await this.client.query(`SELECT mfa_secret, mfa_enabled_at, mfa_recovery FROM ${this.p}users WHERE id = $1`, [userId])).rows as Record<string, unknown>[];
+    return { secret: rows[0]?.mfa_secret ? String(rows[0].mfa_secret) : null, enabled: !!rows[0]?.mfa_enabled_at, recoveryCodes: ((rows[0]?.mfa_recovery as string[] | null) ?? []).length };
+  }
+  /** Replaces the account's recovery codes with ten new ones, returned once; only their hashes are stored. */
+  async newRecoveryCodes(userId: string): Promise<string[]> {
+    await this.init();
+    const codes = Array.from({ length: 10 }, () => base32(randomBytes(8)).slice(0, 12).toLowerCase().replace(/(.{4})(?=.)/g, "$1-"));
+    await this.client.query(`UPDATE ${this.p}users SET mfa_recovery = $2::text[] WHERE id = $1`, [userId, codes.map(recoveryHash)]);
+    return codes;
+  }
+  /** False when the code is not one of the account's unused recovery codes. */
+  async takeRecoveryCode(userId: string, code: string): Promise<boolean> {
+    await this.init();
+    const h = recoveryHash(code);
+    return (await this.client.query(`UPDATE ${this.p}users SET mfa_recovery = array_remove(mfa_recovery, $2) WHERE id = $1 AND $2 = ANY(mfa_recovery) RETURNING id`, [userId, h])).rows.length > 0;
   }
   async setMfaSecret(userId: string, secretHex: string): Promise<boolean> {
     await this.init();
@@ -348,7 +561,7 @@ export class PortalStore {
   }
   async resetMfa(email: string): Promise<boolean> {
     await this.init();
-    return (await this.client.query(`UPDATE ${this.p}users SET mfa_secret = NULL, mfa_enabled_at = NULL, mfa_last_step = NULL WHERE email = $1 RETURNING id`, [email])).rows.length > 0;
+    return (await this.client.query(`UPDATE ${this.p}users SET mfa_secret = NULL, mfa_enabled_at = NULL, mfa_last_step = NULL, mfa_recovery = NULL WHERE email = $1 RETURNING id`, [email])).rows.length > 0;
   }
   /** Replaces the tenant's setting. A domain belongs to one tenant, so a domain that another tenant holds is refused. */
   async setSso(s: SsoSetting): Promise<void> {
@@ -411,7 +624,7 @@ export class PortalStore {
       role = invited;
     }
     if (unverified) {
-      for (const t of ["members", "identities"]) await this.client.query(`DELETE FROM ${this.p}${t} WHERE user_id = $1`, [user!.id]);
+      for (const t of ["members", "identities", "resets"]) await this.client.query(`DELETE FROM ${this.p}${t} WHERE user_id = $1`, [user!.id]);
       await this.client.query(`DELETE FROM ${this.p}users WHERE id = $1`, [user!.id]);
       user = null;
       home = null;
@@ -472,18 +685,19 @@ export class PortalStore {
 const b64u = (b: Buffer) => b.toString("base64url");
 /** `via` records how the user signed in, for example `sso:acme`. */
 export function signSession(secret: string, userId: string, ttlMs = 14 * 86_400_000, via?: string): string {
-  const body = b64u(Buffer.from(JSON.stringify({ u: userId, e: Date.now() + ttlMs, ...(via ? { a: via } : {}) })));
+  const body = b64u(Buffer.from(JSON.stringify({ u: userId, e: Date.now() + ttlMs, i: Date.now(), ...(via ? { a: via } : {}) })));
   return `${body}.${createHmac("sha256", secret).update(body).digest("base64url")}`;
 }
-function readClaims(secret: string, cookie: string | undefined): { u: string; a?: string } | null {
+function readClaims(secret: string, cookie: string | undefined): { u: string; a?: string; i: number } | null {
   if (!cookie) return null;
   const [body, mac] = cookie.split(".");
   if (!body || !mac) return null;
   const expected = createHmac("sha256", secret).update(body).digest("base64url");
   if (expected.length !== mac.length || !timingSafeEqual(Buffer.from(expected), Buffer.from(mac))) return null;
   try {
-    const { u, e, a } = JSON.parse(Buffer.from(body, "base64url").toString()) as { u: string; e: number; a?: string };
-    return typeof u === "string" && typeof e === "number" && e > Date.now() ? { u, ...(typeof a === "string" ? { a } : {}) } : null;
+    const { u, e, a, i } = JSON.parse(Buffer.from(body, "base64url").toString()) as { u: string; e: number; a?: string; i?: number };
+    // a cookie from before the issue time was added counts as issued at 0, so a reset ends it too
+    return typeof u === "string" && typeof e === "number" && e > Date.now() ? { u, i: typeof i === "number" ? i : 0, ...(typeof a === "string" ? { a } : {}) } : null;
   } catch {
     return null;
   }
@@ -527,11 +741,62 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ENFORCED = "Your organisation signs in through its identity provider. Use Sign in with single sign-on";
 const RESERVED = new Set(["default", "admin", "api", "www", "log", "checkpoints", "app", "portal", "stripe", "health", "t"]);
 
+const LOGO_URL = "https://agent-custody.dev/apple-touch-icon.png";
+const escapeHtml = (v: string) => v.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+
+export interface MailContent {
+  heading: string;
+  /** the line that an inbox shows beside the subject */
+  preheader?: string;
+  paragraphs: string[];
+  /** a block that keeps its line breaks and uses a fixed-width font */
+  code?: string;
+  /** the one action of the message */
+  button?: { label: string; url: string };
+  footer?: (string | { label: string; url: string })[];
+}
+
+/** Builds the HTML part and the plain-text part of one message from the same fields. Every value in the HTML is escaped, and only an http or https URL becomes a link. */
+export function renderMail(c: MailContent): { html: string; text: string } {
+  const link = (url: string) => (/^https?:\/\//i.test(url) ? escapeHtml(url) : null);
+  const button = c.button && link(c.button.url) ? c.button : undefined;
+  const footer = (c.footer ?? []).filter((f) => typeof f === "string" || link(f.url));
+  const text = [
+    c.heading, "",
+    ...c.paragraphs.flatMap((p) => [p, ""]),
+    ...(c.code ? [c.code, ""] : []),
+    ...(button ? [`${button.label}:`, button.url, ""] : []),
+    ...footer.map((f) => (typeof f === "string" ? f : `${f.label}: ${f.url}`)),
+    "agent-custody",
+  ].join("\n");
+  const font = `-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif`;
+  const p = (v: string, style: string, cls = "ink") => `<p class="${cls}" style="margin:0 0 16px;font:15px/1.55 ${font};${style}">${escapeHtml(v)}</p>`;
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(c.heading)}</title>
+<style>@media (prefers-color-scheme: dark) { .bg { background: #0c0a09 !important; } .card { background: #1c1917 !important; border-color: #292524 !important; } .ink { color: #fafaf9 !important; } .mute { color: #a8a29e !important; } .code { background: #0c0a09 !important; border-color: #292524 !important; color: #fafaf9 !important; } .btn { background: #f59e0b !important; } .btn a { color: #1c1917 !important; } .lnk { color: #f59e0b !important; } }</style></head>
+<body class="bg" style="margin:0;padding:0;background:#fafaf9">
+${c.preheader ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;mso-hide:all">${escapeHtml(c.preheader)}</div>` : ""}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="bg" style="background:#fafaf9"><tr><td align="center" style="padding:24px 12px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="card" style="max-width:560px;background:#ffffff;border:1px solid #e7e5e4;border-radius:8px">
+<tr><td style="padding:24px 28px 4px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding-right:10px"><img src="${LOGO_URL}" width="32" height="32" alt="logo" style="display:block;border:0;border-radius:6px"></td><td class="ink" style="font:700 17px/1 ${font};letter-spacing:.02em;color:#1c1917">agent-custody</td></tr></table></td></tr>
+<tr><td style="padding:20px 28px 8px"><h1 class="ink" style="margin:0 0 16px;font:700 22px/1.3 ${font};color:#1c1917">${escapeHtml(c.heading)}</h1>
+${c.paragraphs.map((v) => p(v, "color:#1c1917")).join("\n")}
+${c.code ? `<pre class="code ink" style="margin:0 0 16px;padding:12px;background:#fafaf9;border:1px solid #e7e5e4;border-radius:6px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#1c1917;white-space:pre-wrap;word-break:break-word">${escapeHtml(c.code)}</pre>` : ""}
+${button ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 16px"><tr><td class="btn" bgcolor="#b45309" style="background:#b45309;border-radius:6px"><a href="${link(button.url)}" style="display:inline-block;padding:12px 24px;font:600 15px/1 ${font};color:#ffffff;text-decoration:none">${escapeHtml(button.label)}</a></td></tr></table>
+${p("The button does not work? Copy this link into your browser:", "font-size:13px;margin-bottom:4px;color:#57534e", "mute")}<p class="mute" style="margin:0 0 16px;font:13px/1.5 ${font};word-break:break-all"><a href="${link(button.url)}" class="lnk" style="color:#b45309">${escapeHtml(button.url)}</a></p>` : ""}
+</td></tr>
+<tr><td style="padding:8px 28px 24px;border-top:1px solid #e7e5e4">
+${footer.map((f) => (typeof f === "string" ? `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#57534e">${escapeHtml(f)}</p>` : `<p class="mute" style="margin:12px 0 0;font:13px/1.5 ${font};color:#57534e"><a href="${link(f.url)}" class="lnk" style="color:#b45309">${escapeHtml(f.label)}</a></p>`)).join("\n")}
+</td></tr></table></td></tr></table></body></html>`;
+  return { html, text };
+}
+
 /** One message through the provider. Best effort: a refusal or a failure is reported through `log`, never thrown. Returns whether it was accepted. */
-export async function deliverMail(mail: MailOptions, m: { to: string; subject: string; text: string }, log: (message: string) => void = console.error): Promise<boolean> {
+export async function deliverMail(mail: MailOptions, m: { to: string; subject: string; text: string; html?: string; headers?: Record<string, string> }, log: (message: string) => void = console.error): Promise<boolean> {
   const f = mail.fetch ?? fetch;
   try {
-    const r = await f(mail.url ?? "https://api.resend.com/emails", { method: "POST", headers: { authorization: `Bearer ${mail.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ from: mail.from, to: [m.to], subject: m.subject, text: m.text }), signal: AbortSignal.timeout(10_000) });
+    const body = { from: mail.from, to: [m.to], subject: m.subject, text: m.text, ...(m.html ? { html: m.html } : {}), ...(mail.replyTo ? { reply_to: mail.replyTo } : {}), ...(m.headers ? { headers: m.headers } : {}) };
+    const r = await f(mail.url ?? "https://api.resend.com/emails", { method: "POST", headers: { authorization: `Bearer ${mail.apiKey}`, "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
     if (r.ok) return true;
     log(`agent-custody portal: mail to ${m.to} refused: ${r.status} ${(await r.text()).slice(0, 200)}`);
   } catch (e) {
@@ -540,45 +805,57 @@ export async function deliverMail(mail: MailOptions, m: { to: string; subject: s
   return false;
 }
 
+const UNSUBSCRIBE_TTL_MS = 365 * 86_400_000;
+
 /**
  * The founder's note, sent about an hour after a registration by `sendFollowUps`, once. Written to get the first
  * receipt appended: it asks which stack they are on, offers to do the integration, and says to start in observe mode.
+ * The signer is a setting; the default is the team.
  */
-export function founderNote(o: { name: string; tenant: string; company: string | null; portalUrl: string; from: string }): { subject: string; text: string } {
+export function founderNote(o: { name: string; tenant: string; company: string | null; portalUrl: string; unsubscribeUrl: string; signer?: string; signerRole?: string }): { subject: string; text: string; html: string; headers: Record<string, string> } {
   const first = o.name.trim().split(/\s+/)[0] || o.name;
-  const signer = o.from.replace(/^.*<|>.*$/g, "");
-  return {
-    subject: "Welcome to agent-custody, and one question",
-    text: [
-      `Hi ${first},`, "",
-      `Thanks for registering ${o.tenant} on agent-custody. I am Partha, the founder; you will get me, not a queue.`, "",
-      "One question so I can help rather than guess: which stack are your agents on, and what do they touch? Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, plain Python, or an MCP host. If you tell me, I will send the exact config for it, and if it is quicker, I will do the integration with you on a call: twenty minutes gets a first receipt into your log and verified in the browser.", "",
-      'Two things worth knowing from the start. Run it in observe mode first, "mode": "observe" in the config: nothing is blocked, and each receipt records what the policy would have denied, so you tune the policy against real traffic before turning it on. And the log only ever receives a hash per receipt; the receipts stay on your machines.', "",
-      `You are on the free plan, ten thousand appends a month, no card. If you hit that, tell me and I move you up while we talk. The setup sheet is under Setup in the dashboard whenever you need it: ${o.portalUrl}`, "",
-      `What are you building${o.company ? ` at ${o.company}` : ""}? I would like to know what you want the receipts to prove, and to whom.`, "",
-      "Partha", `agent-custody.dev · ${signer}`,
-    ].join("\n"),
-  };
+  const subject = "Welcome to agent-custody, and one question";
+  // A named signer writes as one person; the default team signature writes as "we".
+  const [I, We, me, intro] = o.signer ? ["I", "I", "me", `I am ${o.signer}${o.signerRole ? `, the ${o.signerRole.toLowerCase()}` : ""}; you will get me, not a queue.`] : ["we", "We", "us", "You are writing to a person, not to a queue."];
+  const mail = renderMail({
+    heading: "One question about your agents",
+    preheader: `Which stack are your agents on? ${We} send the exact config.`,
+    paragraphs: [
+      `Hi ${first},`,
+      `Thanks for registering ${o.tenant} on agent-custody. ${intro}`,
+      `One question so that ${I} can help rather than guess: which stack are your agents on, and what do they touch? Claude Code, the OpenAI Agents SDK, LangChain, OpenClaw, DeepSeek Harness, Hermes, plain Python, or an MCP host. If you tell ${me}, ${I} send the exact config for it. If it is quicker, ${I} do the integration with you on a call: twenty minutes gets a first receipt into your log and verified in the browser.`,
+      'Two things to know from the start. Run it in observe mode first, "mode": "observe" in the config: nothing is blocked, and each receipt records what the policy would have denied, so you tune the policy against real traffic before you turn it on. And the log only receives a hash per receipt; the receipts stay on your machines.',
+      `You are on the free plan: ten thousand appends a month, no card. If you hit that limit, tell ${me} and ${I} move you up while we talk.`,
+      `What are you building${o.company ? ` at ${o.company}` : ""}? ${We} would like to know what you want the receipts to prove, and to whom. Reply to this email.`,
+      `${o.signer ?? "The agent-custody team"}${o.signerRole ? `, ${o.signerRole}` : ""}`,
+    ],
+    button: { label: "Open the setup sheet", url: o.portalUrl },
+    footer: ["You get this one note because you registered a tenant on agent-custody. We send no other automatic messages about getting started.", { label: "Do not send me these messages", url: o.unsubscribeUrl }],
+  });
+  return { subject, ...mail, headers: { "List-Unsubscribe": `<${o.unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } };
 }
 
 /**
  * Sends the founder's note to every account registered between an hour and a week ago that has not had it, and
- * marks each one. Accounts on the operator's own mail domains are marked without a message. Idempotent: run it hourly.
+ * marks each one. Accounts on the operator's own mail domains and accounts that opted out are skipped without a message.
+ * `secret` is the portal's secret: it signs the opt-out link. Idempotent: run it hourly.
  */
-export async function sendFollowUps(store: PortalStore, mail: MailOptions, o: { portalUrl: string; now?: Date; minAgeMs?: number; maxAgeMs?: number; dryRun?: boolean; log?: (message: string) => void } = { portalUrl: "https://app.agent-custody.dev/" }): Promise<{ sent: string[]; skipped: string[]; failed: string[] }> {
+export async function sendFollowUps(store: PortalStore, mail: MailOptions, o: { portalUrl: string; secret: string; signer?: string; signerRole?: string; now?: Date; minAgeMs?: number; maxAgeMs?: number; dryRun?: boolean; log?: (message: string) => void }): Promise<{ sent: string[]; skipped: string[]; failed: string[] }> {
   const log = o.log ?? console.error;
   const now = o.now ?? new Date();
   const own = new Set([mail.from, mail.notify ?? ""].map((a) => a.replace(/^.*<|>.*$/g, "").split("@")[1]?.toLowerCase()).filter(Boolean));
   const sent: string[] = [];
   const skipped: string[] = [];
   const failed: string[] = [];
+  const portalUrl = o.portalUrl.replace(/\/?$/, "/");
   for (const u of await store.pendingFollowUps({ now, minAgeMs: o.minAgeMs ?? 3_600_000, maxAgeMs: o.maxAgeMs ?? 7 * 86_400_000 })) {
     if (own.has(u.email.split("@")[1]?.toLowerCase() ?? "")) {
       if (!o.dryRun) await store.markFollowedUp(u.id, now);
       skipped.push(u.email);
       continue;
     }
-    const note = founderNote({ name: u.name, tenant: u.tenantId, company: u.company, portalUrl: o.portalUrl, from: mail.from });
+    const unsubscribeUrl = `${portalUrl}unsubscribe?token=${signSession(o.secret, `unsub:${u.id}`, UNSUBSCRIBE_TTL_MS)}`;
+    const note = founderNote({ name: u.name, tenant: u.tenantId, company: u.company, portalUrl, unsubscribeUrl, ...(o.signer ? { signer: o.signer } : {}), ...(o.signerRole ? { signerRole: o.signerRole } : {}) });
     if (o.dryRun) { sent.push(u.email); continue; }
     if (await deliverMail(mail, { to: u.email, ...note }, log)) {
       await store.markFollowedUp(u.id, now);
@@ -599,28 +876,52 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   const registrations = new RateLimiter({ perSecond: 1 / 600, burst: 5 });
   // per account, whatever the address
   const mfaFailures = new RateLimiter({ perSecond: 1 / 120, burst: 5 });
+  const resetsByClient = new RateLimiter({ perSecond: 1 / 600, burst: 5 });
+  const resetsByEmail = new RateLimiter({ perSecond: 1 / 900, burst: 3 });
   const base = o.publicUrl.endsWith("/") ? o.publicUrl : `${o.publicUrl}/`;
   const cookieName = "custody_session";
 
   const sheet = (tenant: string, logId: string) => welcomeSheet({ tenant, logId, publicUrl: base, ...(o.checkpointsUrl ? { checkpointsUrl: o.checkpointsUrl } : {}), ...(o.keyid ? { keyid: o.keyid } : {}) });
   const portalBase = (o.portalUrl ?? "http://localhost/").replace(/\/?$/, "/");
   // Mail is best effort and off the request path: a provider outage is logged, never a failed registration.
-  const send = async (m: { to: string; subject: string; text: string }) => { if (o.mail) await deliverMail(o.mail, m, log); };
+  const send = async (m: { to: string; subject: string; text: string; html: string }) => (o.mail ? deliverMail(o.mail, m, log) : false);
   /** The verification link: a signed, single-purpose token good for a day. Until it is used, a provider sign-in for this address will not link to the account. */
-  const verificationMail = (u: PortalUser) => ({
-    to: u.email,
-    subject: "Verify your email address for agent-custody",
-    text: ["Hello,", "", "Please confirm this address for your agent-custody account by opening the link below. It is good for 24 hours.", "", `${portalBase}verify-email?token=${signSession(o.secret, `verify:${u.id}`, 86_400_000)}`, "", "If you did not create an account, ignore this mail; nothing was created in your name that works without it.", "", "agent-custody"].join("\n"),
-  });
+  const verificationMail = (u: PortalUser) => {
+    const subject = "Verify your email address for agent-custody";
+    return { to: u.email, subject, ...renderMail({
+      heading: "Confirm your email address",
+      preheader: "Confirm this address for your agent-custody account. The link is good for 24 hours.",
+      paragraphs: ["Hello,", "Confirm this address for your agent-custody account. The link is good for 24 hours."],
+      button: { label: "Confirm email address", url: `${portalBase}verify-email?token=${signSession(o.secret, `verify:${u.id}`, 86_400_000)}` },
+      footer: ["If you did not create an account, ignore this email. Nothing that works without this step was created in your name."],
+    }) };
+  };
 
-  const welcomeMail = (to: string, name: string, tenant: string, logId: string) => send({ to, subject: `Your agent-custody log "${tenant}" is ready`, text: [
-    `Hello ${name},`, "",
-    `Your tenant "${tenant}" is live on the hosted log. Your API key was shown once when you registered and is not in this email; if it is gone, mint another under API keys at ${portalBase}.`, "",
-    "Everything below is under Setup in the dashboard whenever you need it.", "",
-    sheet(tenant, logId), "",
-    `Dashboard: ${portalBase}`, "Getting started: https://agent-custody.dev/guide/getting-started", "Questions: reply to this email.",
-  ].join("\n") });
-  const notifyMail = (p: Profile & { email: string; tenant: string }) => o.mail?.notify ? send({ to: o.mail.notify, subject: `New registration: ${p.company} (${p.tenant})`, text: [`${p.name}${p.role ? `, ${p.role}` : ""} at ${p.company} registered tenant "${p.tenant}".`, "", `email     ${p.email}`, `phone     ${p.phone ?? "-"}`, `telegram  ${p.telegram ? `@${p.telegram}` : "-"}`, "", "The Registrations section of the admin page has the same, with their usage."].join("\n") }) : Promise.resolve();
+  const resetMail = (to: string, token: string) => ({ to, subject: "Reset your agent-custody password", ...renderMail({
+    heading: "Reset your password",
+    preheader: "The link works one time, for one hour.",
+    paragraphs: ["Hello,", "Someone asked to reset the password of your agent-custody account. Use the button below to set a new password. The link works one time, for one hour."],
+    button: { label: "Set a new password", url: `${portalBase}reset-password?token=${token}` },
+    footer: ["If you did not ask for this, ignore this email. Your password stays the same."],
+  }) });
+
+  const welcomeMail = (to: string, name: string, tenant: string, logId: string) => send({ to, subject: `Your agent-custody log "${tenant}" is ready`, ...renderMail({
+    heading: `Your log "${tenant}" is ready`,
+    preheader: "Your tenant is live on the hosted log. The setup sheet is below.",
+    paragraphs: [
+      `Hello ${name},`,
+      `Your tenant "${tenant}" is live on the hosted log. Your API key was shown once when you registered and is not in this email. If it is gone, create another under API keys in the dashboard.`,
+      "The setup sheet is below. It is also under Setup in the dashboard.",
+    ],
+    code: sheet(tenant, logId),
+    button: { label: "Open the dashboard", url: portalBase },
+    footer: ["Getting started: https://agent-custody.dev/guide/getting-started", "Questions? Reply to this email."],
+  }) });
+  const notifyMail = (p: Profile & { email: string; tenant: string }) => o.mail?.notify ? send({ to: o.mail.notify, subject: `New registration: ${p.company} (${p.tenant})`, ...renderMail({
+    heading: `New registration: ${p.company}`,
+    paragraphs: [`${p.name}${p.role ? `, ${p.role}` : ""} at ${p.company} registered tenant "${p.tenant}".`, "The Registrations section of the admin page has the same, with their usage."],
+    code: [`email     ${p.email}`, `phone     ${p.phone ?? "-"}`, `telegram  ${p.telegram ? `@${p.telegram}` : "-"}`].join("\n"),
+  }) }) : Promise.resolve(false);
   const exportCommand = (tenant: string) => `npx @agent-custody/receipts log-export --log-url ${base} --tenant ${tenant} --token-env AGENT_CUSTODY_LOG_TOKEN --out custody-export/`;
   // The welcome sheet as data: what the page renders as numbered steps, at registration and again under Setup.
   const setupFor = (tenant: string, logId: string) => {
@@ -639,6 +940,8 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
     };
   };
 
+  const keyList = async (tenantId: string) => (await o.tenancy.listTokens(tenantId)).map((k) => ({ label: k.label, hash: k.tokenHash.slice(0, 12), createdAt: k.createdAt, revokedAt: k.revokedAt, lastUsedAt: k.lastUsedAt }));
+
   return async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const addr = clientAddress(req, o.trustProxy);
@@ -655,8 +958,11 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
     // the state between the first step and the code; never a session
     const mfaCookie = (id: string | null) => `custody_mfa=${id ? signSession(o.secret, `mfa:${id}`, 300_000) : ""}; Path=/api/login; HttpOnly; SameSite=Strict${o.trustProxy ? "; Secure" : ""}; Max-Age=${id ? 300 : 0}`;
     const cookies = Object.fromEntries((req.headers.cookie ?? "").split(";").map((c) => c.trim().split("=") as [string, string]).filter(([k]) => k));
-    const userId = readSession(o.secret, cookies[cookieName]);
-    const via = readSessionVia(o.secret, cookies[cookieName]);
+    const claims = readClaims(o.secret, cookies[cookieName]);
+    const userId = claims?.u ?? null;
+    const via = claims?.a ?? null;
+    // a password reset or change ends every session and MFA cookie signed before it
+    const fresh = (u: PortalUser | null, c: { i: number } | null) => (u && c && c.i >= (u.sessionsAfter ?? 0) ? u : null);
     // A page, not a redirect: the session cookie is SameSite=Strict, and a redirect that started at the provider
     // would not carry it. The page's own navigation to / does.
     const signedInPage = (who: string, next: string, setCookies: string[], lead: string) => {
@@ -671,14 +977,19 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       let text = "";
       for await (const chunk of req) {
         text += chunk;
-        if (text.length > 65_536) throw new Error("body too large");
+        if (text.length > 65_536) throw new ClientError(413, "body too large");
       }
       return text;
     };
     const jsonBody = async (): Promise<Record<string, unknown>> => {
-      if (!(req.headers["content-type"] ?? "").startsWith("application/json")) throw new Error("expected a JSON body");
+      if (!(req.headers["content-type"] ?? "").startsWith("application/json")) throw new ClientError(400, "expected a JSON body");
       const t = await rawBody();
-      return t ? (JSON.parse(t) as Record<string, unknown>) : {};
+      if (!t) return {};
+      try {
+        return JSON.parse(t) as Record<string, unknown>;
+      } catch {
+        throw new ClientError(400, "the body is not valid JSON");
+      }
     };
 
     try {
@@ -687,7 +998,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'" });
         const providers = JSON.stringify((["github", "google"] as const).filter((p) => !!o.oauth?.[p]));
-        return void res.end(PORTAL_PAGE.replace("__LOG_BASE__", base.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!)).replace("__PROVIDERS__", providers));
+        return void res.end(PORTAL_PAGE.replace("__LOG_BASE__", base.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!)).replace("__PROVIDERS__", providers).replace("__MAIL__", String(!!o.mail)).replace("__PLANS__", PLANS_JSON));
       }
 
       // ---- Stripe's webhook: the only caller that is not a browser with a session ----
@@ -753,11 +1064,14 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         return { status: 200, body: { tenant: t.id, logId: t.logId, plan: t.plan, token: minted.token, tokenHash: minted.tokenHash.slice(0, 12), welcome: sheet(t.id, t.logId), setup: setupFor(t.id, t.logId), exportCommand: exportCommand(t.id) } };
       };
       // `on` is the state the account must be in: true to sign in or turn MFA off, false to turn it on.
+      // With MFA on, a recovery code works once in place of a code.
       const checkCode = async (id: string, code: unknown, on: boolean): Promise<Refusal | null> => {
         if (!mfaFailures.take(id)) return { status: 429, body: { error: "too many codes tried for this account; wait a few minutes" } };
         const m = await store.mfa(id);
         if (!m.secret || m.enabled !== on) return { status: 409, body: { error: on ? "MFA is not on for this account" : "start the MFA setup first" } };
-        const step = totpStep(Buffer.from(m.secret, "hex"), String(code ?? ""));
+        const given = String(code ?? "").trim();
+        if (on && !/^[0-9]{6}$/.test(given)) return (await store.takeRecoveryCode(id, given)) ? null : { status: 401, body: { error: "that code is not valid, or was used already" } };
+        const step = totpStep(Buffer.from(m.secret, "hex"), given);
         if (step === null || !(await store.takeMfaStep(id, step))) return { status: 401, body: { error: "that code is not valid, or was used already" } };
         if (!on) await store.enableMfa(id);
         return null;
@@ -788,6 +1102,19 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         const r = await onboard(user, parsed);
         void send(verificationMail(user));
         return json(r.status, r.body, cookie);
+      }
+      // A GET changes nothing: a mail scanner opens the link before the person does. The opt-out is the POST, from the form below or from a mail provider's one-click request. The body of that request is not read.
+      if ((req.method === "GET" || req.method === "POST") && url.pathname === "/unsubscribe") {
+        const token = url.searchParams.get("token") ?? "";
+        const who = readSession(o.secret, token);
+        const userId = who?.startsWith("unsub:") ? who.slice("unsub:".length) : null;
+        if (!userId || !(await store.user(userId))) return page(400, "Link not valid", "This link is not valid or has expired. Reply to the email and we stop the messages by hand.");
+        if (req.method === "GET") {
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'" });
+          return void res.end(resultPage("Stop these emails?", `<p>Press the button to stop the automatic messages about getting started that agent-custody sends to this account.</p><form method="post" action="/unsubscribe?token=${encodeURIComponent(token)}" style="margin-top:1.25rem"><button type="submit" style="font:inherit;font-weight:600;padding:.6rem 1.2rem;border:0;border-radius:8px;background:var(--accent);color:var(--panel);cursor:pointer">Stop these emails</button></form>`));
+        }
+        await store.optOutOfFollowUps(userId);
+        return page(200, "You are unsubscribed", "You get no more automatic messages about getting started from agent-custody. Messages about your account, such as a sign-in or invite email, still arrive.");
       }
       if (req.method === "GET" && url.pathname === "/verify-email") {
         const who = readSession(o.secret, url.searchParams.get("token") ?? undefined);
@@ -893,7 +1220,7 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         if (!provider[2]) {
           // ?link=1 from a signed-in session links the provider to that account instead of signing in; the state says so
           const linking = url.searchParams.get("link") === "1";
-          if (linking && !userId) return json(401, { error: "sign in first, then link a provider from the account page" });
+          if (linking && !fresh(userId ? await store.user(userId) : null, claims)) return json(401, { error: "sign in first, then link a provider from the account page" });
           const state = signSession(o.secret, `oauth:${name}:${linking ? `link:${userId}:` : ""}${randomBytes(16).toString("hex")}`, 600_000);
           const authorize = name === "github"
             ? `https://github.com/login/oauth/authorize?${new URLSearchParams({ client_id: conf.clientId, redirect_uri: redirectUri, scope: "user:email", state })}`
@@ -937,7 +1264,7 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         let user: PortalUser;
         if (linkTo) {
           // linking: the signed state records the session that started it (the Strict cookie does not come back from the provider), so the provider's email need not match; when it does, it also confirms the address
-          const owner = await store.user(linkTo);
+          const owner = fresh(await store.user(linkTo), readClaims(o.secret, state));
           if (!owner) return json(401, { error: "the account that started the link no longer exists" }, { "set-cookie": stateCookie(null) });
           await store.linkIdentity(name, subject, email, owner.id);
           if (email === owner.email) await store.markEmailVerified(owner.id);
@@ -968,24 +1295,75 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
       if (req.method === "POST" && url.pathname === "/api/login/mfa") {
         if (!loginFailures.take(`login:${addr}`)) return json(429, { error: "too many attempts; wait a minute" });
         const b = await jsonBody();
-        const who = readSession(o.secret, cookies.custody_mfa);
-        const half = who?.startsWith("mfa:") ? await store.user(who.slice(4)) : null;
+        const half_ = readClaims(o.secret, cookies.custody_mfa);
+        const half = half_?.u.startsWith("mfa:") ? fresh(await store.user(half_.u.slice(4)), half_) : null;
         if (!half) return json(401, { error: "the password step expired; sign in again" });
         const refused = await checkCode(half.id, b.code, true);
         if (refused) return json(refused.status, refused.body);
         return json(200, { email: half.email }, { "set-cookie": [setCookie(signSession(o.secret, half.id)), mfaCookie(null)] });
       }
+      // ---- password reset by mail: the same answer for every address, and the token proves the mailbox ----
+      if (req.method === "POST" && url.pathname === "/api/password/forgot") {
+        const email = String((await jsonBody()).email ?? "").trim().toLowerCase();
+        if (!o.mail) return json(503, { error: "mail is not configured on this portal" });
+        if (!EMAIL.test(email)) return json(400, { error: "a valid email address is needed" });
+        if (!resetsByClient.take(`reset:${addr}`)) return json(429, { error: "too many reset requests from this address; try again later" });
+        // the lookup runs after the answer, so the time to answer does not tell whether the address has an account
+        if (resetsByEmail.take(email)) void (async () => {
+          const u = await store.userByEmail(email);
+          // a member of a tenant that enforces single sign-on gets no password
+          if (!u || (await enforcedFor(u.id))) return;
+          await send(resetMail(u.email, await store.createPasswordReset(u.id)));
+          log(`agent-custody portal: ${u.email} asked for a password reset`);
+        })().catch((e) => log(`agent-custody portal: a password reset failed: ${e instanceof Error ? e.message : String(e)}`));
+        return json(200, { ok: true });
+      }
+      if (req.method === "GET" && url.pathname === "/reset-password") {
+        const token = url.searchParams.get("token") ?? "";
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; base-uri 'none'" });
+        return void res.end(`${resultPage("Set a new password", `<style>form { display: grid; gap: .75rem; margin-top: 1rem; } [hidden] { display: none; } label { display: grid; gap: .35rem; font-weight: 600; font-size: .9rem; } label span { font-weight: 400; color: var(--ink2); font-size: .82rem; } input { font: inherit; padding: .6rem .8rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); } button { font: inherit; font-weight: 600; padding: .6rem .9rem; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }</style>
+<form id="f"><label>New password<input id="pw" type="password" autocomplete="new-password" minlength="10" required><span>At least ten characters.</span></label><button type="submit">Set the password</button></form><p id="m" aria-live="polite"></p>`)}<script>
+document.getElementById("f").onsubmit = async (e) => {
+  e.preventDefault();
+  const m = document.getElementById("m");
+  const r = await fetch("/api/password/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: ${JSON.stringify(token).replace(/</g, "\\u003c")}, password: document.getElementById("pw").value }) });
+  const b = await r.json().catch(() => ({}));
+  if (r.ok) { document.getElementById("f").hidden = true; m.innerHTML = "Your password is set. Other sessions of this account are signed out. <a href='/'>Sign in</a>."; }
+  else m.textContent = b.error || "The password was not set.";
+};
+</script>`);
+      }
+      if (req.method === "POST" && url.pathname === "/api/password/reset") {
+        const b = await jsonBody();
+        const password = String(b.password ?? "");
+        // checked before the token is used, so a short password does not spend the link
+        if (password.length < 10) return json(400, { error: "the password needs at least ten characters" });
+        const id = await store.takePasswordReset(String(b.token ?? ""));
+        const u = id ? await store.user(id) : null;
+        if (!u) return json(400, { error: "this reset link is not valid, was used already, or is older than one hour; ask for a new one" });
+        if (await enforcedFor(u.id)) return json(403, { error: ENFORCED });
+        await store.setPassword(u.id, password);
+        // The link proves the mailbox, and the new password replaces any password set before that proof. A provider
+        // linked before the address was proved was linked by whoever held that password, so it goes.
+        if (!u.emailVerifiedAt) {
+          await store.unlinkIdentities(u.id);
+          await store.markEmailVerified(u.id);
+        }
+        log(`agent-custody portal: ${u.email} reset their password`);
+        // no session here: the user signs in with the new password, and two-step sign-in still applies
+        return json(200, { ok: true });
+      }
       if (req.method === "POST" && url.pathname === "/api/logout") return json(200, { ok: true }, { "set-cookie": setCookie(null) });
 
       // ---- everything below needs a session ----
       if (!url.pathname.startsWith("/api/")) return json(404, { error: "not found" });
-      const user = userId ? await store.user(userId) : null;
+      const user = fresh(userId ? await store.user(userId) : null, claims);
       if (!user) return json(401, { error: "sign in first" });
       if (req.method !== "GET" && !(req.headers["content-type"] ?? "").startsWith("application/json")) return json(415, { error: "expected a JSON body" });
       const tenantId = await store.tenantOf(user.id);
       const ssoConf = tenantId ? await store.ssoOf(tenantId) : null;
       if (ssoConf?.enforced && via !== `sso:${tenantId}`) return json(401, { error: ENFORCED });
-      const account = async () => ({ emailVerified: !!user.emailVerifiedAt, identities: await store.identities(user.id), providers: (["github", "google"] as const).filter((p) => !!o.oauth?.[p]), mail: !!o.mail, mfa: (await store.mfa(user.id)).enabled });
+      const account = async () => { const m = await store.mfa(user.id); return { emailVerified: !!user.emailVerifiedAt, identities: await store.identities(user.id), providers: (["github", "google"] as const).filter((p) => !!o.oauth?.[p]), mail: !!o.mail, mfa: m.enabled, recoveryCodes: m.recoveryCodes }; };
       if (req.method === "POST" && url.pathname === "/api/verify-email") {
         const who = readSession(o.secret, String((await jsonBody()).token ?? ""));
         if (!who?.startsWith("verify:")) return json(400, { error: "this verification link is not valid or has expired" });
@@ -1006,7 +1384,8 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         const secret = randomBytes(20);
         if (!(await store.setMfaSecret(user.id, secret.toString("hex")))) return json(409, { error: "MFA is on already; turn it off first" });
         const b32 = base32(secret);
-        return json(200, { secret: b32, uri: `otpauth://totp/agent-custody:${encodeURIComponent(user.email)}?secret=${b32}&issuer=agent-custody` });
+        const uri = `otpauth://totp/agent-custody:${encodeURIComponent(user.email)}?secret=${b32}&issuer=agent-custody`;
+        return json(200, { secret: b32, uri, qr: qrSvg(uri) });
       }
       if (req.method === "POST" && (url.pathname === "/api/mfa/enable" || url.pathname === "/api/mfa/disable")) {
         const on = url.pathname.endsWith("/disable");
@@ -1014,7 +1393,26 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         if (refused) return json(refused.status, refused.body);
         if (on) await store.resetMfa(user.email);
         log(`agent-custody portal: ${user.email} turned MFA ${on ? "off" : "on"}`);
-        return json(200, { mfa: !on });
+        return json(200, { mfa: !on, ...(on ? {} : { recoveryCodes: await store.newRecoveryCodes(user.id) }) });
+      }
+      // a code is needed, so a stolen session cannot take the codes
+      if (req.method === "POST" && url.pathname === "/api/mfa/recovery") {
+        const refused = await checkCode(user.id, (await jsonBody()).code, true);
+        if (refused) return json(refused.status, refused.body);
+        log(`agent-custody portal: ${user.email} made new recovery codes`);
+        return json(200, { recoveryCodes: await store.newRecoveryCodes(user.id) });
+      }
+      if (req.method === "POST" && url.pathname === "/api/password/change") {
+        const b = await jsonBody();
+        const password = String(b.password ?? "");
+        if (ssoConf?.enforced) return json(409, { error: "this tenant signs in through its identity provider; its members have no password here" });
+        if (password.length < 10) return json(400, { error: "the new password needs at least ten characters" });
+        if (!loginFailures.take(`password:${user.id}`)) return json(429, { error: "too many attempts; wait a minute" });
+        if (!(await store.authenticate(user.email, String(b.current ?? "")))) return json(401, { error: "the current password is not correct" });
+        await store.setPassword(user.id, password);
+        log(`agent-custody portal: ${user.email} changed their password`);
+        // this browser stays signed in; every other session ends
+        return json(200, { ok: true }, { "set-cookie": setCookie(signSession(o.secret, user.id, undefined, via ?? undefined)) });
       }
       // The address must be verified: otherwise anyone who registers the invited address with a password gets in.
       if (req.method === "POST" && url.pathname === "/api/invites/accept") {
@@ -1060,10 +1458,19 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
           const u = await o.tenancy.usage(month);
           months.push({ month, appends: u.tenants.find((t) => t.id === tenantId)?.appends ?? 0 });
         }
-        const keys = (await o.tenancy.listTokens(tenantId)).map((k) => ({ label: k.label, hash: k.tokenHash.slice(0, 12), createdAt: k.createdAt, revokedAt: k.revokedAt }));
+        const keys = await keyList(tenantId);
         const audit = await o.tenancy.audit({ tenant: tenantId, limit: 50 });
         const billing = await store.billing(tenantId);
         return json(200, { tenant: tenantId, logId: tenant.logId, plan: q.plan, used: q.used, quota: q.quota, treeSize: size, rootHash: size ? await backend.root(size) : null, latestCheckpoint: latest ? { treeSize: latest.treeSize, signedAt: latest.signedAt } : null, months, keys, audit, billing: billing ? { status: billing.status } : null, urls: { log: `${base}t/${tenantId}/`, keys: `${base}.well-known/agent-custody-log.json`, checkpoints: o.checkpointsUrl ? `${o.checkpointsUrl.replace(/\/?$/, "/")}${tenantId}/latest.json` : null }, exportCommand: exportCommand(tenantId), welcome: sheet(tenantId, tenant.logId), setup: setupFor(tenantId, tenant.logId), stripe: !!o.stripe });
+      }
+      if (req.method === "GET" && url.pathname === "/api/audit") {
+        const limit = url.searchParams.get("limit") ?? "25";
+        const before = url.searchParams.get("before");
+        if (!/^\d{1,3}$/.test(limit) || +limit < 1 || +limit > 100) return json(400, { error: "limit is a whole number from 1 to 100" });
+        if (before !== null && !/^[1-9]\d{0,15}$/.test(before)) return json(400, { error: "before is the id of an entry, a positive whole number" });
+        const entries = await o.tenancy.audit({ tenant: tenantId, limit: +limit + 1, ...(before ? { before: +before } : {}) });
+        const more = entries.length > +limit;
+        return json(200, { entries: entries.slice(0, +limit), next: more ? entries[+limit - 1]!.id : null });
       }
       if (req.method === "GET" && url.pathname === "/api/members") return json(200, { members: await store.members(tenantId), invites: await store.invitesOf(tenantId) });
       const ownerOnly = (...roles: string[]) => myRole !== "owner" && roles.includes("owner");
@@ -1078,8 +1485,14 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         if (ownerOnly(role, ...(await store.invitesOf(tenantId)).filter((i) => i.email === email).map((i) => i.role))) return json(403, OWNER_ONLY);
         await store.invite(tenantId, email, role as Role, user.email);
         log(`agent-custody portal: ${user.email} invited ${email} to tenant ${tenantId} as ${role}`);
-        void send({ to: email, subject: `You are invited to ${tenantId} on agent-custody`, text: [`${user.email} invited you to the agent-custody tenant "${tenantId}" as ${role}.`, "", `Create an account or sign in with this address at ${portalBase}, verify the address, and accept the invite. The invite is good for seven days.`, "", "agent-custody"].join("\n") });
-        return json(200, { invited: email, role });
+        const emailSent = await send({ to: email, subject: `You are invited to ${tenantId} on agent-custody`, ...renderMail({
+          heading: `Join "${tenantId}" on agent-custody`,
+          preheader: `${user.email} invited you as ${role}. The invite is good for seven days.`,
+          paragraphs: [`${user.email} invited you to the agent-custody tenant "${tenantId}" as ${role}.`, `Sign in, or create an account, with this address: ${email}. Verify the address. The first screen then shows the invite with an Accept button. The invite is good for seven days.`],
+          button: { label: "Accept the invite", url: portalBase },
+          footer: ["If you do not know the person who invited you, ignore this email."],
+        }) });
+        return json(200, { invited: email, role, emailSent });
       }
       if (req.method === "POST" && url.pathname === "/api/invites/remove") {
         const email = String((await jsonBody()).email ?? "").trim().toLowerCase();
@@ -1107,7 +1520,7 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
         return json(200, { removed: true });
       }
       if (req.method === "GET" && url.pathname === "/api/keys") {
-        return json(200, { keys: (await o.tenancy.listTokens(tenantId)).map((k) => ({ label: k.label, hash: k.tokenHash.slice(0, 12), createdAt: k.createdAt, revokedAt: k.revokedAt })) });
+        return json(200, { keys: await keyList(tenantId) });
       }
       if (req.method === "POST" && url.pathname === "/api/keys") {
         const b = await jsonBody();
@@ -1170,7 +1583,14 @@ fetch("/api/verify-email", { method: "POST", headers: { "content-type": "applica
       }
       return json(404, { error: "not found" });
     } catch (e) {
-      if (!res.headersSent) json(500, { error: e instanceof Error ? e.message : String(e) });
+      if (e instanceof ClientError) {
+        if (!res.headersSent) json(e.status, { error: e.message });
+        return;
+      }
+      // the detail can name a table, a query, or another service: it goes to the operator, not to the browser
+      log(`agent-custody portal: ${req.method} ${url.pathname} failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+      if (!res.headersSent) json(500, { error: "internal error" });
+      else res.end();
     }
   };
 }
@@ -1188,153 +1608,194 @@ export function servePortal(o: PortalOptions, opts: { port: number; host?: strin
 }
 
 // ---- the page: one file, no framework, no outside requests ----
+/** The plan cards of the Billing page. The appends come from PLAN_QUOTAS; a test keeps the names, prices, and appends equal to site/pricing.md. */
+export const PLAN_CARDS: readonly { plan: Plan; name: string; price: string; points: string[] }[] = [
+  { plan: "free", name: "Free", price: "$0", points: ["One tenant on the shared log", "Export and audit trail", "Community support on GitHub"] },
+  { plan: "team", name: "Team", price: "$50 a month", points: ["One tenant on the shared log", "Export and audit trail", "Email support, answer within two working days"] },
+  { plan: "enterprise", name: "Enterprise", price: "by conversation", points: ["A dedicated log, your signing key, your region", "A named contact and a stated response time", "A signed agreement and a DPA"] },
+];
+const PLANS_JSON = JSON.stringify(PLAN_CARDS.map((c) => ({ ...c, appends: PLAN_QUOTAS[c.plan] })));
 const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#b45309"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="#b45309" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="#b45309" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-const MARK = '<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect class="tile" width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path class="ink" d="M25 20h14M25 27h14" stroke-width="2.6" stroke-linecap="round"/><path class="ink" d="M25 37.5l5 4.5 9.5-10" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 // The small pages outside the app (errors, results, the address check) share the brand without the app's script.
 const RESULT_STYLE = `<style>
-  :root { color-scheme: light dark; --ink: #1b2430; --ink2: #5b6b7a; --line: #d7dfe5; --bg: #f5f7f9; --panel: #ffffff; --accent: #b45309; --accent-bg: #fbf1dc; }
-  @media (prefers-color-scheme: dark) { :root { --ink: #e6ecf0; --ink2: #9fb0bd; --line: #27333c; --bg: #0e1418; --panel: #151d23; --accent: #f59e0b; --accent-bg: #2d2412; } }
-  * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 1.5rem .75rem; color: var(--ink); font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; background-color: var(--bg); background-image: radial-gradient(56rem 26rem at 50% -8rem, var(--accent-bg), transparent 72%), radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--ink2) 20%, transparent) 1px, transparent 0); background-size: 100% 100%, 22px 22px; background-repeat: no-repeat, repeat; }
-  main { position: relative; width: 100%; max-width: 27rem; padding: 2rem 2.25rem; background: var(--panel); border: 1px solid var(--line); border-top: 4px solid var(--accent); border-radius: 14px; box-shadow: 0 1px 2px rgb(0 0 0 / .05), 0 18px 40px -18px rgb(0 0 0 / .25); }
-  .brand { display: inline-flex; align-items: center; gap: .55rem; margin: 0 0 1.25rem; color: var(--ink); font-weight: 700; letter-spacing: .04em; text-decoration: none; }
+${DESIGN_CSS}
+  body { min-height: 100vh; display: grid; place-items: center; padding: 1.5rem .75rem; font-size: var(--text-md); line-height: 1.6; background-color: var(--bg); background-image: radial-gradient(56rem 26rem at 50% -8rem, var(--accent-bg), transparent 72%), radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--ink2) 20%, transparent) 1px, transparent 0); background-size: 100% 100%, 22px 22px; background-repeat: no-repeat, repeat; }
+  main { position: relative; width: 100%; max-width: 27rem; padding: 2rem 2.25rem; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-md); box-shadow: var(--shadow); }
+  .brand { display: inline-flex; align-items: center; gap: .55rem; margin: 0 0 1.25rem; color: var(--ink); font-weight: 700; text-decoration: none; }
   .mark { width: 28px; height: 28px; display: block; } .mark .tile { fill: var(--accent); } .mark .ink { stroke: var(--accent); }
-  h1 { margin: 0 0 .5rem; font-size: 1.4rem; line-height: 1.25; letter-spacing: -.02em; }
+  h1 { margin: 0 0 .5rem; }
   p { margin: 0; color: var(--ink2); overflow-wrap: anywhere; }
-  a { color: var(--accent); font-weight: 600; text-underline-offset: 3px; } a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  a { font-weight: 600; }
   @media (max-width: 30rem) { main { padding: 1.5rem 1.25rem; } }
 </style>`;
 const resultPage = (title: string, body: string, head = "") =>
   `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${head}<title>${title}</title>${RESULT_STYLE}<main><a class="brand" href="/">${MARK}agent-custody</a><h1>${title}</h1>${body}</main>`;
 
+// the website's one nav list, on the dashboard's own host
+const DASHBOARD_NAV = SITE_NAV.map((l) => `<a href="${siteUrl(l.link)}" target="_blank" rel="noopener">${l.text}</a>`).join("");
+
 const PORTAL_PAGE = `<!doctype html>
+<html lang="en">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agent-custody</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <script>(() => { try { const t = localStorage.getItem("agent-custody-theme"); if (t === "dark" || t === "light") document.documentElement.dataset.theme = t; } catch {} })();</script>
 <style>
-  :root { color-scheme: light dark; --ink: #1b2430; --ink2: #5b6b7a; --line: #d7dfe5; --bg: #f5f7f9; --panel: #ffffff; --accent: #b45309; --accent-bg: #fbf1dc; --warn: #8a5a00; --bad: #b3261e; --ok: #1f7a4d; --accent-ink: #ffffff; --accent-hover: #92400e; --field: #a9b4bd; --lift: 0 1px 2px rgb(0 0 0 / .04); --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
-  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink: #e6ecf0; --ink2: #9fb0bd; --line: #27333c; --bg: #0e1418; --panel: #151d23; --accent: #f59e0b; --accent-bg: #2d2412; --warn: #e2b862; --bad: #ff8a80; --ok: #6fd39a; --accent-ink: #1c1917; --accent-hover: #fbbf24; --field: #3d4c57; --lift: none; } }
-  :root[data-theme="dark"] { --ink: #e6ecf0; --ink2: #9fb0bd; --line: #27333c; --bg: #0e1418; --panel: #151d23; --accent: #f59e0b; --accent-bg: #2d2412; --warn: #e2b862; --bad: #ff8a80; --ok: #6fd39a; --accent-ink: #1c1917; --accent-hover: #fbbf24; --field: #3d4c57; --lift: none; }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .top { display: flex; align-items: center; gap: 1rem; padding: .7rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel); }
-  .brand { font-weight: 700; letter-spacing: .04em; display: inline-flex; align-items: center; gap: .5rem; color: var(--ink); text-decoration: none; } .brand svg { width: 20px; height: 20px; display: block; } .brand rect { fill: var(--accent); }
-  .top .links { margin-left: auto; display: flex; gap: .9rem; font-size: .9rem; } .top .links a { color: var(--accent); text-decoration: none; }
-  .top .who { color: var(--ink2); font-size: .9rem; margin-left: .5rem; }
-  button.theme { background: transparent; color: var(--ink2); border: 1px solid var(--line); padding: .25rem .6rem; font-size: .8rem; border-radius: 4px; } button.theme:hover { color: var(--ink); }
-  .pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font: 600 .72rem/1.6 var(--mono); letter-spacing: .06em; text-transform: uppercase; background: var(--accent-bg); color: var(--accent); }
-  .notice { padding: .6rem 1.25rem; font-size: .9rem; color: var(--ink); background: var(--accent-bg); border-bottom: 1px solid var(--line); } .notice a, .notice button { margin-left: .6rem; } .notice button { font: inherit; background: none; border: 1px solid var(--line); border-radius: 4px; padding: .1rem .5rem; color: var(--ink); cursor: pointer; }
+${DESIGN_CSS}
+  :root { --field: var(--line-strong); --lift: 0 1px 2px rgb(28 25 23 / .04); }
+  .top { display: flex; align-items: center; gap: var(--space-3); min-height: 3.5rem; padding: 0 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .top [hidden] { display: none !important; }
+  .brand { flex: none; font-weight: 600; font-size: var(--text-md); display: inline-flex; align-items: center; gap: var(--space-2); color: var(--ink); text-decoration: none; white-space: nowrap; } .brand svg { width: 28px; height: 28px; display: block; } .brand rect { fill: var(--accent); }
+  .top .tenant { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font: 600 var(--text-md)/1.5rem var(--font); }
+  .top .tenant::before { content: ""; display: inline-block; width: 1px; height: 1.5rem; margin: 0 var(--space-3) 0 0; vertical-align: middle; position: relative; top: .15rem; background: var(--ink3); opacity: .6; transform: rotate(20deg); }
+  .top .badge { flex: none; padding: 0 var(--space-2); border: 1px solid var(--line-strong); border-radius: var(--radius-full); color: var(--ink2); font: 500 var(--text-xs)/1.25rem var(--font); }
+  .top .links { margin-left: auto; display: flex; align-items: center; gap: var(--space-4); font-size: var(--text-sm); } .top .links a { color: var(--ink2); font-weight: 500; text-decoration: none; transition: color .15s; } .top .links a:hover { color: var(--ink); }
+  .top .sep { width: 1px; height: 1.25rem; background: var(--line-strong); }
+  #themeToggle[aria-pressed="true"] .moon, #themeToggle[aria-pressed="false"] .sun { display: none; }
+  .pill { display: inline-block; padding: .05rem .55rem; border-radius: var(--radius-full); font: 600 var(--text-xs)/1.6 var(--font); background: var(--accent-bg); color: var(--accent); }
+  .notice { padding: .6rem 1.25rem; font-size: .9rem; color: var(--ink); background: var(--accent-bg); border-bottom: 1px solid var(--line); } .notice a, .notice button { margin-left: .6rem; } .notice button { font: inherit; background: none; border: 1px solid var(--line); border-radius: var(--radius-sm); min-height: 0; padding: .1rem .5rem; color: var(--ink); font-weight: 600; cursor: pointer; }
   .notice button:hover { background: var(--panel); border-color: var(--line); }
-  a { color: var(--accent); text-underline-offset: 3px; }
-  a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .layout { display: grid; grid-template-columns: 15rem 1fr; min-height: calc(100vh - 3.3rem); }
   nav { border-right: 1px solid var(--line); background: var(--panel); padding: 1rem 0; }
-  nav .group { font: 600 .68rem/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); padding: 1rem 1.25rem .35rem; }
+  nav .group { font: 600 var(--text-xs)/1.4 var(--font); color: var(--ink3); padding: 1rem 1.25rem .35rem; }
   nav a { display: flex; justify-content: space-between; gap: .5rem; padding: .45rem 1.25rem; color: var(--ink); text-decoration: none; border-left: 3px solid transparent; }
   nav a:hover { background: var(--bg); } nav a.on { border-left-color: var(--accent); background: var(--accent-bg); font-weight: 600; }
-  nav a span.n { color: var(--ink2); font-family: var(--mono); font-size: .8rem; }
+  nav a span.n { color: var(--ink2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+  .navbtn { display: none; }
+  .top .userbtn { flex: none; width: 2.25rem; min-height: 2.25rem; padding: 0; border-color: transparent; border-radius: var(--radius-full); }
+  .top .userbtn:not(:disabled):hover, .top .userbtn[aria-expanded="true"] { background: var(--soft); border-color: transparent; }
+  .userbtn svg, #userMenu svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .avatar { display: inline-flex; align-items: center; justify-content: center; width: 1.75rem; height: 1.75rem; flex: none; border-radius: var(--radius-full); background: var(--accent-bg); color: var(--accent); font: 600 var(--text-sm)/1 var(--font); text-transform: uppercase; }
+  #userMenu { position: fixed; inset: auto; margin: 0; width: 20rem; max-width: calc(100vw - 1rem); padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
+  #userMenu:popover-open { display: grid; }
+  #userMenu .head { display: grid; gap: 2px; padding: var(--space-2) var(--space-3); }
+  #userMenu .who { color: var(--ink); font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
+  #userMenu .meta { color: var(--ink2); font-size: var(--text-xs); } #userMenu .plan { display: none; }
+  #userMenu hr { margin: var(--space-1) 0; border: 0; border-top: 1px solid var(--line); }
+  #userMenu .row { display: flex; align-items: center; justify-content: flex-start; gap: var(--space-3); width: 100%; min-height: 2.25rem; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); font: 500 var(--text-sm)/1.2 var(--font); text-decoration: none; text-align: left; }
+  #userMenu .row:hover { background: var(--soft); color: var(--ink); border: 0; }
+  #userMenu .row:focus-visible { outline-offset: -2px; }
+  #userMenu .row.out:hover { color: var(--bad); }
+  #userMenu .state { margin-left: auto; color: var(--ink2); font-size: var(--text-xs); } #userMenu .state::after { content: "Off"; } #themeToggle[aria-pressed="true"] .state::after { content: "On"; }
+  nav .help { display: none; }
+  @media (max-width: 48rem) { .navbtn { display: inline-flex; } nav { position: fixed; z-index: 10; inset: 0 auto 0 0; width: min(18rem, 85vw); overflow-y: auto; visibility: hidden; transform: translateX(-100%); } nav.open { visibility: visible; transform: none; box-shadow: 0 0 0 100vmax rgb(12 10 9 / .5); } }
+  @media (max-width: 48rem) and (prefers-reduced-motion: no-preference) { nav { transition: transform .2s, visibility 0s .2s; } nav.open { transition: transform .2s, visibility 0s; } }
+  @media (max-width: 48rem) { .top:has(#menuBtn:not([hidden])) :is(.links, .sep) { display: none; } .top:has(#menuBtn:not([hidden])) .userbtn { margin-left: auto; } nav { display: flex; flex-direction: column; } nav .help { display: flex; } nav .group.help { display: block; margin-top: auto; } }
   main { padding: 2rem 2rem 3rem; max-width: 72rem; min-width: 0; }
-  h1 { font-size: 1.5rem; letter-spacing: -.02em; margin: 0 0 1rem; } h2 { font: 600 .72rem/1.4 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink2); margin: 1.5rem 0 .6rem; }
+  h1 { margin: 0 0 1rem; } h2 { font-size: var(--text-md); margin: 1.5rem 0 .6rem; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .9rem; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: 10px; box-shadow: var(--lift); padding: 1rem 1.1rem; }
-  .card.warn { border-top-color: var(--warn); } .card.bad { border-top-color: var(--bad); } .card.ok { border-top-color: var(--ok); }
-  .card .k { font: 600 .68rem/1.4 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink2); }
-  .card .v { font-size: 1.9rem; font-weight: 700; margin: .2rem 0 0; font-variant-numeric: tabular-nums; }
+  .card { box-shadow: var(--lift); padding: 1rem 1.1rem; }
+  .card:is(.ok, .warn, .bad) .k::before { content: ""; display: inline-block; width: .5rem; height: .5rem; margin-right: .45rem; border-radius: var(--radius-full); background: var(--ok); vertical-align: .05em; }
+  .card.warn .k::before { background: var(--warn); } .card.bad .k::before { background: var(--bad); }
+  .card .k { font-weight: 500; color: var(--ink2); }
+  .card .v { font-size: var(--text-2xl); font-weight: 700; margin: .2rem 0 0; font-variant-numeric: tabular-nums; }
   .card .s { color: var(--ink2); font-size: .88rem; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.25rem; margin-top: .9rem; box-shadow: var(--lift); overflow-x: auto; } .panel > h2:first-child { margin-top: 0; }
+  .panel { padding: 1rem 1.25rem; margin-top: .9rem; box-shadow: var(--lift); overflow-x: auto; } .panel > h2:first-child { margin-top: 0; }
   table { border-collapse: collapse; width: 100%; font-size: .92rem; }
   th, td { text-align: left; padding: .55rem .75rem .55rem 0; border-bottom: 1px solid var(--line); vertical-align: middle; } tbody tr:last-child > * { border-bottom: 0; }
-  td button:not(.link) { padding: .25rem .7rem; font-size: .85rem; } td select { padding: .3rem .5rem; }
-  #audit td:nth-child(-n+3) { white-space: nowrap; } #audit td:last-child { min-width: 16rem; overflow-wrap: anywhere; font-size: .86rem; }
-  th { font: 600 .68rem/1.4 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--ink2); }
-  code, pre, .mono { font-family: var(--mono); font-size: .86em; }
-  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: .8rem .9rem; overflow-x: auto; white-space: pre-wrap; }
-  .bars { display: grid; grid-template-columns: repeat(6, 1fr); gap: .6rem; align-items: end; height: 9rem; }
-  .bar { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; font-size: .75rem; color: var(--ink2); }
-  .bar i { display: block; width: 70%; max-width: 4rem; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; }
-  .bar b { font-family: var(--mono); font-weight: 400; margin-top: .3rem; }
+  td button:not(.link) { min-height: 2rem; padding: 0 .7rem; font-size: var(--text-xs); } td select { min-height: 2rem; }
+  .feed { list-style: none; margin: 0; padding: 0; } .feed li { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-4); padding: var(--space-2) 0; border-bottom: 1px solid var(--line); } .feed li:last-child { border-bottom: 0; }
+  .feed time { flex: none; color: var(--ink2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+  progress { display: block; width: 100%; height: .5rem; margin: var(--space-2) 0; appearance: none; border: 0; border-radius: var(--radius-full); background: var(--soft); color: var(--accent); overflow: hidden; }
+  progress::-webkit-progress-bar { background: var(--soft); } progress::-webkit-progress-value { background: currentColor; } progress::-moz-progress-bar { background: currentColor; }
+  progress.warn { color: var(--warn); } progress.bad { color: var(--bad); }
+  .plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
+  .card.plan { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-5); } .card.plan.now { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .plan h2 { margin: 0; display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); } .plan .price { font-size: var(--text-xl); font-weight: 700; } .plan .price::first-letter { text-transform: uppercase; }
+  .plan ul { margin: 0; padding-left: var(--space-5); color: var(--ink2); } .plan .act { margin-top: auto; padding-top: var(--space-3); } .plan .act p { margin: 0; }
+  #policyView { width: min(48rem, calc(100vw - 2rem)); max-width: none; } #policyView pre { max-height: 60vh; overflow: auto; } #publishDialog { width: min(40rem, calc(100vw - 2rem)); max-width: none; } dialog h2 { margin-top: 0; }
+  th { font-size: var(--text-xs); font-weight: 600; color: var(--ink2); } th::first-letter { text-transform: uppercase; }
+  code, pre, .mono { font-size: .86em; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: .8rem .9rem; overflow-x: auto; white-space: pre-wrap; }
+  .bars { display: grid; grid-template-columns: repeat(6, 1fr); height: 11rem; }
+  .bar { display: flex; flex-direction: column; align-items: center; height: 100%; font-size: .75rem; color: var(--ink2); }
+  .bar .col { position: relative; flex: 1; width: 100%; display: flex; justify-content: center; align-items: flex-end; border-bottom: 1px solid var(--line); }
+  .bar i { display: block; width: 70%; max-width: 4rem; background: var(--accent); border-radius: var(--radius-sm) var(--radius-sm) 0 0; min-height: 2px; }
+  .bar s { position: absolute; left: 0; right: 0; border-top: 2px dashed var(--bad); }
+  .bar b { font-weight: 400; font-variant-numeric: tabular-nums; margin-top: .3rem; }
   label { display: grid; gap: .25rem; font-size: .85rem; color: var(--ink2); margin: 0 0 .8rem; }
-  label .opt { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; margin-left: .3rem; } label .hint { font-size: .8rem; line-height: 1.45; } label .hint code { font-family: var(--mono); font-size: .9em; }
+  label .opt { font-size: var(--text-xs); margin-left: .3rem; } label .hint { font-size: .8rem; line-height: 1.45; } label .hint code { font-family: var(--mono); font-size: .9em; }
   textarea { font: .86rem/1.5 var(--mono); padding: .5rem .6rem; width: 100%; }
-  input, select { font: inherit; padding: .5rem .6rem; }
-  input, select, textarea { border: 1px solid var(--field); border-radius: 8px; background: var(--bg); color: var(--ink); transition: border-color .15s, box-shadow .15s; }
+  input { font: inherit; padding: .5rem .6rem; }
+  input, textarea { border: 1px solid var(--field); border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); transition: border-color .15s, box-shadow .15s; }
   input::placeholder, textarea::placeholder { color: var(--ink2); opacity: .8; }
   input:focus, select:focus, textarea:focus { outline: 2px solid transparent; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
-  button { font: inherit; font-weight: 600; padding: .5rem .9rem; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); cursor: pointer; transition: background-color .15s, border-color .15s; }
-  button:not(.quiet, .link, .theme):hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-  button.quiet { background: transparent; color: var(--accent); } button.quiet:hover { background: var(--accent-bg); }
-  button.link { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
-  button:disabled { opacity: .55; cursor: default; }
+  button.link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
   body:has(> .auth:not([hidden])) { min-height: 100vh; background-color: var(--bg); background-image: radial-gradient(56rem 26rem at 50% -8rem, var(--accent-bg), transparent 72%), radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--ink2) 20%, transparent) 1px, transparent 0); background-size: 100% 100%, 22px 22px; background-repeat: no-repeat, repeat; }
-  .auth { --pad: 2.25rem; position: relative; max-width: 27rem; margin: 3.5rem auto 4rem; padding: var(--pad) var(--pad) 1.75rem; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 1px 2px rgb(0 0 0 / .05), 0 18px 40px -18px rgb(0 0 0 / .25); }
-  .auth::before { content: ""; position: absolute; top: -1px; left: -1px; right: -1px; height: 4px; border-radius: 14px 14px 0 0; background: var(--accent); }
+  .auth { --pad: 2.25rem; position: relative; max-width: 27rem; margin: 3.5rem auto 4rem; padding: var(--pad) var(--pad) 1.75rem; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-md); box-shadow: var(--shadow); }
   #onboard { max-width: 31rem; } .auth.wide { max-width: 44rem; }
   .auth.split { padding: 0; } .auth.split > .pane { padding: var(--pad) var(--pad) 1.75rem; } .pitch { display: none; }
   .pitch .eyebrow { color: #f59e0b; }
-  .pitch h2 { margin: 0 0 1rem; font: 700 2rem/1.15 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -.025em; text-transform: none; color: #fff; }
-  .pitch > p { margin: 0 0 2rem; max-width: 30rem; color: #9fb0bd; }
+  .pitch h2 { margin: 0 0 1rem; font: 700 var(--text-2xl)/1.15 var(--font); letter-spacing: -.025em; color: #fafaf9; }
+  .pitch > p { margin: 0 0 2rem; max-width: 30rem; color: #a8a29e; }
   .flow { list-style: none; counter-reset: flow; display: grid; gap: 1.1rem; margin: 0; padding: 0; }
   .flow li { counter-increment: flow; display: grid; grid-template-columns: 2rem 1fr; gap: .1rem .85rem; }
-  .flow li::before { content: counter(flow); grid-row: span 2; display: grid; place-items: center; width: 2rem; height: 2rem; border: 1px solid rgb(255 255 255 / .2); border-radius: 50%; color: #9fb0bd; font: 700 .8rem var(--mono); }
+  .flow li::before { content: counter(flow); grid-row: span 2; display: grid; place-items: center; width: 2rem; height: 2rem; border: 1px solid rgb(255 255 255 / .2); border-radius: var(--radius-full); color: #a8a29e; font: 700 var(--text-xs) var(--font); }
   .flow li.now::before { background: #f59e0b; border-color: #f59e0b; color: #1c1917; }
-  .flow b { color: #fff; font-weight: 600; } .flow span { color: #9fb0bd; font-size: .9rem; }
+  .flow b { color: #fafaf9; font-weight: 600; } .flow span { color: #a8a29e; font-size: var(--text-sm); }
   @media (min-width: 60rem) {
     .auth.split { display: grid; grid-template-columns: minmax(0, 1fr) 27rem; max-width: 64rem; overflow: hidden; }
     #onboard.split { grid-template-columns: minmax(0, 1fr) 31rem; max-width: 68rem; }
-    .pitch { display: flex; flex-direction: column; justify-content: center; padding: 3rem; background: radial-gradient(circle at 1px 1px, rgb(255 255 255 / .07) 1px, transparent 0) 0 0 / 22px 22px, linear-gradient(160deg, #1f2a35, #0e1418); }
+    .pitch { display: flex; flex-direction: column; justify-content: center; padding: 3rem; background: radial-gradient(circle at 1px 1px, rgb(255 255 255 / .07) 1px, transparent 0) 0 0 / 22px 22px, linear-gradient(160deg, #292524, #0c0a09); }
     #onboard .pitch { justify-content: flex-start; padding-top: 4.5rem; }
     .split .fine { border-radius: 0; }
     .auth.wide { display: grid; grid-template-columns: 21rem minmax(0, 1fr); gap: 0 2.5rem; align-items: start; max-width: 72rem; }
     .wide .side { position: sticky; top: 1.5rem; } .wide #firstSetup > .step:first-child { border-top: 0; padding-top: 0; }
   }
-  .auth .mark { display: block; width: 40px; height: 40px; margin: 0 0 1rem; } .mark .tile { fill: var(--accent); } .mark .ink { stroke: var(--accent); }
-  .auth .eyebrow { margin: 0 0 .3rem; font: 600 .7rem/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
-  .auth h1 { font-size: 1.6rem; line-height: 1.2; letter-spacing: -.02em; margin: 0 0 1.5rem; }
+  .auth .eyebrow { margin: 0 0 .3rem; font: 600 var(--text-sm)/1.4 var(--font); color: var(--accent); }
+  .auth h1 { margin: 0 0 1.5rem; }
   .auth h1 + .muted { margin-top: -.75rem; }
   .auth label { color: var(--ink); font-weight: 600; font-size: .85rem; gap: .4rem; margin: 0 0 1rem; }
   .auth label { position: relative; } .auth label .opt { position: absolute; top: .1rem; right: 0; margin: 0; }
   .auth label .opt, .auth label .hint { font-weight: 400; color: var(--ink2); }
-  .auth input, .auth select { width: 100%; min-height: 2.75rem; padding: .6rem .8rem; font-size: 1rem; font-weight: 400; }
+  .auth input { width: 100%; min-height: 2.75rem; padding: .6rem .8rem; font-size: 1rem; font-weight: 400; }
   .auth form > button[type="submit"] { display: block; width: 100%; min-height: 2.75rem; margin-top: .25rem; }
     .providers { display: grid; gap: .6rem; margin: 0 0 1.25rem; }
-  .providers a { display: flex; align-items: center; justify-content: center; gap: .6rem; min-height: 2.75rem; padding: .55rem .9rem; border: 1px solid var(--field); border-radius: 8px; background: var(--panel); color: var(--ink); text-decoration: none; font-weight: 600; transition: border-color .15s, background-color .15s; }
+  .providers a { display: flex; align-items: center; justify-content: center; gap: .6rem; min-height: 2.75rem; padding: .55rem .9rem; border: 1px solid var(--field); border-radius: var(--radius-sm); background: var(--panel); color: var(--ink); text-decoration: none; font-weight: 600; transition: border-color .15s, background-color .15s; }
   .providers a:hover { border-color: var(--accent); background: var(--bg); } .providers svg { width: 18px; height: 18px; flex: none; }
-  .or { display: flex; align-items: center; gap: .75rem; margin: .4rem 0 0; color: var(--ink2); font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+  .or { display: flex; align-items: center; gap: .75rem; margin: .4rem 0 0; color: var(--ink2); font-size: var(--text-xs); }
   .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-  #authNote { margin: 1rem 0 0; padding: .65rem .85rem; border-radius: 8px; background: var(--accent-bg); color: var(--ink); font-size: .88rem; }
+  #authNote { margin: 1rem 0 0; padding: .65rem .85rem; border-radius: var(--radius-sm); background: var(--accent-bg); color: var(--ink); font-size: .88rem; }
   #ssoForm { margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); } #ssoForm button { margin-top: .25rem; }
   .auth .swap { text-align: center; margin: 1.25rem 0 0; }
-  .auth .fine { margin: 1.5rem calc(-1 * var(--pad)) -1.75rem; padding: 1rem var(--pad); border-top: 1px solid var(--line); border-radius: 0 0 14px 14px; background: var(--bg); font-size: .82rem; line-height: 1.55; }
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: .25rem; margin: 0 0 1.5rem; padding: .25rem; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); }
+  .tabs button { background: transparent; border: 0; color: var(--ink2); padding: .5rem; border-radius: 7px; } .tabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+  .tabs button:not([aria-selected="true"]):hover { color: var(--ink); background: transparent; }
+  .auth .forgot { position: absolute; top: 0; right: 0; font-weight: 400; font-size: .82rem; }
+  .qr { width: 12rem; max-width: 100%; margin: .5rem 0; } .qr svg { display: block; width: 100%; height: auto; border-radius: 6px; }
+  .codes { columns: 2; font-family: var(--mono); }
+  #firstSetup pre { overflow-wrap: anywhere; }
+  .auth .fine { margin: 1.5rem calc(-1 * var(--pad)) -1.75rem; padding: 1rem var(--pad); border-top: 1px solid var(--line); border-radius: 0 0 var(--radius-md) var(--radius-md); background: var(--bg); font-size: .82rem; line-height: 1.55; }
   .auth .msg { min-height: 0; margin: .75rem 0 0; font-size: .9rem; } .auth .msg:empty { margin: 0; }
-  .auth .msg.err:not(:empty), .auth .msg.ok:not(:empty) { padding: .55rem .8rem; border-radius: 8px; border: 1px solid; }
+  .auth .msg.err:not(:empty), .auth .msg.ok:not(:empty) { padding: .55rem .8rem; border-radius: var(--radius-sm); border: 1px solid; }
   .auth .msg.err:not(:empty) { border-color: color-mix(in srgb, var(--bad) 40%, var(--panel)); background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
   .auth .msg.ok:not(:empty) { border-color: color-mix(in srgb, var(--ok) 40%, var(--panel)); background: color-mix(in srgb, var(--ok) 8%, var(--panel)); }
-  @media (max-width: 30rem) { .top { flex-wrap: wrap; row-gap: .4rem; } .brand, button.theme { white-space: nowrap; } button.theme { margin-left: auto; } .top .links { order: 1; flex-basis: 100%; margin-left: 0; font-size: .85rem; } .top .who, #planTag { display: none !important; } .auth { --pad: 1.25rem; margin: 1rem .75rem 2rem; border-radius: 12px; } .auth::before { border-radius: 12px 12px 0 0; } .auth .fine { border-radius: 0 0 12px 12px; } .auth h1 { font-size: 1.4rem; } }
+  @media (max-width: 30rem) { .top { padding: 0 var(--space-3); } .top:not(:has(#menuBtn:not([hidden]))) { flex-wrap: wrap; padding-block: var(--space-2); row-gap: var(--space-1); } .top:not(:has(#menuBtn:not([hidden]))) .links { order: 1; flex-basis: 100%; margin-left: 0; } .top:not(:has(#menuBtn:not([hidden]))) .userbtn { margin-left: auto; } .top .sep { display: none; } #planTag { display: none !important; } #userMenu .plan { display: block; } .auth { --pad: 1.25rem; margin: 1rem .75rem 2rem; } .auth h1 { font-size: var(--text-xl); } }
   .step { display: grid; grid-template-columns: 2rem 1fr; gap: .2rem .8rem; padding: 1rem 0; border-top: 1px solid var(--line); }
-  .step .n { font: 700 .85rem/1.6 var(--mono); color: var(--accent); }
+  .step .n { font: 700 var(--text-sm)/1.6 var(--font); color: var(--accent); }
   .step h3 { margin: 0 0 .3rem; font-size: 1rem; } .step p { margin: 0 0 .5rem; color: var(--ink2); font-size: .92rem; }
   .snip { position: relative; margin: .4rem 0 .6rem; } .snip pre { margin: 0; padding-right: 4.5rem; font-family: var(--mono); font-size: .84rem; }
-  .snip button { position: absolute; top: .45rem; right: .45rem; padding: .2rem .6rem; font-size: .8rem; }
+  .snip button { position: absolute; top: .45rem; right: .45rem; min-height: 1.75rem; padding: 0 .6rem; font-size: var(--text-xs); }
   .addr th { text-align: left; font-weight: 600; padding-right: 1rem; white-space: nowrap; } .addr td { word-break: break-all; }
-  .once { border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); border-radius: 10px; padding: 1rem 1.1rem; margin: 1rem 0; }
-  .tok { font-family: var(--mono); word-break: break-all; padding: .6rem .75rem; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  .once { border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); border-radius: var(--radius-md); padding: 1rem 1.1rem; margin: 1rem 0; }
+  .tok { font-family: var(--mono); word-break: break-all; padding: .6rem .75rem; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); }
   .msg { min-height: 1.4rem; margin: .6rem 0; color: var(--ink2); } .panel > .msg:empty { display: none; } .msg.err { color: var(--bad); } .msg.ok { color: var(--ok); }
   .muted { color: var(--ink2); }
   [hidden] { display: none !important; }
-  @media (max-width: 48rem) { .layout { grid-template-columns: 1fr; } nav { display: flex; overflow-x: auto; padding: 0 .3rem; border-right: 0; border-bottom: 1px solid var(--line); } nav .group { display: none; } nav a { flex: none; white-space: nowrap; border-left: 0; border-bottom: 3px solid transparent; } main { padding: 1.25rem 1rem 2rem; } nav a.on { border-bottom-color: var(--accent); }
-    .cards { grid-template-columns: 1fr 1fr; gap: .6rem; } .card { padding: .75rem .85rem; } .card .k { font-size: .6rem; letter-spacing: .06em; } .card .v { font-size: 1.4rem; } .card .s { font-size: .8rem; line-height: 1.35; }
-    table:has(#urls), #urls, table:has(#audit), #audit { display: block; } table:has(#audit) thead { display: none; }
+  @media (max-width: 48rem) { .layout { grid-template-columns: 1fr; } main { padding: 1.25rem 1rem 2rem; }
+    .cards { grid-template-columns: 1fr 1fr; gap: .6rem; } .card { padding: .75rem .85rem; } .card .k { font-size: var(--text-xs); } .card .v { font-size: var(--text-xl); } .card .s { font-size: .8rem; line-height: 1.35; }
+    table:has(#urls), #urls { display: block; } .feed li { flex-direction: column; gap: var(--space-1); }
     #urls tr { display: grid; gap: .15rem; padding: .55rem 0; border-bottom: 1px solid var(--line); } #urls tr:last-child { border-bottom: 0; }
     #urls th, #urls td { padding: 0; border: 0; } #urls td { overflow-wrap: anywhere; font-size: .8rem; }
-    #audit tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .15rem .75rem; padding: .65rem 0; border-bottom: 1px solid var(--line); } #audit tr:last-child { border-bottom: 0; }
-    #audit td { min-width: 0; padding: 0; border: 0; white-space: normal; }
-    #audit td:nth-child(3) { grid-area: 1 / 1; font-weight: 600; } #audit td:nth-child(1) { grid-area: 1 / 2; color: var(--ink2); font-size: .8rem; white-space: nowrap; }
-    #audit td:nth-child(2), #audit td:nth-child(4), #audit td[colspan] { grid-column: 1 / -1; font-size: .8rem; } #audit td:nth-child(2) { color: var(--ink2); } }
+    }
+  .toast { position: fixed; right: var(--space-4); bottom: var(--space-4); z-index: 20; max-width: min(26rem, calc(100vw - 2rem)); padding: var(--space-3) var(--space-4); background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: var(--radius-sm); box-shadow: var(--shadow); } .toast.err { border-left-color: var(--bad); } .toast:empty { visibility: hidden; }
+  dialog.confirm { padding: 0; width: min(28rem, calc(100vw - 2rem)); } dialog.confirm form { padding: var(--space-5); } dialog.confirm h2 { margin: 0 0 var(--space-2); overflow-wrap: anywhere; } dialog.confirm p:empty { display: none; }
+  dialog.confirm .acts { display: flex; justify-content: flex-end; gap: var(--space-3); margin-top: var(--space-5); flex-wrap: wrap; } dialog.confirm .choice { display: grid; grid-template-columns: auto 1fr; column-gap: var(--space-3); margin: var(--space-3) 0; font-weight: 400; cursor: pointer; } dialog.confirm .choice input { width: auto; margin: .2rem 0 0; } dialog.confirm .choice span { grid-column: 2; color: var(--ink2); font-size: var(--text-sm); }
+  abbr[title] { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
 </style>
-<div class="top"><a class="brand" href="https://agent-custody.dev/"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>agent-custody</a><span id="tenantTag" class="pill" hidden></span><span id="planTag" class="pill" hidden></span><span class="links"><a href="https://agent-custody.dev/guide/getting-started">Guide</a><a href="https://docs.agent-custody.dev/reference/">Docs</a><a href="https://agent-custody.dev/verify">Verify a receipt</a></span><span class="who" id="who"></span><button class="theme" id="themeToggle" type="button">Dark mode</button></div>
+<div class="top"><button class="navbtn icon" id="menuBtn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Navigation" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><a class="brand" href="#overview" aria-label="agent-custody, Overview"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff"/><path d="M25 20h14M25 27h14" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/><path d="M25 37.5l5 4.5 9.5-10" fill="none" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-out>agent-custody</span></a><span id="tenantTag" class="tenant" hidden></span><span id="planTag" class="badge" hidden></span><span class="links">${DASHBOARD_NAV}</span><span class="sep" aria-hidden="true"></span><button class="userbtn quiet" id="userBtn" type="button" popovertarget="userMenu" aria-expanded="false" aria-controls="userMenu" aria-label="Appearance"><span class="avatar" id="avatar" aria-hidden="true" data-acct hidden></span><svg class="theme-ic" viewBox="0 0 24 24" aria-hidden="true" data-out><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg></button><div id="userMenu" popover><div class="head" data-acct><span class="who" id="who"></span><span class="meta" id="whoMeta"></span><span class="meta plan" id="whoPlan"></span></div><hr data-acct><a class="row" href="#account" data-view="account" data-acct><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>Security</a><button class="row" id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Dark mode"><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Dark mode<span class="state" aria-hidden="true"></span></button><hr data-acct><button class="row out" id="signout" type="button" data-acct><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9"/></svg>Sign out</button></div></div>
 <div id="notice" class="notice" hidden></div>
 <section id="auth" class="auth split" hidden>
   <aside class="pitch">
@@ -1348,29 +1809,36 @@ const PORTAL_PAGE = `<!doctype html>
     </ol>
   </aside>
   <div class="pane">
-  ${MARK}
   <p class="eyebrow">Hosted log</p>
   <h1 id="authTitle">Sign in</h1>
+  <div class="tabs" id="authTabs" role="tablist"><button type="button" role="tab" id="tabSignIn" aria-selected="true">Sign in</button><button type="button" role="tab" id="tabSignUp" aria-selected="false">Sign up</button></div>
   <div id="providers" class="providers" hidden></div>
   <form id="authForm">
     <label>Work email<input id="email" type="email" autocomplete="email" required></label>
-    <label>Password<input id="password" type="password" autocomplete="current-password" minlength="10" required></label>
+    <label>Password<button class="link forgot" id="forgotOpen" type="button" hidden>Forgot password?</button><input id="password" type="password" autocomplete="current-password" minlength="10" required><span class="hint" id="pwRule" hidden>At least ten characters.</span></label>
     <button id="authGo" type="submit">Sign in</button>
     <p class="msg" id="authMsg" aria-live="polite"></p>
   </form>
+  <form id="forgotForm" hidden>
+    <p class="muted">Enter the address of your account. We send a link to set a new password. The link works for one hour.</p>
+    <label>Work email<input id="forgotEmail" type="email" autocomplete="email" required></label>
+    <button type="submit">Send the link</button>
+    <p class="msg" id="forgotMsg" aria-live="polite"></p>
+    <p class="muted swap"><button class="link" id="forgotBack" type="button">Back to sign in</button></p>
+  </form>
   <form id="mfaForm" hidden>
-    <p class="muted">Your account has two-step sign-in. Enter the six-digit code from your authenticator app.</p>
-    <label>Code<input id="mfaCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+    <p class="muted">Your account has two-step sign-in. Enter the six-digit code from your authenticator app, or one of your recovery codes.</p>
+    <label>Code<input id="mfaCode" autocomplete="one-time-code" maxlength="20" required></label>
     <button type="submit">Verify</button>
     <p class="msg" id="mfaMsg" aria-live="polite"></p>
   </form>
   <p class="muted" id="authNote" hidden>Next you name your organisation and get your tenant and its first key. Two minutes.</p>
-  <form id="ssoForm" action="/auth/sso" method="get">
+  <p class="muted swap" id="ssoSwap"><button class="link" id="ssoOpen" type="button">Sign in with single sign-on</button></p>
+  <form id="ssoForm" action="/auth/sso" method="get" hidden>
     <label>Work email for single sign-on<input name="email" type="email" autocomplete="email" required></label>
-    <button class="quiet" type="submit">Sign in with single sign-on</button>
+    <button class="quiet" type="submit">Continue with single sign-on</button>
   </form>
-  <p class="muted swap"><button class="link" id="authSwap" type="button">Create an account instead</button></p>
-  <p class="muted fine">The free plan is ten thousand appends a month, no card. Your gateway sends only hashes; nothing you log here can be read by us.</p>
+  <p class="muted fine">The free plan is ten thousand <abbr title="An append is one receipt hash your gateway writes to your log.">appends</abbr> a month, no card. Your gateway sends only hashes; nothing you log here can be read by us.</p>
   </div>
 </section>
 <section id="onboard" class="auth split" hidden>
@@ -1385,7 +1853,6 @@ const PORTAL_PAGE = `<!doctype html>
     </ol>
   </aside>
   <div class="pane">
-  ${MARK}
   <h1>Set up your tenant</h1>
   <p class="muted">Signed in as <b id="onboardWho"></b>. A tenant is your own log on this service, with its own keys and its own path.</p>
   <div id="invites" class="panel" hidden><p><b>You are invited to join a tenant.</b> Your email address must be verified first.</p><div id="inviteList"></div></div>
@@ -1394,8 +1861,6 @@ const PORTAL_PAGE = `<!doctype html>
     <label>Company or organisation<input id="company" autocomplete="organization" maxlength="160" required></label>
     <label>Tenant id<input id="tenant" placeholder="acme" pattern="[a-z0-9][a-z0-9\\-]{1,38}[a-z0-9]" required><span class="hint">A short name for your organisation, filled in from the company name; change it if you like. It becomes the path of your log, which your gateway config and your auditors will use: <code id="tenantPreview">__LOG_BASE__t/&lt;tenant&gt;/</code></span></label>
     <label>Your role <span class="opt">optional</span><input id="role" autocomplete="organization-title" maxlength="120" placeholder="Head of Platform"></label>
-    <label>Phone <span class="opt">optional</span><input id="phone" type="tel" autocomplete="tel" maxlength="40" placeholder="+44 20 …"></label>
-    <label>Telegram username <span class="opt">optional</span><input id="telegram" maxlength="40" placeholder="@yourname"><span class="hint">Your handle in Telegram, under Settings, if you would rather we reach you there than by email.</span></label>
     <button type="submit">Create tenant</button>
     <p class="msg" id="onboardMsg" aria-live="polite"></p>
   </form>
@@ -1404,99 +1869,121 @@ const PORTAL_PAGE = `<!doctype html>
 </section>
 <section id="welcome" class="auth wide" hidden>
   <div class="side">
-  ${MARK}
   <h1>Your tenant is ready</h1>
-  <p class="muted">Three steps to your first receipt in this log. Everything here is under <b>Setup</b> in the dashboard whenever you need it again.</p>
-  <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst">Copy key</button></div>
+  <p class="muted">That was step 1 of 4. Steps 2 to 4 take you to your first receipt in this log. Everything here is under <b>Setup</b> in the dashboard whenever you need it again.</p>
+  <div class="once"><p><b>Your first API key, shown once.</b> Put it in the environment your gateway reads as <code>AGENT_CUSTODY_LOG_TOKEN</code>. We keep only its hash.</p><p class="tok" id="firstToken"></p><button class="quiet" id="copyFirst" data-copy>Copy API key</button> <button type="button" id="savedFirst">I saved the key</button></div>
   <p><button id="toDash">Go to the dashboard</button></p>
   </div>
   <div id="firstSetup"></div>
 </section>
+<section id="loadFail" class="auth" role="alert" hidden>
+  <h1>We could not load your account</h1>
+  <p class="muted" id="loadErr"></p>
+  <p><button type="button" id="retry">Retry</button></p>
+</section>
 <div class="layout" id="app" hidden>
-  <nav>
+  <nav id="nav" aria-label="Main">
     <div class="group">Monitor</div>
     <a href="#overview" data-view="overview">Overview</a>
     <a href="#usage" data-view="usage">Usage</a>
-    <div class="group">Configure</div>
+    <a href="#activity" data-view="activity">Activity</a>
+    <div class="group">Log</div>
     <a href="#setup" data-view="setup">Setup</a>
     <a href="#keys" data-view="keys">API keys <span class="n" id="nKeys"></span></a>
     <a href="#policies" data-view="policies">Policies <span class="n" id="nPolicies"></span></a>
+    <a href="#export" data-view="export">Export</a>
+    <div class="group">Organisation</div>
     <a href="#members" data-view="members">Members <span class="n" id="nMembers"></span></a>
     <a href="#billing" data-view="billing">Billing</a>
-    <a href="#export" data-view="export">Export</a>
-    <div class="group">Account</div>
-    <a href="#account" data-view="account">Two-step sign-in</a>
-    <a href="#" id="signout">Sign out</a>
+    <div class="group help">Help</div>
+    ${DASHBOARD_NAV.replaceAll("<a ", '<a class="help" ')}
   </nav>
   <main>
     <div data-pane="overview">
       <h1>Overview</h1>
-      <div class="cards">
+      <div class="panel" id="firstReceipt" hidden><h2>Send your first receipt</h2><p>Your log is empty. Put your API key where your gateway runs, point the gateway at this log, and run your agent once. The numbers show here after the first append.</p><p><a href="#setup" data-view="setup">Open Setup</a></p></div>
+      <div class="cards" id="ovCards">
         <div class="card" id="cUsed"><div class="k">Appends this month</div><div class="v" id="vUsed">–</div><div class="s" id="sUsed"></div></div>
         <div class="card" id="cSize"><div class="k">Receipts in your log</div><div class="v" id="vSize">–</div><div class="s">leaf hashes, all time</div></div>
-        <div class="card" id="cKeys"><div class="k">Live keys</div><div class="v" id="vKeys">–</div><div class="s" id="sKeys"></div></div>
-        <div class="card" id="cCp"><div class="k">Latest checkpoint</div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
+        <div class="card" id="cKeys"><div class="k">Active keys</div><div class="v" id="vKeys">–</div><div class="s" id="sKeys"></div></div>
+        <div class="card" id="cCp"><div class="k"><abbr title="A checkpoint is the log's size and root hash, signed and published apart from the log, so anyone can check later that it was never rewritten.">Latest checkpoint</abbr></div><div class="v" id="vCp">–</div><div class="s" id="sCp"></div></div>
       </div>
-      <p class="muted">Tree heads on this log are signed by our key; there is no second, independent witness yet. Every receipt you log here is checkable by anyone with your gateway's public key and ours: <a href="https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not">what a receipt proves and what it does not</a>.</p>
+      <p class="muted">Tree heads on this log are signed by our key; there is no second, independent witness yet. Every receipt you log here is checkable by anyone with your gateway's public key and ours: <a href="https://github.com/svayatta/agent-custody/tree/main/packages/receipts#what-a-receipt-proves-and-what-it-does-not" target="_blank" rel="noopener">what a receipt proves and what it does not</a>.</p>
       <h2>Your log</h2>
       <div class="panel"><table><tbody id="urls"></tbody></table></div>
-      <h2>Recent activity</h2>
-      <div class="panel"><table><thead><tr><th>when</th><th>who</th><th>action</th><th>detail</th></tr></thead><tbody id="audit"></tbody></table></div>
+    </div>
+    <div data-pane="activity" hidden>
+      <h1>Activity</h1>
+      <p class="muted">Every change to your tenant, newest first. Times are in your time zone. Hold the pointer on a time to see it in UTC.</p>
+      <div class="panel"><ul class="feed" id="activityFeed"></ul></div>
+      <p><button type="button" class="quiet" id="activityMore" hidden>Show older</button></p>
     </div>
     <div data-pane="usage" hidden>
       <h1>Usage</h1>
-      <div class="panel"><div class="bars" id="bars"></div></div>
-      <p class="muted" id="usageNote"></p>
+      <div class="panel"><h2>This month</h2><p id="usageNow"></p><progress id="usageBar" aria-label="Appends this month against the plan limit"></progress></div>
+      <div class="panel"><h2>Last six months</h2><div class="bars" id="bars"></div><p class="muted" id="usageNote"></p></div>
     </div>
     <div data-pane="keys" hidden>
       <h1>API keys</h1>
-      <p class="muted">A key is a bearer token your gateway presents on append. It is shown once when minted; we keep only its hash. Mint a second key before revoking the first to rotate without a gap.</p>
-      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Mint key</button></form>
-        <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted">Copy key</button></div>
-        <table style="margin-top:1rem"><thead><tr><th>label</th><th>hash</th><th>created</th><th>state</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
-      <p class="msg" id="keysMsg"></p>
+      <p class="muted">An API key is what your gateway sends with each append. You see it one time, when you create it; we keep only its hash. To rotate without a gap, create the new API key before you revoke the old one.</p>
+      <div class="panel"><form id="mintForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Label<input id="label" placeholder="support fleet"></label><button type="submit">Create API key</button></form>
+        <div id="minted" class="once" hidden><p><b>Shown once.</b></p><p class="tok" id="mintedTok"></p><button class="quiet" id="copyMinted" data-copy>Copy API key</button> <button type="button" id="savedMinted">I saved the key</button></div>
+        <table style="margin-top:1rem"><thead><tr><th>label</th><th>created</th><th>last used</th><th>state</th><th></th></tr></thead><tbody id="keyRows"></tbody></table></div>
     </div>
     <div data-pane="policies" hidden>
       <h1>Policies</h1>
-      <p class="muted">Enforcement stays on your machines: the gateway reads its Cedar file locally and writes the file's SHA-256 into every receipt as <code>policyDigest</code>. This page gives those digests names. Publish each version you deploy, byte for byte as the gateway loads it, and a receipt's digest reads as "refunds-v3" instead of a hash, here and in your export. We never evaluate a policy and nothing here is read by the gateway.</p>
-      <div class="panel"><form id="policyForm"><label>Name for this version<input id="policyName" placeholder="refunds-v3" maxlength="80" required></label><label>Policy text, exactly as the gateway's file<textarea id="policyText" rows="8" spellcheck="false" placeholder="permit(principal, action == Action::&quot;stripe.refund&quot;, resource) when { context.args.amount <= 100000 };" required></textarea></label><button type="submit">Publish version</button> <span class="muted" id="policyDigestPreview"></span></form></div>
+      <p class="muted">Publish each <abbr title="Cedar is the policy language the gateway uses to allow or deny each tool call.">Cedar</abbr> policy version that your gateway loads, and the <code>policyDigest</code> of a receipt reads as its name, such as "refunds-v3". Enforcement stays on your machines: the gateway never reads this page. <a href="https://agent-custody.dev/reference/hosted#policies-names-for-the-digests-receipts-carry" target="_blank" rel="noopener">How policy names work</a></p>
+      <p><button type="button" id="policyNew">Publish version</button></p>
+      <div class="panel"><table><thead><tr><th>name</th><th>digest</th><th>bytes</th><th>published</th><th>by</th><th></th></tr></thead><tbody id="policyRows"></tbody></table></div>
       <div class="panel"><h2>Match a receipt</h2><p class="muted">Paste a receipt file, or just its <code>policyDigest</code>, to see which published version decided it.</p><form id="matchForm"><label>Receipt JSON or digest<textarea id="matchIn" rows="3" spellcheck="false"></textarea></label><button type="submit" class="quiet">Match</button></form><p class="msg" id="matchOut"></p></div>
-      <div class="panel"><table><thead><tr><th>name</th><th>digest</th><th>bytes</th><th>published</th><th>by</th><th></th></tr></thead><tbody id="policies"></tbody></table></div>
-      <div class="panel" id="policyView" hidden><h2 id="policyViewName"></h2><pre id="policyViewText"></pre></div>
-      <p class="msg" id="policiesMsg"></p>
+      <dialog id="publishDialog" aria-labelledby="publishTitle"><form id="policyForm"><h2 id="publishTitle">Publish a policy version</h2><label>Name for this version<input id="policyName" placeholder="refunds-v3" maxlength="80" required></label><label>Policy text, exactly as the gateway's file<textarea id="policyText" rows="10" spellcheck="false" placeholder="permit(principal, action == Action::&quot;stripe.refund&quot;, resource) when { context.args.amount <= 100000 };" required></textarea></label><p class="muted" id="policyDigestPreview"></p><button type="submit">Publish</button> <button type="button" class="quiet" id="publishCancel">Cancel</button><p class="msg" id="publishMsg"></p></form></dialog>
+      <dialog id="policyView" aria-labelledby="policyViewName"><h2 id="policyViewName"></h2><pre id="policyViewText"></pre><button type="button" class="quiet" id="policyViewClose">Close</button></dialog>
     </div>
     <div data-pane="members" hidden>
       <h1>Members</h1>
-      <p class="muted">An owner manages everything, billing and owners included. An admin manages keys and members below owner. A reviewer publishes policy versions. A read-only member only looks. An invited person creates an account with the invited address, verifies it, and accepts on the first screen. An invite is good for seven days.</p>
-      <div class="panel" id="inviteBox" hidden><form id="inviteForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Email<input id="inviteEmail" type="email" required></label><label style="margin:0">Role<select id="inviteRole"></select></label><button type="submit">Invite</button></form></div>
-      <div class="panel"><table><thead><tr><th>member</th><th>role</th><th>joined</th><th>two-step</th><th></th></tr></thead><tbody id="members"></tbody></table></div>
+      <p class="muted">Each member has one role. The list of choices explains each role. An invited person creates an account with the invited address, verifies it, and accepts on the first screen. An invite is good for seven days.</p>
+      <div class="panel" id="inviteBox" hidden><form id="inviteForm" style="display:flex;gap:.6rem;align-items:end;flex-wrap:wrap"><label style="margin:0">Email<input id="inviteEmail" type="email" required></label><label style="margin:0">Role<select id="inviteRole"></select></label><button type="submit">Invite</button></form><p class="muted" id="inviteRoleHint"></p></div>
+      <div class="panel"><table><thead><tr><th>member</th><th>role</th><th>joined</th><th>two-step</th><th></th></tr></thead><tbody id="memberRows"></tbody></table></div>
       <h2>Pending invites</h2>
       <div class="panel"><table><thead><tr><th>email</th><th>role</th><th>invited by</th><th>sent</th><th></th></tr></thead><tbody id="inviteRows"></tbody></table></div>
-      <p class="msg" id="membersMsg"></p>
     </div>
     <div data-pane="account" hidden>
-      <h1>Two-step sign-in</h1>
+      <h1>Account</h1>
+      <h2>Two-step sign-in</h2>
       <p class="muted">Two-step sign-in is <b id="mfaState">off</b>. With it on, a password or a GitHub or Google sign-in is followed by a six-digit code from an authenticator app (TOTP).</p>
       <div class="panel">
         <button id="mfaStart" type="button">Set up</button>
         <div id="mfaSetupBox" hidden>
-          <p>Add this secret to your authenticator app (enter it by hand, or paste the address), then type a code from the app.</p>
-          <p class="tok" id="mfaSecret"></p><p class="tok" id="mfaUri"></p>
+          <p>Scan this QR code with your authenticator app, then type a code from the app.</p>
+          <div class="qr" id="mfaQr"></div>
+          <p class="muted">Cannot scan? Type this secret into the app by hand:</p>
+          <p class="tok" id="mfaSecret"></p>
+          <details><summary class="muted">Show the setup address</summary><p class="tok" id="mfaUri"></p></details>
           <form id="mfaOnForm"><label>Code<input id="mfaOnCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><button type="submit">Turn on</button></form>
         </div>
-        <form id="mfaOffForm" hidden><label>Current code<input id="mfaOffCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><button type="submit" class="quiet">Turn off</button></form>
+        <div id="recoveryBox" class="once" hidden><p><b>Your recovery codes, shown once.</b> Keep them in a safe place. Each code works one time in place of a code from the app, if you lose your phone. We keep only their hashes.</p><div class="snip"><pre class="codes" id="recoveryCodes"></pre><button type="button" class="quiet" data-copy>Copy</button></div></div>
+        <form id="mfaOffForm" hidden><label>Current code or recovery code<input id="mfaOffCode" autocomplete="one-time-code" maxlength="20" required></label><button type="submit" class="quiet">Turn off</button></form>
+        <form id="recoveryForm" hidden><p class="muted"><span id="recoveryLeft"></span> Make new codes to replace all of them.</p><label>Current code<input id="recoveryCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><button type="submit" class="quiet">Make new recovery codes</button></form>
       </div>
       <p class="msg" id="accountMsg"></p>
+      <h2>Password</h2>
+      <div class="panel">
+        <form id="pwForm"><label>Current password<input id="pwCurrent" type="password" autocomplete="current-password" required></label><label>New password<input id="pwNew" type="password" autocomplete="new-password" minlength="10" required><span class="hint">At least ten characters.</span></label><button type="submit">Change password</button></form>
+        <p class="muted">A change signs out every other session of this account. An account made through GitHub, Google, or single sign-on has a random password that nobody knows<span id="pwNoMail">.</span><span id="pwMail" hidden>: to set one, sign out and use <b>Forgot password?</b> on the sign-in page.</span></p>
+        <p class="msg" id="pwMsg"></p>
+      </div>
     </div>
     <div data-pane="billing" hidden>
       <h1>Billing</h1>
-      <div class="panel" id="billingPanel"></div>
+      <div class="panel" id="billingNow"></div>
+      <div class="plans" id="plans"></div>
+      <p class="muted">The prices and limits are the same as on the <a href="https://agent-custody.dev/pricing" target="_blank" rel="noopener">pricing page</a>. No plan has an availability commitment yet.</p>
       <p class="msg" id="billingMsg"></p>
     </div>
     <div data-pane="export" hidden>
       <h1>Export</h1>
-      <p class="muted">Everything the log holds about you, any time, with your key: every leaf hash as a log file the verifier reads offline, the signed head, the published keys, the checkpoints, your usage, and the actions taken on your tenant. It checks itself before writing.</p>
-      <pre id="exportCmd"></pre>
+      <p class="muted">Everything the log holds about you, any time, with your key: every <abbr title="A leaf is one entry in the log: the hash of one receipt.">leaf</abbr> hash as a log file the verifier reads offline, the signed head, the published keys, the checkpoints, your usage, and the actions taken on your tenant. It checks itself before writing.</p>
+      <div class="snip"><pre id="exportCmd"></pre><button type="button" class="quiet" data-copy>Copy</button></div>
     </div>
     <div data-pane="setup" hidden>
       <h1>Setup</h1>
@@ -1505,6 +1992,15 @@ const PORTAL_PAGE = `<!doctype html>
     </div>
   </main>
 </div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<dialog id="dlg" class="confirm" aria-labelledby="dlgTitle" aria-describedby="dlgText">
+  <form method="dialog">
+    <h2 id="dlgTitle"></h2>
+    <p id="dlgText" class="muted"></p>
+    <div id="dlgChoices"></div>
+    <div class="acts"><button type="submit" value="cancel" class="quiet" id="dlgNo" formnovalidate autofocus>Go back</button><button type="submit" value="ok" id="dlgOk"></button></div>
+  </form>
+</dialog>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -1522,22 +2018,117 @@ const PORTAL_PAGE = `<!doctype html>
   const ROLES = ["readonly", "reviewer", "admin", "owner"];
   const can = (least) => ROLES.indexOf(myRole) >= ROLES.indexOf(least);
   const note = (id, text, ok) => { $(id).className = "msg " + (ok ? "ok" : "err"); $(id).textContent = text; };
-  const show = (id) => { for (const s of ["auth", "onboard", "welcome", "app"]) $(s).hidden = s !== id; };
+  const toast = (text, ok) => {
+    const t = $("toast"), s = String(text).charAt(0).toUpperCase() + String(text).slice(1);
+    t.className = "toast " + (ok ? "ok" : "err"); t.textContent = /[.!?…]$/.test(s) ? s : s + ".";
+    clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.textContent = ""; }, ok ? 6000 : 10000);
+  };
+  const ask = (o) => new Promise((resolve) => {
+    const d = $("dlg"), box = $("dlgChoices");
+    $("dlgTitle").textContent = o.title; $("dlgText").textContent = o.text || ""; $("dlgOk").textContent = o.ok; $("dlgOk").className = o.danger ? "danger" : "";
+    box.replaceChildren(...(o.choices || []).map(([v, label, desc]) => {
+      const l = document.createElement("label"), r = document.createElement("input"), b = document.createElement("b"), t = document.createElement("span");
+      l.className = "choice"; r.type = "radio"; r.name = "dlgChoice"; r.value = v; r.checked = v === o.current; b.textContent = label; t.textContent = desc; l.append(r, b, t); return l;
+    }));
+    d.returnValue = "";
+    d.onclose = () => { const c = box.querySelector("input:checked"); resolve(d.returnValue !== "ok" ? null : o.choices ? c && c.value : true); };
+    d.showModal();
+  });
+  $("dlg").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const show = (id) => {
+    for (const s of ["auth", "onboard", "welcome", "loadFail", "app"]) $(s).hidden = s !== id;
+    $("menuBtn").hidden = id !== "app";
+    for (const el of document.querySelectorAll("[data-acct]")) el.toggleAttribute("hidden", id !== "app");
+    for (const el of document.querySelectorAll("[data-out]")) el.toggleAttribute("hidden", id === "app");
+    if (id !== "app") { $("tenantTag").hidden = true; $("planTag").hidden = true; }
+    $("userBtn").setAttribute("aria-label", id === "app" ? "Account menu for " + myEmail : "Appearance");
+    if (id !== "app") { document.title = "agent-custody"; setDrawer(false); }
+  };
   const PROVIDERS = __PROVIDERS__;
+  const PLANS = __PLANS__;
+  const PLAN_NAMES = Object.fromEntries(PLANS.map((p) => [p.plan, p.name]));
+  let myEmail = "";
+  let keyList = [];
+  let activityNext = null;
+  const when = (iso) => "<time datetime=\\"" + esc(iso) + "\\" title=\\"" + esc(iso.slice(0, 16).replace("T", " ")) + " UTC\\">" + esc(new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })) + "</time>";
+  const actor = (a) => a === "portal:" + myEmail ? "You" : a.startsWith("portal:") ? a.slice(7) : a.startsWith("stripe:") ? "Stripe billing" : a.startsWith("cli:") ? "The operator" : a === "unattributed" ? "Someone" : a;
+  const keyName = (prefix) => { const k = keyList.find((k) => prefix && k.hash.startsWith(String(prefix).slice(0, 12))); return k ? "the key '" + k.label + "'" : "the key " + prefix; };
+  const SENTENCES = {
+    "tenant.add": (d) => "created the tenant" + (d.logId ? " with the log id '" + d.logId + "'" : ""),
+    "tenant.disable": () => "disabled the tenant",
+    "tenant.plan": (d) => "moved the tenant to the " + (PLAN_NAMES[d.plan] || d.plan) + " plan",
+    "token.add": (d) => "created the key '" + d.label + "'",
+    "token.revoke": (d) => d.revoked === 0 ? "tried to revoke " + keyName(d.hashPrefix) + ", but no active key matched" : "revoked " + keyName(d.hashPrefix),
+    "policy.add": (d) => "published the policy version '" + d.name + "'",
+    "policy.remove": (d) => "removed the policy version '" + d.name + "'",
+    "sso.set": (d) => "set up single sign-on" + (d.protocol ? " (" + String(d.protocol).toUpperCase() + ")" : ""),
+    "sso.remove": () => "removed single sign-on",
+    "user.mfa-reset": (d) => "turned off two-step sign-in for " + (d.email || "a member"),
+  };
+  const sentence = (e) => { const d = e.detail || {}; return actor(e.actor) + " " + (Object.hasOwn(SENTENCES, e.action) ? SENTENCES[e.action](d) : "did '" + e.action + "'" + (Object.keys(d).length ? " (" + Object.entries(d).map(([k, v]) => k + ": " + v).join(", ") + ")" : "")) + "."; };
+  const feed = (entries) => entries.map((e) => "<li><span title=\\"" + esc(e.action + " " + JSON.stringify(e.detail || {})) + "\\">" + esc(sentence(e)) + "</span>" + when(e.at) + "</li>").join("");
+  const loadActivity = async (older) => {
+    try {
+      const r = await api("GET", "/api/audit?limit=25" + (older ? "&before=" + activityNext : ""));
+      if (older) $("activityFeed").insertAdjacentHTML("beforeend", feed(r.entries)); else $("activityFeed").innerHTML = feed(r.entries) || "<li class=muted>Nothing yet.</li>";
+      activityNext = r.next; $("activityMore").hidden = r.next === null;
+    } catch (err) { toast(err.message, false); }
+  };
+  $("activityMore").onclick = () => loadActivity(true);
+  const meter = (bar, used, quota) => { bar.hidden = quota === null; if (quota === null) return; bar.max = quota; bar.value = Math.min(used, quota); bar.className = used >= quota ? "bad" : used >= .8 * quota ? "warn" : ""; };
+  const resets = () => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toLocaleDateString(undefined, { day: "numeric", month: "long", timeZone: "UTC" }); };
+  const usedLine = (o) => fmt(o.used) + (o.quota === null ? " appends this month. Your plan has no limit." : " of " + fmt(o.quota) + " appends this month (" + Math.floor(100 * o.used / o.quota) + "%). The count resets on " + resets() + ", UTC.");
+  const monthName = (m) => new Date(m + "-01T00:00:00Z").toLocaleDateString(undefined, { month: "short", year: "numeric", timeZone: "UTC" });
+  const MAIL = __MAIL__;
   const ICONS = { github: "<svg viewBox='0 0 16 16' aria-hidden='true'><path fill='currentColor' d='M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z'/></svg>", google: "<svg viewBox='0 0 48 48' aria-hidden='true'><path fill='#EA4335' d='M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z'/><path fill='#4285F4' d='M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z'/><path fill='#FBBC05' d='M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z'/><path fill='#34A853' d='M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z'/></svg>" };
   if (PROVIDERS.length) { $("providers").innerHTML = PROVIDERS.map((p) => "<a href='/auth/" + p + "'>" + ICONS[p] + "Continue with " + (p === "github" ? "GitHub" : "Google") + "</a>").join("") + "<p class=or>or with email</p>"; $("providers").hidden = false; }
-  const view = (name) => {
+  const TITLES = { overview: "Overview", usage: "Usage", activity: "Activity", setup: "Setup", keys: "API keys", policies: "Policies", export: "Export", members: "Members", billing: "Billing", account: "Security" };
+  const route = () => {
+    if ($("app").hidden) return;
+    const h = location.hash.slice(1), name = Object.hasOwn(TITLES, h) ? h : "overview";
     for (const p of document.querySelectorAll("[data-pane]")) p.hidden = p.dataset.pane !== name;
     for (const a of document.querySelectorAll("nav a[data-view]")) a.classList.toggle("on", a.dataset.view === name);
-    location.hash = name;
+    document.title = TITLES[name] + " \u00b7 agent-custody";
+    if (h !== name) history.replaceState(null, "", "#" + name);
+    scrollTo(0, 0);
   };
+  addEventListener("hashchange", route);
+  const setDrawer = (open, refocus) => {
+    $("nav").classList.toggle("open", open); $("menuBtn").setAttribute("aria-expanded", open);
+    if (open) $("nav").querySelector("a").focus(); else if (refocus) $("menuBtn").focus();
+  };
+  const drawerOpen = () => $("nav").classList.contains("open");
+  $("menuBtn").onclick = () => setDrawer(!drawerOpen());
+  matchMedia("(max-width: 48rem)").onchange = () => setDrawer(false);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drawerOpen()) setDrawer(false, true); });
+  $("userMenu").addEventListener("beforetoggle", (e) => { if (e.newState === "open") { const r = $("userBtn").getBoundingClientRect(); $("userMenu").style.top = r.bottom + 6 + "px"; $("userMenu").style.right = document.documentElement.clientWidth - r.right + "px"; } });
+  $("userMenu").addEventListener("toggle", (e) => $("userBtn").setAttribute("aria-expanded", e.newState === "open"));
   const LOG_BASE = $("tenantPreview").textContent.replace("t/<tenant>/", "");
   const slug = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
   let tenantEdited = false;
   const previewTenant = () => { $("tenantPreview").textContent = LOG_BASE + "t/" + ($("tenant").value || "<tenant>") + "/"; };
   $("company").oninput = () => { if (!tenantEdited) { $("tenant").value = slug($("company").value); previewTenant(); } };
   $("tenant").oninput = () => { tenantEdited = $("tenant").value !== ""; previewTenant(); };
-  $("authSwap").onclick = () => { registering = !registering; $("authTitle").textContent = registering ? "Create an account" : "Sign in"; $("authGo").textContent = registering ? "Create account" : "Sign in"; $("authNote").hidden = !registering; $("password").autocomplete = registering ? "new-password" : "current-password"; $("authSwap").textContent = registering ? "I already have an account" : "Create an account instead"; };
+  const authTab = (signUp) => {
+    registering = signUp;
+    $("tabSignIn").setAttribute("aria-selected", String(!signUp)); $("tabSignUp").setAttribute("aria-selected", String(signUp));
+    $("authTitle").textContent = signUp ? "Sign up" : "Sign in"; $("authGo").textContent = signUp ? "Sign up" : "Sign in";
+    $("authNote").hidden = !signUp; $("pwRule").hidden = !signUp; $("forgotOpen").hidden = signUp || !MAIL; $("ssoSwap").hidden = signUp; $("ssoForm").hidden = true;
+    $("password").autocomplete = signUp ? "new-password" : "current-password";
+    $("authForm").hidden = false; $("forgotForm").hidden = true; $("authMsg").textContent = "";
+  };
+  $("tabSignIn").onclick = () => authTab(false);
+  $("tabSignUp").onclick = () => authTab(true);
+  authTab(false);
+  $("ssoOpen").onclick = () => { $("ssoSwap").hidden = true; $("ssoForm").hidden = false; $("ssoForm").querySelector("input").focus(); };
+  $("forgotOpen").onclick = () => { $("authForm").hidden = true; $("ssoSwap").hidden = true; $("authTitle").textContent = "Reset your password"; $("forgotForm").hidden = false; $("forgotEmail").value = $("email").value; $("forgotMsg").textContent = ""; $("forgotEmail").focus(); };
+  $("forgotBack").onclick = () => authTab(false);
+  $("forgotForm").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("POST", "/api/password/forgot", { email: $("forgotEmail").value }); note("forgotMsg", "If an account has this address, we sent it a link to set a new password. The link works for one hour.", true); }
+    catch (err) { note("forgotMsg", err.message, false); }
+  };
   $("authForm").onsubmit = async (e) => {
     e.preventDefault(); $("authMsg").className = "msg"; $("authMsg").textContent = "";
     try {
@@ -1546,7 +2137,7 @@ const PORTAL_PAGE = `<!doctype html>
       await enter();
     } catch (err) { $("authMsg").className = "msg err"; $("authMsg").textContent = err.message; }
   };
-  const askCode = () => { $("authForm").hidden = true; $("ssoForm").hidden = true; $("providers").hidden = true; $("authSwap").parentElement.hidden = true; $("authTitle").textContent = "Enter your code"; $("mfaForm").hidden = false; $("mfaCode").focus(); };
+  const askCode = () => { $("authForm").hidden = true; $("ssoForm").hidden = true; $("ssoSwap").hidden = true; $("providers").hidden = true; $("authTabs").hidden = true; $("authTitle").textContent = "Enter your code"; $("mfaForm").hidden = false; $("mfaCode").focus(); };
   $("mfaForm").onsubmit = async (e) => {
     e.preventDefault();
     try { await api("POST", "/api/login/mfa", { code: $("mfaCode").value }); location.href = "/"; }
@@ -1555,88 +2146,119 @@ const PORTAL_PAGE = `<!doctype html>
   $("onboardForm").onsubmit = async (e) => {
     e.preventDefault(); $("onboardMsg").className = "msg"; $("onboardMsg").textContent = "";
     try {
-      const r = await api("POST", "/api/onboard", { tenant: $("tenant").value, name: $("name").value, company: $("company").value, role: $("role").value, phone: $("phone").value, telegram: $("telegram").value });
-      $("firstToken").textContent = r.token; renderSetup($("firstSetup"), r.setup, true); show("welcome");
+      const r = await api("POST", "/api/onboard", { tenant: $("tenant").value, name: $("name").value, company: $("company").value, role: $("role").value });
+      $("firstToken").textContent = r.token; renderSetup($("firstSetup"), Object.assign({}, r.setup, { env: "export AGENT_CUSTODY_LOG_TOKEN=" + r.token }), true); $("savedFirst").disabled = false; $("savedFirst").textContent = "I saved the key"; show("welcome");
     } catch (err) { $("onboardMsg").className = "msg err"; $("onboardMsg").textContent = err.message; }
   };
   $("signoutOnboard").onclick = async (e) => { e.preventDefault(); await api("POST", "/api/logout", {}); location.hash = ""; show("auth"); };
-  $("copyFirst").onclick = () => navigator.clipboard.writeText($("firstToken").textContent);
   // Light or dark by choice, kept in this browser; unset, the page follows the system. The button says where it is going.
   const themeNow = () => document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  const themeLabel = () => { $("themeToggle").textContent = themeNow() === "dark" ? "Light mode" : "Dark mode"; };
+  const themeLabel = () => { $("themeToggle").setAttribute("aria-pressed", String(themeNow() === "dark")); };
   $("themeToggle").onclick = () => { const next = themeNow() === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; try { localStorage.setItem("agent-custody-theme", next); } catch {} themeLabel(); };
   themeLabel();
   const snip = (text) => "<div class=snip><pre>" + esc(text) + "</pre><button type=button class=quiet data-copy>Copy</button></div>";
   const step = (n, title, body) => "<div class=step><span class=n>" + n + "</span><div><h3>" + title + "</h3>" + body + "</div></div>";
   const renderSetup = (el, s, atRegistration) => {
+    const n = atRegistration ? 1 : 0;
     el.innerHTML =
-      step(1, "Keep the key where your gateway runs", (atRegistration ? "<p>Your first key is shown once; we keep only its hash. Put it in the environment of the machine that runs your gateway or SDK:</p>" : "<p>Your key was shown once at registration. If it is gone, mint another under <a href=\\"#keys\\" data-view=\\"keys\\">API keys</a>. It lives in the environment of the machine that runs your gateway or SDK:</p>") + snip(s.env)) +
-      step(2, "Point your gateway or SDK at your log", "<p>Add this to <code>gateway.json</code> or <code>sdk.json</code>. <code>hashOnly</code> means this log receives the hash of each receipt and never the receipt.</p>" + snip(s.config)) +
-      step(3, "Send the first receipt", "<p>Run your agent through the gateway once. The <a href=\\"#overview\\" data-view=\\"overview\\">Overview</a> shows the append within seconds, and the first signed checkpoint follows within minutes. New to the gateway? <a href=\\"https://agent-custody.dev/guide/getting-started\\">Getting started</a> takes ten minutes.</p>") +
-      step(4, "Hand this to whoever verifies your receipts", "<p>Both commands fetch this log's published keys and pin them; <code>--log-id</code> makes sure the tree heads are this log's.</p>" + snip(s.verify) + snip(s.audit)) +
-      step(5, "Take your data, any time", "<p>Every leaf hash, the signed head, the keys, the checkpoints, your usage, and the actions taken on your tenant, checked against each other and written as a log copy the verifier reads offline.</p>" + snip(s.export)) +
+      step(n + 1, "Keep the key where your gateway runs", (atRegistration ? "<p>Your first key is shown once; we keep only its hash. Put it in the environment of the machine that runs your gateway or SDK. The command below holds your key:</p>" : "<p>Your key was shown once at registration. If it is gone, create another under <a href=\\"#keys\\" data-view=\\"keys\\">API keys</a>. It lives in the environment of the machine that runs your gateway or SDK:</p>") + snip(s.env)) +
+      step(n + 2, "Point your gateway or SDK at your log", "<p>Add this to <code>gateway.json</code> or <code>sdk.json</code>. <code>hashOnly</code> means this log receives the hash of each receipt and never the receipt.</p>" + snip(s.config)) +
+      step(n + 3, "Send the first receipt", "<p>Run your agent through the gateway once. The <a href=\\"#overview\\" data-view=\\"overview\\">Overview</a> shows the append within seconds, and the first signed checkpoint follows within minutes. New to the gateway? <a href=\\"https://agent-custody.dev/guide/getting-started\\" target=\\"_blank\\" rel=\\"noopener\\">Getting started</a> takes ten minutes.</p>") +
+      "<h2>After the first receipt</h2>" + step("", "Hand this to whoever verifies your receipts", "<p>Both commands fetch this log's published keys and pin them; <code>--log-id</code> makes sure the tree heads are this log's.</p>" + snip(s.verify) + snip(s.audit)) +
+      step("", "Take your data, any time", "<p>Every leaf hash, the signed head, the keys, the checkpoints, your usage, and the actions taken on your tenant, checked against each other and written as a log copy the verifier reads offline.</p>" + snip(s.export)) +
       "<h2>Your log's addresses</h2><div class=panel><table class=addr><tbody>" + [["Your log", s.log], ["Log id on tree heads", s.logId], ["Your checkpoints", s.checkpoints || "published after your first append"], ["The log's keys", s.keys + (s.keyid ? " (current keyid " + s.keyid.slice(0, 12) + "…)" : "")]].map(([k, v]) => "<tr><th>" + esc(k) + "</th><td class=mono>" + esc(v) + "</td></tr>").join("") + "</tbody></table></div>" +
-      "<h2>What this log does not do</h2><p class=muted>Hold receipt contents; forge a receipt, since your gateway key signs those; or, today, countersign with a second independent witness. <a href=\\"https://agent-custody.dev/receipts/#what-a-receipt-proves-and-what-it-does-not\\">What a receipt proves and what it does not.</a></p>";
+      "<h2>What this log does not do</h2><p class=muted>Hold receipt contents; forge a receipt, since your gateway key signs those; or, today, countersign with a second independent witness. <a href=\\"https://github.com/svayatta/agent-custody/tree/main/packages/receipts#what-a-receipt-proves-and-what-it-does-not\\" target=\\"_blank\\" rel=\\"noopener\\">What a receipt proves and what it does not.</a></p>";
   };
   document.addEventListener("click", (e) => {
-    const b = e.target.closest("button[data-copy]"); if (b) { navigator.clipboard.writeText(b.previousElementSibling.textContent).then(() => { b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy"; }, 1500); }); return; }
-    const a = e.target.closest("a[data-view]"); if (a && a.closest("main")) { e.preventDefault(); view(a.dataset.view); }
+    const b = e.target.closest("button[data-copy]"); if (b) { const was = b.dataset.was || b.textContent; b.dataset.was = was; navigator.clipboard.writeText(b.previousElementSibling.textContent).then(() => { b.textContent = "Copied"; setTimeout(() => { b.textContent = was; }, 1500); }, () => toast("Copy failed. Select the text and copy it by hand.", false)); return; }
+    if (drawerOpen() && !e.target.closest("#menuBtn") && (!e.target.closest("nav") || e.target.closest("nav a"))) setDrawer(false);
+    if (e.target.closest("#userMenu a")) $("userMenu").hidePopover();
   });
-  $("toDash").onclick = () => enter();
-  $("signout").onclick = async (e) => { e.preventDefault(); await api("POST", "/api/logout", {}); location.hash = ""; show("auth"); };
-  for (const a of document.querySelectorAll("nav a[data-view]")) a.onclick = (e) => { e.preventDefault(); view(a.dataset.view); };
+  $("savedFirst").onclick = () => { $("savedFirst").disabled = true; $("savedFirst").textContent = "Key saved"; };
+  $("toDash").onclick = async () => { if (!$("savedFirst").disabled && !(await ask({ title: "Leave without saving the key?", text: "We show the key one time. If you did not copy it, create a new key under API keys.", ok: "Leave anyway" }))) return; enter(); };
+  addEventListener("beforeunload", (e) => { if ((!$("welcome").hidden && !$("savedFirst").disabled) || !$("minted").hidden) e.preventDefault(); });
+  $("signout").onclick = async () => { $("userMenu").hidePopover(); await api("POST", "/api/logout", {}); location.hash = ""; show("auth"); };
   const render = (o) => {
-    $("tenantTag").textContent = o.tenant; $("tenantTag").hidden = false; $("planTag").textContent = o.plan + " plan"; $("planTag").hidden = false;
+    $("tenantTag").textContent = o.tenant; $("tenantTag").hidden = false; $("planTag").textContent = cap(o.plan); $("planTag").hidden = false;
     const pct = o.quota ? o.used / o.quota : 0;
     $("cUsed").className = "card " + (o.quota === null ? "ok" : pct >= 1 ? "bad" : pct >= .8 ? "warn" : "ok");
     $("vUsed").textContent = fmt(o.used); $("sUsed").textContent = o.quota === null ? "no allowance on " + o.plan : "of " + fmt(o.quota) + " on " + o.plan + (pct >= 1 ? ": appends are refused until next month" : "");
     $("vSize").textContent = fmt(o.treeSize);
+    $("firstReceipt").hidden = o.treeSize > 0; $("ovCards").hidden = o.treeSize === 0;
     const live = o.keys.filter((k) => !k.revokedAt).length; $("vKeys").textContent = live; $("sKeys").textContent = o.keys.length - live + " revoked"; $("nKeys").textContent = live;
     $("cCp").className = "card " + (o.latestCheckpoint ? (Date.now() - Date.parse(o.latestCheckpoint.signedAt) < 7 * 3600e3 ? "ok" : "warn") : "warn");
     $("vCp").textContent = o.latestCheckpoint ? "size " + fmt(o.latestCheckpoint.treeSize) : "none yet"; $("sCp").textContent = o.latestCheckpoint ? "signed " + ago(o.latestCheckpoint.signedAt) : "published after your first append";
-    $("urls").innerHTML = [["Append here", o.urls.log], ["Log id on tree heads", o.logId], ["The log's keys", o.urls.keys], ["Your checkpoints", o.urls.checkpoints || "(not published)"], ["Current root", o.rootHash || "(empty)"]].map(([k, v]) => "<tr><th>" + esc(k) + "</th><td class=mono>" + esc(v) + "</td></tr>").join("");
-    $("audit").innerHTML = o.audit.map((e) => "<tr><td>" + esc(e.at.replace("T", " ").slice(0, 16)) + "</td><td class=mono>" + esc(e.actor) + "</td><td>" + esc(e.action) + "</td><td class=muted>" + esc(Object.entries(e.detail).map(([k, v]) => k + "=" + v).join(" ")) + "</td></tr>").join("") || "<tr><td colspan=4 class=muted>nothing yet</td></tr>";
-    const max = Math.max(1, ...o.months.map((m) => m.appends));
-    $("bars").innerHTML = o.months.map((m) => "<div class=bar><span class=mono>" + fmt(m.appends) + "</span><i style=\\"height:" + Math.max(2, Math.round(100 * m.appends / max)) + "%\\"></i><b>" + esc(m.month.slice(2)) + "</b></div>").join("");
-    $("usageNote").textContent = "Appends per calendar month, UTC. Your plan allows " + (o.quota === null ? "any number" : fmt(o.quota)) + " a month; the count resets on the first.";
-    $("keys").innerHTML = o.keys.map((k) => "<tr><td>" + esc(k.label) + "</td><td class=mono>" + esc(k.hash) + "</td><td>" + esc(k.createdAt.slice(0, 10)) + "</td><td>" + (k.revokedAt ? "revoked " + esc(k.revokedAt.slice(0, 10)) : "live") + "</td><td>" + (k.revokedAt || !can("admin") ? "" : "<button class=quiet data-revoke=\\"" + esc(k.hash) + "\\">Revoke</button>") + "</td></tr>").join("");
-    $("billingPanel").innerHTML = o.plan === "free"
-      ? "<p>You are on the <b>free</b> plan: ten thousand appends a month, no card.</p><p>The <b>team</b> plan is <b>$50 a month</b>: a million appends, email support within two working days, the same export and audit trail. No availability commitment yet, and the design fails closed: when the log is unreachable your gateway withholds pre-committed calls.</p>" + (o.stripe ? (can("owner") ? "<button id=upgrade>Upgrade to team, $50/month</button>" : "<p class=muted>An owner upgrades the plan.</p>") : "<p class=muted>Card payments are not switched on for this portal yet; email us and we move the plan by hand.</p>")
-      : "<p>You are on the <b>" + esc(o.plan) + "</b> plan" + (o.billing ? " (subscription " + esc(o.billing.status) + ")" : "") + ".</p>" + (o.stripe && o.billing && can("owner") ? "<button class=quiet id=manage>Manage billing</button>" : "");
+    $("urls").innerHTML = [["Append here", o.urls.log], ["Log id on tree heads", o.logId], ["The log's keys", o.urls.keys], ["Your checkpoints", o.urls.checkpoints || "(not published)"], ["Current root", o.rootHash || "none until the first append"]].map(([k, v]) => "<tr><th>" + esc(k) + "</th><td class=mono>" + esc(v) + "</td></tr>").join("");
+    keyList = o.keys;
+    const max = 1.15 * Math.max(1, o.quota || 0, ...o.months.map((m) => m.appends));
+    $("bars").innerHTML = o.months.map((m) => "<div class=bar><span class=mono>" + fmt(m.appends) + "</span><div class=col><i style=\\"height:" + Math.max(1, Math.round(100 * m.appends / max)) + "%\\"></i>" + (o.quota === null ? "" : "<s style=\\"bottom:" + (100 * o.quota / max) + "%\\"></s>") + "</div><b>" + esc(monthName(m.month)) + "</b></div>").join("");
+    $("usageNote").textContent = "Appends per calendar month, UTC. " + (o.quota === null ? "Your plan has no limit." : "The dashed line is your plan limit, " + fmt(o.quota) + " appends a month.");
+    $("usageNow").textContent = usedLine(o); meter($("usageBar"), o.used, o.quota);
+    $("keyRows").innerHTML = o.keys.map((k) => "<tr><td><span title=\\"Hash " + esc(k.hash) + "\\">" + esc(k.label) + "</span></td><td>" + when(k.createdAt) + "</td><td>" + (k.lastUsedAt ? when(k.lastUsedAt) : "<span class=muted>never</span>") + "</td><td>" + (k.revokedAt ? "Revoked " + when(k.revokedAt) : "Active") + "</td><td>" + (k.revokedAt || !can("admin") ? "" : "<button class=quiet data-revoke=\\"" + esc(k.hash) + "\\" data-label=\\"" + esc(k.label) + "\\">Revoke</button>") + "</td></tr>").join("");
+    $("billingNow").innerHTML = "<p>You are on the <b>" + esc(PLAN_NAMES[o.plan] || o.plan) + "</b> plan" + (o.billing ? " (subscription " + esc(o.billing.status) + ")" : "") + ". " + esc(usedLine(o)) + "</p><progress id=billingBar aria-label=\\"Appends this month against the plan limit\\"></progress>";
+    meter($("billingBar"), o.used, o.quota);
+    $("plans").innerHTML = PLANS.map((p) => {
+      const now = p.plan === o.plan;
+      const act = now ? (o.stripe && o.billing && can("owner") ? "<button class=quiet id=manage>Manage billing</button>" : "")
+        : p.plan === "team" && o.plan === "free" ? (o.stripe ? (can("owner") ? "<button id=upgrade>Upgrade to Team</button>" : "<p class=muted>An owner upgrades the plan.</p>") : "<p class=muted>Card payments are off on this portal. Email us and we move the plan by hand.</p>")
+        : p.plan === "enterprise" ? "<a class=\\"btn quiet\\" href=\\"https://agent-custody.dev/contact\\" target=\\"_blank\\" rel=\\"noopener\\">Contact us</a>" : "";
+      return "<div class=\\"card plan" + (now ? " now" : "") + "\\"" + (now ? " aria-current=true" : "") + "><h2>" + esc(p.name) + (now ? " <span class=pill>Current plan</span>" : "") + "</h2><div class=price>" + esc(p.price) + "</div><div class=muted>" + (p.appends === null ? "No append limit" : fmt(p.appends) + " appends a month") + "</div><ul>" + p.points.map((x) => "<li>" + esc(x) + "</li>").join("") + "</ul><div class=act>" + act + "</div></div>";
+    }).join("");
     $("exportCmd").textContent = o.exportCommand; renderSetup($("setupPane"), o.setup, false);
     const up = $("upgrade"); if (up) up.onclick = async () => { try { const r = await api("POST", "/api/checkout", {}); location.href = r.url; } catch (err) { $("billingMsg").className = "msg err"; $("billingMsg").textContent = err.message; } };
     const mg = $("manage"); if (mg) mg.onclick = async () => { try { const r = await api("POST", "/api/billing-portal", {}); location.href = r.url; } catch (err) { $("billingMsg").className = "msg err"; $("billingMsg").textContent = err.message; } };
   };
-  const load = async () => { render(await api("GET", "/api/overview")); await loadPolicies(); await loadMembers(); };
-  const mfaShow = (on) => { $("mfaState").textContent = on ? "on" : "off"; $("mfaStart").hidden = on; $("mfaOffForm").hidden = !on; $("mfaSetupBox").hidden = true; };
-  $("mfaStart").onclick = async () => { try { const r = await api("POST", "/api/mfa/setup", {}); $("mfaSecret").textContent = r.secret; $("mfaUri").textContent = r.uri; $("mfaSetupBox").hidden = false; $("accountMsg").textContent = ""; } catch (err) { note("accountMsg", err.message, false); } };
-  $("mfaOnForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/mfa/enable", { code: $("mfaOnCode").value }); $("mfaOnCode").value = ""; mfaShow(true); note("accountMsg", "Two-step sign-in is on.", true); } catch (err) { note("accountMsg", err.message, false); } };
+  const load = async () => { render(await api("GET", "/api/overview")); await loadPolicies(); await loadMembers(); await loadActivity(false); };
+  const recoveryLeft = (n) => { $("recoveryLeft").textContent = n === 1 ? "1 recovery code is left." : n + " recovery codes are left."; };
+  const showCodes = (codes) => { $("recoveryCodes").textContent = codes.join("\\n"); $("recoveryBox").hidden = false; recoveryLeft(codes.length); };
+  const mfaShow = (on, left) => { $("mfaState").textContent = on ? "on" : "off"; $("mfaStart").hidden = on; $("mfaOffForm").hidden = !on; $("recoveryForm").hidden = !on; $("mfaSetupBox").hidden = true; if (!on) $("recoveryBox").hidden = true; if (left !== undefined) recoveryLeft(left); };
+  $("mfaStart").onclick = async () => { try { const r = await api("POST", "/api/mfa/setup", {}); $("mfaQr").innerHTML = r.qr; $("mfaSecret").textContent = r.secret; $("mfaUri").textContent = r.uri; $("mfaSetupBox").hidden = false; $("mfaStart").hidden = true; $("accountMsg").textContent = ""; } catch (err) { note("accountMsg", err.message, false); } };
+  $("mfaOnForm").onsubmit = async (e) => { e.preventDefault(); try { const r = await api("POST", "/api/mfa/enable", { code: $("mfaOnCode").value }); $("mfaOnCode").value = ""; mfaShow(true); showCodes(r.recoveryCodes); note("accountMsg", "Two-step sign-in is on.", true); } catch (err) { note("accountMsg", err.message, false); } };
   $("mfaOffForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/mfa/disable", { code: $("mfaOffCode").value }); $("mfaOffCode").value = ""; mfaShow(false); note("accountMsg", "Two-step sign-in is off.", true); } catch (err) { note("accountMsg", err.message, false); } };
-  const roleOptions = (cur) => ROLES.filter((r) => r !== "owner" || can("owner")).map((r) => "<option" + (r === cur ? " selected" : "") + ">" + r + "</option>").join("");
+  $("recoveryForm").onsubmit = async (e) => { e.preventDefault(); try { const r = await api("POST", "/api/mfa/recovery", { code: $("recoveryCode").value }); $("recoveryCode").value = ""; showCodes(r.recoveryCodes); note("accountMsg", "New recovery codes are made. The old codes no longer work.", true); } catch (err) { note("accountMsg", err.message, false); } };
+  $("pwMail").hidden = !MAIL; $("pwNoMail").hidden = MAIL;
+  $("pwForm").onsubmit = async (e) => { e.preventDefault(); try { await api("POST", "/api/password/change", { current: $("pwCurrent").value, password: $("pwNew").value }); $("pwCurrent").value = ""; $("pwNew").value = ""; note("pwMsg", "Your password is changed. Other sessions are signed out.", true); } catch (err) { note("pwMsg", err.message, false); } };
+  const ROLE_LABEL = { readonly: "Read-only", reviewer: "Reviewer", admin: "Admin", owner: "Owner" };
+  const ROLE_DESC = { readonly: "Looks at everything. Changes nothing.", reviewer: "Looks at everything and publishes policy versions.", admin: "Does what a reviewer does, and manages API keys and members below owner.", owner: "Manages everything, including billing and owners." };
+  const roleChoices = () => ROLES.filter((r) => r !== "owner" || can("owner")).map((r) => [r, ROLE_LABEL[r], ROLE_DESC[r]]);
+  const hint = () => { $("inviteRoleHint").textContent = ROLE_DESC[$("inviteRole").value]; };
+  $("inviteRole").onchange = hint;
   const loadMembers = async () => {
     const r = await api("GET", "/api/members");
     $("nMembers").textContent = r.members.length;
-    $("inviteRole").innerHTML = roleOptions("readonly");
-    $("members").innerHTML = r.members.map((m) => "<tr><td>" + esc(m.email) + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<select data-setrole=" + m.id + ">" + roleOptions(m.role) + "</select>" : esc(m.role)) + "</td><td>" + esc(m.joinedAt.slice(0, 10)) + "</td><td>" + (m.mfa ? "on" : "off") + "</td><td>" + (can("admin") && (m.role !== "owner" || can("owner")) ? "<button class=link data-rmmember=" + m.id + ">Remove</button>" : "") + "</td></tr>").join("");
-    $("inviteRows").innerHTML = r.invites.map((i) => "<tr><td>" + esc(i.email) + "</td><td>" + esc(i.role) + "</td><td class=mono>" + esc(i.invitedBy) + "</td><td>" + esc(i.createdAt.slice(0, 10)) + "</td><td>" + (can("admin") ? "<button class=link data-rminvite=\\"" + esc(i.email) + "\\">Cancel</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>none</td></tr>";
+    $("inviteRole").innerHTML = roleChoices().map(([v, label]) => "<option value=" + v + ">" + label + "</option>").join(""); hint();
+    const owners = r.members.filter((m) => m.role === "owner").length;
+    $("memberRows").innerHTML = r.members.map((m) => {
+      const mine = can("admin") && (m.role !== "owner" || can("owner")), last = m.role === "owner" && owners === 1;
+      return "<tr><td>" + esc(m.email) + "</td><td>" + esc(ROLE_LABEL[m.role]) + (mine && !last ? " <button class=link data-setrole=" + m.id + " data-role=" + m.role + ">Change</button>" : "") + "</td><td>" + esc(m.joinedAt.slice(0, 10)) + "</td><td>" + (m.mfa ? "on" : "off") + "</td><td>" + (last ? "<span class=muted>Last owner</span>" : mine ? "<button class=link data-rmmember=" + m.id + ">Remove</button>" : "") + "</td></tr>";
+    }).join("");
+    $("inviteRows").innerHTML = r.invites.map((i) => "<tr><td>" + esc(i.email) + "</td><td>" + esc(ROLE_LABEL[i.role]) + "</td><td class=mono>" + esc(i.invitedBy) + "</td><td>" + esc(i.createdAt.slice(0, 10)) + "</td><td>" + (can("admin") ? "<button class=link data-rminvite=\\"" + esc(i.email) + "\\">Cancel</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=5 class=muted>none</td></tr>";
   };
-  const membersDo = async (path, body, done) => { try { await api("POST", path, body); note("membersMsg", done, true); await loadMembers(); } catch (err) { note("membersMsg", err.message, false); await loadMembers(); } };
-  $("inviteForm").onsubmit = (e) => { e.preventDefault(); membersDo("/api/members", { email: $("inviteEmail").value, role: $("inviteRole").value }, "Invite sent to " + $("inviteEmail").value + ".").then(() => { $("inviteEmail").value = ""; }); };
-  document.addEventListener("change", (e) => { const s = e.target.closest("select[data-setrole]"); if (s) membersDo("/api/members/" + s.dataset.setrole + "/role", { role: s.value }, "Role changed."); });
+  const membersDo = async (path, body, done) => { try { await api("POST", path, body); toast(done, true); } catch (err) { toast(err.message, false); } await loadMembers(); };
+  $("inviteForm").onsubmit = async (e) => { e.preventDefault(); const to = $("inviteEmail").value; try { const r = await api("POST", "/api/members", { email: to, role: $("inviteRole").value }); toast(r.emailSent ? "Invite sent to " + to + "." : "The invite is saved, but the email did not go out to " + to + ". Ask them to sign in at " + location.origin + "/ with that address and accept the invite.", r.emailSent); $("inviteEmail").value = ""; } catch (err) { toast(err.message, false); } await loadMembers(); };
   document.addEventListener("click", async (e) => {
-    const rm = e.target.closest("button[data-rmmember]"); if (rm && confirm("Remove this member? They lose access to the tenant at once.")) { membersDo("/api/members/" + rm.dataset.rmmember + "/remove", {}, "Member removed."); return; }
-    const ri = e.target.closest("button[data-rminvite]"); if (ri) { membersDo("/api/invites/remove", { email: ri.dataset.rminvite }, "Invite cancelled."); return; }
+    const cell = (b) => b.closest("tr").cells[0].textContent;
+    const ch = e.target.closest("button[data-setrole]");
+    if (ch) { const who = cell(ch), role = await ask({ title: "Change the role of " + who, ok: "Save role", current: ch.dataset.role, choices: roleChoices() }); if (role && role !== ch.dataset.role) membersDo("/api/members/" + ch.dataset.setrole + "/role", { role }, "Role of " + who + " is now " + ROLE_LABEL[role] + "."); return; }
+    const rm = e.target.closest("button[data-rmmember]");
+    if (rm) { const who = cell(rm); if (await ask({ title: "Remove " + who + "?", text: "This member loses access to the tenant at once.", ok: "Remove member", danger: true })) membersDo("/api/members/" + rm.dataset.rmmember + "/remove", {}, who + " is removed."); return; }
+    const ri = e.target.closest("button[data-rminvite]");
+    if (ri) { if (await ask({ title: "Cancel the invite to " + ri.dataset.rminvite + "?", text: "This person can no longer accept it.", ok: "Cancel invite", danger: true })) membersDo("/api/invites/remove", { email: ri.dataset.rminvite }, "Invite to " + ri.dataset.rminvite + " is cancelled."); return; }
     const ac = e.target.closest("button[data-accept]"); if (ac) { try { await api("POST", "/api/invites/accept", { tenant: ac.dataset.accept }); await enter(); } catch (err) { note("onboardMsg", err.message, false); } }
   });
   const enter = async () => {
     try {
       const me = await api("GET", "/api/me");
       accountNotice(me);
-      if (me.tenant === null) { $("onboardWho").textContent = me.email; $("invites").hidden = !(me.invites || []).length; $("inviteList").innerHTML = (me.invites || []).map((i) => "<p>Join <b>" + esc(i.tenant) + "</b> as " + esc(i.role) + " <button type=button data-accept=\\"" + esc(i.tenant) + "\\">Accept</button></p>").join(""); if (me.profile) { for (const k of ["name", "company", "role", "phone", "telegram"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
-      $("who").textContent = me.email; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyForm").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa); show("app"); await load(); view((location.hash || "#overview").slice(1) || "overview");
+      if (me.tenant === null) { $("onboardWho").textContent = me.email; $("invites").hidden = !(me.invites || []).length; $("inviteList").innerHTML = (me.invites || []).map((i) => "<p>Join <b>" + esc(i.tenant) + "</b> as " + esc(i.role) + " <button type=button data-accept=\\"" + esc(i.tenant) + "\\">Accept</button></p>").join(""); if (me.profile) { for (const k of ["name", "company", "role"]) if (me.profile[k]) $(k).value = me.profile[k]; } previewTenant(); show("onboard"); return; }
+      $("who").textContent = me.email; myEmail = me.email; $("avatar").textContent = me.email.charAt(0); $("whoMeta").textContent = me.tenant + " \u00b7 " + ROLE_LABEL[me.role]; $("whoPlan").textContent = cap(me.plan) + " plan"; myRole = me.role; $("mintForm").hidden = !can("admin"); $("policyNew").hidden = !can("reviewer"); $("inviteBox").hidden = !can("admin") || !!(me.sso && me.sso.enforced); mfaShow(me.mfa, me.recoveryCodes); show("app"); await load(); route();
     }
-    catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) $("authSwap").click(); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { show("app"); $("who").textContent = err.message; } }
+    catch (err) { if (err.status === 401) { show("auth"); if (location.hash === "#register" && !registering) authTab(true); if (new URLSearchParams(location.search).get("mfa") === "1") askCode(); } else { $("loadErr").textContent = err.message.charAt(0).toUpperCase() + err.message.slice(1) + "."; show("loadFail"); } }
   };
+  $("retry").onclick = () => enter();
+  const recheck = () => { if ($("resendVerify")) api("GET", "/api/me").then((me) => { if (me.emailVerified !== false) accountNotice(me); }, () => {}); };
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") recheck(); });
+  addEventListener("focus", recheck);
   const accountNotice = (me) => {
     const parts = [];
     if (me.emailVerified === false && me.mail) parts.push("Verify your email address: we sent a link to " + me.email + ". <button type=button id=resendVerify>Send it again</button>");
@@ -1651,30 +2273,41 @@ const PORTAL_PAGE = `<!doctype html>
   const loadPolicies = async () => {
     const r = await api("GET", "/api/policies");
     $("nPolicies").textContent = r.policies.length || "";
-    $("policies").innerHTML = r.policies.map((p) => "<tr><td>" + esc(p.name) + "</td><td class=mono>" + esc(p.digest.slice(0, 16)) + "…</td><td>" + p.bytes + "</td><td>" + esc(p.createdAt.slice(0, 10)) + "</td><td class=mono>" + esc(p.createdBy.replace(/^portal:/, "")) + "</td><td><button class=link data-viewpol=\\"" + esc(p.id) + "\\">View</button>" + (can("reviewer") ? " <button class=link data-rmpol=\\"" + esc(p.id) + "\\">Remove</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=6 class=muted>No versions published yet. Receipts keep their digests either way; a name is for the people reading them.</td></tr>";
+    $("policyRows").innerHTML = r.policies.map((p) => "<tr><td>" + esc(p.name) + "</td><td class=mono>" + esc(p.digest.slice(0, 16)) + "…</td><td>" + p.bytes + "</td><td>" + esc(p.createdAt.slice(0, 10)) + "</td><td class=mono>" + esc(p.createdBy.replace(/^portal:/, "")) + "</td><td><button class=link data-viewpol=\\"" + esc(p.id) + "\\">View</button>" + (can("reviewer") ? " <button class=link data-rmpol=\\"" + esc(p.id) + "\\">Remove</button>" : "") + "</td></tr>").join("") || "<tr><td colspan=6 class=muted>No versions published yet. Receipts keep their digests either way; a name is for the people reading them.</td></tr>";
   };
   $("policyText").oninput = async () => { const t = $("policyText").value; $("policyDigestPreview").textContent = t ? "sha256 " + (await sha256hex(t)).slice(0, 16) + "…" : ""; };
+  $("policyNew").onclick = () => { $("publishMsg").textContent = ""; $("publishDialog").showModal(); };
+  $("publishCancel").onclick = () => $("publishDialog").close();
+  $("policyViewClose").onclick = () => $("policyView").close();
   $("policyForm").onsubmit = async (e) => {
-    e.preventDefault(); $("policiesMsg").className = "msg";
-    try { const r = await api("POST", "/api/policies", { name: $("policyName").value, text: $("policyText").value }); $("policiesMsg").className = "msg ok"; $("policiesMsg").textContent = "Published " + r.policy.name + " as " + r.policy.digest.slice(0, 16) + "…"; $("policyName").value = ""; $("policyText").value = ""; $("policyDigestPreview").textContent = ""; await loadPolicies(); }
-    catch (err) { $("policiesMsg").className = "msg err"; $("policiesMsg").textContent = err.message; }
+    e.preventDefault(); $("publishMsg").textContent = "";
+    try { const r = await api("POST", "/api/policies", { name: $("policyName").value, text: $("policyText").value }); $("publishDialog").close(); toast("Published version " + r.policy.name + " (digest " + r.policy.digest.slice(0, 16) + "…).", true); $("policyName").value = ""; $("policyText").value = ""; $("policyDigestPreview").textContent = ""; await loadPolicies(); await loadActivity(false); }
+    catch (err) { note("publishMsg", err.message, false); }
   };
   $("matchForm").onsubmit = async (e) => {
     e.preventDefault(); $("matchOut").className = "msg";
     try {
       const raw = $("matchIn").value.trim(); let digest = raw;
-      if (!/^[0-9a-f]{64}$/i.test(raw)) { const b = JSON.parse(raw); const payload = b.envelope ? b.envelope.payload : b.payload; const st = JSON.parse(atob(payload)); digest = st.predicate && st.predicate.policy ? st.predicate.policy.policyDigest : ""; if (!digest) throw new Error("this receipt carries no policy decision"); }
+      if (!/^[0-9a-f]{64}$/i.test(raw)) { try { const b = JSON.parse(raw); const st = JSON.parse(atob(b.envelope ? b.envelope.payload : b.payload)); digest = st.predicate && st.predicate.policy ? st.predicate.policy.policyDigest : ""; } catch { throw new Error("Paste a receipt file or a 64-character digest."); } if (!digest) throw new Error("This receipt carries no policy decision."); }
       const r = await api("GET", "/api/policies?digest=" + encodeURIComponent(digest));
       $("matchOut").className = r.match ? "msg ok" : "msg"; $("matchOut").textContent = r.match ? "Decided by \\"" + r.match.name + "\\", published " + r.match.createdAt.slice(0, 10) + " (" + digest.slice(0, 16) + "…)" : "No published version has digest " + digest.slice(0, 16) + "…; publish the file the gateway loaded to name it.";
     } catch (err) { $("matchOut").className = "msg err"; $("matchOut").textContent = err.message; }
   };
   document.addEventListener("click", async (e) => {
-    const v = e.target.closest("button[data-viewpol]"); if (v) { try { const r = await api("GET", "/api/policies/" + v.dataset.viewpol); $("policyViewName").textContent = r.policy.name + " · " + r.policy.digest; $("policyViewText").textContent = r.policy.text; $("policyView").hidden = false; } catch (err) { $("policiesMsg").className = "msg err"; $("policiesMsg").textContent = err.message; } return; }
-    const rm = e.target.closest("button[data-rmpol]"); if (rm && confirm("Remove this published version? Receipts keep their digests; only the name goes.")) { try { await api("POST", "/api/policies/" + rm.dataset.rmpol + "/remove", {}); $("policyView").hidden = true; await loadPolicies(); } catch (err) { $("policiesMsg").className = "msg err"; $("policiesMsg").textContent = err.message; } }
+    const v = e.target.closest("button[data-viewpol]"); if (v) { try { const r = await api("GET", "/api/policies/" + v.dataset.viewpol); $("policyViewName").textContent = r.policy.name + " · " + r.policy.digest; $("policyViewText").textContent = r.policy.text; $("policyView").showModal(); } catch (err) { toast(err.message, false); } return; }
+    const rm = e.target.closest("button[data-rmpol]"); if (rm && await ask({ title: "Remove version " + rm.closest("tr").cells[0].textContent + "?", text: "Receipts keep their digests. Only the name goes.", ok: "Remove version", danger: true })) { try { await api("POST", "/api/policies/" + rm.dataset.rmpol + "/remove", {}); await loadPolicies(); await loadActivity(false); toast("Version removed.", true); } catch (err) { toast(err.message, false); } }
   });
-  $("mintForm").onsubmit = async (e) => { e.preventDefault(); try { const r = await api("POST", "/api/keys", { label: $("label").value }); $("mintedTok").textContent = r.token; $("minted").hidden = false; $("keysMsg").className = "msg ok"; $("keysMsg").textContent = "minted " + r.label + ", stored as hash " + r.tokenHash; await load(); } catch (err) { $("keysMsg").className = "msg err"; $("keysMsg").textContent = err.message; } };
-  $("copyMinted").onclick = () => navigator.clipboard.writeText($("mintedTok").textContent);
-  document.addEventListener("click", async (e) => { const b = e.target.closest("button[data-revoke]"); if (!b) return; if (!confirm("Revoke key " + b.dataset.revoke + "? A gateway using it stops appending at once.")) return; try { await api("POST", "/api/keys/" + b.dataset.revoke + "/revoke", {}); $("keysMsg").className = "msg ok"; $("keysMsg").textContent = "revoked"; await load(); } catch (err) { $("keysMsg").className = "msg err"; $("keysMsg").textContent = err.message; } });
+  $("mintForm").onsubmit = async (e) => {
+    e.preventDefault();
+    if (!$("minted").hidden && !(await ask({ title: "Replace the key that is still shown?", text: "You did not confirm that you saved it. We show a key one time.", ok: "Continue" }))) return;
+    try { const r = await api("POST", "/api/keys", { label: $("label").value }); $("mintedTok").textContent = r.token; $("minted").hidden = false; toast("Key created" + (r.label ? ": " + r.label : "") + ". We keep only its hash, " + r.tokenHash + ".", true); await load(); } catch (err) { toast(err.message, false); }
+  };
+  $("savedMinted").onclick = () => { $("minted").hidden = true; $("mintedTok").textContent = ""; toast("Key hidden. We do not show it again.", true); };
+  document.addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-revoke]"); if (!b) return;
+    if (!(await ask({ title: "Revoke key " + b.closest("tr").cells[0].textContent + " (" + b.dataset.revoke + ")?", text: "A gateway that uses it stops appending at once. You cannot undo this.", ok: "Revoke key", danger: true }))) return;
+    try { await api("POST", "/api/keys/" + b.dataset.revoke + "/revoke", {}); toast("Key revoked.", true); await load(); } catch (err) { toast(err.message, false); }
+  });
   if (new URLSearchParams(location.search).get("upgraded")) history.replaceState(null, "", "/#billing");
   enter();
 })();

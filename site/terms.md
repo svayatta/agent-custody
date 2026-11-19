@@ -1,4 +1,9 @@
-# Terms for early access
+---
+sidebar: false
+aside: false
+---
+
+# Terms of service
 
 Version 0.2, 2026-09-26. These are the terms on which Charioteer Consulting Ltd ("we") gives early-access tenants ("you") the use of the hosted log at log.agent-custody.dev. They are written in plain language and have not yet been reviewed by counsel; a tenant who needs a signed agreement gets one, and where the two differ the signed one wins. The packages themselves are Apache-2.0 and these terms do not touch them.
 

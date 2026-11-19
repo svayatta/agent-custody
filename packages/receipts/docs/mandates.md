@@ -1,4 +1,4 @@
-# Payment mandates and agent identity: AP2, Visa TAP, Mastercard Agent Pay
+# Payment mandates and agent identity (planned)
 
 Design, not yet built. It tracks issues #185 and #186: fitting the grant and the receipt to the payment networks' standards, so that the networks define the authority and agent-custody keeps the evidence of what was done under it.
 

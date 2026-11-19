@@ -25,6 +25,8 @@ import { createDoorHost, serveDoor } from "./door.ts";
 import { createEgressHost, serveEgress } from "./egress.ts";
 import { draftEgressPolicy } from "./egress-draft.ts";
 import { createAcsGuardian } from "./acs.ts";
+import { auditSessions, defaultTranscriptDir, formatSessionAudit, parseSince } from "./session-audit.ts";
+import { formatPerathosReport, perathosHead, verifyPerathosLog } from "./perathos.ts";
 import { serveA2a } from "./a2a.ts";
 import { PortalStore, sendFollowUps, servePortal, type MailOptions, type OAuthOptions, type Role, type StripeOptions } from "./portal.ts";
 import type { OidcConfig, SamlConfig } from "./sso.ts";
@@ -107,7 +109,9 @@ const USAGE = `agent-custody <command>
   door    --config <door.json> [--port 8780] [--host 127.0.0.1]
                                                    a reverse proxy in front of your own site or API: every arrival classified (verified by a
                                                    trusted grant, claimed, or unknown), decided by the Cedar policy for its route, relayed to the
-                                                   origin or refused with 403, and receipted either way; GET /.well-known/agent-custody-door
+                                                   origin or refused with 403, and receipted either way; GET /.well-known/agent-custody-door.
+                                                   With "authz": true in the config it relays nothing and answers nginx auth_request and
+                                                   Envoy ext_authz checks instead: 200 with the receipt headers, or 403
   egress  --config <egress.json> [--port 8791] [--host 127.0.0.1]
                                                    the egress witness: a forward proxy (CONNECT and plain HTTP, no TLS interception) for a
                                                    locked-down agent's calls that do not go to the gateway. Each agent proves itself with its own
@@ -122,6 +126,8 @@ const USAGE = `agent-custody <command>
   init claude-code [--dir <dir>] [--user] [--enforce] [--log-url <url> [--log-id <id>] [--log-token-env NAME] [--log-key <pub>]]
                                                    one command for your own Claude Code sessions: an agent key, sdk.json in observe mode, a starter deny
                                                    policy, and the three hooks in .claude/settings.local.json (--user: ~/.claude/settings.json). Safe to run twice
+  audit-sessions [--since 7d|24h|<date>|all] [--dir <claude projects dir>] [--policy <file.cedar>] [--counts] [--json]
+          a read-only preview: which of your past Claude Code tool calls the policy would have denied, from the transcripts; writes nothing
   report  --config <sdk.json>                      the calls that the policy would have denied, from the receipts: tool, command or path, rule, receipt id;
                                                    a receipt that does not verify is counted apart. Exits 1 when any receipt does not verify
   hook    [--config <sdk.json>]        Claude Code hook command; reads the event on stdin (or AGENT_CUSTODY_CONFIG)
@@ -133,6 +139,8 @@ const USAGE = `agent-custody <command>
           verify <bundle.json> --attestation <attestations/<keyid>.json> --release-digest sha256:<hex> [--allow-simulated-attestation] [--attestation-audience <aud>] [--attestation-root <pem>]...   attested build: the key was made inside that release
           verify --attestation <file> --release-digest sha256:<hex> [same attestation flags]   the attestation alone, before any receipt
           verify --markdown <dir|bundle.json>... --issuer-key <pub>   one Markdown table for a directory of bundles; exit 1 when one does not verify or none exists
+  verify-perathos <session.jsonl> [--key <hex>]... [--allow-unsigned] [--head <session.head.json>] [--json]
+          check another project's record format, a Perathos session log (perathos.receipt/v1), against its spec; exit 1 when it is not valid
   export  --receipts <dir> --out <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--since <ISO time>] [--allow-clear]
                                                    copies the verified receipt bundles that keep their values private into a directory for a pull request, byte for byte.
                                                    Reads only <id>.json at the top level; never salts/, outbox/, or *.authorization.json. Exits 1 when it refuses a receipt, and when it copies none
@@ -188,7 +196,8 @@ const USAGE = `agent-custody <command>
           [--stripe-key-env NAME --stripe-webhook-env NAME --stripe-price-team <price id>] [--trust-proxy]
                                                    the tenant portal: register, first key, usage against plan, keys, billing, export
   log-admin --db-env NAME import --file <log.jsonl> [--tenant default]      copies a file log into the database as hashes
-  portal-followup --db-env NAME --mail-key-env NAME --mail-from <address> [--mail-notify <address>] [--portal-url <url>] [--dry-run]
+  portal-followup --db-env NAME --secret-env NAME --mail-key-env NAME --mail-from <address> [--mail-notify <address>] [--mail-reply-to <address>]
+                  [--signer <name>] [--signer-role <role>] [--portal-url <url>] [--dry-run]
                                                    the founder's note to registrations an hour to a week old that have not had it; hourly from cron
   audit   --older <bundle.json> --newer <bundle.json> (--log <log.jsonl> | --log-url <url>) [--issuer-key <pub>] [--log-key <pub>] [--log-id <id>] [--witness-key <pub> | --witness-url <url>] [--json]
                                                  with --log-url the log's published keys are fetched and pinned by keyid; with a witness key or
@@ -364,7 +373,7 @@ async function main(argv: string[]): Promise<number> {
       const cfg = loadDoorConfig(values.config);
       const host = await createDoorHost(cfg, { autoFlush: true });
       const running = await serveDoor(host, { port: Number(values.port), host: values.host });
-      console.error(`agent-custody door: ${running.url} keyid=${host.keyid} in front of ${cfg.origin.url}; ${cfg.routes.length} route(s), unmatched arrivals are "${cfg.unmatchedRoute}"`);
+      console.error(`agent-custody door: ${running.url} keyid=${host.keyid} ${cfg.authz ? "answering authz checks" : `in front of ${cfg.origin?.url}`}; ${cfg.routes.length} route(s), unmatched arrivals are "${cfg.unmatchedRoute}"`);
       await untilStopped();
       await running.close();
       await host.close();
@@ -438,6 +447,19 @@ async function main(argv: string[]): Promise<number> {
         ...(values["log-token-env"] ? { logTokenEnv: values["log-token-env"] } : {}),
         ...(values["log-key"] ? { logKey: values["log-key"] } : {}),
       });
+      return 0;
+    }
+    case "audit-sessions": {
+      const { values } = parseArgs({ args: rest, options: { since: { type: "string", default: "7d" }, dir: { type: "string" }, policy: { type: "string" }, json: { type: "boolean", default: false }, counts: { type: "boolean", default: false } } });
+      if (values.policy && isRegoFile(values.policy)) throw new Error("audit-sessions reads a Cedar policy; a Rego policy needs opa, which writes files");
+      const templateUrl = new URL("../templates/claude-code.cedar", import.meta.url);
+      const audit = auditSessions({
+        dir: values.dir ?? defaultTranscriptDir(),
+        policyText: readFileSync(values.policy ?? templateUrl, "utf8"),
+        policyName: values.policy ?? "the init claude-code template",
+        ...(values.since === "all" ? {} : { since: parseSince(values.since) }),
+      });
+      console.log(values.json ? JSON.stringify(audit, null, 2) : formatSessionAudit(audit, { counts: values.counts }));
       return 0;
     }
     case "report": {
@@ -556,16 +578,18 @@ async function main(argv: string[]): Promise<number> {
     }
     case "portal-followup": {
       // The founder's note to every registration between an hour and a week old that has not had it; run hourly from cron.
-      const { values } = parseArgs({ args: rest, options: { "db-env": { type: "string" }, "mail-key-env": { type: "string" }, "mail-from": { type: "string" }, "mail-notify": { type: "string" }, "portal-url": { type: "string", default: "https://app.agent-custody.dev/" }, "dry-run": { type: "boolean", default: false } } });
-      if (!values["db-env"] || !values["mail-key-env"] || !values["mail-from"]) throw new Error("portal-followup needs --db-env, --mail-key-env, and --mail-from");
+      const { values } = parseArgs({ args: rest, options: { "db-env": { type: "string" }, "mail-key-env": { type: "string" }, "mail-from": { type: "string" }, "mail-notify": { type: "string" }, "mail-reply-to": { type: "string" }, "secret-env": { type: "string" }, signer: { type: "string" }, "signer-role": { type: "string" }, "portal-url": { type: "string", default: "https://app.agent-custody.dev/" }, "dry-run": { type: "boolean", default: false } } });
+      if (!values["db-env"] || !values["secret-env"] || !values["mail-key-env"] || !values["mail-from"]) throw new Error("portal-followup needs --db-env, --secret-env, --mail-key-env, and --mail-from");
       const apiKey = process.env[values["mail-key-env"]];
       if (!apiKey) throw new Error(`portal-followup: environment variable ${values["mail-key-env"]} is not set`);
-      const r = await sendFollowUps(new PortalStore(openPostgres(values["db-env"])), { apiKey, from: values["mail-from"], ...(values["mail-notify"] ? { notify: values["mail-notify"] } : {}) }, { portalUrl: values["portal-url"], dryRun: values["dry-run"] });
+      const secret = process.env[values["secret-env"]];
+      if (!secret) throw new Error(`portal-followup: environment variable ${values["secret-env"]} is not set`);
+      const r = await sendFollowUps(new PortalStore(openPostgres(values["db-env"])), { apiKey, from: values["mail-from"], ...(values["mail-notify"] ? { notify: values["mail-notify"] } : {}), ...(values["mail-reply-to"] ? { replyTo: values["mail-reply-to"] } : {}) }, { portalUrl: values["portal-url"], secret, ...(values.signer ? { signer: values.signer } : {}), ...(values["signer-role"] ? { signerRole: values["signer-role"] } : {}), dryRun: values["dry-run"] });
       console.log(`${values["dry-run"] ? "would send" : "sent"} ${r.sent.length}, skipped ${r.skipped.length} (operator's own), failed ${r.failed.length}${r.sent.length ? `: ${r.sent.join(", ")}` : ""}`);
       return r.failed.length ? 1 : 0;
     }
     case "portal": {
-      const { values } = parseArgs({ args: rest, options: { "db-env": { type: "string" }, "secret-env": { type: "string" }, "public-url": { type: "string" }, "checkpoints-url": { type: "string" }, "portal-url": { type: "string" }, port: { type: "string", default: "8792" }, host: { type: "string", default: "127.0.0.1" }, "stripe-key-env": { type: "string" }, "stripe-webhook-env": { type: "string" }, "stripe-price-team": { type: "string" }, "mail-key-env": { type: "string" }, "mail-from": { type: "string" }, "mail-notify": { type: "string" }, "github-client-id": { type: "string" }, "github-secret-env": { type: "string" }, "google-client-id": { type: "string" }, "google-secret-env": { type: "string" }, "trust-proxy": { type: "boolean", default: false } } });
+      const { values } = parseArgs({ args: rest, options: { "db-env": { type: "string" }, "secret-env": { type: "string" }, "public-url": { type: "string" }, "checkpoints-url": { type: "string" }, "portal-url": { type: "string" }, port: { type: "string", default: "8792" }, host: { type: "string", default: "127.0.0.1" }, "stripe-key-env": { type: "string" }, "stripe-webhook-env": { type: "string" }, "stripe-price-team": { type: "string" }, "mail-key-env": { type: "string" }, "mail-from": { type: "string" }, "mail-notify": { type: "string" }, "mail-reply-to": { type: "string" }, "github-client-id": { type: "string" }, "github-secret-env": { type: "string" }, "google-client-id": { type: "string" }, "google-secret-env": { type: "string" }, "trust-proxy": { type: "boolean", default: false } } });
       if (!values["db-env"] || !values["secret-env"] || !values["public-url"]) throw new Error("portal needs --db-env, --secret-env, and --public-url");
       let oauth: OAuthOptions | undefined;
       for (const p of ["github", "google"] as const) {
@@ -583,7 +607,7 @@ async function main(argv: string[]): Promise<number> {
         if (!values["mail-key-env"] || !values["mail-from"]) throw new Error("mail needs both --mail-key-env and --mail-from");
         const apiKey = process.env[values["mail-key-env"]];
         if (!apiKey) throw new Error(`portal: environment variable ${values["mail-key-env"]} is not set`);
-        mail = { apiKey, from: values["mail-from"], ...(values["mail-notify"] ? { notify: values["mail-notify"] } : {}) };
+        mail = { apiKey, from: values["mail-from"], ...(values["mail-notify"] ? { notify: values["mail-notify"] } : {}), ...(values["mail-reply-to"] ? { replyTo: values["mail-reply-to"] } : {}) };
       }
       const secret = process.env[values["secret-env"]];
       if (!secret || secret.length < 32) throw new Error(`environment variable ${values["secret-env"]} must hold a secret of at least 32 characters`);
@@ -747,6 +771,22 @@ async function main(argv: string[]): Promise<number> {
       publisher?.stop();
       await running.close();
       return 0;
+    }
+    case "verify-perathos": {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { key: { type: "string", multiple: true }, "allow-unsigned": { type: "boolean", default: false }, head: { type: "string" }, json: { type: "boolean", default: false } },
+      });
+      if (positionals.length !== 1) throw new Error("verify-perathos needs one session log");
+      for (const k of values.key ?? []) if (!/^[0-9a-fA-F]{64}$/.test(k)) throw new Error(`--key takes an Ed25519 public key as 64 hex characters; got "${k}"`);
+      const report = verifyPerathosLog(readFileSync(positionals[0]!, "utf8"), {
+        ...(values.key ? { trustedKeys: values.key } : {}),
+        allowUnsigned: values["allow-unsigned"],
+        ...(values.head ? { head: perathosHead(readFileSync(values.head, "utf8")) } : {}),
+      });
+      console.log(values.json ? JSON.stringify(report, null, 2) : formatPerathosReport(report));
+      return report.ok ? 0 : 1;
     }
     case "verify": {
       const { values, positionals } = parseArgs({

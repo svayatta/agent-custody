@@ -1,0 +1,13 @@
+{
+  "identity": { "keyFile": "/work/keys/door.key" },
+  "authz": true,
+  "trustProxy": true,
+  "routes": [
+    { "name": "catalogue", "methods": ["GET", "HEAD"], "path": "/catalogue/*" },
+    { "name": "refund", "methods": ["POST"], "path": "/refunds" }
+  ],
+  "trustedPrincipalKeys": ["/work/keys/principal.pub"],
+  "policyFile": "policy.cedar",
+  "receiptsDir": "/work/receipts",
+  "logFile": "/work/log.jsonl"
+}

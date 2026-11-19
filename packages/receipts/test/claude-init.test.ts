@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildSdkFixture } from "../scripts/fixture.ts";
 import { initClaudeCode, type ClaudeInitOptions } from "../src/claude-init.ts";
 import { loadSdkConfig } from "../src/config.ts";
@@ -297,6 +297,23 @@ describe("report", () => {
     expect(run.stdout).toContain("reason:  terraform destroy deletes infrastructure");
     expect(run.stdout).toContain(report.wouldDeny[1]!.receiptId);
     expect(run.stdout).toContain('remove the "mode": "observe" line');
+  });
+
+  it("lists calls recorded in the same millisecond in the order they were made, not in the order of their random receipt ids", async () => {
+    // Under load two calls can share a timestamp. The report must then fall back to the log's leaf order; the file
+    // names are random UUIDs, so any order taken from them puts eight tied calls in call order once in 40,320 runs.
+    const { configFile } = init();
+    const commands = Array.from({ length: 8 }, (_, i) => `terraform destroy -target=module.m${i}`);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-11-10T12:00:00.000Z"));
+      await runCalls(configFile, commands);
+    } finally {
+      vi.useRealTimers();
+    }
+    const report = denyReport(configFile);
+    expect(new Set(report.wouldDeny.map((c) => c.timestamp)).size).toBe(1);
+    expect(report.wouldDeny.map((c) => c.target)).toEqual(commands);
   });
 
   it("counts a receipt that does not verify apart, and exits 1", async () => {

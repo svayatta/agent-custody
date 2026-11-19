@@ -56,6 +56,8 @@ function writableAncestor(path: string): string | null {
     dir = up;
   }
   try {
+    // the path itself may be a file; anything above it must be a directory
+    if (dir !== resolve(path) && !statSync(dir).isDirectory()) return null;
     accessSync(dir, constants.W_OK);
     return dir;
   } catch {
@@ -68,11 +70,11 @@ function onPath(command: string): boolean {
   return (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync(join(d, command)));
 }
 
-/** True when the file is a door config rather than a gateway config: it names an origin, which no gateway config has. */
+/** True when the file is a door config rather than a gateway config: it names an origin, door routes, or answers authz checks, which no gateway config does. An in-process door's config has routes and no origin. */
 export function isDoorConfig(configPath: string): boolean {
   try {
     const raw = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
-    return !!raw && typeof raw === "object" && !Array.isArray(raw) && "origin" in raw && !("upstream" in raw) && !("upstreams" in raw);
+    return !!raw && typeof raw === "object" && !Array.isArray(raw) && ("origin" in raw || "routes" in raw || "authz" in raw) && !("upstream" in raw) && !("upstreams" in raw) && !("agents" in raw);
   } catch {
     return false;
   }
@@ -161,10 +163,14 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
   add("ok", "precommit", cfg.precommit.includes("*") ? "every arrival is committed to the log before it is relayed" : `every POST, PUT, PATCH, and DELETE${cfg.precommit.length ? `, and every arrival at ${cfg.precommit.join(", ")},` : ""} is committed to the log before it is relayed`);
   if (cfg.routes.length === 0) add("warn", "routes", `no routes: every arrival is the action "${cfg.unmatchedRoute}"`);
   else add("ok", "routes", `${cfg.routes.length} route(s); unmatched arrivals are "${cfg.unmatchedRoute}"`);
-  const origin = new URL(cfg.origin.url);
-  if (origin.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)) add("warn", "origin", `${cfg.origin.url} is plain HTTP to a remote host; the relayed traffic is not encrypted on that leg`);
-  else add("ok", "origin", `relays to ${cfg.origin.url}`);
-  for (const [, variable] of Object.entries(cfg.origin.headerEnv ?? {})) if (!process.env[variable]) add("error", "credentials", `origin header variable ${variable} is not set in this environment`);
+  if (cfg.authz) add("ok", "authz", "answers nginx auth_request and Envoy ext_authz checks: the proxy relays, and the receipts record the decision, never the body or the origin's answer");
+  else if (!cfg.origin) add("ok", "origin", "no origin: a config for the door in-process (Express or Next.js); `agent-custody door` needs origin.url, or authz: true behind nginx or Envoy");
+  else {
+    const origin = new URL(cfg.origin.url);
+    if (origin.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)) add("warn", "origin", `${cfg.origin.url} is plain HTTP to a remote host; the relayed traffic is not encrypted on that leg`);
+    else add("ok", "origin", `relays to ${cfg.origin.url}`);
+    for (const [, variable] of Object.entries(cfg.origin.headerEnv ?? {})) if (!process.env[variable]) add("error", "credentials", `origin header variable ${variable} is not set in this environment`);
+  }
   if (cfg.log?.tokenEnv && !process.env[cfg.log.tokenEnv]) add("error", "credentials", `log token variable ${cfg.log.tokenEnv} is not set in this environment`);
   if (cfg.splunk?.tokenEnv && !process.env[cfg.splunk.tokenEnv]) add("error", "credentials", `splunk token variable ${cfg.splunk.tokenEnv} is not set in this environment`);
   for (const v of Object.values(cfg.otel?.headersEnv ?? {})) if (!process.env[v]) add("error", "credentials", `otel header variable ${v} is not set in this environment`);
@@ -174,6 +180,11 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
     if (!process.env[cfg.challenge.secretEnv]) add("error", "credentials", `challenge secret variable ${cfg.challenge.secretEnv} is not set in this environment`);
     add("ok", "challenge", `${cfg.challenge.provider} tokens in the ${cfg.challenge.header} header are verified with the provider; the outcome is context.facts.arrival.challenge.outcome, and class is unchanged by it`);
   } else add("ok", "challenge", "no challenge: an unknown arrival has no way to become anything else on this door");
+  if (cfg.webBotAuth) {
+    const w = cfg.webBotAuth;
+    add("ok", "web bot auth", `Ed25519 signatures tagged web-bot-auth from ${w.agents.join(", ")} are checked against their directories, for ${w.authorities.join(", ")}, at most ${w.maxAgeSeconds} s after created; a verified signature without a grant makes the arrival verified as its origin`);
+    if (!w.requireNonce) add("warn", "web bot auth", `requireNonce is false: a signature without a nonce can be replayed for up to ${w.maxAgeSeconds + w.clockSkewSeconds} s, and a minimal one covers only the authority, so the replay may use any method and path`);
+  } else add("ok", "web bot auth", "no webBotAuth: a Signature-Input header is recorded as signature \"unchecked\", a claim");
   const dir = writableAncestor(cfg.receiptsDir);
   if (!dir) add("error", "paths", `${cfg.receiptsDir} cannot be created: no writable directory above it`);
   else add("ok", "paths", `receipts go to ${cfg.receiptsDir}`);

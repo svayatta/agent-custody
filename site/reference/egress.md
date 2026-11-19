@@ -1,5 +1,7 @@
 # The egress witness
 
+> Every field, route, and flag. How it works and when to use it is in [the guide](/receipts/egress).
+
 An HTTP forward proxy for a locked-down agent's connections that do not go to the [gateway](./gateway). It relays CONNECT and plain HTTP, with no TLS interception. Each connection is tied to an agent by the proxy credential the witness checked, decided by a Cedar or Rego policy per destination, and receipted either way with `issuer.kind: "egress"`. The guide is [the egress witness](/receipts/egress), and [credential custody and lockdown](/guide/credential-custody) covers the deployment; this page is the exact contract.
 
 It sees the destination, the times, and the byte counts. It never sees payloads. It sees nothing that skips it, which happens whenever lockdown is off, and it relays no protocol other than HTTP. Each receipt is an observed bypass, not a record of what was done.

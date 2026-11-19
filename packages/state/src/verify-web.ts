@@ -236,10 +236,13 @@ export async function verifyConsistency(oldSize: number, oldRoot: string, newSiz
 const ISSUER_NOTE: Record<string, string> = {
   gateway: "enforced outside the agent's process; the agent could neither skip nor forge this receipt",
   sdk: "self-reported by the agent's own process; tamper-evident after issue, but nothing here was enforced outside the agent",
-  door: "enforced in front of the business's own HTTP surface; the arriving party could neither skip nor forge this receipt, and is attested only when it presented a grant",
+  door: "enforced in front of the business's own HTTP surface; the arriving party could not forge this receipt and is attested only when it presented a grant, and a request that reached the origin some other way leaves no receipt",
+  "door/authz": "decided by the door for a proxy in front of the business's own HTTP surface (nginx auth_request or Envoy ext_authz): the receipt records the decision, not the result, since the proxy relayed an allowed request and the door saw neither its body nor the origin's answer; the arriving party could not forge this receipt and is attested only when it presented a grant",
   guardian: "decided by an ACS Guardian outside the agent's process and signed with its own key, so the decision is attributable to it; the call is the agent's own report, and the agent could skip the Guardian or ignore its answer",
   egress: "observed by a forward proxy in the agent's network path, for a connection that went around the gateway: where it went and how much, never what was sent; the agent is known only by the proxy credential the witness checked, and a connection that skipped the proxy (no lockdown) leaves no receipt at all",
 };
+/** What kind of evidence the issuer gives; a door answering a proxy's authz check gives a decision only. */
+const issuerNote = (issuer: { kind: string; framework?: string }) => (issuer.kind === "door" && issuer.framework === "authz" ? ISSUER_NOTE["door/authz"]! : ISSUER_NOTE[issuer.kind] ?? "unknown issuer kind");
 const short = (s: string) => s.slice(0, 12);
 
 /** An issuer key's attestation and the release it must be: mirrors AttestationVerifyOptions in packages/receipts/src/attestation.ts. */
@@ -628,7 +631,7 @@ export async function verifyBundle(bundle: Bundle, given: Options): Promise<Resu
   const checks: Check[] = [];
   const add = (name: string, ok: boolean, detail?: string) => { checks.push(detail === undefined ? { name, ok } : { name, ok, detail }); return ok; };
   let treeHeadSigner: Result["treeHeadSigner"] = null;
-  const done = (statement: any | null): Result => ({ ok: checks.every((c) => c.ok), checks, statement, issuerNote: statement ? (ISSUER_NOTE[statement.predicate.issuer.kind] ?? "unknown issuer kind") : null, treeHeadSigner });
+  const done = (statement: any | null): Result => ({ ok: checks.every((c) => c.ok), checks, statement, issuerNote: statement ? issuerNote(statement.predicate.issuer) : null, treeHeadSigner });
   // An attested key is trusted for this receipt only through its attestation; its checks come first so a refusal names them.
   const attested = given.attestation ? await verifyAttestation(given.attestation, given.logKeys ?? []) : null;
   if (attested) for (const c of attested.checks) checks.push(c);
@@ -671,6 +674,11 @@ export async function verifyBundle(bundle: Bundle, given: Options): Promise<Resu
     add("gateway receipt carries a policy decision", p.policy !== null);
   }
   if (p.issuer.kind === "door") add("door receipt carries a policy decision", p.policy !== null);
+  // In authz mode the door answers a proxy's check and relays nothing: the receipt is a decision, never a result.
+  if (p.issuer.kind === "door" && p.issuer.framework === "authz") {
+    const decided = p.execution.status === "withheld" || (p.execution.status === "denied" && p.policy?.decision === "deny");
+    add("door authz decided, relayed nothing", decided, decided ? `${p.policy?.decision}; a decision for the proxy, which relays: the door saw neither the body nor the origin's answer` : `the receipt says ${p.execution.status} with a policy ${p.policy?.decision ?? "absent"}`);
+  }
   // An egress witness saw a connection that went around the gateway: where it went and how much, never what was sent.
   // Its destination is its own observation; its agent is only as good as the proxy credential it checked.
   if (p.issuer.kind === "egress") {

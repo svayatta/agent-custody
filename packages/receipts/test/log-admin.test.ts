@@ -7,7 +7,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { generateKeyPair } from "../src/crypto.ts";
 import { postgresResolver, serveLog, type RunningLog } from "../src/log-sink.ts";
 import { PostgresTenancy } from "../src/log-store.ts";
-import { welcomeSheet } from "../src/log-admin.ts";
+import { csvCell, welcomeSheet } from "../src/log-admin.ts";
 import { PortalStore } from "../src/portal.ts";
 
 let db: PGlite;
@@ -47,6 +47,16 @@ describe("the admin surface", () => {
     expect(html).not.toMatch(/https?:\/\/(?!agent-custody\.dev)/); // no third-party requests
     expect(html).not.toContain("sessionStorage");
     expect(html).toContain('id="themeToggle"');
+    expect(html).toContain('<html lang="en">');
+    // Tabs: one link per section; a tab hash never equals an element id; the plan dialog names old and new plan; tables scroll.
+    const hashes = [...html.matchAll(/<a href="#(tab-[a-z]+)"/g)].map((m) => m[1]!);
+    expect(hashes).toHaveLength(5);
+    const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]!));
+    for (const h of hashes) expect(ids.has(h)).toBe(false);
+    expect(html).toContain('<dialog id="planDialog"');
+    expect(html).toContain("dialog.showModal()");
+    expect(html.match(/class="scroll"/g)).toHaveLength(5);
+    expect(html).toContain('role="status" data-status="addTenant"');
     expect(html).toContain(':root[data-theme="dark"]');
     for (const [m, p] of [["GET", "admin/tenants"], ["POST", "admin/tenants"], ["GET", "admin/info"]] as const) {
       expect((await call(m, p, m === "POST" ? { id: "x" } : undefined, null)).status).toBe(401);
@@ -106,7 +116,7 @@ describe("the admin surface", () => {
     expect((await append(minted.token)).status).toBe(200);
     expect((await append(ADMIN)).status).toBe(401); // the admin token is not a tenant token
     const tokens = (await (await call("GET", "admin/tenants/acme/tokens")).json()) as { label: string; tokenHash: string; revokedAt: string | null }[];
-    expect(tokens).toEqual([{ label: "support fleet", tokenHash: minted.tokenHash, createdAt: expect.any(String), revokedAt: null, tenantId: "acme" }]);
+    expect(tokens).toEqual([{ label: "support fleet", tokenHash: minted.tokenHash, createdAt: expect.any(String), revokedAt: null, lastUsedAt: expect.any(String), tenantId: "acme" }]);
     expect(await (await call("POST", `admin/tenants/acme/tokens/${minted.tokenHash.slice(0, 12)}/revoke`)).json()).toEqual({ revoked: 1 });
     expect((await append(minted.token)).status).toBe(401);
     expect((await call("POST", "admin/tenants/nobody/tokens", { label: "x" })).status).toBe(404);
@@ -236,7 +246,7 @@ describe("registrations", () => {
     expect(csv.headers.get("content-type")).toMatch(/text\/csv/);
     const lines = (await csv.text()).trim().split("\n");
     expect(lines[0]).toBe("month,tenant,log_id,plan,email,name,company,role,phone,telegram,registered_at,billing,appends,quota,total_leaves,live_tokens,disabled");
-    expect(lines.find((l) => l.includes(",buyer,"))).toMatch(new RegExp(`^${month},buyer,buyer-eu,team,ops@buyer.example,Ola Buyer,Buyer GmbH,CISO,\\+49 30 1234,olabuyer,\\d{4}-.*,active,3,1000000,3,1,false$`));
+    expect(lines.find((l) => l.includes(",buyer,"))).toMatch(new RegExp(`^${month},buyer,buyer-eu,team,ops@buyer.example,Ola Buyer,Buyer GmbH,CISO,'\\+49 30 1234,olabuyer,\\d{4}-.*,active,3,1000000,3,1,false$`));
     // the usage export is what is billed: a column out of place bills the wrong number
     const usageCsv = await call("GET", `admin/usage.csv?month=${month}`);
     expect(usageCsv.headers.get("content-type")).toBe("text/csv; charset=utf-8");
@@ -252,5 +262,47 @@ describe("registrations", () => {
     expect(html).toContain("/admin/registrations?month=");
     expect(html).toContain("registered through the portal");
     expect(html).toContain("<th>who</th><th>reach</th>");
+  });
+});
+
+describe("the CSV exports", () => {
+  // An operator opens these in a spreadsheet and bills from them. A comma or a newline in a cell would move the
+  // numbers into the wrong column, and a cell that starts with = runs as a formula on the operator's machine.
+  it("quotes a comma, a quote, and a newline, and turns a cell a spreadsheet would run into text", () => {
+    expect(csvCell("plain")).toBe("plain");
+    expect(csvCell("a,b")).toBe('"a,b"');
+    expect(csvCell('say "hi"')).toBe('"say ""hi"""');
+    expect(csvCell("line\nbreak")).toBe('"line\nbreak"');
+    expect(csvCell("cr\rhere")).toBe('"cr\rhere"');
+    for (const lead of ["=", "+", "-", "@", "\t", "\r"]) expect(csvCell(`${lead}1+1`).startsWith(`${lead === "\r" ? '"' : ""}'${lead}`)).toBe(true);
+    expect(csvCell('=HYPERLINK("http://x.example","y")')).toBe(`"'=HYPERLINK(""http://x.example"",""y"")"`);
+    // numbers and booleans are the billing columns: left as they are
+    expect(csvCell(-5)).toBe("-5");
+    expect(csvCell(3)).toBe("3");
+    expect(csvCell(false)).toBe("false");
+    expect(csvCell(null)).toBe("");
+    expect(csvCell(undefined)).toBe("");
+  });
+
+  it("a log id must be a plain identifier, through the store and through the admin API", async () => {
+    for (const bad of ["a,b", "a\nb", "=1+1", "a b", ""]) await expect(tenancy.addTenant("plain", bad)).rejects.toThrow(/log id must be a plain identifier/);
+    const r = await call("POST", "admin/tenants", { id: "plain", logId: "=cmd|' /C calc'!A0" });
+    expect(r.status).toBe(400);
+    expect(await r.json()).toEqual({ error: "logId must be a plain identifier" });
+    expect(await tenancy.tenant("plain")).toBeNull();
+  });
+
+  it("a row written before log ids were checked, and portal fields with commas, newlines, and formulas, keep every column in place", async () => {
+    // a tenant from before the check, written straight to the table as an older version could have
+    await db.query("INSERT INTO log_tenants (id, log_id) VALUES ($1, $2)", ["legacy", '=SUM(1,2)\n"x"']);
+    const user = await portal.createUser("csv@legacy.example", "correct horse battery staple", { name: "Doe, Jane", company: "@acme\nnext line", role: "-ops", phone: "+1 555", telegram: "=1+1" });
+    await portal.addMember(user.id, "legacy");
+    const month = new Date().toISOString().slice(0, 7);
+    const usage = await (await call("GET", `admin/usage.csv?month=${month}`)).text();
+    expect(usage).toContain(`\n${month},legacy,"'=SUM(1,2)\n""x""",free,10000,0,0,0,false\n`);
+    const reg = await (await call("GET", `admin/registrations.csv?month=${month}`)).text();
+    expect(reg).toContain(`\n${month},legacy,"'=SUM(1,2)\n""x""",free,csv@legacy.example,"Doe, Jane","'@acme\nnext line",'-ops,'+1 555,'=1+1,`);
+    // no line outside a quoted cell starts a formula
+    expect(reg.split("\n").filter((l) => /^[=+\-@]/.test(l))).toEqual([]);
   });
 });

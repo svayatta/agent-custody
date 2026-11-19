@@ -1,4 +1,4 @@
-# An incident replay: the agent runs terraform destroy
+# Incident replay
 
 A coding agent has your shell. One bad command deletes a cloud stack, a database, or a home directory. This page replays that moment with a script and shows what the policy does. The replay needs no model and no network. It does not run any destructive command.
 

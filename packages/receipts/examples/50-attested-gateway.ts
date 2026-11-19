@@ -1,5 +1,5 @@
 // Aspect: an attested gateway key. Source: src/attestation.ts, src/gateway.ts, src/verify.ts
-// Run:    node examples/45-attested-gateway.ts
+// Run:    node examples/50-attested-gateway.ts
 //
 // A receipt proves that a gateway key signed it, not which gateway code held the key. With `attestation` in the
 // config, the gateway makes its key in memory at start, asks the platform for evidence binding the key to the
@@ -18,7 +18,7 @@ import { formatReport, verifyBundle } from "../src/verify.ts";
 import { buildFixture } from "../scripts/fixture.ts";
 import { out, step } from "./_out.ts";
 
-const fx = buildFixture(out("45-attested-gateway"));
+const fx = buildFixture(out("50-attested-gateway"));
 const IMAGE = `sha256:${"a1".repeat(32)}`;
 const failing = (r: { checks: { name: string; ok: boolean }[] }) => r.checks.filter((c) => !c.ok).map((c) => c.name);
 

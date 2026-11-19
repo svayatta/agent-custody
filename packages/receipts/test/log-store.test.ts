@@ -4,7 +4,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "../src/crypto.ts";
 import { leafHash, MerkleLog, verifyConsistency, verifyInclusion } from "../src/log.ts";
@@ -92,6 +92,43 @@ describe("PostgresTenancy", () => {
     await t.disableTenant("other");
     expect((await t.tenant("other"))?.disabledAt).not.toBeNull();
     expect((await t.listTenants()).map((x) => x.id)).toEqual(["acme", "other"]);
+  });
+
+  it("records the last use of a token at most once a minute, and a failed write does not refuse the token", async () => {
+    let writes = 0;
+    let fail = false;
+    const t = new PostgresTenancy({ query: async (sql, values) => { if (sql.includes("SET last_used_at")) { writes++; if (fail) throw new Error("down"); } return db.query(sql, values); } }, { prefix: "lu_" });
+    await t.addTenant("acme");
+    const { token } = await t.addToken("acme", "fleet");
+    expect((await t.listTokens("acme"))[0]!.lastUsedAt).toBeNull();
+    for (let i = 0; i < 5; i++) expect(await t.authorize("acme", token)).toBe(true);
+    await vi.waitFor(async () => expect((await t.listTokens("acme"))[0]!.lastUsedAt).not.toBeNull());
+    expect(writes).toBe(1);
+    const later = Date.now() + 61_000;
+    const now = vi.spyOn(Date, "now").mockReturnValue(later);
+    try {
+      fail = true;
+      expect(await t.authorize("acme", token)).toBe(true);
+      expect(writes).toBe(2);
+      await new Promise((r) => setTimeout(r, 10));
+      fail = false;
+      expect(await t.authorize("acme", token)).toBe(true);
+      expect(writes).toBe(3);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("pages the audit trail newest first with a cursor", async () => {
+    const t = new PostgresTenancy(db, { prefix: "au_" });
+    await t.addTenant("acme");
+    for (let i = 0; i < 4; i++) await t.addToken("acme", `k${i}`);
+    const all = await t.audit({ tenant: "acme" });
+    expect(all).toHaveLength(5);
+    const first = await t.audit({ tenant: "acme", limit: 2 });
+    expect(first.map((e) => e.id)).toEqual(all.slice(0, 2).map((e) => e.id));
+    expect((await t.audit({ tenant: "acme", limit: 2, before: first[1]!.id })).map((e) => e.id)).toEqual(all.slice(2, 4).map((e) => e.id));
+    expect(await t.audit({ tenant: "other" })).toEqual([]);
   });
 });
 

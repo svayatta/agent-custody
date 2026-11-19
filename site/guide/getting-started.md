@@ -1,10 +1,20 @@
 # Getting started
 
+Terms such as receipt, issuer, and observe mode are defined in the [glossary](/guide/glossary).
+
 Two paths. The **SDK path** records what the agent's own process reports: the quickest way to a receipt, and every field in it is the agent's word (`claimed`). The **gateway path** puts a process the agent does not control between it and the tools, so a call can be denied before it runs and a stranger can accept the record. Start with the SDK to see a receipt today; move a tool to the gateway when its call moves money or touches production. Either path runs in observe mode first, `"mode": "observe"` in the config, recording what the policy would deny without blocking anything, until the policy is right.
 
 ## Claude Code in one command
 
 For your own Claude Code sessions, one command does the setup and prints each step: an agent key, a config in observe mode, a starter deny policy (force push, `rm -rf` on `/`, `~`, and `$HOME`, `terraform destroy`, `drop database`), and the three hooks.
+
+To see first what that policy would have caught, read your last week of Claude Code sessions. It reads the transcripts Claude Code keeps on your machine; it installs nothing, writes nothing, and sends nothing. A transcript is not a receipt, so this is a preview ([auditing past sessions](/reference/claude-code#auditing-past-sessions)):
+
+```bash
+npx -y @agent-custody/receipts audit-sessions --since 7d
+```
+
+Then install:
 
 ```bash
 npm install -g @agent-custody/receipts
@@ -131,7 +141,7 @@ Then verify the receipt in the shell, or drop it on [/verify](/verify):
 npx @agent-custody/receipts verify receipts/<id>.json --issuer-key keys/app.pub --log log.jsonl
 ```
 
-Every adapter is on [the SDK page](/receipts/sdk) with what it enforces and what it only records. **To make a receipt evidence** a customer or auditor accepts, put [the gateway](/receipts/usage) in front of the tool and log to [a log run by someone else](/early-access): the receipt then carries a signed grant, a policy decision made outside the agent, and a tree head signed by a key you do not hold.
+Every adapter is on [the SDK page](/receipts/sdk) with what it enforces and what it only records. **To make a receipt evidence** a customer or auditor accepts, put [the gateway](/receipts/usage) in front of the tool and log to [a log run by someone else](/hosted-log): the receipt then carries a signed grant, a policy decision made outside the agent, and a tree head signed by a key you do not hold.
 
 <Flow />
 

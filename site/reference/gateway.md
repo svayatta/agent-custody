@@ -1,5 +1,7 @@
 # The gateway
 
+> Every field, route, and flag. How it works and when to use it is in [the guide](/receipts/usage).
+
 A separate process between the agent and its tools. The agent connects to it as an MCP server and sees only the tools its grant names; the gateway checks the grant, fetches the facts the policy needs, evaluates the policy, forwards or refuses the call, and issues a signed receipt whose hash goes to the log. For tools named in `precommit`, the authorization is logged before the call is forwarded. Tools named in `approvals` also require short-lived human signatures over the exact action.
 
 ## The config file
@@ -233,6 +235,7 @@ What the client gets back, in the remote agent's wire format:
 | denied by scope or policy, or withheld because the log refused the pre-commit | a task in state `TASK_STATE_REJECTED` (0.3: `rejected`) with the request's `taskId` and `contextId` or fresh ones, the status message `agent-custody: <reason> (receipt <id>)`, and the receipt id in `metadata`; nothing reached the remote agent |
 | the remote agent could not be reached | a task in state `TASK_STATE_FAILED` (0.3: `failed`), the same shape |
 | the remote agent answered a JSON-RPC error | that error, with `data.receipt` set to the receipt id; the receipt records the call as `failed` |
+| the gateway failed in a way none of the above covers | HTTP 500, `{ "jsonrpc": "2.0", "id": null, "error": { "code": -32603, "message": "internal error" } }`; the cause goes to the gateway's log, not to the client |
 
 ```json
 { "jsonrpc": "2.0", "id": "1", "result": { "id": "0f3c…", "contextId": "7a1e…", "status": { "state": "TASK_STATE_REJECTED", "message": { "role": "ROLE_AGENT", "messageId": "…", "parts": [{ "text": "agent-custody: Denied by policy: no permit policy matched (receipt 36c85dc9-…)" }] }, "timestamp": "2026-10-10T09:27:31.401Z" }, "metadata": { "agent-custody/receipt": "36c85dc9-43c1-46a9-9be7-9210210a7aa1" } } }

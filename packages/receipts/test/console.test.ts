@@ -319,4 +319,19 @@ describe("the console page", () => {
     expect(CONSOLE_SCRIPT).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/);
     expect(CONSOLE_SCRIPT).not.toMatch(/setAttribute\('style'|style: '/);
   });
+
+  it("asks in the page and not with confirm(), keeps the tab in the hash, warns about unsaved edits, and opens a receipt from a button", () => {
+    expect(CONSOLE_SCRIPT).not.toMatch(/confirm\(|alert\(|prompt\(/);
+    expect(CONSOLE_SCRIPT).toContain("showModal()");
+    expect(CONSOLE_SCRIPT).toContain("hashchange");
+    expect(CONSOLE_SCRIPT).toContain("beforeunload");
+    // a tab hash names no element: the page has no id that equals one
+    for (const id of CONSOLE_HTML.matchAll(/ id="([^"]+)"/g)) expect(id[1]).not.toMatch(/^tab=/);
+    expect(CONSOLE_SCRIPT).toContain("'#tab='");
+    expect(CONSOLE_SCRIPT).toMatch(/h\('button', \{ type: 'button', class: 'link', 'data-id'/);
+    expect(CONSOLE_SCRIPT).toContain("h('details'");
+    // every time goes through one helper, which carries the UTC value
+    expect(CONSOLE_SCRIPT.match(/h\('time'/g)).toHaveLength(1);
+    expect(CONSOLE_SCRIPT.match(/toLocale/g)).toHaveLength(1);
+  });
 });

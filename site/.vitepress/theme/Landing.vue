@@ -2,20 +2,24 @@
 // The product's front door, outside the docs theme. It speaks to one reader: an engineer who runs a coding agent, such
 // as Claude Code, against a repository or a system that touches production. The order is the command, what the user
 // sees (the report), the incident replay, how a reviewer checks the record, and the limits of the hook. Everything else
-// is on /advanced. The word "receipt" comes after the page shows what a receipt does. The terminal text below is
+// is on /how-it-works. The word "receipt" comes after the page shows what a receipt does. The terminal text below is
 // real output: the report is from tutorial 36, and the replay is from tutorial 38 (packages/receipts/examples). Colours
 // are tokens on .landing. Light and dark share the names. Every section uses the same 1200px container, so all left
 // edges line up.
 import { onBeforeUnmount, ref } from "vue";
 import { useData } from "vitepress";
+import SiteFooter from "./SiteFooter.vue";
+import Flow from "./Flow.vue";
+import { SITE_NAV, SIGN_IN, GET_STARTED } from "../../../packages/receipts/src/site-links.ts";
 
 const { isDark } = useData();
-const year = new Date().getUTCFullYear();
+// the one site nav, shared with the docs pages and the dashboard; on a phone it opens from the menu button
+const menuOpen = ref(false);
 
 const repo = "https://github.com/svayatta/agent-custody";
 const commands = ["npm install -g @agent-custody/receipts", "agent-custody init claude-code"];
 const command = commands.join("\n");
-const tryCommand = "npx @agent-custody/receipts init claude-code";
+const auditCommand = "npx -y @agent-custody/receipts audit-sessions";
 const setupHref = "/guide/getting-started#claude-code-in-one-command";
 
 // The Copy button shows "Copied" for 1.5 seconds. The id says which of the two command boxes was used.
@@ -92,7 +96,7 @@ const limits = [
           <span>agent-custody</span>
         </a>
         <nav class="navlinks" aria-label="Site">
-          <a href="#report">What you see</a><a href="#replay">Incident replay</a><a href="#limits">Limits</a><a href="/advanced">Advanced</a><a href="/pricing">Pricing</a><a href="/guide/getting-started">Docs</a>
+          <a v-for="l in SITE_NAV" :key="l.link" :href="l.link" :aria-current="l.link === '/' ? 'page' : undefined">{{ l.text }}</a>
         </nav>
         <div class="right">
           <button class="icon-btn" type="button" aria-label="Switch between light and dark mode" @click="isDark = !isDark">
@@ -102,9 +106,18 @@ const limits = [
           <a class="icon-btn" :href="repo" aria-label="agent-custody on GitHub">
             <svg viewBox="0 0 16 16" class="mark" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" /></svg>
           </a>
-          <a class="btn sm" href="https://app.agent-custody.dev/">Sign in</a>
+          <a class="btn quiet sm bar-action" :href="SIGN_IN.link">{{ SIGN_IN.text }}</a>
+          <a class="btn sm bar-action" :href="GET_STARTED.link">{{ GET_STARTED.text }}</a>
+          <button class="icon-btn menu-btn" type="button" :aria-expanded="menuOpen" aria-controls="site-menu" aria-label="Menu" @click="menuOpen = !menuOpen">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path v-if="!menuOpen" d="M4 7h16M4 12h16M4 17h16" /><path v-else d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
         </div>
       </div>
+      <nav v-show="menuOpen" id="site-menu" class="menu-panel" aria-label="Site">
+        <a v-for="l in SITE_NAV" :key="l.link" :href="l.link">{{ l.text }}</a>
+        <a class="btn" :href="GET_STARTED.link">{{ GET_STARTED.text }}</a>
+        <a class="btn quiet" :href="SIGN_IN.link">{{ SIGN_IN.text }}</a>
+      </nav>
     </header>
 
     <main>
@@ -112,14 +125,14 @@ const limits = [
         <div class="wrap">
           <div>
             <h1>Proof of what your AI agents did.</h1>
-            <p class="lede">Give your agents real power, without losing control of them. Start with your coding agent: one command adds a hook to Claude Code. The hook checks each shell command, file edit, and MCP tool call against a deny list before the call runs. The starter list covers force push, <code>rm -rf</code> on <code>/</code> and <code>~</code>, <code>terraform destroy</code>, and <code>drop database</code>.</p>
+            <p class="lede">Give your agents real power, without losing control of them. One command adds a hook to Claude Code that checks each command before it runs and signs a record that a reviewer can check.</p>
             <div class="cmd"><div class="lines"><div v-for="c in commands" :key="c"><span class="prompt" aria-hidden="true">$</span><code>{{ c }}</code></div></div><button type="button" aria-live="polite" @click="copy('hero')">{{ label("hero") }}</button></div>
             <p v-if="failed === 'hero'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
             <p class="note">Needs Node 22. It starts in observe mode: nothing is blocked until you say so.</p>
-            <p class="note">To try it once, run <code>{{ tryCommand }}</code>. Do not keep the npx form: npm can clear its cache, and the hooks then stop working.</p>
+            <p class="note">To see first what the list would have caught in your last week, run <code>{{ auditCommand }}</code>. It reads your Claude Code transcripts and writes nothing.</p>
             <div class="ctas">
-              <a class="btn primary" href="/guide/incident-replay">See the incident replay</a>
-              <a class="btn" :href="setupHref">Setup for Claude Code</a>
+              <a class="btn" :href="setupHref">Set up Claude Code</a>
+              <a class="btn quiet" href="/guide/incident-replay">See the incident replay</a>
             </div>
           </div>
 
@@ -134,8 +147,14 @@ const limits = [
               <dt>Result</dt><dd>denied before it ran</dd>
               <dt>The agent was told</dt><dd>{{ denial }}</dd>
             </dl>
-            <footer><span>From the incident replay. No command ran.</span><a href="/guide/incident-replay">Read the replay →</a></footer>
+            <footer><span>From the incident replay. No command ran.</span></footer>
           </article>
+        </div>
+      </section>
+
+      <section class="visual" aria-label="How a call becomes a receipt">
+        <div class="wrap">
+          <Flow />
         </div>
       </section>
 
@@ -178,11 +197,11 @@ const limits = [
             <div>
               <p class="h3">What a reviewer checks, offline</p>
               <div class="term"><pre tabindex="0" aria-label="The offline check of the receipts">{{ verified }}</pre></div>
-              <p class="caption">The reviewer holds the agent's public key and the receipt files. Nothing else. The last line is the <code>terraform destroy</code> receipt checked with a key that is not the agent's. <a href="/verify">Verify a receipt in your browser →</a></p>
+              <p class="caption">The reviewer holds the agent's public key and the receipt files. Nothing else. The last line is the <code>terraform destroy</code> receipt checked with a key that is not the agent's. <a href="/verify">Verify a receipt →</a></p>
             </div>
           </div>
           <div class="ctas after">
-            <a class="btn primary" href="/guide/incident-replay">Read the replay, with its full output →</a>
+            <a class="btn" href="/guide/incident-replay">Read the replay, with its full output →</a>
           </div>
         </div>
       </section>
@@ -194,7 +213,7 @@ const limits = [
           <div class="cards c2">
             <div v-for="l in limits" :key="l.t" class="card"><h3>{{ l.t }}</h3><p>{{ l.d }}</p></div>
           </div>
-          <p class="after">To cover more, keep production credentials out of the agent's environment, and put a gateway between the agent and the tools that touch production. The gateway is on the <a href="/advanced">advanced page</a>, and <a href="/guide/credential-custody">credential custody and egress lockdown</a> shows how to take away the routes around it. The <a href="/receipts/threat-model">threat model</a> lists what each part defends, and what it does not. No independent witness runs yet, and the hosted log is not anchored on mainnet yet.</p>
+          <p class="after">To cover more, keep production credentials out of the agent's environment, and put a gateway between the agent and the tools that touch production. The gateway is on the <a href="/how-it-works">How it works</a>, and <a href="/guide/credential-custody">credential custody and egress lockdown</a> shows how to take away the routes around it. The <a href="/receipts/threat-model">threat model</a> lists what each part defends, and what it does not. No independent witness runs yet, and the hosted log is not anchored on mainnet yet.</p>
         </div>
       </section>
 
@@ -205,131 +224,110 @@ const limits = [
           <div class="cmd"><div class="lines"><div v-for="c in commands" :key="c"><span class="prompt" aria-hidden="true">$</span><code>{{ c }}</code></div></div><button type="button" aria-live="polite" @click="copy('final')">{{ label("final") }}</button></div>
           <p v-if="failed === 'final'" class="note" role="status">Copy failed. Select the command and copy it by hand.</p>
           <div class="ctas">
-            <a class="btn primary" :href="setupHref">Setup for Claude Code →</a>
-            <a class="btn" href="/advanced">Advanced: the gateway, memory, and the hosted log</a>
+            <a class="btn" :href="setupHref">Set up Claude Code</a>
+            <a class="btn quiet" href="/how-it-works">How it works: the gateway, memory, and the hosted log</a>
           </div>
         </div>
       </section>
     </main>
 
-    <footer class="site">
-      <div class="wrap">
-        <div class="cols">
-          <div class="about">
-            <a class="brand" href="/" aria-label="agent-custody home">
-              <svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" class="tile" /><path d="M19 11H45V45L41.75 48 38.5 45 35.25 48 32 45 28.75 48 25.5 45 22.25 48 19 45Z" fill="#fff" /><path d="M25 20h14M25 27h14" class="ink" stroke-width="2.6" stroke-linecap="round" /><path d="M25 37.5l5 4.5 9.5-10" fill="none" class="ink" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
-              <span>agent-custody</span>
-            </a>
-            <p>A deny list and a signed record for coding agents.</p>
-          </div>
-          <nav aria-label="Product"><h2>Product</h2><ul><li><a href="/advanced">Advanced</a></li><li><a href="/use-cases">Use cases</a></li><li><a href="/pricing">Pricing</a></li><li><a href="/early-access">Hosted log</a></li><li><a href="/verify">Verify</a></li></ul></nav>
-          <nav aria-label="Docs"><h2>Docs</h2><ul><li><a href="/guide/getting-started">Getting started</a></li><li><a href="/guide/incident-replay">Incident replay</a></li><li><a href="/reference/">Reference</a></li><li><a href="/receipt/v0.2">Receipt spec</a></li><li><a href="/changelog">Changelog</a></li></ul></nav>
-          <nav aria-label="Trust"><h2>Trust</h2><ul><li><a href="/security">Security</a></li><li><a href="/faq">FAQ: where data goes</a></li><li><a href="/receipts/threat-model">Threat model</a></li><li><a href="/custody">This repository</a></li></ul></nav>
-          <nav aria-label="Company"><h2>Company</h2><ul><li><a href="/blog/">Writing</a></li><li><a href="/contact">Contact</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul></nav>
-        </div>
-        <div class="legal">
-          <span>Apache-2.0 · Charioteer Consulting Ltd, {{ year }}</span>
-          <span><a :href="repo">GitHub</a> · <a href="https://www.npmjs.com/org/agent-custody">npm</a> · <a href="https://pypi.org/project/agent-custody/">PyPI</a></span>
-        </div>
-      </div>
-    </footer>
+    <SiteFooter />
   </div>
 </template>
 
 <style scoped>
-/* Tokens. VitePress bundles Inter, so the type needs no font request. The --vp-c-* aliases make Flow.vue and Demo.vue
-   follow the same palette. --ink-3 is for decoration only; it fails AA contrast for small text on white. */
+/* The colour, type, and radius tokens come from tokens.css. The --vp-c-* aliases make Flow.vue and Demo.vue follow the
+   page background of the landing page. */
 .landing {
-  --sans: var(--vp-font-family-base); --mono: var(--vp-font-family-mono);
-  --bg: #ffffff; --bg-2: #fafaf9; --line: #e7e5e4; --line-2: #d6d3d1; --ink: #1c1917; --ink-2: #57534e; --ink-3: #a8a29e;
-  --brand: #b45309; --brand-hover: #92400e; --brand-ink: #ffffff; --brand-soft: #fef3c7;
-  --allow: #15803d; --allow-soft: #dcfce7; --deny: #b91c1c; --deny-soft: #fee2e2;
-  --term: #1c1917; --term-ink: #e7e5e4; --r: 12px;
-  --vp-c-bg: var(--bg); --vp-c-bg-soft: var(--bg-2); --vp-c-divider: var(--line);
-  --vp-c-text-1: var(--ink); --vp-c-text-2: var(--ink-2); --vp-c-text-3: var(--ink-3); --vp-c-brand-1: var(--brand);
-  min-height: 100vh; background: var(--bg); color: var(--ink); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased;
+  --term: #1c1917; --term-ink: #e7e5e4;
+  --vp-c-bg: var(--panel); --vp-c-bg-soft: var(--panel); --vp-c-divider: var(--line);
+  min-height: 100vh; background: var(--panel); color: var(--ink); font: var(--text-md)/1.6 var(--font); -webkit-font-smoothing: antialiased;
 }
-a { color: inherit; }
-.landing :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+a:not(.btn) { color: inherit; }
+.landing :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .landing code, .landing pre { font-family: var(--mono); }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .wrap { max-width: 1200px; margin: 0 auto; padding: 0 32px; }
 
 /* Nav */
-.nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+.nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--panel) 85%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
 .nav .wrap { display: flex; align-items: center; height: 64px; gap: 40px; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; text-decoration: none; }
-.brand svg { width: 28px; height: 28px; flex: none; } .tile { fill: var(--brand); } .ink { stroke: var(--brand); }
-.navlinks { display: flex; gap: 28px; font-size: 14px; color: var(--ink-2); white-space: nowrap; }
+.brand svg { width: 28px; height: 28px; flex: none; } .tile { fill: var(--accent); } .ink { stroke: var(--accent); }
+.navlinks { display: flex; gap: 28px; font-size: var(--text-sm); color: var(--ink2); white-space: nowrap; }
 .navlinks a { text-decoration: none; } .navlinks a:hover { color: var(--ink); }
-.right { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: 14px; }
-.icon-btn { width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink-2); cursor: pointer; }
-.icon-btn:hover { color: var(--ink); border-color: var(--line-2); }
+.right { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: var(--text-sm); }
+.icon-btn { width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); background: transparent; color: var(--ink2); cursor: pointer; }
+.icon-btn:hover { color: var(--ink); border-color: var(--line-strong); }
 .icon-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .icon-btn svg.mark { fill: currentColor; stroke: none; }
+.menu-btn { display: none; }
+.menu-panel { display: grid; gap: 4px; padding: 8px 32px 20px; border-top: 1px solid var(--line); background: var(--bg); }
+.menu-panel > a:not(.btn) { padding: 10px 0; text-decoration: none; color: var(--ink); font-weight: 500; border-bottom: 1px solid var(--line); }
+.menu-panel .btn { justify-content: center; margin-top: 8px; }
+@media (min-width: 56.01rem) { .menu-panel { display: none !important; } }
+.navlinks a:focus-visible, .menu-panel a:focus-visible, .icon-btn:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Both icons are in the markup, so the server and the client render the same tree. The html.dark class picks one. */
 .icon-btn svg.sun { display: none; }
 html.dark .icon-btn svg.sun { display: block; }
 html.dark .icon-btn svg.moon { display: none; }
 
-/* Buttons */
-.btn { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 18px; border-radius: 8px; font-weight: 500; font-size: 15px; text-decoration: none; white-space: nowrap; border: 1px solid var(--line-2); background: var(--bg); color: var(--ink); }
-.btn:hover { border-color: var(--ink-3); }
-.btn.sm { height: 36px; padding: 0 14px; font-size: 14px; }
-.btn.primary { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
-.btn.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
+/* The buttons are the shared .btn of tokens.css. */
+.btn.sm { min-height: 2.25rem; }
 
 /* Section rhythm */
 .sec { padding: 96px 0; border-top: 1px solid var(--line); scroll-margin-top: 64px; }
-.alt { background: var(--bg-2); }
-h1 { font-size: clamp(28px, 4.4vw, 44px); line-height: 1.12; letter-spacing: -.03em; font-weight: 700; margin: 0 0 20px; }
-h2 { font-size: clamp(28px, 4vw, 36px); line-height: 1.15; letter-spacing: -.025em; font-weight: 650; margin: 0 0 16px; max-width: 22ch; border: 0; padding: 0; }
-.sub { font-size: 18px; color: var(--ink-2); max-width: 60ch; margin: 0 0 48px; }
+.alt { background: var(--bg); }
+h1 { font-size: clamp(2.25rem, 6vw, 3.5rem); line-height: 1.12; letter-spacing: -.03em; font-weight: 700; margin: 0 0 20px; }
+h2 { font-size: clamp(var(--text-xl), 4vw, var(--text-2xl)); line-height: 1.15; letter-spacing: -.025em; font-weight: 650; margin: 0 0 16px; max-width: 22ch; border: 0; padding: 0; }
+.sub { font-size: var(--text-lg); color: var(--ink2); max-width: 60ch; margin: 0 0 48px; }
 .sub code { font-size: .9em; color: var(--ink); }
 
 /* Hero */
 .hero { padding: 88px 0 72px; }
 .hero .wrap { display: grid; grid-template-columns: 1.1fr .9fr; gap: 64px; align-items: center; }
 .hero .wrap > * { min-width: 0; }
-.lede { font-size: 19px; color: var(--ink-2); margin: 0 0 32px; max-width: 34em; }
+.visual { padding: 0 0 64px; }
+.visual :deep(.flow) { margin: 0; }
+.lede { font-size: var(--text-lg); color: var(--ink2); margin: 0 0 32px; max-width: 34em; }
 .hero .ctas { margin-top: 24px; }
 .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
-.cmd { display: flex; align-items: center; gap: 12px; background: var(--term); color: var(--term-ink); border-radius: 10px; padding: 12px 12px 12px 16px; font: 13.5px var(--mono); max-width: 560px; }
+.cmd { display: flex; align-items: center; gap: 12px; background: var(--term); color: var(--term-ink); border-radius: var(--radius-md); padding: 12px 12px 12px 16px; font: var(--text-sm) var(--mono); max-width: 560px; }
 .cmd .prompt { color: #a8a29e; flex: none; }
 .cmd .lines { flex: 1; min-width: 0; display: grid; gap: 4px; user-select: all; }
 .cmd .lines > div { display: flex; gap: 12px; min-width: 0; }
 .cmd code { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.cmd button { flex: none; min-width: 64px; font: 12px var(--sans); background: #292524; color: var(--term-ink); border: 1px solid #44403c; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+.cmd button { flex: none; min-width: 64px; font: var(--text-xs) var(--font); background: #292524; color: var(--term-ink); border: 1px solid #44403c; border-radius: var(--radius-sm); padding: 6px 10px; cursor: pointer; }
 .cmd button:hover { background: #44403c; }
-.note { font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }
-.watch { display: inline-flex; align-items: center; gap: 10px; margin-top: 20px; font-size: 14px; font-weight: 500; color: var(--ink-2); text-decoration: none; }
+.note { font-size: var(--text-sm); color: var(--ink2); margin: 10px 0 0; }
+.watch { display: inline-flex; align-items: center; gap: 10px; margin-top: 20px; font-size: var(--text-sm); font-weight: 500; color: var(--ink2); text-decoration: none; }
 .watch:hover { color: var(--ink); }
-.play { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; border: 1px solid var(--line-2); font-size: 10px; color: var(--brand); padding-left: 2px; }
+.play { width: 28px; height: 28px; border-radius: var(--radius-full); display: grid; place-items: center; border: 1px solid var(--line-strong); font-size: var(--text-xs); color: var(--accent); padding-left: 2px; }
 
 /* The denied-call card in the hero */
-.denied { border: 1px solid var(--line); border-radius: var(--r); background: var(--bg); box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 24px 48px -24px rgba(28, 25, 23, .18); overflow: hidden; }
+.denied { border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 24px 48px -24px rgba(28, 25, 23, .18); overflow: hidden; }
 .denied header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
-.denied .t { font-weight: 600; font-size: 14px; } .denied .d { font: 12px var(--mono); color: var(--ink-2); }
-.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
-.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.badge.deny { background: var(--deny-soft); color: var(--deny); } .badge.allow { background: var(--allow-soft); color: var(--allow); }
-.denied dl { margin: 0; padding: 8px 20px; display: grid; grid-template-columns: 128px 1fr; font-size: 13.5px; }
+.denied .t { font-weight: 600; font-size: var(--text-sm); } .denied .d { font: var(--text-xs) var(--mono); color: var(--ink2); }
+.badge { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); font-weight: 600; border-radius: var(--radius-full); padding: 3px 10px; white-space: nowrap; }
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: var(--radius-full); background: currentColor; }
+.badge.deny { background: var(--bad-bg); color: var(--bad); } .badge.allow { background: var(--ok-bg); color: var(--ok); }
+.denied dl { margin: 0; padding: 8px 20px; display: grid; grid-template-columns: 128px 1fr; font-size: var(--text-sm); }
 .denied dt, .denied dd { padding: 9px 0; border-bottom: 1px solid var(--line); margin: 0; }
 .denied dl > :nth-last-child(-n+2) { border-bottom: 0; }
-.denied dt { color: var(--ink-2); } .denied dd { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
-.denied dd small { color: var(--ink-2); font-family: var(--sans); font-size: 12px; }
-.denied footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 20px; background: var(--bg-2); border-top: 1px solid var(--line); font-size: 13px; color: var(--ink-2); }
-.denied footer a { flex: none; white-space: nowrap; font-weight: 600; color: var(--brand); text-decoration: none; }
-.denied footer a:hover { color: var(--brand-hover); }
+.denied dt { color: var(--ink2); } .denied dd { font-family: var(--mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.denied dd small { color: var(--ink2); font-family: var(--font); font-size: var(--text-xs); }
+.denied footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 20px; background: var(--bg); border-top: 1px solid var(--line); font-size: var(--text-sm); color: var(--ink2); }
+.denied footer a { flex: none; white-space: nowrap; font-weight: 600; color: var(--accent); text-decoration: none; }
+.denied footer a:hover { color: var(--accent-hover); }
 
 /* Cards */
 .cards { display: grid; gap: 20px; }
 .c3 { grid-template-columns: repeat(3, 1fr); }
 .c2 { grid-template-columns: repeat(2, 1fr); }
-.card { border: 1px solid var(--line); border-radius: var(--r); padding: 24px; background: var(--bg); min-width: 0; }
-.card h3 { font-size: 16px; margin: 0 0 8px; font-weight: 600; } .card p { margin: 0; font-size: 14.5px; color: var(--ink-2); }
+.card { border: 1px solid var(--line); border-radius: var(--radius-md); padding: 24px; background: var(--panel); min-width: 0; }
+.card h3 { font-size: var(--text-md); margin: 0 0 8px; font-weight: 600; } .card p { margin: 0; font-size: var(--text-sm); color: var(--ink2); }
 .card .badge { margin-bottom: 14px; }
-.card h3 code { font-size: 13.5px; overflow-wrap: anywhere; }
+.card h3 code { font-size: var(--text-sm); overflow-wrap: anywhere; }
 
 /* Two columns, the steps, and the terminal blocks */
 .two { display: grid; grid-template-columns: 1fr 1.5fr; gap: 48px; align-items: start; }
@@ -337,21 +335,21 @@ h2 { font-size: clamp(28px, 4vw, 36px); line-height: 1.15; letter-spacing: -.025
 .replay-out { grid-template-columns: 1fr 1fr; margin-top: 32px; }
 .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 24px; }
 .steps li { display: grid; grid-template-columns: 36px 1fr; gap: 8px; }
-.steps .n { font: 12px var(--mono); color: var(--brand); padding-top: 4px; }
-.steps b { display: block; font-size: 15.5px; font-weight: 600; margin-bottom: 2px; }
-.steps p { margin: 0; font-size: 14.5px; color: var(--ink-2); }
-.term { background: var(--term); color: var(--term-ink); border-radius: 10px; overflow: hidden; }
-.term pre { margin: 0; padding: 16px; font-size: 12.5px; line-height: 1.6; overflow-x: auto; white-space: pre; }
-.termbar { display: flex; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #292524; font: 12.5px var(--mono); overflow-x: auto; white-space: nowrap; }
+.steps .n { font: var(--text-xs) var(--mono); color: var(--accent); padding-top: 4px; }
+.steps b { display: block; font-size: var(--text-md); font-weight: 600; margin-bottom: 2px; }
+.steps p { margin: 0; font-size: var(--text-sm); color: var(--ink2); }
+.term { background: var(--term); color: var(--term-ink); border-radius: var(--radius-md); overflow: hidden; }
+.term pre { margin: 0; padding: 16px; font-size: var(--text-xs); line-height: 1.6; overflow-x: auto; white-space: pre; }
+.termbar { display: flex; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #292524; font: var(--text-xs) var(--mono); overflow-x: auto; white-space: nowrap; }
 .termbar .prompt { color: #a8a29e; flex: none; }
-.h3 { font-size: 15px; font-weight: 600; margin: 0 0 14px; }
-.caption { font-size: 13px; color: var(--ink-2); margin: 12px 0 0; }
-.caption a, .after a { color: var(--brand); font-weight: 500; }
+.h3 { font-size: var(--text-md); font-weight: 600; margin: 0 0 14px; }
+.caption { font-size: var(--text-sm); color: var(--ink2); margin: 12px 0 0; }
+.caption a, .after a { color: var(--accent); font-weight: 500; }
 .caption code { font-size: .95em; }
-.after { margin: 24px 0 0; font-size: 15px; color: var(--ink-2); max-width: 70ch; }
+.after { margin: 24px 0 0; font-size: var(--text-md); color: var(--ink2); max-width: 70ch; }
 .ctas.after { margin-top: 32px; }
 .lede code { font-size: .88em; color: var(--ink); }
-.denied dd code { font-size: 12.5px; }
+.denied dd code { font-size: var(--text-xs); }
 
 /* Final call to action */
 .final { text-align: center; }
@@ -362,17 +360,9 @@ h2 { font-size: clamp(28px, 4vw, 36px); line-height: 1.15; letter-spacing: -.025
 .final .ctas { justify-content: center; margin-bottom: 0; }
 
 /* Footer */
-footer.site { border-top: 1px solid var(--line); padding: 56px 0 40px; font-size: 14px; }
-.cols { display: grid; grid-template-columns: 2fr repeat(4, 1fr); gap: 32px; }
-.about p { color: var(--ink-2); font-size: 14px; max-width: 28ch; margin: 12px 0 0; }
-.cols h2 { margin: 0 0 12px; font-size: 13px; line-height: 1.6; letter-spacing: 0; font-weight: 600; max-width: none; }
-.cols ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
-.cols a { text-decoration: none; color: var(--ink-2); } .cols a:hover { color: var(--ink); }
-.legal { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--ink-2); font-size: 13px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; }
-.legal a:hover { color: var(--ink); }
 
 @media (prefers-reduced-motion: no-preference) {
-  .btn, .icon-btn, .cmd button { transition: background-color .15s, border-color .15s, color .15s; }
+  .icon-btn, .cmd button { transition: background-color .15s, border-color .15s, color .15s; }
 }
 
 @media (max-width: 64rem) {
@@ -381,18 +371,19 @@ footer.site { border-top: 1px solid var(--line); padding: 56px 0 40px; font-size
   .c3 { grid-template-columns: repeat(2, 1fr); }
   .c3 > :last-child:nth-child(odd) { grid-column: 1 / -1; }
   .two, .replay-out { grid-template-columns: 1fr; gap: 40px; }
-  .cols { grid-template-columns: repeat(2, 1fr); } .about { grid-column: 1 / -1; }
-  /* The nav needs two rows below this width: the links move under the logo and scroll sideways. */
-  .nav .wrap { flex-wrap: wrap; height: auto; gap: 8px 16px; padding-top: 10px; padding-bottom: 10px; }
+  .nav .wrap { gap: 24px; }
+  .navlinks { gap: 20px; }
+}
+/* Below this width the links and the two actions move into the menu panel, the one pattern the docs pages use too. */
+@media (max-width: 56rem) {
+  .navlinks, .bar-action { display: none; }
+  .menu-btn { display: grid; }
   .right { gap: 8px; }
-  .navlinks { order: 3; flex: 1 0 100%; min-width: 0; gap: 22px; overflow-x: auto; scrollbar-width: none; padding: 4px 0; }
-  .navlinks::-webkit-scrollbar { display: none; }
-  .sec { scroll-margin-top: 104px; }
 }
 @media (max-width: 48rem) {
   .sec { padding: 64px 0; }
   .hero { padding: 48px 0 40px; }
-  .sub { font-size: 17px; margin-bottom: 32px; }
+  .sub { font-size: var(--text-md); margin-bottom: 32px; }
 }
 @media (max-width: 40rem) {
   .wrap { padding: 0 24px; }
@@ -402,20 +393,13 @@ footer.site { border-top: 1px solid var(--line); padding: 56px 0 40px; font-size
   .denied dt { padding-bottom: 0; border-bottom: 0; } .denied dd { padding-top: 2px; }
   .denied dl > :nth-last-child(2) { border-bottom: 0; }
   .denied footer { flex-wrap: wrap; gap: 8px 16px; }
-  .legal { flex-direction: column; }
 }
 </style>
 
 <style>
-/* Dark tokens live outside the scoped block: Vue's scoped compiler collapses `:global(.dark) .landing` to `.dark`, which
-   sets the variables on the root where the scoped light values on .landing override them. html.dark .landing outranks
-   .landing[data-v]. */
-html.dark .landing {
-  --bg: #0c0a09; --bg-2: #1c1917; --line: #292524; --line-2: #44403c; --ink: #fafaf9; --ink-2: #a8a29e; --ink-3: #78716c;
-  --brand: #f59e0b; --brand-hover: #fbbf24; --brand-ink: #1c1917; --brand-soft: #451a03;
-  --allow: #4ade80; --allow-soft: #052e16; --deny: #f87171; --deny-soft: #450a0a;
-  --term: #0c0a09; --term-ink: #e7e5e4;
-}
+/* Dark rules live outside the scoped block: Vue's scoped compiler collapses `:global(.dark) .landing` to `.dark`.
+   html.dark .landing outranks .landing[data-v]. */
+html.dark .landing { --term: #0c0a09; --vp-c-bg: var(--panel); --vp-c-bg-soft: var(--panel); background: var(--panel); }
 html.dark .landing .cmd { border: 1px solid var(--line); }
 html.dark .landing .denied { box-shadow: none; }
 </style>

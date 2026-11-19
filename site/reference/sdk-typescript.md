@@ -130,6 +130,8 @@ Each records the framework's tool calls through the issuer. Enforce or observe, 
 | `@agent-custody/receipts/sdk/deepseek-harness` | `deepseekHarnessHooks(issuer)` → `{ preExecute, postExecute }` | `preExecute(exec, next)` returns `{ kind: "deny", reason }` on an enforced policy deny after issuing the denial receipt, else `next()`; `postExecute(exec, result, next)` records the executed (`content`/`value`) or failed (`error`) call, then `next()`. `exec` is the harness's `{ name, arguments, callId, agent }` |
 | `@agent-custody/receipts/sdk/deepseek-harness` | `registerDeepSeekHarness(ctx, issuer)` | calls `ctx.on` for both events |
 
+When an enforcing adapter cannot issue the denial receipt, the call stays denied and the reason ends with `(no receipt: <why>)` in place of `(receipt <id>)`. `noReceipt(error)`, exported from the package root, builds that text: `no receipt: the receipt could not be recorded`. The reason reaches the model, and the error can carry the log's answer, so `noReceipt` writes the error to stderr and keeps it out of the reason. A log error shows the log URL without its user, password, or query string. `handleHookEvent`, OpenAI Agents `wrapTools`, `openclawHooks`, and `deepseekHarnessHooks` use it. The Vercel AI `wrapTools` and `issuer.wrap` throw `PolicyDeniedError`, which needs a receipt id, so a failed denial receipt there still rejects with the log's error.
+
 ## Agents over A2A
 
 Exported from `@agent-custody/receipts` beside the gateway. They belong to the gateway, not the in-process issuer, and are listed here with the other exports; the behaviour is on the [gateway](./gateway#an-a2a-agent-as-an-upstream) page.
@@ -213,3 +215,19 @@ Every option and check is on the [verify](./verify) page.
 ## Keys
 
 `generateKeyPair(): KeyPair`, `writeKeyPair(kp, dir, name)` → `{ keyFile, pubFile }`, `loadPrivateKey(path)`, `loadPublicKey(path): PublicKeyRef` (`{ publicKey, keyid }`), `publicKeyFromPem(pem)`, `publicKeyToPem(publicKey)`. Keys are Ed25519; a keyid is the SHA-256 of the SPKI DER. `dsseSign(payloadType, payload, keyPair): Envelope`, `dsseCountersign(envelope, keyPair): Envelope`, and `dsseVerify(envelope, trustedKeys)` are the primitives every signed artefact uses.
+
+## Design tokens
+
+`DESIGN_CSS` is a string of CSS: the colour, type, spacing, and radius tokens of agent-custody, light and dark, and the shared button, select, card, dialog, and heading styles. The portal, the log admin, the gateway console, and the review page of `@agent-custody/state` put it in their own `<style>` element, so a page with `default-src 'none'` makes no outside request. Dark mode follows the system, or `data-theme="dark"` or `"light"` on `<html>`.
+
+| token | use |
+| --- | --- |
+| `--bg`, `--panel`, `--soft` | page background, cards and panels, hover fill |
+| `--line`, `--line-strong` | dividers, control borders |
+| `--ink`, `--ink2`, `--ink3` | text, secondary text, quiet text (all 4.5:1 or more on `--panel`) |
+| `--accent`, `--accent-hover`, `--accent-active`, `--accent-ink`, `--accent-bg` | the amber action colour, its states, the text on it, a soft fill |
+| `--ok`, `--warn`, `--bad` and `--ok-bg`, `--warn-bg`, `--bad-bg` | status text and fills |
+| `--font`, `--mono` | Inter where the machine has it, else the system font; monospace for code and ids |
+| `--text-xs` to `--text-3xl` | 12, 14, 16, 18, 24, 32, 44 px |
+| `--space-1` to `--space-8` | 4, 8, 12, 16, 24, 32, 48, 64 px |
+| `--radius-sm`, `--radius-md`, `--radius-full` | controls, cards and dialogs, pills |

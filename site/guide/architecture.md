@@ -30,7 +30,7 @@ flowchart LR
         SIG["Signer<br/>alone holds the log key"]
         CP[("Checkpoints<br/>second host, signed")]
         WIT["Witness<br/>countersigns checkpoints"]
-        PORT["Tenant portal<br/>register, keys, usage, billing, export"]
+        PORT["Dashboard<br/>sign up, API keys, usage, billing, export"]
         LOG --> SIG
         LOG --> CP
         CP --> WIT
@@ -47,7 +47,7 @@ flowchart LR
 | the gateway, in front of the tools | the log server for each tenant, at `/t/<tenant>/` |
 | the gateway key, the principal key, the grant, the Cedar policy, the revocation list | the signer that holds the log's key, apart from the process facing the internet |
 | the tool credentials (Stripe key and the like), held by the gateway, not the agent | signed checkpoints on a second host, and the outside monitor |
-| the full receipts, with arguments and results, under the customer's capture rules | the tenant portal: registration, tokens, usage against the plan, billing, export |
+| the full receipts, with arguments and results, under the customer's capture rules | the dashboard: sign-up, API keys, usage against the plan, billing, export |
 | the optional memory server and its ledger | the witness software, which must run on a machine the log's operator does not control; no independent operator runs one for our log yet |
 
 A customer who does not want a hosted log runs the same server from the container, the compose file, or the Kubernetes manifests in `deploy/`.
@@ -378,7 +378,7 @@ sequenceDiagram
 - **The SDK and sidecar record, they do not prove.** They run in the process they describe, so their receipts are `claimed`.
 - **The hosted log does not see grants or policy.** It sees leaf hashes. A receipt names the grant and carries the policy digest, and a verifier checks both against public keys.
 - **The operator can rewrite a local log.** A remote log, published checkpoints, and a witness are what detect that. The witness ships in the package, but a second, independent operator for our log is still being sought, so today the checkpoints are published and the witness step is not yet independent.
-- **There is no hosted control plane yet.** Grants, revocation and Cedar policy are managed on the customer's gateway; the portal manages the log, tokens, usage and billing.
+- **There is no hosted control plane yet.** Grants, revocation and Cedar policy are managed on the customer's gateway; the dashboard manages the log, API keys, usage and billing.
 - **Failure mode:** a `precommit` tool is withheld while the log is unreachable. That is deliberate and it is a denial of service on the agent.
 - **Egress is witnessed only under lockdown, and never inspected.** The [egress witness](/receipts/egress) receipts, and decides by policy, the connections an agent makes around the gateway: the destination, the times, and the byte counts, never the payload, since there is no TLS interception. A receipt shows an observed bypass, not what was done. With no [lockdown](/guide/credential-custody), an agent can ignore `HTTPS_PROXY`, and a protocol other than HTTP never reaches the witness.
 

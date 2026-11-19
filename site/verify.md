@@ -1,3 +1,9 @@
+---
+sidebar: false
+aside: false
+pageClass: wide
+---
+
 # Verify a receipt
 
 Paste a receipt bundle and the public keys it should verify against. The report is the one the CLI prints: every check, then every field with its provenance, so you know what was proven and what was merely claimed. Nothing leaves your browser.

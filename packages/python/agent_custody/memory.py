@@ -49,10 +49,13 @@ class MemoryClient:
     async def __aenter__(self) -> "MemoryClient":
         headers = {"authorization": f"Bearer {self.token}"} if self.token else None
         # A refused token surfaces inside the transport's task group as a cancellation, not as the status. Ask first.
-        async with create_mcp_http_client(headers=headers) as http:
-            probe = await http.post(self.url, json={"jsonrpc": "2.0", "id": 0, "method": "ping"}, headers={"accept": "application/json, text/event-stream"})
-            if probe.status_code in (401, 403):
-                raise MemoryError(f"memory server at {self.url} refused the connection: HTTP {probe.status_code}")
+        try:
+            async with create_mcp_http_client(headers=headers) as http:
+                probe = await http.post(self.url, json={"jsonrpc": "2.0", "id": 0, "method": "ping"}, headers={"accept": "application/json, text/event-stream"})
+        except Exception as e:  # noqa: BLE001 - mcp 1.x brings httpx and mcp 2.x httpx2; either one's transport error means the same
+            raise MemoryError(f"memory server at {self.url} could not be reached: {_refusal(e)}") from None
+        if probe.status_code in (401, 403):
+            raise MemoryError(f"memory server at {self.url} refused the connection: HTTP {probe.status_code}")
         self._cm = streamable_http_client(self.url, http_client=create_mcp_http_client(headers=headers))
         try:
             # mcp 2.x yields (read, write); mcp 1.x yields (read, write, get_session_id). Both are supported.
@@ -62,6 +65,9 @@ class MemoryClient:
             await self._session.initialize()
         except BaseException as e:  # noqa: BLE001 - the transport raises exception groups; the caller gets one plain error
             detail = _refusal(e)
+            # the transport often reports only "Session terminated"; the probe's status says why
+            if probe.status_code >= 400 and not detail.startswith("HTTP "):
+                detail = f"HTTP {probe.status_code} ({detail})"
             try:
                 await self.__aexit__(None, None, None)
             except BaseException:  # noqa: BLE001

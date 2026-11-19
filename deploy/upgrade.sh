@@ -1,6 +1,7 @@
 #!/bin/sh
 # The one command the deploy key may run: its line in authorized_keys forces this script, and the client's command
-# arrives as SSH_ORIGINAL_COMMAND. "docs" brings the checkout to main and rebuilds the docs site. A version, such as
+# arrives as SSH_ORIGINAL_COMMAND. "docs" brings the checkout to main and applies its Caddyfile (the docs site itself
+# is the website now; the docs host only redirects there). A version, such as
 # 0.8.0, checks out the tag v0.8.0, so the compose file, the Caddyfile, and the scripts are the ones that were released
 # and not whatever main has become, then backs up the log, moves log, signer, and portal to that published image, and
 # puts the previous version and its checkout back if they are not healthy within two minutes. A version deploy leaves

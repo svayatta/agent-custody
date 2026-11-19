@@ -56,6 +56,11 @@ describe("the review console", () => {
       query.search = new URLSearchParams({ transaction: refundId!, customer: "cust_123", agent: "refund-agent" }).toString();
       const index = await (await fetch(query)).text();
       expect(index).toContain('name="transaction"');
+      expect(index).toContain('<html lang="en">');
+      expect(index).toContain('id="themeToggle"');
+      expect(index).toContain('type="datetime-local"');
+      expect(index).toContain("From (UTC, inclusive)");
+      expect(index).toMatch(/content-security-policy" content="default-src 'none'/);
       expect(index).toContain("1 receipt(s)");
       expect(index).toContain(`href="/r/${receiptId!}"`);
       expect(index).toContain("&lt;script&gt;");
@@ -66,6 +71,9 @@ describe("the review console", () => {
       expect(await submitted.text()).toContain("1 receipt(s)");
       expect(await (await fetch(new URL("?customer=missing", running.url))).text()).toContain("No receipts match");
       expect((await fetch(new URL("?from=not-a-date", running.url))).status).toBe(400);
+      // A date input sends a value without an offset. The review reads it as UTC.
+      const local = await (await fetch(new URL("?from=2020-01-01T00:00&to=2099-01-01T00:00", running.url))).text();
+      expect(local).toContain('name="from" value="2020-01-01T00:00:00"');
       expect((await fetch(new URL("?from=2026-10-15T00:00:00Z&to=2026-10-14T00:00:00Z", running.url))).status).toBe(400);
       const html = await (await fetch(new URL(`r/${receiptId!}`, running.url))).text();
       expect(html).toContain("support-lead, grant signed by key");
@@ -108,7 +116,7 @@ describe("the review console", () => {
     expect(domRow.hidden).toBe(true);
     expect(empty.hidden).toBe(false);
     expect(count.textContent).toBe("0 receipt(s)");
-    fields.from!.value = "2026-02-30T00:00:00Z";
+    fields.from!.value = "2026-02-30T00:00";
     handlers.submit!({ preventDefault() {} });
     expect(error.textContent).toContain("ISO 8601 date-time");
 

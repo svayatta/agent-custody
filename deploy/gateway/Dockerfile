@@ -4,9 +4,9 @@
 # that. Mounts: /config (read-only: gateway.json, policy.cedar or policy.rego, the principals' public keys) and /data (the gateway
 # key, receipts, the local log, the revocation file). The opa binary is copied in from the official static image so a
 # policy.rego compiles when the gateway loads it; Cedar policies and OPA servers do not use it.
-FROM openpolicyagent/opa:1.22.0-static@sha256:906bfc9904b2693733e7959d71773dd073e6c135cf06f26d955abe94603e82b3 AS opa
+FROM openpolicyagent/opa:1.22.4-static@sha256:12cecac5a174368f7d3f09d3a19d040ebe0c91d576e520335ae7a985a26e39d3 AS opa
 
-FROM node:24-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
 
 COPY --from=opa /opa /usr/local/bin/opa
 

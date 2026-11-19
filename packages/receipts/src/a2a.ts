@@ -411,7 +411,7 @@ export async function serveA2a(host: GatewayHost, cfg: A2aUpstreamConfig, opts: 
   const server: HttpServer = createServer((req, res) => {
     handler(req, res).catch((e) => {
       log(`agent-custody gateway (a2a): ${e instanceof Error ? e.message : String(e)}`);
-      if (!res.headersSent) sendBody(res, 500, "application/json", JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: e instanceof Error ? e.message : String(e) } }));
+      if (!res.headersSent) sendBody(res, 500, "application/json", JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "internal error" } }));
       else res.end();
     });
   });
