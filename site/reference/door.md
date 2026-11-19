@@ -134,7 +134,7 @@ The door's headers on every answer: `X-Agent-Custody-Receipt` (receipt id), `X-A
 
 ## Authz mode
 
-With `"authz": true` the door relays nothing: every request except `GET /.well-known/agent-custody-door` is a check from nginx `auth_request` or Envoy `ext_authz` (HTTP mode). Stock configs: `deploy/door/nginx.conf`, `deploy/door/envoy.yaml`; `deploy/door/demo.sh` runs both. The guide is [behind nginx or Envoy](/receipts/door#behind-nginx-or-envoy-authz-mode).
+With `"authz": true` the door relays nothing: every request except `GET /.well-known/agent-custody-door` is a check from nginx `auth_request` or Envoy `ext_authz` (HTTP mode). Stock configs: `deploy/door/nginx.conf`, `deploy/door/envoy.yaml`; `deploy/door/demo.sh` runs both. The guide is [behind nginx or Envoy](/receipts/door#behind-nginx-or-envoy-authz-mode). Middleware for Go `net/http`, Rack (Rails), Django and WSGI, and the JDK `HttpServer` (with a Spring filter snippet) sends the same check from inside the app: [the door in Go, Rails, Django, and Spring](/receipts/door-languages).
 
 | in the check | read as |
 | --- | --- |

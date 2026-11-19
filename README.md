@@ -21,7 +21,7 @@ agent-custody is infrastructure to authorize the actions of AI agents and to acc
 
 The fastest way to try it is [the Claude Code hook](#start-with-a-coding-agent): one command. Before you rely on any part, read [the threat model](packages/receipts/docs/threat-model.md). It lists what each part defends, and what it does not.
 
-Run a website or an API? [Put the door in front of it](packages/receipts/docs/door-quickstart.md): a sign-up form that refuses bots, admits a person who passes a challenge and an agent with a passport, and receipts every arrival, in about fifteen minutes. Already behind nginx or Envoy? The door can answer their authz checks instead, and the site keeps its proxy ([deploy/door](deploy/door/README.md)).
+Run a website or an API? [Put the door in front of it](packages/receipts/docs/door-quickstart.md): a sign-up form that refuses bots, admits a person who passes a challenge and an agent with a passport, and receipts every arrival, in about fifteen minutes. Already behind nginx or Envoy? The door can answer their authz checks instead, and the site keeps its proxy ([deploy/door](deploy/door/README.md)). A site in Go, Rails, Django, or Spring asks the door from a middleware ([the door in Go, Rails, Django, and Spring](packages/receipts/docs/door-languages.md)).
 
 ## How it works
 
