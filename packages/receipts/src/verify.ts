@@ -216,6 +216,11 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
   }
   // A door decides every arrival by policy; an arrival carries a grant only when it chose to present one.
   if (p.issuer.kind === "door") add("door receipt carries a policy decision", p.policy !== null);
+  // In authz mode the door answers a proxy's check and relays nothing: the receipt is a decision, never a result.
+  if (p.issuer.kind === "door" && p.issuer.framework === "authz") {
+    const decided = p.execution.status === "withheld" || (p.execution.status === "denied" && p.policy?.decision === "deny");
+    add("door authz decided, relayed nothing", decided, decided ? `${p.policy?.decision}; a decision for the proxy, which relays: the door saw neither the body nor the origin's answer` : `the receipt says ${p.execution.status} with a policy ${p.policy?.decision ?? "absent"}`);
+  }
   // An egress witness saw a connection that went around the gateway: where it went and how much, never what was sent.
   // Its destination is its own observation; its agent is only as good as the proxy credential it checked.
   if (p.issuer.kind === "egress") {
@@ -560,10 +565,14 @@ export function auditExtends(older: Envelope, newer: Envelope, proof: string[], 
   return { ok: checks.every((c) => c.ok), checks, older: a, newer: b };
 }
 
+/** What kind of evidence the issuer gives; a door answering a proxy's authz check gives a decision only. */
+const issuerNote = (issuer: { kind: string; framework?: string }) => (issuer.kind === "door" && issuer.framework === "authz" ? ISSUER_NOTE["door/authz"]! : ISSUER_NOTE[issuer.kind] ?? "unknown issuer kind");
+
 const ISSUER_NOTE: Record<string, string> = {
   gateway: "enforced outside the agent's process; the agent could neither skip nor forge this receipt",
   sdk: "self-reported by the agent's own process; tamper-evident after issue, but nothing here was enforced outside the agent",
   door: "enforced in front of the business's own HTTP surface; the arriving party could not forge this receipt and is attested only when it presented a grant, and a request that reached the origin some other way leaves no receipt",
+  "door/authz": "decided by the door for a proxy in front of the business's own HTTP surface (nginx auth_request or Envoy ext_authz): the receipt records the decision, not the result, since the proxy relayed an allowed request and the door saw neither its body nor the origin's answer; the arriving party could not forge this receipt and is attested only when it presented a grant",
   guardian: "decided by an ACS Guardian outside the agent's process and signed with its own key, so the decision is attributable to it; the call is the agent's own report, and the agent could skip the Guardian or ignore its answer",
   egress: "observed by a forward proxy in the agent's network path, for a connection that went around the gateway: where it went and how much, never what was sent; the agent is known only by the proxy credential the witness checked, and a connection that skipped the proxy (no lockdown) leaves no receipt at all",
 };
@@ -577,7 +586,7 @@ export function formatReport(r: VerifyResult): string {
   if (!r.statement) return lines.join("\n");
   const p = r.statement.predicate;
   lines.push("");
-  lines.push(`ISSUER: ${p.issuer.kind}${p.issuer.framework ? ` (${p.issuer.framework})` : ""}${p.issuer.strict ? ", strict mode" : ""}, ${ISSUER_NOTE[p.issuer.kind] ?? "unknown issuer kind"}`);
+  lines.push(`ISSUER: ${p.issuer.kind}${p.issuer.framework ? ` (${p.issuer.framework})` : ""}${p.issuer.strict ? ", strict mode" : ""}, ${issuerNote(p.issuer)}`);
   lines.push("");
   lines.push("field           provenance  value");
   const row = (f: string, prov: string, v: unknown) => lines.push(`${f.padEnd(15)} ${prov.padEnd(11)} ${typeof v === "string" ? v : JSON.stringify(v)}`);
@@ -596,7 +605,7 @@ export function formatReport(r: VerifyResult): string {
   if (p.authorization) {
     const committed = r.checks.filter((c) => c.name.startsWith("authorization ")).every((c) => c.ok);
     row("authorization", "observed", committed ? `committed to the log as leaf ${p.authorization.inclusion.leafIndex}, before the call was forwarded` : "carried, but its checks FAILED");
-  } else if (p.execution.status === "withheld" && p.issuer.kind !== "guardian") row("authorization", "observed", "the log would not commit it; the call was not forwarded");
+  } else if (p.execution.status === "withheld" && p.issuer.kind !== "guardian" && !(p.issuer.kind === "door" && p.issuer.framework === "authz")) row("authorization", "observed", "the log would not commit it; the call was not forwarded");
   if (p.approval) row("approval", p.approval.provenance, `${p.approval.status}; ${p.approval.requiredApprovers} approver(s) required${p.approval.consumedAt ? `; consumed ${p.approval.consumedAt}` : ""}${typeof p.approval.reason === "string" ? `; ${p.approval.reason}` : ""}`);
   const upstreamCheck = r.checks.find((c) => c.name === "upstream signature (upstream key)" || c.name === "upstream signature (provider secret)");
   const hasUpstream = (p.execution.status === "executed" || p.execution.status === "failed") && !!p.execution.upstream;

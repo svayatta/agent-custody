@@ -108,7 +108,9 @@ const USAGE = `agent-custody <command>
   door    --config <door.json> [--port 8780] [--host 127.0.0.1]
                                                    a reverse proxy in front of your own site or API: every arrival classified (verified by a
                                                    trusted grant, claimed, or unknown), decided by the Cedar policy for its route, relayed to the
-                                                   origin or refused with 403, and receipted either way; GET /.well-known/agent-custody-door
+                                                   origin or refused with 403, and receipted either way; GET /.well-known/agent-custody-door.
+                                                   With "authz": true in the config it relays nothing and answers nginx auth_request and
+                                                   Envoy ext_authz checks instead: 200 with the receipt headers, or 403
   egress  --config <egress.json> [--port 8791] [--host 127.0.0.1]
                                                    the egress witness: a forward proxy (CONNECT and plain HTTP, no TLS interception) for a
                                                    locked-down agent's calls that do not go to the gateway. Each agent proves itself with its own
@@ -368,7 +370,7 @@ async function main(argv: string[]): Promise<number> {
       const cfg = loadDoorConfig(values.config);
       const host = await createDoorHost(cfg, { autoFlush: true });
       const running = await serveDoor(host, { port: Number(values.port), host: values.host });
-      console.error(`agent-custody door: ${running.url} keyid=${host.keyid} in front of ${cfg.origin.url}; ${cfg.routes.length} route(s), unmatched arrivals are "${cfg.unmatchedRoute}"`);
+      console.error(`agent-custody door: ${running.url} keyid=${host.keyid} ${cfg.authz ? "answering authz checks" : `in front of ${cfg.origin!.url}`}; ${cfg.routes.length} route(s), unmatched arrivals are "${cfg.unmatchedRoute}"`);
       await untilStopped();
       await running.close();
       await host.close();

@@ -253,13 +253,15 @@ export type DoorRouteConfig = z.infer<typeof DoorRouteSchema>;
  */
 export const DoorConfigSchema = z.object({
   identity: z.object({ keyFile: z.string() }),
-  /** where allowed requests go: the site or API the door stands in front of */
+  /** where allowed requests go: the site or API the door stands in front of. Not used with `authz` */
   origin: z.object({
     url: z.string().url(),
     headers: z.record(z.string(), z.string()).optional(),
     headerEnv: z.record(z.string(), z.string().min(1)).optional(),
     timeoutMs: z.number().int().positive().default(30_000),
-  }),
+  }).optional(),
+  /** answer nginx `auth_request` and Envoy `ext_authz` checks instead of relaying: 200 with the receipt headers or 403, from `X-Original-Method` and `X-Original-URI`. The door never sees the body or the origin's answer */
+  authz: z.boolean().optional(),
   routes: z.array(DoorRouteSchema).default([]),
   /** the action name for an arrival no route matches; default "other" */
   unmatchedRoute: z.string().min(1).default("other"),
@@ -302,6 +304,8 @@ export const DoorConfigSchema = z.object({
   capture: CaptureSchema.optional(),
   captureKeyEnv: z.string().min(1).optional(),
 }).refine(hasOneLog, oneLog).refine((c) => new Set(c.routes.map((r) => r.name)).size === c.routes.length, { message: "route names must be unique" })
+  .refine((c) => c.authz || c.origin, { message: "a door needs an origin, unless it answers authz checks (authz: true)" })
+  .refine((c) => !c.authz || c.trustProxy, { message: "authz needs trustProxy: true, since every check comes from the proxy and the arrival's address is the last in its X-Forwarded-For" })
   .refine((c) => !c.log || !!c.log.keys?.length, { message: "a remote log needs log.keys: the log's public key files, pinned, to check its answer before a request is relayed" });
 export type DoorConfig = z.infer<typeof DoorConfigSchema>;
 

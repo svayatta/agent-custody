@@ -34,7 +34,8 @@ A reverse proxy in front of your own website, API, or forms. Where the [gateway]
 | field | type | meaning |
 | --- | --- | --- |
 | `identity.keyFile` | path | the door's Ed25519 private key; signs every receipt |
-| `origin.url` | URL | where allowed arrivals are relayed; a path in it is kept as the prefix of every relayed path |
+| `origin.url` | URL, required unless `authz` | where allowed arrivals are relayed; a path in it is kept as the prefix of every relayed path |
+| `authz` | boolean, optional | answer nginx `auth_request` and Envoy `ext_authz` checks instead of relaying ([authz mode](#authz-mode)); `origin` is then not needed and not used. Requires `trustProxy: true` |
 | `origin.headers`, `origin.headerEnv` | maps, optional | headers added to every relayed request; `headerEnv` maps a header name to an environment variable, read at startup, missing is a startup error |
 | `origin.timeoutMs` | integer, default 30000 | one relayed request's budget |
 | `routes[]` | `{ name, methods?, path }` | the action per arrival. `path`: exact (`/refunds`), prefix (`/api/*`, which also matches `/api`), or `*`. `methods`: a subset of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS; default all. First match wins, on the path percent-decoded once with empty segments merged (`normalizePath`: `//admin/x` and `/admin//x` are `/admin/x`); a trailing slash matches as none (`/refunds/` matches `/refunds`). The origin is sent that form encoded once, trailing slash kept. Names are unique |
@@ -57,9 +58,9 @@ agent-custody check --config door.json
 agent-custody door --config door.json [--port 8780] [--host 127.0.0.1]
 ```
 
-Plain HTTP; bind to loopback or put TLS in front. `check` on a door config reports unknown keys, the key, the principal keys, the policy (and warns on a permit that names an agent without requiring `context.facts.arrival.class == "verified"`), the routes, what is precommitted, the challenge provider or its absence, the origin's scheme, every credential variable the door reads at startup (origin headers, log, Splunk, OTel, capture key, challenge secret), and the paths; exit 1 on an error.
+Plain HTTP; bind to loopback or put TLS in front. `check` on a door config reports unknown keys, the key, the principal keys, the policy (and warns on a permit that names an agent without requiring `context.facts.arrival.class == "verified"`), the routes, what is precommitted, the challenge provider or its absence, the origin's scheme (or, with `authz`, that the receipts record decisions only), every credential variable the door reads at startup (origin headers, log, Splunk, OTel, capture key, challenge secret), and the paths; exit 1 on an error.
 
-In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `normalizePath(pathname)`, `matchRoute(routes, unmatched, method, path)`, `classifyArrival(req, trustedKeys, route, trustProxy, atIso)` (which leaves `rate` unset), `cedarArgs(args)`, `DOOR_DEFAULT_CAPTURE`, `createRateTracker(now?, { maxSources?, maxKeyLength? })`, whose clock defaults to the monotonic `performance.now` and which returns `{ hit(source), size(), close() }`, costs the same per hit however full the window, keeps at most `maxSources` (10000) sources, keeps a key longer than `maxKeyLength` (256) as its sha256, and drops stale sources every minute, and `verifyChallengeToken({ provider, secret, token, remoteIp?, hostnames, action?, siteKey?, timeoutMs }, fetch)` are exported for embedding the door in a server of your own.
+In code: `createDoorHost(cfg, { log?, exporter?, fetch?, autoFlush? })` returns a `DoorHost` with `keyid`, `policyDigest()`, `handle(req, res)`, `flushOutbox()`, `pendingReceipts()`, `close()`. `serveDoor(host, { port, host?, log? })` returns `{ url, close() }`. `normalizePath(pathname)`, `matchRoute(routes, unmatched, method, path)`, `classifyArrival(req, trustedKeys, route, trustProxy, atIso, target?)` (which leaves `rate` unset; `target` is `{ method, url }`, the original request in authz mode), `authzTarget(req)` (`{ method, url }` from `X-Original-Method` and `X-Original-URI`, or `{ problem }`), `ORIGINAL_METHOD_HEADER`, `ORIGINAL_URI_HEADER`, `AUTHZ_ALLOWED_REASON`, `cedarArgs(args)`, `DOOR_DEFAULT_CAPTURE`, `createRateTracker(now?, { maxSources?, maxKeyLength? })`, whose clock defaults to the monotonic `performance.now` and which returns `{ hit(source), size(), close() }`, costs the same per hit however full the window, keeps at most `maxSources` (10000) sources, keeps a key longer than `maxKeyLength` (256) as its sha256, and drops stale sources every minute, and `verifyChallengeToken({ provider, secret, token, remoteIp?, hostnames, action?, siteKey?, timeoutMs }, fetch)` are exported for embedding the door in a server of your own.
 
 ## What an arrival presents
 
@@ -107,9 +108,33 @@ The door's headers on every answer: `X-Agent-Custody-Receipt` (receipt id), `X-A
 
 `GET /.well-known/agent-custody-door` → `{ "keyid", "policyDigest", "version", "pendingReceipts" }`.
 
+## Authz mode
+
+With `"authz": true` the door relays nothing: every request except `GET /.well-known/agent-custody-door` is a check from nginx `auth_request` or Envoy `ext_authz` (HTTP mode). Stock configs: `deploy/door/nginx.conf`, `deploy/door/envoy.yaml`; `deploy/door/demo.sh` runs both. The guide is [behind nginx or Envoy](/receipts/door#behind-nginx-or-envoy-authz-mode).
+
+| in the check | read as |
+| --- | --- |
+| `X-Original-Method` (required, letters only) | the original request's method |
+| `X-Original-URI` (required, starting with `/`) | the original request's path and query, normalised as above |
+| `X-Forwarded-For` | the arrival's address: the last entry (`trustProxy` is required) |
+| the grant, `X-Agent-Custody-Agent`, `Signature-Input`, the challenge header, `User-Agent`, `Accept`, `Content-Type`, `Host` | as for a relayed arrival |
+| the check's own method, path, and body | ignored; the body is drained unread |
+
+| outcome | status | body | receipt `execution` |
+| --- | --- | --- | --- |
+| allowed | 200 | `{ "allowed": true, "receipt" }` | `withheld`, reason `AUTHZ_ALLOWED_REASON` (with "Observe mode: ..." appended for an unenforced deny) |
+| denied | 403 | as above | `denied` |
+| no `X-Original-Method` or `X-Original-URI`, or a URI that is not a path | 400 | `{ "error" }` | none |
+| allowed, a path segment does not decode or decodes to a slash | 400 | `{ "error": "not relayed", "reason", "receipt" }` | `withheld` |
+| allowed, log refused the authorization | 503 | `{ "error": "not relayed", "reason", "receipt" }` | `withheld` |
+| receipt could not be written | 500 | `{ "error", "outcome": "nothing was relayed", "receipt" }` | none |
+| more than `maxInFlight` at once | 503 | `{ "error" }` | none |
+
+Every answer carries `X-Agent-Custody-Receipt` and `X-Agent-Custody-Class` as above; the stock configs pass both to the origin on an allow and to the client always. Any method but GET, HEAD, and OPTIONS, and any route in `precommit`, is committed to the log before the 200. `request.args` is `{ method, path, query, headers }`: no `body`, `bodyBytes`, or `bodyDigest`.
+
 ## The receipt
 
-Receipt v0.2 with `issuer: { kind: "door", keyid, version, framework: "http" }`. `tool.name` is the route, observed. `request.args` as the Cedar request's `args`, claimed. For a verified arrival `principal` and `agent` are attested and `delegation` carries the grant; otherwise `principal` is `{ id: null, provenance: "claimed" }` and `agent.id` is the subject, claimed. `authorization` is present when the request was committed before relaying. Verification runs `door receipt carries a policy decision` and otherwise the gateway's checks, the authorization checks included; vectors `door-*`. See the [specification](/receipt/v0.2).
+Receipt v0.2 with `issuer: { kind: "door", keyid, version, framework: "http" }`, or `framework: "authz"` in authz mode, where the receipt records the decision and never a result. `tool.name` is the route, observed. `request.args` as the Cedar request's `args`, claimed. For a verified arrival `principal` and `agent` are attested and `delegation` carries the grant; otherwise `principal` is `{ id: null, provenance: "claimed" }` and `agent.id` is the subject, claimed. `authorization` is present when the request was committed before relaying. Verification runs `door receipt carries a policy decision`, on an authz receipt also `door authz decided, relayed nothing` (an allow `withheld`, a deny `denied`, nothing else), and otherwise the gateway's checks, the authorization checks included; vectors `door-*`. See the [specification](/receipt/v0.2).
 
 ## Not yet
 

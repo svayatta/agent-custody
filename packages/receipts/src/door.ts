@@ -28,6 +28,11 @@ export const CLASS_HEADER = "x-agent-custody-class";
 export const ARRIVAL_FACT = "arrival";
 /** the header an agent may use to name itself without a grant; recorded as claimed, never checked */
 export const AGENT_HEADER = "x-agent-custody-agent";
+/** in authz mode: the original request's method and target, as nginx `auth_request` and Envoy `ext_authz` are configured to send them */
+export const ORIGINAL_METHOD_HEADER = "x-original-method";
+export const ORIGINAL_URI_HEADER = "x-original-uri";
+/** the reason an allowed authz receipt carries: the door decided, and the proxy, not the door, relays */
+export const AUTHZ_ALLOWED_REASON = "allowed; the door answered the proxy's authz check and relays nothing: the proxy relays the request, and the door sees neither its body nor the origin's answer";
 
 export type ArrivalClass = "verified" | "claimed" | "unknown";
 
@@ -282,9 +287,28 @@ function encodeSegment(segment: string): string {
 }
 
 /** The request target as a URL whose host is the door's own: an origin-form target `//x/y` is a path, never a scheme-relative URL. */
-function requestUrl(req: IncomingMessage): URL {
-  const raw = req.url ?? "/";
+function targetUrl(raw: string): URL {
   return raw.startsWith("/") ? new URL(`http://door${raw}`) : new URL(raw, "http://door");
+}
+const requestUrl = (req: IncomingMessage): URL => targetUrl(req.url ?? "/");
+
+/** The request an arrival made: its method and target. In authz mode they are the original request's, sent by the proxy. */
+export interface ArrivalTarget {
+  method: string;
+  url: URL;
+}
+
+/**
+ * The original request of an authz check, from `X-Original-Method` and `X-Original-URI`. The check request's own method
+ * and path are the proxy's (nginx sends GET to a fixed location), so both headers are required, and a check without them
+ * is refused rather than decided on the proxy's request.
+ */
+export function authzTarget(req: IncomingMessage): ArrivalTarget | { problem: string } {
+  const method = req.headers[ORIGINAL_METHOD_HEADER];
+  const uri = req.headers[ORIGINAL_URI_HEADER];
+  if (typeof method !== "string" || !/^[A-Za-z]+$/.test(method)) return { problem: `an authz check needs ${ORIGINAL_METHOD_HEADER}, the original request's method` };
+  if (typeof uri !== "string" || !uri.startsWith("/")) return { problem: `an authz check needs ${ORIGINAL_URI_HEADER}, the original request's path and query` };
+  return { method: method.toUpperCase(), url: targetUrl(uri) };
 }
 
 /** A path without its trailing slash: `/refunds/` and `/refunds` are one route. */
@@ -323,9 +347,9 @@ export function remoteOf(req: IncomingMessage, trustProxy: boolean): string {
  * or signed by a stranger leaves the arrival `claimed`: it asserted an identity the door could not accept for this route.
  * An `x-agent-custody-agent` header or an HTTP signature header alone is `claimed`. Nothing at all is `unknown`.
  */
-export function classifyArrival(req: IncomingMessage, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string): Classified {
-  const url = requestUrl(req);
-  const method = (req.method ?? "GET").toUpperCase();
+export function classifyArrival(req: IncomingMessage, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string, target?: ArrivalTarget): Classified {
+  const url = target?.url ?? requestUrl(req);
+  const method = target?.method ?? (req.method ?? "GET").toUpperCase();
   const declaredRaw = req.headers[AGENT_HEADER];
   const declared = typeof declaredRaw === "string" && declaredRaw.trim() ? declaredRaw.trim().slice(0, 200) : undefined;
   const signature = typeof req.headers["signature-input"] === "string";
@@ -433,13 +457,15 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   for (const [route, rule] of Object.entries(cfg.capture ?? {})) {
     for (const side of [rule.args, rule.result, rule.facts]) if (side?.mode === "encrypted" && !captureKey) throw new Error(`capture for ${route} uses mode encrypted, which needs captureKeyEnv`);
   }
-  const originHeaders: Record<string, string> = { ...(cfg.origin.headers ?? {}) };
-  for (const [header, variable] of Object.entries(cfg.origin.headerEnv ?? {})) {
+  const authz = !!cfg.authz;
+  if (!authz && !cfg.origin) throw new Error("a door needs an origin, unless it answers authz checks (authz: true)");
+  const originHeaders: Record<string, string> = { ...(cfg.origin?.headers ?? {}) };
+  if (!authz) for (const [header, variable] of Object.entries(cfg.origin?.headerEnv ?? {})) {
     const v = process.env[variable];
     if (!v) throw new Error(`origin: environment variable ${variable} is not set`);
     originHeaders[header] = v;
   }
-  const origin = new URL(cfg.origin.url);
+  const origin = new URL(cfg.origin?.url ?? "http://authz.invalid");
   const originPath = origin.pathname.replace(/\/$/, "");
   const f = options.fetch ?? fetch;
   const challengeSecret = cfg.challenge ? process.env[cfg.challenge.secretEnv] : undefined;
@@ -450,7 +476,8 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   // a route the config gives no rule falls to "*", and without a "*" rule of the config's own, to the door's default
   const rules = cfg.capture && Object.hasOwn(cfg.capture, "*") ? cfg.capture : { ...(cfg.capture ?? {}), "*": DOOR_DEFAULT_CAPTURE };
   const issuer = createIssuer(key, cfg.receiptsDir, sink, { exporter: options.exporter ?? openExporter(cfg), capture: { rules, key: captureKey } });
-  const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework: "http" };
+  // `authz` tells a verifier that the receipt records a decision only: the proxy relayed, and no result was seen
+  const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework: authz ? "authz" : "http" };
   const precommit = new Set(cfg.precommit);
   const rates = createRateTracker();
 
@@ -509,16 +536,21 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   }
 
   async function decideAndAnswer(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // A check that does not say what it is checking is the proxy's misconfiguration, not an arrival: nothing to decide or receipt
+    const target = authz ? authzTarget(req) : { method: (req.method ?? "GET").toUpperCase(), url: requestUrl(req) };
+    if ("problem" in target) {
+      req.resume();
+      return json(res, 400, {}, { error: target.problem });
+    }
     const receiptId = randomUUID();
     const timestamp = new Date().toISOString();
     res.setHeader(RECEIPT_HEADER, receiptId);
-    const url = requestUrl(req);
-    const method = (req.method ?? "GET").toUpperCase();
+    const { url, method } = target;
     // A path that does not decode cleanly is never relayed; it falls under the unmatched route for the receipt.
     const norm = normalizePath(url.pathname);
     const path = "path" in norm ? norm.path : url.pathname;
     const route = "path" in norm ? matchRoute(cfg.routes, cfg.unmatchedRoute, method, path) : cfg.unmatchedRoute;
-    const { arrival, delegation } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp);
+    const { arrival, delegation } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, target);
     const by = delegation ? "agent" : "remote";
     arrival.rate = { by, ...rates.hit(`${by}:${delegation ? arrival.subject : arrival.remote}`) };
     if (cfg.challenge && challengeHeader) {
@@ -539,7 +571,9 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     }
     const { text: policyText, digest: pDigest } = currentPolicy();
 
-    const read = await readBody(req, cfg.maxBodyBytes);
+    // an authz check carries no body: the proxy holds the original's and relays it after the answer
+    if (authz) req.resume();
+    const read = authz ? { body: Buffer.alloc(0) } : await readBody(req, cfg.maxBodyBytes);
     const body = "body" in read ? read.body : null;
     const headers: Record<string, string> = {};
     for (const name of RECORDED_HEADERS) {
@@ -559,7 +593,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
       query: queryOf(url),
       headers,
       ...(recordedBody !== undefined ? { body: recordedBody } : {}),
-      ...(body ? { bodyBytes: body.length, bodyDigest: sha256Hex(body) } : { bodyBytes: (read as { bytes: number }).bytes, bodyOversized: true }),
+      ...(authz ? {} : body ? { bodyBytes: body.length, bodyDigest: sha256Hex(body) } : { bodyBytes: (read as { bytes: number }).bytes, bodyOversized: true }),
     };
     const facts: Record<string, FactRecord> = { [ARRIVAL_FACT]: { tool: "door.arrival", args: {}, value: arrival, resultDigest: digestOf(arrival), provenance: "observed" } };
 
@@ -619,6 +653,9 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         }
       }
     }
+    // the one outcome an allowed authz check has: the decision, answered 200, and nothing relayed by the door
+    const allowedCheck = !execution && authz;
+    if (allowedCheck) execution = { status: "withheld", reason: policy.decision === "allow" ? AUTHZ_ALLOWED_REASON : `${AUTHZ_ALLOWED_REASON}. Observe mode: the policy denied it and the denial was not enforced`, provenance: "observed" };
     if (!execution) {
       let upstream: Response | undefined;
       try {
@@ -649,7 +686,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         out.set(RECEIPT_HEADER, receiptId);
         out.set(CLASS_HEADER, arrival.class);
         for (const [h, v] of Object.entries(originHeaders)) out.set(h, v);
-        upstream = await f(target, { method, headers: out, ...(method === "GET" || method === "HEAD" ? {} : { body: new Uint8Array(body!) }), redirect: "manual", signal: AbortSignal.timeout(cfg.origin.timeoutMs) });
+        upstream = await f(target, { method, headers: out, ...(method === "GET" || method === "HEAD" ? {} : { body: new Uint8Array(body!) }), redirect: "manual", signal: AbortSignal.timeout(cfg.origin!.timeoutMs) });
         const got = await readResponse(upstream, cfg.maxResponseBytes);
         const back: Record<string, string | string[]> = {};
         upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k) && k !== "content-length" && k !== "content-encoding" && k !== "set-cookie") back[k] = v; });
@@ -714,6 +751,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
         // A refused arrival that could have passed a challenge is told how: the provider, the public site key, and the header
         return json(res, 403, mark, { error: "refused by the door's policy", reason: execution!.reason, receipt: receiptId, ...(cfg.challenge && arrival.challenge?.outcome !== "passed" ? { challenge: { provider: cfg.challenge.provider, siteKey: cfg.challenge.siteKey, header: cfg.challenge.header } } : {}) });
       case "withheld":
+        if (allowedCheck) return json(res, 200, mark, { allowed: true, receipt: receiptId });
         return json(res, withheldStatus, mark, { error: "not relayed", reason: execution!.reason, receipt: receiptId });
       case "error":
         return notSent
