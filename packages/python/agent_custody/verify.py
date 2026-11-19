@@ -838,6 +838,7 @@ def _verify(bundle: Any, trust: Trust, report: Report, *, log, log_id, require_s
     if "approval" in p:
         _approval_checks(p, trust, add, forwarded, approval_withheld, args_withheld)
     _digest_checks(statement, paths, add)
+    _fact_attestation_checks(p, paths, trust, add)
     _upstream_checks(p, paths, trust, add)
 
     policy = p.get("policy")
@@ -1028,6 +1029,35 @@ def _is_provider_attestation(v: Any) -> bool:
     # Only a recognised, well-formed delivery takes the provider branch, so unknown or malformed evidence cannot
     # suppress the upstream-key check.
     return isinstance(v, dict) and v.get("provider") in _PROVIDERS and all(_is_str(v.get(f)) or is_commitment(v.get(f)) for f in ("rawBody", "signature", "bind"))
+
+
+def _fact_attestation_checks(p: dict, paths: list, trust: Trust, add) -> None:
+    # A fact its source signed (the door's partner verdict), marked attested by the issuer: checked again under the
+    # key the reader trusts for that source. The signature binds this receipt and tool, so a moved verdict fails.
+    for name, fact in p["facts"].items():
+        if not isinstance(fact, dict) or fact.get("provenance") != "attested":
+            continue
+        label = f"fact {name} signature (upstream key)"
+        env = fact.get("attestation")
+        if any(_under(path, ("facts", name, "value")) for path in paths):
+            add(f"fact {name} signature not checked", True, "the value is withheld")
+        elif ["facts", name, "attestation"] in paths:
+            add(label, False, "the value is in clear but its signature is withheld")
+        elif not _is_envelope(env):
+            add(label, False, "the fact is marked attested and carries no signature, and the capture note does not say it is withheld")
+        elif not trust.upstream:
+            add(label, False, "the fact is marked attested; give the signer's public key to check it")
+        else:
+            payload = dsse_payload(env)
+            ok = (
+                env["payloadType"] == UPSTREAM
+                and bool(dsse_signers(env, trust.upstream))
+                and isinstance(payload, dict)
+                and payload.get("receiptId") == p["receiptId"]
+                and payload.get("tool") == p["tool"]["name"]
+                and payload.get("contentDigest") == digest(fact.get("value"))
+            )
+            add(label, ok)
 
 
 def _upstream_checks(p: dict, paths: list, trust: Trust, add) -> None:

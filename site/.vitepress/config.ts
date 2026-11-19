@@ -121,6 +121,7 @@ export default withMermaid(
             { text: "Writing egress policies", link: "/guide/egress-policies" },
             { text: "The door", link: "/receipts/door" },
             { text: "The door in your Node app", link: "/receipts/door-middleware" },
+            { text: "The door in Go, Rails, Django, and Spring", link: "/receipts/door-languages" },
             { text: "Door signals", link: "/receipts/door-signals" },
             { text: "Safe financial operations", link: "/receipts/financial-operations" },
             { text: "Completeness", link: "/receipts/completeness" },

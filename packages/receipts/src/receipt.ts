@@ -41,7 +41,10 @@ export interface FactRecord {
   value: unknown;
   /** the digest of the lookup's full result; under a capture rule a commitment to that result (the receipt shows only the selected value, the rest is private), named in the `capture` note */
   resultDigest: string | Commitment;
-  provenance: "observed";
+  /** `attested` only when `attestation` carries its source's signature over `value` for this receipt and tool, checked by the issuer; a verifier checks it again under the source's key */
+  provenance: "observed" | "attested";
+  /** the source's attestation envelope (upstream.ts format, over the digest of `value`); the door's partner verdict carries one. Withheld unless it is exactly that plain attestation beside a value in clear */
+  attestation?: Envelope | Commitment;
 }
 
 /** A gateway's durable financial operation identity; execution still describes only the tool/API call. */

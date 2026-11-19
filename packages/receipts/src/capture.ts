@@ -198,8 +198,12 @@ export function effectiveRule(capture: CaptureConfig | undefined, tool: string, 
  * rule publishes from the same upstream.
  */
 function isPlainAttestation(envelope: unknown, receiptId: unknown, tool: unknown, result: unknown): boolean {
+  return isObject(result) && isPlainEnvelope(envelope, receiptId, tool, contentDigest(result as { content: unknown; isError?: boolean }));
+}
+/** The same test for any signed content: an attestation envelope that binds this receipt, this tool, and `digest`, and nothing else. A partner engine's verdict is signed this way, over the verdict's digest. */
+export function isPlainEnvelope(envelope: unknown, receiptId: unknown, tool: unknown, digest: string): boolean {
   if (!isObject(envelope) || !exactKeys(envelope, ["payload", "payloadType", "signatures"])) return false;
-  if (envelope.payloadType !== UPSTREAM_TYPE || typeof envelope.payload !== "string" || !isObject(result)) return false;
+  if (envelope.payloadType !== UPSTREAM_TYPE || typeof envelope.payload !== "string") return false;
   const sigs = envelope.signatures;
   if (!Array.isArray(sigs) || sigs.length !== 1) return false;
   const sig = sigs[0] as unknown;
@@ -211,7 +215,7 @@ function isPlainAttestation(envelope: unknown, receiptId: unknown, tool: unknown
     const p = JSON.parse(bytes.toString("utf8")) as unknown;
     // compared as bytes: decoding to text would turn an invalid byte into U+FFFD and let it through
     if (!isObject(p) || !exactKeys(p, ["contentDigest", "receiptId", "tool"]) || !bytes.equals(Buffer.from(canonicalize(p), "utf8"))) return false;
-    return p.receiptId === receiptId && p.tool === tool && p.contentDigest === contentDigest(result as { content: unknown; isError?: boolean });
+    return p.receiptId === receiptId && p.tool === tool && p.contentDigest === digest;
   } catch {
     return false;
   }
@@ -424,6 +428,11 @@ export function privateView<P extends AuthorizationPredicate>(predicate: P, rule
             if (factsSide) object(["facts", name, "value"], v, factsSide);
           } else if (f === "args") {
             if (argsSide) fields(["facts", name, "args"], v, { clear: new Set(ownOf(ctx.clearFactArgs, name) ?? []), key: argsSide.key });
+          } else if (f === "attestation") {
+            // a fact its source signed (the door's partner verdict): kept beside a value the rule leaves in clear only
+            // when it is exactly the plain attestation of that value for this receipt and route, as an upstream's is
+            if (!factsSide && !ctx.unknownTool && isPlainEnvelope(v, predicate.receiptId, predicate.tool.name, digestOf(fact.value))) continue;
+            hide(["facts", name, f], v, factsSide ? factsSide.key : k);
           } else if (!CLEAR_IN.fact.has(f)) hide(["facts", name, f], v, k);
         }
         // The fact's digest is over the lookup's full result, of which the receipt shows only the selected value: the

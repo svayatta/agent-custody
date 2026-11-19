@@ -38,7 +38,7 @@ http-server = [
 
 [[package]]
 name = "agent-custody"
-version = "0.16.6"
+version = "0.16.7"
 source = { editable = "." }
 
 [package.optional-dependencies]

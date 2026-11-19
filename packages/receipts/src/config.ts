@@ -322,6 +322,34 @@ export const DoorConfigSchema = z.object({
     /** nonces remembered at once; past this a signature is `unavailable`. Default 100000 */
     maxNonces: z.number().int().positive().default(100_000),
   }).optional(),
+  /**
+   * A partner detection engine (Cloudflare Bot Management, HUMAN, DataDome, behind an adapter that holds a signing key):
+   * the door asks it about each arrival on `routes`, naming the receipt it is writing, and the engine signs its verdict
+   * for that receipt. Only a verdict whose signature verifies under `keyFile` reaches the policy, as
+   * `context.facts.partner`, and the receipt records it as attested.
+   */
+  partner: z.object({
+    /** the engine's name; the signed verdict must name the same engine */
+    engine: z.string().min(1).max(64),
+    /** where the door POSTs its question about an arrival */
+    url: z.string().url(),
+    /** the engine's Ed25519 public key file; the verdict's signature must verify under it */
+    keyFile: z.string(),
+    /** the route names whose arrivals the engine is asked about, or ["*"] */
+    routes: z.array(z.string().min(1)).min(1),
+    /** one question's budget, the answer's body included. Default 1500 */
+    timeoutMs: z.number().int().positive().default(1_500),
+    /**
+     * When no verified verdict is had (the engine is unreachable, slow, busy, or answers with a bad signature or a
+     * verdict for another arrival): "deny" (default) refuses the arrival with 503, whatever the policy says; "absent"
+     * leaves the `partner` fact out, so the policy decides without it and a rule that requires it denies. Never allow.
+     */
+    onFailure: z.enum(["deny", "absent"]).default("deny"),
+    /** questions waiting on the engine at once; an arrival past this has no verdict (`unavailable`). Default 64 */
+    maxInFlight: z.number().int().positive().default(64),
+    /** the largest answer the door reads. Default 16 KiB */
+    maxResponseBytes: z.number().int().positive().default(16 * 1024),
+  }).optional(),
   receiptsDir: z.string(),
   logFile: z.string().optional(),
   log: LogSchema.optional(),
@@ -330,6 +358,7 @@ export const DoorConfigSchema = z.object({
   capture: CaptureSchema.optional(),
   captureKeyEnv: z.string().min(1).optional(),
 }).refine(hasOneLog, oneLog).refine((c) => new Set(c.routes.map((r) => r.name)).size === c.routes.length, { message: "route names must be unique" })
+  .refine((c) => !c.partner || c.partner.routes.every((r) => r === "*" || r === c.unmatchedRoute || c.routes.some((x) => x.name === r)), { message: "partner.routes names a route the door does not have" })
   .refine((c) => !c.authz || c.trustProxy, { message: "authz needs trustProxy: true, since every check comes from the proxy and the arrival's address is the last in its X-Forwarded-For" })
   .refine((c) => !c.log || !!c.log.keys?.length, { message: "a remote log needs log.keys: the log's public key files, pinned, to check its answer before a request is relayed" });
 export type DoorConfig = z.infer<typeof DoorConfigSchema>;
@@ -387,6 +416,7 @@ export function loadDoorConfig(path: string): DoorConfig {
     receiptsDir: r(cfg.receiptsDir),
     ...(cfg.logFile ? { logFile: r(cfg.logFile) } : {}),
     ...(cfg.log?.keys ? { log: { ...cfg.log, keys: cfg.log.keys.map(r) } } : {}),
+    ...(cfg.partner ? { partner: { ...cfg.partner, keyFile: r(cfg.partner.keyFile) } } : {}),
   };
 }
 
