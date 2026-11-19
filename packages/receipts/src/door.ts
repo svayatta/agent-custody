@@ -4,7 +4,8 @@
 // an agent: `unknown` means nothing was presented, `claimed` means something was asserted and could not be checked,
 // and `verified` means a grant signed by a trusted principal names this agent for this route, or a Web Bot Auth
 // signature checked against the key its agent's directory publishes. The same key, policy language, issuer, log, and
-// verifier as the gateway; the receipt's issuer kind is `door`.
+// verifier as the gateway; the receipt's issuer kind is `door`. A partner engine's detection verdict, when configured,
+// is a fact beside the arrival, and only one the engine signed for this arrival (door-partner.ts).
 import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
@@ -16,6 +17,7 @@ import { decodeDelegation, delegationValidAt, verifyDelegation, type Delegation 
 import { parseGrantHeader, GRANT_HEADER } from "./gateway-http.ts";
 import { createIssuer, ReceiptPending, type FlushResult } from "./issue.ts";
 import { createWebBotAuthVerifier, normalizeAuthority, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
+import { createPartnerEngine, PARTNER_FACT, PARTNER_TOOL, type ArrivalPartner, type PartnerVerdict } from "./door-partner.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
@@ -67,6 +69,8 @@ export interface Arrival {
   rate?: ArrivalRate;
   /** what became of the challenge token, when the door is configured to challenge; absent otherwise, and from `classifyArrival` alone */
   challenge?: ArrivalChallenge;
+  /** what became of the question to the partner engine, when the door asks one about this route; absent otherwise, and from `classifyArrival` alone. The verdict itself is the `partner` fact, present only when `outcome` is `verified` */
+  partner?: ArrivalPartner;
 }
 
 /**
@@ -579,6 +583,7 @@ export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetc
   const precommit = new Set(cfg.precommit);
   const rates = createRateTracker();
   const webBotAuth = cfg.webBotAuth ? createWebBotAuthVerifier(cfg.webBotAuth, f) : undefined;
+  const partner = cfg.partner ? createPartnerEngine(cfg.partner, f) : undefined;
 
   // The policy, re-read when the file changes, as the gateway does; a file that does not parse is refused and the
   // policy in force stays. The bytes and the metadata come from one open file.
@@ -648,6 +653,16 @@ export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetc
       const v = req.headers[name];
       if (typeof v === "string") headers[name] = v;
     }
+    // A verdict reaches the policy and the receipt only when its signature verified for this receipt and route. Without
+    // one, onFailure "deny" refuses the arrival whatever the policy says, and "absent" leaves the policy without the fact.
+    let verdict: { value: PartnerVerdict; signature: Envelope } | undefined;
+    let partnerRefusal: string | undefined;
+    if (partner && cfg.partner && partner.applies(route)) {
+      const asked = await partner.ask({ receiptId, route, method, path, remote: arrival.remote, class: arrival.class, headers });
+      arrival.partner = asked.check;
+      if (asked.verdict) verdict = { value: asked.verdict, signature: asked.signature };
+      else if (cfg.partner.onFailure === "deny") partnerRefusal = `the partner engine ${cfg.partner.engine} gave no verified verdict (${asked.check.outcome}: ${asked.check.error ?? "no detail"}), and partner.onFailure is deny`;
+    }
     const contentType = req.headers["content-type"] ?? "";
     let recordedBody: unknown;
     if (body && body.length > 0 && body.length <= RECORDED_BODY_BYTES && /^application\/json\b/i.test(contentType)) {
@@ -663,7 +678,10 @@ export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetc
       ...(recordedBody !== undefined ? { body: recordedBody } : {}),
       ...(read === null ? {} : body ? { bodyBytes: body.length, bodyDigest: sha256Hex(body) } : { bodyBytes: (read as { bytes: number }).bytes, bodyOversized: true }),
     };
-    const facts: Record<string, FactRecord> = { [ARRIVAL_FACT]: { tool: "door.arrival", args: {}, value: arrival, resultDigest: digestOf(arrival), provenance: "observed" } };
+    const facts: Record<string, FactRecord> = {
+      [ARRIVAL_FACT]: { tool: "door.arrival", args: {}, value: arrival, resultDigest: digestOf(arrival), provenance: "observed" },
+      ...(verdict ? { [PARTNER_FACT]: { tool: PARTNER_TOOL, args: {}, value: verdict.value, resultDigest: digestOf(verdict.value), provenance: "attested" as const, attestation: verdict.signature } } : {}),
+    };
 
     // The Cedar principal is an agent the door checked: the one a verified grant names, or the signature agent of a
     // verified signature. A declared name, or the agent a rejected grant names, stays in the arrival fact as a claim, so
@@ -673,7 +691,7 @@ export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetc
       policy = evaluate(policyText, {
         agentId: checkedAgent ? arrival.subject : "unknown",
         tool: route,
-        context: { args: cedarArgs(args), facts: { [ARRIVAL_FACT]: arrival }, ...(delegation ? { grant: { principal: delegation.grant.principal, scopes: delegation.grant.scopes } } : {}) },
+        context: { args: cedarArgs(args), facts: { [ARRIVAL_FACT]: arrival, ...(verdict ? { [PARTNER_FACT]: verdict.value } : {}) }, ...(delegation ? { grant: { principal: delegation.grant.principal, scopes: delegation.grant.scopes } } : {}) },
       });
     } catch (e) {
       policy = { decision: "deny", reasons: [], errors: [String(e instanceof Error ? e.message : e)], policyDigest: pDigest };
@@ -695,9 +713,13 @@ export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetc
       policy: { ...policy, provenance: "observed" as const },
     };
     const decision: DoorDecision = { receiptId, arrival, method, url, route, ...("relay" in norm ? { relay: norm.relay } : {}), body, head };
+    // observe mode records the missing verdict in the arrival fact and relays, as it does a deny
+    if (partnerRefusal && cfg.mode === "observe") console.error(`agent-custody door (observe mode): ${partnerRefusal}; not enforced, receipt ${receiptId}`);
 
     if (!forward) {
       decision.refused = { status: 403, execution: { status: "denied", reason: [...policy.reasons, ...policy.errors].join("; ") || "no permit policy matched", provenance: "observed" } };
+    } else if (partnerRefusal && cfg.mode !== "observe") {
+      decision.refused = { status: 503, execution: { status: "withheld", reason: `not relayed: ${partnerRefusal}`, provenance: "observed" } };
     } else if ("problem" in norm) {
       decision.refused = { status: 400, execution: { status: "withheld", reason: `the path was not relayed: ${norm.problem}`, provenance: "observed" } };
     } else if (body === null) {

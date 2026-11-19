@@ -616,6 +616,28 @@ export async function verifyBundle(bundle: Bundle, opts: Options): Promise<Resul
   const isProvider = (v: any) => !!v && (v.provider === "stripe-webhook" || v.provider === "github-delivery") && stringOrCommitment(v.rawBody) && stringOrCommitment(v.signature) && stringOrCommitment(v.bind);
   // a check is skipped only for a part the signed note declares withheld; a part that is simply not there, or commitment-shaped without the note saying so, fails
   const declared = (path: Path) => (note?.withheld ?? []).some((w) => JSON.stringify(w) === JSON.stringify(path));
+  // a fact its source signed (the door's partner verdict), marked attested by the issuer: checked again under the key the reader trusts for that source
+  for (const [name, f] of Object.entries<any>(p.facts)) {
+    if (f?.provenance !== "attested") continue;
+    const label = `fact ${name} signature (upstream key)`;
+    const env = f.attestation;
+    const wellFormed = !!env && typeof env === "object" && typeof env.payload === "string" && Array.isArray(env.signatures);
+    if ((note?.withheld ?? []).some((w) => w.length >= 3 && w[0] === "facts" && w[1] === name && w[2] === "value")) add(`fact ${name} signature not checked`, true, "the value is withheld; disclose it with the command-line verifier to check its signature");
+    else if (declared(["facts", name, "attestation"])) add(label, false, "the value is in clear but its signature is withheld; disclose it or give the capture key to check it");
+    else if (!wellFormed) add(label, false, "the fact is marked attested and carries no signature, and the capture note does not say it is withheld");
+    else if (!opts.upstreamKeys?.length) add(label, false, "the fact is marked attested; give the signer's public key to check it");
+    else {
+      const u = await dsseVerify(env, opts.upstreamKeys);
+      let ok = u.ok && env.payloadType === UPSTREAM_TYPE;
+      let detail = u.ok ? (ok ? `keyid ${short(u.keyid)}` : `payload type ${env.payloadType}`) : u.error;
+      if (ok && u.ok) {
+        if (u.payload.receiptId !== p.receiptId) { ok = false; detail = "signed for a different receipt"; }
+        else if (u.payload.tool !== p.tool.name) { ok = false; detail = `signed for tool ${u.payload.tool}`; }
+        else if (u.payload.contentDigest !== await digestOf(f.value)) { ok = false; detail = "signed content differs from the result in the receipt"; }
+      }
+      add(label, ok, detail);
+    }
+  }
   if (executedOrFailed && p.execution.upstream && isProvider(p.execution.upstream)) {
     if (opts.providerSecrets) {
       const parts = ["rawBody", "signature", "bind"];
@@ -817,7 +839,14 @@ export function formatReport(r: Result): string {
   row("model", p.model.provenance, p.model.id === null ? "(none supplied)" : idText(p.model.id));
   row("tool", p.tool.provenance, p.tool.name);
   row("args", p.request.provenance, p.request.args);
-  for (const [k, f] of Object.entries<any>(p.facts)) row(`fact.${k}`, f.provenance, f.value);
+  for (const [k, f] of Object.entries<any>(p.facts)) {
+    if (f.provenance !== "attested") {
+      row(`fact.${k}`, f.provenance, f.value);
+      continue;
+    }
+    const signed = r.checks.find((c) => c.name === `fact ${k} signature (upstream key)`);
+    row(`fact.${k}`, f.provenance, `${JSON.stringify(f.value)}${signed ? (signed.ok ? ` (signed by ${signed.detail})` : " (signature FAILED)") : " (signature not checked)"}`);
+  }
   if (p.reconciliation) row("policy", "-", "(none evaluated: a provider read, not a call)");
   else if (p.policy) row("policy", p.policy.provenance, `${p.policy.decision}${p.policy.enforced === false ? " (observe mode, not enforced)" : ""} [${p.policy.reasons.join(",")}] policy ${short(p.policy.policyDigest)}`); else row("policy", "-", "(none evaluated)");
   if (p.consumed) row("consumed", p.consumed.provenance, !Array.isArray(p.consumed.factIds) ? "(withheld under the capture rule)" : p.consumed.factIds.length === 0 ? "(no facts shown before this call)" : p.consumed.factIds);

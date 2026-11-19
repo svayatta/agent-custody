@@ -297,7 +297,8 @@ export interface WebBotAuthVerifier {
   nonces(): number;
 }
 
-async function readCapped(res: Response, max: number): Promise<Buffer | null> {
+/** A response body up to `max` bytes; null when it passes that, and the rest is not read. */
+export async function readCapped(res: Response, max: number): Promise<Buffer | null> {
   if (!res.body) return Buffer.alloc(0);
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];

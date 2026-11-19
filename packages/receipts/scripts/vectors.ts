@@ -24,6 +24,7 @@ import { createDoorHost, RECEIPT_HEADER, serveDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
 import { loadDoorConfig } from "../src/config.ts";
 import { buildDoorFixture, startOrigin } from "./door-fixture.ts";
+import { startPartner } from "./fake-partner.ts";
 import { createEgressHost, serveEgress } from "../src/egress.ts";
 import { loadEgressConfig } from "../src/config.ts";
 import { EGRESS_AGENT, EGRESS_SECRET, buildEgressFixture, connectThrough, proxyAuth, startEcho } from "./egress-fixture.ts";
@@ -530,9 +531,13 @@ try {
 // ---- the door: receipts for arrivals at a business's own HTTP surface, issuer kind "door" ----
 {
   const origin = await startOrigin();
-  const dfx = buildDoorFixture(mkdtempSync(join(tmpdir(), "vectors-door-")), origin.url);
+  // a partner detection engine asked about the API route only, so the catalogue and refund cases carry no verdict
+  const engineKey = generateKeyPair();
+  const partner = await startPartner(engineKey);
+  const dfx = buildDoorFixture(mkdtempSync(join(tmpdir(), "vectors-door-")), origin.url, { partner: { engine: "stub-engine", url: partner.url, keyFile: "keys/engine.pub", routes: ["api"] } });
   key("door", dfx.doorPub);
   key("door-principal", dfx.principalPub);
+  key("door-partner", writeApprovalKeyPair(engineKey, join(dfx.dir, "keys"), "engine").pubFile);
   const dhost = await createDoorHost(loadDoorConfig(dfx.configFile));
   const door = await serveDoor(dhost, { port: 0, log: () => {} });
   try {
@@ -546,6 +551,8 @@ try {
     const refusedRefund = await arrive("POST", "/refunds", {}, { order: "o_1", amount: 1000 });
     const grant = createDelegation(dfx.principalKey, { version: "0.1", principal: "shop-owner", agent: "shopping-agent", scopes: ["refund", "api"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() });
     const verifiedRefund = await arrive("POST", "/refunds", { authorization: `Bearer ${grantHeader(grant)}` }, { order: "o_2", amount: 4500 });
+    const partnerOrders = await arrive("GET", "/api/orders", { authorization: `Bearer ${grantHeader(grant)}`, "user-agent": "Mozilla/5.0 (vectors)" });
+    const partnerInvoices = await arrive("GET", "/api/invoices", { authorization: `Bearer ${grantHeader(grant)}`, "user-agent": "Mozilla/5.0 (vectors)" });
     const dlog = logLines(dfx.logFile);
     addCase({ name: "door-unknown-executed", description: "An arrival that presented nothing reads a public route through the door: issuer kind door, principal claimed, agent `unknown` claimed, the arrival fact observed, relayed and executed. Verifies with the door's key alone.", bundle: readCatalogue, ...D, principalKeys: [], log: dlog });
     addCase({ name: "door-unknown-denied", description: "The same unknown arrival asks for a refund and the policy refuses it: a denied door receipt, nothing relayed, verified without any principal key.", bundle: refusedRefund, ...D, principalKeys: [], log: dlog });
@@ -553,7 +560,11 @@ try {
     addCase({ name: "door-verified-without-principal-trust", description: "The verified refund checked without the principal's key: the delegation signature fails, as for a gateway receipt.", bundle: verifiedRefund, ...D, principalKeys: [], log: dlog });
     const doorKey = loadPrivateKey(join(dfx.dir, "keys", "door.key"));
     addCase({ name: "resigned-door-no-policy", description: "A door receipt re-signed with its policy decision removed. A door decides every arrival by policy, so `door receipt carries a policy decision` fails.", bundle: resigned(readCatalogue, doorKey, (st) => { st.predicate.policy = null; }), ...D, principalKeys: [], log: dlog });
-  } finally { await door.close(); await dhost.close(); await origin.close(); }
+    addCase({ name: "door-partner-attested", description: "A verified agent reads the API, and the door asks its partner detection engine about the arrival. The engine signs its verdict for this receipt and route (the upstream attestation format, over the digest of the verdict); the receipt carries the `partner` fact as attested with the plain envelope beside it. With the engine's key given as an upstream key, `fact partner signature (upstream key)` passes in both verifiers.", bundle: partnerOrders, ...D, upstreamKeys: ["door-partner"], log: dlog });
+    addCase({ name: "door-partner-without-key", description: "The same receipt checked without the engine's key. The fact is marked attested and the reader cannot confirm it, so `fact partner signature (upstream key)` fails rather than being skipped.", bundle: partnerOrders, ...D, log: dlog });
+    addCase({ name: "door-partner-wrong-key", description: "The same receipt with the principal's key offered as the engine's key: `fact partner signature (upstream key)` fails; everything else passes.", bundle: partnerOrders, ...D, upstreamKeys: ["door-principal"], log: dlog });
+    addCase({ name: "resigned-door-partner-moved", description: "The signed verdict of one arrival pasted into another arrival's receipt, re-signed with the door's key. The signature binds the receipt it was made for, so `fact partner signature (upstream key)` fails with the engine's key given (and the log inclusion of the changed leaf).", bundle: resigned(partnerInvoices, doorKey, (st) => { st.predicate.facts.partner = decode(partnerOrders).predicate.facts.partner!; }), ...D, upstreamKeys: ["door-partner"], log: dlog });
+  } finally { await door.close(); await dhost.close(); await partner.close(); await origin.close(); }
 }
 
 // ---- the door answering a proxy's authz check: issuer kind "door", framework "authz", a decision and never a result ----

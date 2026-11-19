@@ -37,7 +37,7 @@ agent-custody door --config door.json --port 8780
 
 Every field of the config, with its type and default, is in [the door reference](../../../site/reference/door.md#config).
 
-`agent-custody check --config door.json` reads a door config the way the door would: unknown keys, the key, the principal keys, the policy (including a permit that names an agent without requiring a verified arrival, see below), the routes, what is precommitted, the challenge provider or its absence, the origin's scheme, every credential variable the door reads at startup (origin headers, the log, Splunk, OTel, the capture key, the challenge secret), and the paths. It exits 1 on an error.
+`agent-custody check --config door.json` reads a door config the way the door would: unknown keys, the key, the principal keys, the policy (including a permit that names an agent without requiring a verified arrival, see below), the routes, what is precommitted, the challenge provider or its absence, the partner engine and its key, the origin's scheme, every credential variable the door reads at startup (origin headers, the log, Splunk, OTel, the capture key, the challenge secret), and the paths. It exits 1 on an error.
 
 ## What the door knows about an arrival
 
@@ -53,6 +53,7 @@ The door records one fact for every arrival, `arrival`, observed by the door its
 | `declared` | string | the `x-agent-custody-agent` header, when sent. A claim |
 | `remote` | string | the arrival's address |
 | `challenge` | `{ provider, outcome, error? }` | only when `challenge` is configured. `passed`: the provider confirmed the token the arrival sent. `failed`: the provider refused the token (`invalid-input-response`, `timeout-or-duplicate`, `expired-input-response`, `already-seen-response`, `missing-input-response`, with the codes in `error`), it confirmed a token issued on another hostname or for another action, or the token was longer than 4096 characters, which is refused without calling the provider. `unavailable`: the provider did not answer in time, answered a non-200, a redirect, or something that is not JSON, answered a code that is its own or the operator's fault (`internal-error`, `bad-request`, `missing-input-secret`, `invalid-input-secret`, `sitekey-secret-mismatch`, `invalid-sitekey`, `missing-sitekey`, `invalid-remoteip`: a rotated secret gives every person one of these), or `maxInFlight` checks were already waiting. `absent`: no token. A passed challenge leaves `class` as it was: it says a provider's test was passed in front of this arrival, not who the arrival is |
+| `partner` | `{ engine, outcome, error? }` | only when `partner` is configured and the route is in `partner.routes`. `verified`: the engine's verdict was signed for this arrival under `partner.keyFile`, and is the `partner` fact. `rejected`: the engine answered with anything else. `unavailable`: it did not answer in time or at all. See [a partner engine's verdict](#a-partner-engines-verdict) |
 | `rate` | `{ by, burst, minute }` | arrivals from the same source in the last 10 and 60 seconds, this one included, whatever was decided about them, counted by this door process alone. `by` is `agent` for a verified arrival (counted by the agent's name across addresses) or `remote` (by address). A pace, not a verdict |
 | `method`, `path`, `route` | strings | what arrived, and the route it fell under |
 
@@ -295,6 +296,30 @@ when {
 
 Tutorial: [47-web-bot-auth.ts](../examples/47-web-bot-auth.ts).
 
+## A partner engine's verdict
+
+A site that already pays for bot detection (Cloudflare Bot Management, HUMAN, DataDome) can give the door that engine's verdict, signed. The door builds no detector of its own here: it asks the engine, checks the engine's signature, and lets the policy decide on the verdict. The engine sits behind an adapter that holds an Ed25519 key; `scripts/fake-partner.ts` is a stand-in.
+
+```json
+"partner": {
+  "engine": "datadome",
+  "url": "https://bot-adapter.internal/verdict",
+  "keyFile": "keys/engine.pub",
+  "routes": ["refund", "api"],
+  "timeoutMs": 1500,
+  "onFailure": "deny"
+}
+```
+
+- **The question.** For an arrival on one of `routes` (`["*"]` for all), the door POSTs `url` a JSON body: `{ receiptId, route, method, path, remote, class, headers }`, with `receiptId` the id of the receipt it is writing and `headers` the four the receipt records (`user-agent`, `content-type`, `accept`, `host`). Never the query, the body, the grant, the challenge token, or a cookie. The question carries `AbortSignal.timeout(timeoutMs)`, follows no redirect, and the door reads at most `maxResponseBytes` (16 KiB) of the answer. At most `maxInFlight` (64) questions wait at once.
+- **The answer.** `{ verdict: { engine, verdict, score? }, signature }`, where `signature` is a DSSE envelope in the upstream attestation format (`src/upstream.ts`): payload type `application/vnd.agent-custody.upstream+json`, payload `{ receiptId, tool, contentDigest }` with `tool` the route and `contentDigest` the digest of `verdict`. `signVerdict(verdict, key, receiptId, route)` in `src/door-partner.ts` makes one. `engine` must equal the config's, `verdict` is a short word, `score` an integer, and no other field is accepted.
+- **What the door accepts.** A signature that verifies under `keyFile`, names this receipt and route, and is exactly that plain attestation (one signature, canonical payload, nothing added). Anything else is `rejected`, with the reason in `arrival.partner.error`. Since the receipt id is fresh for every arrival, a verdict signed for one arrival cannot be replayed onto another.
+- **What the policy reads.** An accepted verdict is `context.facts.partner`, `{ engine, verdict, score? }`. Without one there is no `partner` fact, and `arrival.partner` says why. A rule reads it as `context.facts has partner && context.facts.partner.verdict == "human"`, so a missing verdict denies.
+- **When there is no verified verdict** (the engine down, slow, busy, or a bad signature, a verdict for another arrival): `onFailure: "deny"`, the default, refuses the arrival with 503 and a `withheld` receipt, whatever the policy said, and relays nothing. `onFailure: "absent"` lets the policy decide without the fact, so a rule that requires it denies and a rule that does not mention it allows as it would anyway. Neither turns an outage into an allow on a route whose rule needs the verdict. A policy deny still answers 403 first. In observe mode the refusal is printed, not enforced, as a deny is.
+- **What the receipt carries.** `facts.partner` is `{ tool: "door.partner", args: {}, value: <verdict>, resultDigest, provenance: "attested", attestation: <the engine's envelope> }`, and `facts.arrival.partner` records the outcome. Under the door's default capture rule, and any rule that leaves the facts in clear, the envelope stays in clear beside the verdict; under a private facts rule it is withheld with the verdict. The verifier runs `fact partner signature (upstream key)`: given the engine's public key with `--upstream-key` (or `upstreamKeys`), it checks the signature, the receipt id, the route, and the digest of the verdict as recorded. Without the key the check fails, because the receipt says the verdict is attested and the reader cannot confirm it. A verdict pasted from another receipt, or edited, fails it. The TypeScript, browser, and Python verifiers run the same check (vectors `door-partner-attested`, `door-partner-without-key`, `door-partner-wrong-key`, `resigned-door-partner-moved`).
+
+What the verdict means, and what it does not, is in [door signals](door-signals.md#the-partner-verdict). Tutorial: [52-door-partner-verdict.ts](../examples/52-door-partner-verdict.ts).
+
 ## How an arrival becomes a Cedar request
 
 | Cedar slot | value |
@@ -343,6 +368,7 @@ A request that can change something at the origin, any method but GET, HEAD, and
 | the request left, and its answer did not arrive: a timeout, a reset, or a body that stopped after the headers | 504 | `{ error, detail, receipt }`, "the origin may have acted on the request ... Do not retry" | `error`, and `execution.error` says the origin may have acted. Find out from the origin before retrying a refund |
 | policy allows, body above `maxBodyBytes` | 413 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
 | policy allows, the log refused the authorization | 503 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
+| policy allows, the partner engine gave no verified verdict and `partner.onFailure` is `deny` | 503 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
 | policy allows, the path does not decode cleanly | 400 | `{ error, reason, receipt }` | `withheld`; nothing was relayed |
 | policy allows, the origin's response above `maxResponseBytes` | 502 | `{ error, receipt }`, and "do not retry" | `executed` or `failed`: the origin acted; `result` carries the status and `bodyOversized: true`, no digest |
 | the receipt could not be written | 500 | `{ error, outcome, receipt }` | none on disk; `outcome` says whether the origin acted, so that a refund is not retried on the strength of a 500 |
@@ -362,7 +388,7 @@ To record more in clear, give the route a rule of its own, as for the gateway ([
 
 ## The receipt
 
-A door receipt is a v0.2 receipt with `issuer.kind: "door"` and `issuer.framework: "http"` (`"authz"` when it answered a proxy's check, [below](#behind-nginx-or-envoy-authz-mode)). The route is the tool, observed. `request.args` is the arrival as the table above describes it, claimed. `facts.arrival` is the door's observation. When the arrival was verified by a grant, `principal` and `agent` are attested and `delegation` carries the grant. When it was verified by a signature alone, `principal` is `{ id: null, provenance: "claimed" }` and `agent` is the signature agent, observed. Otherwise `principal` is `{ id: null, provenance: "claimed" }` and `agent` is the subject, claimed. `execution.result` for a relayed call is `{ status, contentType?, bodyBytes, bodyDigest }`: the origin's body is never copied into the receipt, only committed to.
+A door receipt is a v0.2 receipt with `issuer.kind: "door"` and `issuer.framework: "http"` (`"authz"` when it answered a proxy's check, [below](#behind-nginx-or-envoy-authz-mode)). The route is the tool, observed. `request.args` is the arrival as the table above describes it, claimed. `facts.arrival` is the door's observation; `facts.partner`, when present, is a partner engine's signed verdict, attested ([above](#a-partner-engines-verdict)). When the arrival was verified by a grant, `principal` and `agent` are attested and `delegation` carries the grant. When it was verified by a signature alone, `principal` is `{ id: null, provenance: "claimed" }` and `agent` is the signature agent, observed. Otherwise `principal` is `{ id: null, provenance: "claimed" }` and `agent` is the subject, claimed. `execution.result` for a relayed call is `{ status, contentType?, bodyBytes, bodyDigest }`: the origin's body is never copied into the receipt, only committed to.
 
 The verifier runs `door receipt carries a policy decision` in place of the gateway's two checks, and otherwise the same checks: a verified arrival's receipt passes `delegation binds principal and agent` and `executed tool within delegated scope`; an unknown arrival's passes `principal is claimed, not attested`; a receipt that carries an `authorization` passes the authorization checks, including `authorization logged before execution`. Both verifiers, the Python verifier, and `policy simulate` accept door receipts; the conformance vectors `door-unknown-executed`, `door-unknown-denied`, and `door-verified-executed` pin them.
 
@@ -395,7 +421,8 @@ A site that already runs nginx or Envoy need not send its traffic through the do
 
 ## What it does not do yet
 
-- Detect agents in web or API traffic. An agent that signs per Web Bot Auth is identified by its signature; for everything else the only signals are the ones in the arrival fact: `declared` is a claim and `rate` is a pace ([door signals](door-signals.md)).
+- Detect agents in web or API traffic itself. An agent that signs per Web Bot Auth is identified by its signature, and a partner engine's signed verdict can be had; beyond those the only signals are the ones in the arrival fact: `declared` is a claim and `rate` is a pace ([door signals](door-signals.md)).
+- Authenticate to a partner engine. The question carries no credential: put the adapter that holds the engine's API key and the signing key where only the door reaches it.
 - Check AP2 mandates.
 - Check every Web Bot Auth signature: Ed25519 only (no RSA-PSS or ECDSA), the components listed above only, no `Content-Digest`, no response signatures on the directory, and nonces in one process's memory. A signature agent must be listed in `agents`; the door does not fetch the directory of an origin it was not told about.
 - Challenge an arrival with a passkey. Turnstile and hCaptcha are the providers; see [challenging a human](#challenging-a-human).
@@ -404,4 +431,4 @@ A site that already runs nginx or Envoy need not send its traffic through the do
 - Stream a request body: the body is read whole, up to `maxBodyBytes`, so that the policy can read it and the receipt can commit to it.
 - Relay a response larger than `maxResponseBytes`, or stream one: the body is relayed whole so that its digest can be recorded. A larger one is not held: reading stops at the limit, the client gets 502, and the receipt records that the origin answered.
 
-Tutorials: [40-door.ts](../examples/40-door.ts), the proxy; [48-door-app.ts](../examples/48-door-app.ts), in-process; [49-door-authz.ts](../examples/49-door-authz.ts), behind nginx or Envoy.
+Tutorials: [40-door.ts](../examples/40-door.ts), the proxy; [48-door-app.ts](../examples/48-door-app.ts), in-process; [49-door-authz.ts](../examples/49-door-authz.ts), behind nginx or Envoy; [52-door-partner-verdict.ts](../examples/52-door-partner-verdict.ts), a partner engine's signed verdict.
