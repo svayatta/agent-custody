@@ -56,7 +56,7 @@ describe("the door as Express middleware", () => {
   let guard: InProcessDoor;
   let server: Server;
   let base: string;
-  const ran: { path: string; headers: IncomingMessage["headers"]; rawHeaders: string[]; body: unknown; authorizationOnDisk: boolean }[] = [];
+  const ran: { path: string; headers: IncomingMessage["headers"]; rawHeaders: string[]; distinct: IncomingMessage["headersDistinct"]; body: unknown; authorizationOnDisk: boolean }[] = [];
   const refusing: LogSink = { kind: "file", where: "refusing", append: async () => { throw new Error("the log is full"); } };
   let refusingGuard: InProcessDoor;
 
@@ -70,7 +70,7 @@ describe("the door as Express middleware", () => {
     app.use(express.urlencoded({ extended: false }));
     const note = (req: express.Request) => {
       const id = req.headers[RECEIPT_HEADER] as string;
-      ran.push({ path: req.url ?? "", headers: { ...req.headers }, rawHeaders: [...req.rawHeaders], body: req.body, authorizationOnDisk: existsSync(join(fx.receiptsDir, `${id}.authorization.json`)) });
+      ran.push({ path: req.url ?? "", headers: { ...req.headers }, rawHeaders: [...req.rawHeaders], distinct: req.headersDistinct, body: req.body, authorizationOnDisk: existsSync(join(fx.receiptsDir, `${id}.authorization.json`)) });
     };
     app.get("/catalogue/:item", (req, res) => { note(req); res.json({ item: "shoes", price: 4500 }); });
     app.post("/refunds", (req, res) => { note(req); res.json({ refunded: (req.body as { amount: number }).amount }); });
@@ -122,7 +122,7 @@ describe("the door as Express middleware", () => {
   });
 
   it("a verified refund reaches express.json() with the body the policy read, without the grant, and only after its authorization is in the log", async () => {
-    const res = await fetch(`${base}/refunds`, { method: "POST", headers: { authorization: `Bearer ${grantHeader(grantFor(fx, "shopping-agent", ["refund"]))}`, "content-type": "application/json" }, body: JSON.stringify({ order: "o_2", amount: 4500 }) });
+    const res = await fetch(`${base}/refunds`, { method: "POST", headers: { authorization: `Bearer ${grantHeader(grantFor(fx, "shopping-agent", ["refund"]))}`, "content-type": "application/json", [CLASS_HEADER]: "spoofed", [RECEIPT_HEADER]: "spoofed" }, body: JSON.stringify({ order: "o_2", amount: 4500 }) });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ refunded: 4500 });
     const seen = ran.find((r) => r.path === "/refunds")!;
@@ -130,6 +130,10 @@ describe("the door as Express middleware", () => {
     expect(seen.headers.authorization).toBeUndefined();
     expect(seen.rawHeaders.map((h) => h.toLowerCase())).not.toContain("authorization");
     expect(seen.headers[CLASS_HEADER]).toBe("verified");
+    // headersDistinct is built from rawHeaders: it must match the rewritten headers, not the client's
+    expect(seen.distinct[CLASS_HEADER]).toEqual(["verified"]);
+    expect(seen.distinct[RECEIPT_HEADER]).toEqual([res.headers.get(RECEIPT_HEADER)]);
+    expect(seen.distinct.authorization).toBeUndefined();
     expect(seen.authorizationOnDisk).toBe(true);
     const p = await receiptOf(fx, res.headers.get(RECEIPT_HEADER));
     expect(p.agent).toMatchObject({ id: "shopping-agent", provenance: "attested" });

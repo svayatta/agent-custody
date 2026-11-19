@@ -84,6 +84,10 @@ function passHeaders(core: DoorCore, req: IncomingMessage, arrival: Arrival, rec
   for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) if (!gone.has(req.rawHeaders[i]!.toLowerCase())) raw.push(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
   raw.push(RECEIPT_HEADER, receiptId, CLASS_HEADER, arrival.class);
   req.rawHeaders = raw;
+  // Node builds headersDistinct from rawHeaders with the parser's original count, which no longer matches raw.
+  const distinct: Record<string, string[]> = {};
+  for (let i = 0; i + 1 < raw.length; i += 2) (distinct[raw[i]!.toLowerCase()] ??= []).push(raw[i + 1]!);
+  Object.defineProperty(req, "headersDistinct", { configurable: true, enumerable: true, value: distinct });
 }
 
 /** Hashes every byte the app writes, as it writes it; the answer streams as it would without the door. */
