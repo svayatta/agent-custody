@@ -22,6 +22,19 @@ export interface RestOptions {
 
 const encode = (v: unknown) => encodeURIComponent(typeof v === "string" ? v : JSON.stringify(v));
 
+/** Form-encodes an object, nesting as `a[b]=` and `a[0]=`; null and undefined are left out. */
+export function formEncode(value: Record<string, unknown>): string {
+  const pairs: [string, string][] = [];
+  const walk = (key: string, v: unknown): void => {
+    if (v === null || v === undefined) return;
+    if (Array.isArray(v)) return v.forEach((item, i) => walk(`${key}[${i}]`, item));
+    if (typeof v === "object") return Object.entries(v as Record<string, unknown>).forEach(([k, item]) => walk(`${key}[${k}]`, item));
+    pairs.push([key, String(v)]);
+  };
+  for (const [k, v] of Object.entries(value)) walk(k, v);
+  return new URLSearchParams(pairs).toString();
+}
+
 /** Builds the request for one tool call: path parameters substituted, the rest of the arguments as query or body. */
 export function buildRequest(base: string, tool: RestToolConfig, args: Record<string, unknown>): { url: URL; method: string; body: string | null } {
   const rest = { ...args };
@@ -39,7 +52,7 @@ export function buildRequest(base: string, tool: RestToolConfig, args: Record<st
     url.searchParams.set(name, typeof rest[name] === "string" ? (rest[name] as string) : JSON.stringify(rest[name]));
     delete rest[name];
   }
-  const body = method === "GET" || method === "DELETE" || tool.body === "none" ? null : JSON.stringify(rest);
+  const body = method === "GET" || method === "DELETE" || tool.body === "none" ? null : tool.body === "form" ? formEncode(rest) : JSON.stringify(rest);
   return { url, method, body };
 }
 
@@ -62,7 +75,7 @@ export function restUpstream(name: string, cfg: RestUpstreamConfig, opts: RestOp
       const tool = tools.get(params.name);
       if (!tool) throw new Error(`upstream ${name} has no tool "${params.name}"`);
       const { url, method, body } = buildRequest(cfg.baseUrl, tool, params.arguments ?? {});
-      const requestHeaders = new Headers({ accept: "application/json", ...(body !== null ? { "content-type": "application/json" } : {}), ...headers });
+      const requestHeaders = new Headers({ accept: "application/json", ...(body !== null ? { "content-type": tool.body === "form" ? "application/x-www-form-urlencoded" : "application/json" } : {}), ...headers });
       if (tool.idempotencyHeader) {
         const operation = params._meta?.[OPERATION_META_KEY];
         if (!operation || typeof operation !== "object" || !Object.hasOwn(operation, "id") || !Object.hasOwn(operation, "idempotencyKey")) throw new Error(`tool ${tool.name}: durable operation metadata is required`);

@@ -94,16 +94,16 @@ An upstream need not be an MCP server. A plain HTTP API is described as tools:
       "baseUrl": "https://api.stripe.com",
       "headerEnv": { "authorization": "STRIPE_BEARER" },
       "tools": [
-        { "name": "customer.lookup", "method": "GET", "path": "/v1/customers/{customer_id}",
-          "inputSchema": { "type": "object", "properties": { "customer_id": { "type": "string" } }, "required": ["customer_id"] } },
-        { "name": "stripe.refund", "method": "POST", "path": "/v1/refunds", "description": "Refund a customer, amount in minor units",
-          "inputSchema": { "type": "object", "properties": { "customer_id": { "type": "string" }, "amount": { "type": "integer" } }, "required": ["customer_id", "amount"] } }
+        { "name": "stripe.payment_intent", "method": "GET", "path": "/v1/payment_intents/{id}",
+          "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } },
+        { "name": "stripe.refund", "method": "POST", "path": "/v1/refunds", "body": "form", "description": "Refund a payment, amount in minor units",
+          "inputSchema": { "type": "object", "properties": { "payment_intent": { "type": "string" }, "amount": { "type": "integer" } }, "required": ["payment_intent", "amount"] } }
       ]
     }
   }
 ```
 
-`{name}` segments in `path` are filled from the call's arguments; the remaining arguments go to the query string on GET and DELETE and to a JSON body otherwise, or `query` names the ones that go to the query and `body: "none"` sends no body. `headers` are sent as written; `headerEnv` maps a header to an environment variable read once at startup, so the credential is never in the file and never reaches the agent, and a missing variable fails at startup. The response body is the tool result, JSON kept as JSON, and a non-2xx status is a failed execution with the API's answer in the receipt. Everything else is unchanged: the tools appear in the grant's scopes, `facts` may name a REST tool for a lookup, `precommit` applies, and each call has a receipt. `rest` can be one of several `upstreams` beside MCP servers. This is how an agent's direct HTTP calls come under custody: they become tool calls through the gateway. Tutorial 17 runs one against a stand-in API.
+`{name}` segments in `path` are filled from the call's arguments; the remaining arguments go to the query string on GET and DELETE and to a JSON body otherwise, or `query` names the ones that go to the query and `body: "none"` sends no body; `body: "form"` sends `application/x-www-form-urlencoded` instead, nesting objects and arrays as `a[b]` and `a[0]` and leaving out nulls, which is what Stripe's v1 API reads. `headers` are sent as written; `headerEnv` maps a header to an environment variable read once at startup, so the credential is never in the file and never reaches the agent, and a missing variable fails at startup. The response body is the tool result, JSON kept as JSON, and a non-2xx status is a failed execution with the API's answer in the receipt. Everything else is unchanged: the tools appear in the grant's scopes, `facts` may name a REST tool for a lookup, `precommit` applies, and each call has a receipt. `rest` can be one of several `upstreams` beside MCP servers. This is how an agent's direct HTTP calls come under custody: they become tool calls through the gateway. Tutorial 17 runs one against a stand-in API. `agent-custody init refunds` writes this setup for Stripe in one command, with a refund policy, a grant, and keys, and `--run` makes a test-mode refund through it and verifies the receipt ([getting started](../../../site/guide/getting-started.md#stripe-refunds-in-one-command), tutorial 50).
 
 Another agent is an upstream too. An agent that speaks the A2A protocol publishes an agent card and takes tasks as messages; described as an upstream, delegating to it becomes a tool call:
 

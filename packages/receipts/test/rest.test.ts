@@ -56,6 +56,18 @@ describe("buildRequest", () => {
     expect(JSON.parse(q.body!)).toEqual({ page: 2 });
     expect(() => buildRequest("https://api.example.com", tool, { limit: 5 })).toThrow(/needs argument "id"/);
   });
+
+  // Stripe's v1 API reads only form bodies: a JSON refund body arrives with no parameters and is refused
+  it("sends a form body with nested fields as a[b] and a[0], leaving out null, for an API like Stripe's", async () => {
+    const form = { ...tool, method: "POST" as const, path: "/v1/refunds", body: "form" as const };
+    const r = buildRequest("https://api.stripe.example", form, { payment_intent: "pi_1", amount: 500, metadata: { order: "A 1" }, expand: ["charge"], reason: null, live: false });
+    expect(new URLSearchParams(r.body!).toString()).toBe(r.body);
+    expect([...new URLSearchParams(r.body!)]).toEqual([["payment_intent", "pi_1"], ["amount", "500"], ["metadata[order]", "A 1"], ["expand[0]", "charge"], ["live", "false"]]);
+    let contentType: string | null = null;
+    const client = restUpstream("stripe", { baseUrl: "https://api.stripe.example", timeoutMs: 1000, tools: [form] }, { fetch: (async (_url, init) => { contentType = new Headers(init!.headers).get("content-type"); return new Response("{}"); }) as typeof fetch });
+    await client.callTool({ name: form.name, arguments: { amount: 1 } });
+    expect(contentType).toBe("application/x-www-form-urlencoded");
+  });
 });
 
 describe("REST durable operation keys", () => {

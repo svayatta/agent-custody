@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { evaluate, policyDigest, type PolicyRequest } from "../src/policy.ts";
+import { cedarFactValue, evaluate, policyDigest, type PolicyRequest } from "../src/policy.ts";
 import { POLICY } from "../scripts/fixture.ts";
 
 const req = (tool: string, args: Record<string, unknown>, facts: Record<string, unknown> = {}) => ({
@@ -92,5 +92,26 @@ describe("Cedar policy kept parsed", () => {
       if (answer.type === "failure") expect(d).toEqual({ decision: "deny", reasons: [], errors: answer.errors.map((e) => e.message), policyDigest: policyDigest(POLICY) });
       else expect([d.decision, d.reasons, d.errors.length > 0]).toEqual([answer.response.diagnostics.errors.length > 0 ? "deny" : answer.response.decision, answer.response.diagnostics.reason, answer.response.diagnostics.errors.length > 0]);
     }
+  });
+});
+
+describe("facts with nulls", () => {
+  // A real API record (a Stripe payment intent, a GitHub pull request) has null fields. Passed as observed, Cedar refuses
+  // the whole context and every call is denied whatever the policy says; a null field must read as absent instead.
+  it("leaves null fields out, so a policy reads the rest and `has` is false for the null one", () => {
+    const payment = { id: "pi_1", status: "succeeded", amount_received: 10000, description: null, metadata: { order: null, ref: "A1" } };
+    expect(cedarFactValue(payment)).toEqual({ value: { id: "pi_1", status: "succeeded", amount_received: 10000, metadata: { ref: "A1" } } });
+    const policy = `permit(principal, action == Action::"stripe.refund", resource) when { context.facts.payment.status == "succeeded" && !(context.facts.payment has description) };`;
+    expect(evaluate(policy, { agentId: "a", tool: "stripe.refund", context: { args: {}, facts: { payment } } } as PolicyRequest).decision).toBe("allow");
+  });
+
+  // Dropping a null from a list would move the elements after it: [null, "locked"] would read as ["locked"], and a rule
+  // on tags[0] or on the list's contents would decide on a list the API never returned. So it denies instead.
+  it("denies, rather than compacting, when a null sits inside a list", () => {
+    expect(cedarFactValue({ tags: [null, "locked"] })).toEqual({ nullAt: "facts.tags[0]" });
+    const policy = `permit(principal, action == Action::"t", resource) when { context.facts.f.tags.contains("locked") };`;
+    const d = evaluate(policy, { agentId: "a", tool: "t", context: { args: {}, facts: { f: { tags: [null, "locked"] } } } } as PolicyRequest);
+    expect(d.decision).toBe("deny");
+    expect(d.errors[0]).toMatch(/facts\.f\.tags\[0\] is null inside a list/);
   });
 });

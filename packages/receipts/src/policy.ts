@@ -84,6 +84,36 @@ export function reservedCedarForm(value: unknown, path = "args"): string | null 
   return null;
 }
 
+/**
+ * A fact as Cedar can read it. JSON null has no Cedar form and refuses the whole context, and real APIs return nulls for
+ * unset fields, so a null field is left out and reads as absent (`has` is false). A null inside a list cannot be left
+ * out without moving the elements after it, which would change what `list[0]` or `contains` means, so it is an error:
+ * the returned path, and the call is denied. Only Cedar needs this; Rego and OPA read null as it is.
+ */
+export function cedarFactValue(value: unknown, path = "facts"): { value: unknown } | { nullAt: string } {
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (let i = 0; i < value.length; i++) {
+      if (value[i] === null) return { nullAt: `${path}[${i}]` };
+      const r = cedarFactValue(value[i], `${path}[${i}]`);
+      if ("nullAt" in r) return r;
+      out.push(r.value);
+    }
+    return { value: out };
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v === null) continue;
+      const r = cedarFactValue(v, `${path}.${k}`);
+      if ("nullAt" in r) return r;
+      out[k] = r.value;
+    }
+    return { value: out };
+  }
+  return { value };
+}
+
 interface ParsedPolicy {
   /** the id the policy set is preparsed under in cedar-wasm; unused when parseErrors is non-empty */
   slot: string;
@@ -138,11 +168,17 @@ export function evaluate(policyText: string, req: PolicyRequest): PolicyDecision
   const reserved = reservedCedarForm(req.context.args);
   if (reserved) return { decision: "deny", reasons: [], errors: [`argument ${reserved} uses a reserved Cedar form; arguments are data, never entities or extension values`], policyDigest: digest };
   if (policy.parseErrors.length > 0) return { decision: "deny", reasons: [], errors: [...policy.parseErrors], policyDigest: digest };
+  let context = req.context as Record<string, unknown>;
+  if (context.facts !== undefined) {
+    const facts = cedarFactValue(context.facts);
+    if ("nullAt" in facts) return { decision: "deny", reasons: [], errors: [`${facts.nullAt} is null inside a list, which Cedar cannot read; the call is denied rather than the list compacted`], policyDigest: digest };
+    context = { ...context, facts: facts.value };
+  }
   const answer = cedar.statefulIsAuthorized({
     principal: { type: "Agent", id: req.agentId },
     action: { type: "Action", id: req.tool },
     resource: { type: "Tool", id: req.tool },
-    context: req.context as cedar.Context,
+    context: context as cedar.Context,
     preparsedPolicySetId: policy.slot,
     entities: [],
   });
