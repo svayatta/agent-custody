@@ -28,7 +28,7 @@ The proxy's `door.json` without `origin`: there is nothing to relay to, because 
 
 ## Quick start: the parts both frameworks share
 
-You need Node 22 or later and `curl`. The in-process door is in `@agent-custody/receipts` from the first release after 0.16.6.
+You need Node 22 or later and `curl`. The in-process door is in `@agent-custody/receipts` from 0.16.7.
 
 The door signs every receipt with its own key. The principal key belongs to whoever vouches for an agent: it signs the agent's passport, and the door trusts what it signs. Run these in the app's directory, after the framework step below has created it:
 
