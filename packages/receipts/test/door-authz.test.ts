@@ -3,8 +3,10 @@
 // recorded, and a request that can change something only once its authorization is in the log; the door never sees the
 // body or the origin's answer, so its receipt must say it records a decision and must never claim a result; and the
 // original request comes from the proxy's headers, never from the check request's own method and path.
+import { generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { checkDoorConfig, isDoorConfig } from "../src/check.ts";
@@ -16,6 +18,7 @@ import { grantHeader } from "../src/gateway-http.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import { RECEIPT_TYPE, type ReceiptBundle, type ReceiptStatement } from "../src/receipt.ts";
 import { formatReport, verifyBundle } from "../src/verify.ts";
+import { DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, jwkThumbprint, parseDictionary, signatureBase, type SfInnerList } from "../src/web-bot-auth.ts";
 import { publicKeyFromPem, verifyBundle as webVerify } from "../../../site/verifier/verify-web.ts";
 import { buildDoorFixture, startOrigin, type DoorFixture, type Origin } from "../scripts/door-fixture.ts";
 
@@ -182,6 +185,76 @@ describe("the door answering authz checks", () => {
   });
 });
 
+// Web Bot Auth is part of the decision the authz door shares with the proxy and the in-process door. A signature covers
+// the request the agent sent, which the door knows only from X-Original-*: verified against the check request's own
+// method and path (nginx's GET /_custody), every signed agent behind a proxy would be refused, and a signature for one
+// path would pass for another.
+describe("the authz door checks Web Bot Auth signatures on the original request", () => {
+  const CRAWLER = "https://crawler.example";
+  const SITE = "shop.example";
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const x = publicKey.export({ format: "jwk" }).x!;
+  const keyid = jwkThumbprint(x);
+  const stub = (async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url !== `${CRAWLER}${DIRECTORY_PATH}`) throw new Error(`the test fetched ${url}`);
+    return new Response(JSON.stringify({ keys: [{ kty: "OKP", crv: "Ed25519", x }] }), { headers: { "content-type": DIRECTORY_MEDIA_TYPE } });
+  }) as typeof fetch;
+  let n = 0;
+  /** what the agent sends: a signature over the method, path, and authority of the request it makes, not of any check */
+  const signedHeaders = (method: string, target: string) => {
+    const created = Math.floor(Date.now() / 1000);
+    const headers: Record<string, string> = { "signature-agent": `crawler="${CRAWLER}"` };
+    headers["signature-input"] = `sig1=("@method" "@path" "@authority" "signature-agent";key="crawler");created=${created};expires=${created + 60};keyid="${keyid}";alg="ed25519";nonce="authz-${process.pid}-${++n}";tag="web-bot-auth"`;
+    const base = signatureBase({ method, target, authority: SITE, header: (h) => (Object.hasOwn(headers, h) ? [headers[h]!] : undefined) }, parseDictionary(headers["signature-input"]).get("sig1") as SfInnerList);
+    headers.signature = `sig1=:${sign(null, Buffer.from(base), privateKey).toString("base64")}:`;
+    return headers;
+  };
+  let f: DoorFixture;
+  let wbaHost: DoorHost;
+  let wbaDoor: RunningDoor;
+  beforeAll(async () => {
+    f = authzFixture({ webBotAuth: { agents: [CRAWLER], authorities: [SITE] } });
+    wbaHost = await createDoorHost(loadDoorConfig(f.configFile), { fetch: stub });
+    wbaDoor = await serveDoor(wbaHost, { port: 0, log: () => {} });
+  });
+  afterAll(async () => {
+    await wbaDoor?.close();
+    await wbaHost?.close();
+  });
+  /** nginx's check: its own GET to a fixed location, the original request in X-Original-*, the client's Host and headers. node:http, because fetch will not send a Host of the test's choosing */
+  const nginxCheck = (original: { method: string; uri: string }, headers: Record<string, string>) =>
+    new Promise<{ status: number; id: string | null; cls: string | undefined }>((resolve, reject) => {
+      const req = httpRequest({ host: "127.0.0.1", port: Number(new URL(wbaDoor.url).port), path: "/_custody", headers: { host: SITE, [ORIGINAL_METHOD_HEADER]: original.method, [ORIGINAL_URI_HEADER]: original.uri, "x-forwarded-for": "203.0.113.9", ...headers } }, (r) => {
+        r.resume();
+        r.on("end", () => resolve({ status: r.statusCode!, id: (r.headers[RECEIPT_HEADER] as string | undefined) ?? null, cls: r.headers[CLASS_HEADER] as string | undefined }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+  it("a signed refund with no grant is verified as its signature agent, committed to the log, and allowed", async () => {
+    const res = await nginxCheck({ method: "POST", uri: "/refunds" }, signedHeaders("POST", "/refunds"));
+    expect(res).toMatchObject({ status: 200, cls: "verified" });
+    const p = decode(receiptIn(f.receiptsDir, res.id)).predicate;
+    expect(p.facts[ARRIVAL_FACT]!.value).toMatchObject({ class: "verified", subject: CRAWLER, grant: "absent", signature: "verified", signatureAgent: CRAWLER, signatureKeyid: keyid, method: "POST", path: "/refunds" });
+    expect(p.agent).toEqual({ id: CRAWLER, provenance: "observed" });
+    expect(p.issuer.framework).toBe("authz");
+    expect(p.execution).toMatchObject({ status: "withheld", reason: AUTHZ_ALLOWED_REASON });
+    expect(existsSync(join(f.receiptsDir, `${res.id}.authorization.json`))).toBe(true);
+    expect(verifyBundle(receiptIn(f.receiptsDir, res.id), keysOf(f)).ok).toBe(true);
+  });
+
+  it("the same signature presented for another original request does not verify, and the arrival is refused as a claim", async () => {
+    // the agent signed a catalogue read; the proxy asks about a refund
+    const res = await nginxCheck({ method: "POST", uri: "/refunds" }, signedHeaders("GET", "/catalogue/shoes"));
+    expect(res).toMatchObject({ status: 403, cls: "claimed" });
+    const p = decode(receiptIn(f.receiptsDir, res.id)).predicate;
+    expect(p.facts[ARRIVAL_FACT]!.value).toMatchObject({ class: "claimed", signature: "invalid" });
+    expect(p.execution.status).toBe("denied");
+  });
+});
+
 describe("authz config", () => {
   const write = (cfg: Record<string, unknown>) => {
     const dir = mkdtempSync(join(tmpdir(), "agent-custody-door-authz-cfg-"));
@@ -192,7 +265,6 @@ describe("authz config", () => {
   it("needs no origin, and needs trustProxy: every check comes from the proxy, and the arrival's address is the one it appended", () => {
     expect(loadDoorConfig(write({ authz: true, trustProxy: true })).origin).toBeUndefined();
     expect(() => loadDoorConfig(write({ authz: true }))).toThrow(/authz needs trustProxy/);
-    expect(() => loadDoorConfig(write({}))).toThrow(/a door needs an origin/);
   });
   it("check recognises an authz door and says the receipts record the decision", () => {
     expect(isDoorConfig(fx.configFile)).toBe(true);

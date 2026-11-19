@@ -370,7 +370,7 @@ async function main(argv: string[]): Promise<number> {
       const cfg = loadDoorConfig(values.config);
       const host = await createDoorHost(cfg, { autoFlush: true });
       const running = await serveDoor(host, { port: Number(values.port), host: values.host });
-      console.error(`agent-custody door: ${running.url} keyid=${host.keyid} ${cfg.authz ? "answering authz checks" : `in front of ${cfg.origin!.url}`}; ${cfg.routes.length} route(s), unmatched arrivals are "${cfg.unmatchedRoute}"`);
+      console.error(`agent-custody door: ${running.url} keyid=${host.keyid} ${cfg.authz ? "answering authz checks" : `in front of ${cfg.origin?.url}`}; ${cfg.routes.length} route(s), unmatched arrivals are "${cfg.unmatchedRoute}"`);
       await untilStopped();
       await running.close();
       await host.close();

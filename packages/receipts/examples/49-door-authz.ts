@@ -1,5 +1,5 @@
 // Aspect: the door behind stock nginx or Envoy, answering their authz checks instead of relaying. Source: src/door.ts, src/config.ts
-// Run:    node examples/47-door-authz.ts
+// Run:    node examples/49-door-authz.ts
 //
 // A site that already runs nginx (`auth_request`) or Envoy (`ext_authz`) keeps its proxy and its routing: the proxy asks
 // the door about each request, with the original method and path in `X-Original-Method` and `X-Original-URI`, and
@@ -21,7 +21,7 @@ import { buildDoorFixture } from "../scripts/door-fixture.ts";
 import { out, step } from "./_out.ts";
 
 step(1, "a door with authz: true behind the proxy, no origin of its own, and a policy that reads who arrived (it never sees a body)");
-const fx = buildDoorFixture(out("47-door-authz"), "http://unused.invalid", { authz: true, trustProxy: true });
+const fx = buildDoorFixture(out("49-door-authz"), "http://unused.invalid", { authz: true, trustProxy: true });
 const config = JSON.parse(readFileSync(fx.configFile, "utf8")) as Record<string, unknown>;
 delete config.origin;
 writeFileSync(fx.configFile, JSON.stringify(config, null, 2));

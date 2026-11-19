@@ -38,6 +38,8 @@ static_resources:
                 - { exact: x-agent-custody-agent }
                 - { exact: x-agent-custody-challenge }
                 - { exact: signature-input }
+                - { exact: signature }
+                - { exact: signature-agent }
                 - { exact: user-agent }
                 - { exact: accept }
                 - { exact: content-type }

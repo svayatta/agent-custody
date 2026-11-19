@@ -7,6 +7,7 @@
 // another host or dodge a route by its encoding; every cookie the origin sets arrives; the proxy chain is the proxy's;
 // a response too large to relay is still recorded as the origin's act. Every receipt the door writes verifies with
 // public keys, the right principal and agent provenance, and the arrival fact the policy decided on.
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -24,6 +25,7 @@ import type { LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { verifyBundle } from "../src/verify.ts";
 import { buildDoorFixture, startOrigin, type DoorFixture, type Origin } from "../scripts/door-fixture.ts";
+import { createWebBotAuthVerifier, DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, jwkThumbprint, parseDictionary, signatureBase, type SfInnerList, type SignedRequest, type WebBotAuthOptions } from "../src/web-bot-auth.ts";
 
 let origin: Origin;
 let fx: DoorFixture;
@@ -466,7 +468,7 @@ describe("the door", () => {
     expect(r.p.delegation).toBeUndefined();
     expect(r.p.tool).toEqual({ name: "catalogue", provenance: "observed" });
     expect(r.p.request.args).toMatchObject({ method: "GET", path: "/catalogue/shoes", query: { size: ["9", "10"], colour: "red" }, bodyBytes: 0 });
-    expect(r.arrival).toMatchObject({ class: "unknown", subject: "unknown", grant: "absent", signature: false, route: "catalogue" });
+    expect(r.arrival).toMatchObject({ class: "unknown", subject: "unknown", grant: "absent", signature: "absent", route: "catalogue" });
     expect(r.p.policy).toMatchObject({ decision: "allow", provenance: "observed" });
     expect(r.p.execution).toMatchObject({ status: "executed", provenance: "observed" });
     const v = verified(r.bundle);
@@ -1115,5 +1117,283 @@ describe("the door", () => {
   it("the well-known endpoint names the key and the policy", async () => {
     const res = await fetch(`${door.url}/.well-known/agent-custody-door`);
     expect(await res.json()).toMatchObject({ keyid: host.keyid, policyDigest: host.policyDigest() });
+  });
+});
+
+// Web Bot Auth. The published vectors come from RFC 9421 (appendix B.1.4, the Ed25519 test key; B.2.6, a request signed
+// with it) and draft-meunier-web-bot-auth-architecture-05 (appendix A.2.1 and A.2.3, signed with the same key). The
+// draft's A.2.2 (Signature-Agent as a dictionary) prints a signature that does not verify against its own printed base,
+// so that layout is signed here with the RFC's published private key. Every directory is built in the test and served by
+// a stubbed fetch: nothing here reaches the network.
+describe("web bot auth", () => {
+  const RFC_X = "JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs";
+  const RFC_D = "n4Ni-HpISpVObnQMW0wOhCKROaIKqKtW_2ZYb2p9KcU";
+  const RFC_KEYID = "poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U";
+  const rfcPublic = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: RFC_X }, format: "jwk" });
+  const rfcPrivate = createPrivateKey({ key: { kty: "OKP", crv: "Ed25519", x: RFC_X, d: RFC_D }, format: "jwk" });
+  const AGENT = "https://crawler.example";
+  const AUTHORITY = "shop.example";
+
+  const signed = (target: string, authority: string, headers: Record<string, string>): SignedRequest => ({ method: "GET", target, authority, header: (n) => (Object.hasOwn(headers, n) ? [headers[n]!] : undefined) });
+  const directory = (...xs: string[]) => ({ keys: xs.map((x) => ({ kty: "OKP", crv: "Ed25519", x })) });
+  /** a fetch that serves directories by origin, counts what it was asked for, and hands anything else to the real fetch (the local origin) */
+  const directories = (served: Record<string, () => Response>) => {
+    const asked: string[] = [];
+    const f = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      const origin = new URL(url).origin;
+      if (url.startsWith("https://")) {
+        asked.push(url);
+        expect(init?.redirect).toBe("manual");
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        const serve = served[origin];
+        if (!serve || new URL(url).pathname !== DIRECTORY_PATH) throw new TypeError("fetch failed");
+        return serve();
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    return { f, asked };
+  };
+  const jwks = (body: unknown, type = DIRECTORY_MEDIA_TYPE) => () => new Response(JSON.stringify(body), { headers: { "content-type": type } });
+  const options = (over: Partial<WebBotAuthOptions> = {}): WebBotAuthOptions => ({ agents: [AGENT], authorities: [AUTHORITY], requireNonce: true, maxAgeSeconds: 300, clockSkewSeconds: 60, timeoutMs: 1000, maxDirectoryBytes: 64 * 1024, cacheSeconds: 300, maxNonces: 1000, ...over });
+
+  /** Signs a request the way a Web Bot Auth agent does: `@authority` and the Signature-Agent member, created now, a fresh nonce. */
+  let nonceCounter = 0;
+  const signHeaders = (key: KeyObject, keyid: string, o: { authority?: string; agent?: string; created?: number; expires?: number; nonce?: string | null; components?: string; extra?: Record<string, string>; target?: string } = {}) => {
+    const created = o.created ?? Math.floor(Date.now() / 1000);
+    const expires = o.expires ?? created + 60;
+    const nonce = o.nonce === null ? "" : `;nonce="${o.nonce ?? `n${process.pid}-${++nonceCounter}-${Math.random()}`}"`;
+    const headers: Record<string, string> = { "signature-agent": `agent1="${o.agent ?? AGENT}"`, ...(o.extra ?? {}) };
+    const input = `sig1=(${o.components ?? '"@authority" "signature-agent";key="agent1"'});created=${created};keyid="${keyid}";alg="ed25519";expires=${expires}${nonce};tag="web-bot-auth"`;
+    headers["signature-input"] = input;
+    const base = signatureBase(signed(o.target ?? "/", o.authority ?? AUTHORITY, headers), parseDictionary(input).get("sig1") as SfInnerList);
+    headers.signature = `sig1=:${edSign(null, Buffer.from(base), key).toString("base64")}:`;
+    return headers;
+  };
+  const freshKey = () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const x = publicKey.export({ format: "jwk" }).x!;
+    return { privateKey, x, keyid: jwkThumbprint(x) };
+  };
+
+  it("builds the RFC 9421 B.2.6 signature base, and the RFC's published Ed25519 signature verifies over it", () => {
+    const input = parseDictionary('sig-b26=("date" "@method" "@path" "@authority" "content-type" "content-length");created=1618884473;keyid="test-key-ed25519"').get("sig-b26") as SfInnerList;
+    const headers: Record<string, string> = { date: "Tue, 20 Apr 2021 02:07:55 GMT", "content-type": "application/json", "content-length": "18" };
+    const base = signatureBase({ ...signed("/foo?param=Value&Pet=dog", "example.com", headers), method: "POST" }, input);
+    expect(base).toBe('"date": Tue, 20 Apr 2021 02:07:55 GMT\n"@method": POST\n"@path": /foo\n"@authority": example.com\n"content-type": application/json\n"content-length": 18\n"@signature-params": ("date" "@method" "@path" "@authority" "content-type" "content-length");created=1618884473;keyid="test-key-ed25519"');
+    expect(edVerify(null, Buffer.from(base), rfcPublic, Buffer.from("wqcAqbmYJ2ji2glfAMaRy4gruYYnx2nEFN2HN6jrnDnQCK1u02Gb04v9EDgwUPiu4A0w6vuQv5lIp5WPpBKRCw==", "base64"))).toBe(true);
+    // the draft's keyid is the RFC 7638 thumbprint of that key
+    expect(jwkThumbprint(RFC_X)).toBe(RFC_KEYID);
+  });
+
+  it("verifies the draft's A.2.1 signature over @authority alone, and refuses it at the door, which needs a Signature-Agent to find the key", async () => {
+    const headers = {
+      "signature-input": `sig1=("@authority");created=1735689600;keyid="${RFC_KEYID}";alg="ed25519";expires=4889289600;nonce="g0iqFa9e1ffijlyOScDkXpfSmTbYpRNSGPJrQ1It20ahwgzB3jOUcdgLgFxUg7RMtW4V8IILaKKtA+YuSyIgJQ==";tag="web-bot-auth"`,
+      signature: "sig1=:FFASViSdcgsyaqqYiCnkHreeZzbNKcTzDvZC5uVlP/dn9IbWj8j0o4wKFTH3rBnUiSUBduwm1Gp5VlIPCp01Ag==:",
+    };
+    const req = signed("/", "example.com", headers);
+    const base = signatureBase(req, parseDictionary(headers["signature-input"]).get("sig1") as SfInnerList);
+    expect(edVerify(null, Buffer.from(base), rfcPublic, Buffer.from("FFASViSdcgsyaqqYiCnkHreeZzbNKcTzDvZC5uVlP/dn9IbWj8j0o4wKFTH3rBnUiSUBduwm1Gp5VlIPCp01Ag==", "base64"))).toBe(true);
+    const v = createWebBotAuthVerifier(options({ authorities: ["example.com"] }), directories({}).f, () => 1735689660_000);
+    expect(await v.verify(req)).toMatchObject({ outcome: "invalid", error: "no Signature-Agent field names the signer's directory" });
+  });
+
+  it("verifies the draft's A.2.3 request against a directory that publishes the RFC key, once: the same nonce again is a replay", async () => {
+    const SA = "https://signature-agent.test";
+    const headers = {
+      "signature-agent": `"${SA}"`,
+      "signature-input": `sig2=("@authority" "signature-agent");created=1735689600;keyid="${RFC_KEYID}";alg="ed25519";expires=1735693200;nonce="e8N7S2MFd/qrd6T2R3tdfAuuANngKI7LFtKYI/vowzk4lAZYadIX6wW25MwG7DCT9RUKAJ0qVkU0mEeLElW1qg==";tag="web-bot-auth"`,
+      signature: "sig2=:jdq0SqOwHdyHr9+r5jw3iYZH6aNGKijYp/EstF4RQTQdi5N5YYKrD+mCT1HA1nZDsi6nJKuHxUi/5Syp3rLWBA==:",
+    };
+    const { f, asked } = directories({ [SA]: jwks(directory(RFC_X)) });
+    const v = createWebBotAuthVerifier(options({ agents: [SA], authorities: ["example.com"] }), f, () => 1735689660_000);
+    const req = signed("/", "example.com", headers);
+    expect(await v.verify(req)).toEqual({ outcome: "verified", agent: SA, keyid: RFC_KEYID, label: "sig2" });
+    expect(asked).toEqual([`${SA}${DIRECTORY_PATH}`]);
+    expect(await v.verify(req)).toMatchObject({ outcome: "invalid", error: "sig2 repeats a nonce already used" });
+    // the published request, an hour after it expired
+    const late = createWebBotAuthVerifier(options({ agents: [SA], authorities: ["example.com"] }), f, () => 1735693200_000 + 61_000);
+    expect(await late.verify(req)).toMatchObject({ outcome: "invalid", error: expect.stringContaining("expired") });
+    // and the A.2.2 layout, Signature-Agent as a dictionary member, signed with the RFC's private key
+    const dict = signHeaders(rfcPrivate, RFC_KEYID, { agent: SA, authority: "example.com", created: 1735689600, expires: 4889289600 });
+    expect(await v.verify(signed("/", "example.com", dict))).toMatchObject({ outcome: "verified", agent: SA, keyid: RFC_KEYID });
+  });
+
+  it("refuses a signature with no nonce when one is required, and without the requirement bounds its replay by maxAgeSeconds", async () => {
+    const k = freshKey();
+    const { f } = directories({ [AGENT]: jwks(directory(k.x)) });
+    const t = 1_800_000_000;
+    let now = t * 1000;
+    const headers = signHeaders(k.privateKey, k.keyid, { nonce: null, created: t, expires: t + 3600 });
+    const strict = createWebBotAuthVerifier(options(), f, () => now);
+    expect(await strict.verify(signed("/", AUTHORITY, headers))).toMatchObject({ outcome: "invalid", error: "sig1 has no nonce, and this door requires one" });
+    const loose = createWebBotAuthVerifier(options({ requireNonce: false, maxAgeSeconds: 30, clockSkewSeconds: 5 }), f, () => now);
+    expect((await loose.verify(signed("/", AUTHORITY, headers))).outcome).toBe("verified");
+    expect((await loose.verify(signed("/", AUTHORITY, headers))).outcome).toBe("verified");
+    now = (t + 36) * 1000;
+    expect(await loose.verify(signed("/", AUTHORITY, headers))).toMatchObject({ outcome: "invalid", error: expect.stringContaining("more than the 30 s") });
+    const future = signHeaders(k.privateKey, k.keyid, { created: t + 600, expires: t + 900 });
+    expect(await strict.verify(signed("/", AUTHORITY, future))).toMatchObject({ outcome: "invalid", error: expect.stringContaining("in the future") });
+  });
+
+  it("fetches only configured agents' directories, over https, from their own origin, within the size cap, as the right media type, and keeps them", async () => {
+    const k = freshKey();
+    let calls = 0;
+    const { f, asked } = directories({
+      [AGENT]: () => { calls += 1; return jwks(directory(k.x))(); },
+      "https://hop.example": () => new Response(null, { status: 302, headers: { location: `${AGENT}${DIRECTORY_PATH}` } }),
+      "https://big.example": jwks({ keys: [{ kty: "OKP", crv: "Ed25519", x: k.x, pad: "x".repeat(70_000) }] }),
+      "https://plain.example": jwks(directory(k.x), "application/json"),
+      "https://down.example": () => new Response("no", { status: 503 }),
+    });
+    const v = createWebBotAuthVerifier(options({ agents: [AGENT, "https://hop.example", "https://big.example", "https://plain.example", "https://down.example", "https://gone.example"] }), f);
+    const check = (o: Parameters<typeof signHeaders>[2]) => v.verify(signed("/", AUTHORITY, signHeaders(k.privateKey, k.keyid, o)));
+    expect((await check({})).outcome).toBe("verified");
+    expect((await check({})).outcome).toBe("verified");
+    expect(calls).toBe(1);
+    expect(await check({ agent: "https://hop.example" })).toMatchObject({ outcome: "invalid", error: expect.stringContaining("a directory is served from the signature agent's own origin") });
+    expect(await check({ agent: "https://big.example" })).toMatchObject({ outcome: "invalid", error: expect.stringContaining("larger than 65536 bytes") });
+    expect(await check({ agent: "https://plain.example" })).toMatchObject({ outcome: "invalid", error: expect.stringContaining("not application/http-message-signatures-directory+json") });
+    expect(await check({ agent: "https://down.example" })).toMatchObject({ outcome: "unavailable", error: expect.stringContaining("answered 503") });
+    expect(await check({ agent: "https://gone.example" })).toMatchObject({ outcome: "unavailable", error: expect.stringContaining("could not be fetched") });
+    const before = asked.length;
+    // not configured, not https, not an origin, inline: refused without a fetch
+    expect(await check({ agent: "https://stranger.example" })).toMatchObject({ outcome: "invalid", error: "https://stranger.example is not a signature agent this door is configured to check" });
+    expect(await check({ agent: "http://crawler.example" })).toMatchObject({ outcome: "invalid", error: expect.stringContaining("is not https") });
+    expect(await check({ agent: "https://crawler.example/keys.json" })).toMatchObject({ outcome: "invalid", error: expect.stringContaining("not an origin or its directory") });
+    expect(await check({ agent: `data:${DIRECTORY_MEDIA_TYPE};base64,${Buffer.from(JSON.stringify(directory(k.x))).toString("base64")}` })).toMatchObject({ outcome: "invalid", error: expect.stringContaining("is not https") });
+    expect(asked.length).toBe(before);
+    // a directory URL at the agent's own origin is the agent
+    expect((await check({ agent: `${AGENT}${DIRECTORY_PATH}` })).outcome).toBe("verified");
+  });
+
+  it("refuses a key the directory does not publish, a signature that does not cover the Signature-Agent, an algorithm other than ed25519, and a component it does not check", async () => {
+    const k = freshKey();
+    const other = freshKey();
+    const { f } = directories({ [AGENT]: jwks(directory(k.x)) });
+    const v = createWebBotAuthVerifier(options(), f);
+    expect(await v.verify(signed("/", AUTHORITY, signHeaders(other.privateKey, other.keyid)))).toMatchObject({ outcome: "invalid", error: `keyid ${other.keyid} is not an Ed25519 key in ${AGENT}'s directory` });
+    // a signature by another key under the published keyid
+    expect(await v.verify(signed("/", AUTHORITY, signHeaders(other.privateKey, k.keyid)))).toMatchObject({ outcome: "invalid", error: expect.stringContaining("does not verify") });
+    expect(await v.verify(signed("/", AUTHORITY, signHeaders(k.privateKey, k.keyid, { components: '"@authority"' })))).toMatchObject({ outcome: "invalid", error: "sig1 does not cover signature-agent" });
+    expect(await v.verify(signed("/", AUTHORITY, signHeaders(k.privateKey, k.keyid, { components: '"signature-agent";key="agent1"' })))).toMatchObject({ outcome: "invalid", error: "sig1 does not cover @authority" });
+    const rsa = signHeaders(k.privateKey, k.keyid);
+    rsa["signature-input"] = rsa["signature-input"]!.replace('alg="ed25519"', 'alg="rsa-pss-sha512"');
+    expect(await v.verify(signed("/", AUTHORITY, rsa))).toMatchObject({ outcome: "invalid", error: expect.stringContaining("ed25519 only") });
+    const targetUri = signHeaders(k.privateKey, k.keyid);
+    targetUri["signature-input"] = targetUri["signature-input"]!.replace('key="agent1")', 'key="agent1" "@target-uri")');
+    expect(await v.verify(signed("/", AUTHORITY, targetUri))).toMatchObject({ outcome: "invalid", error: expect.stringContaining("@target-uri is not one this door checks") });
+    // a signature over the method and path checks them
+    const covered = signHeaders(k.privateKey, k.keyid, { components: '"@authority" "signature-agent";key="agent1" "@method" "@path"', target: "/api/orders" });
+    expect((await v.verify(signed("/api/orders", AUTHORITY, covered))).outcome).toBe("verified");
+    const moved = signHeaders(k.privateKey, k.keyid, { components: '"@authority" "signature-agent";key="agent1" "@method" "@path"', target: "/api/orders" });
+    expect(await v.verify(signed("/api/refunds", AUTHORITY, moved))).toMatchObject({ outcome: "invalid", error: expect.stringContaining("does not verify") });
+  });
+
+  describe("at the door", () => {
+    let wfx: DoorFixture;
+    let whost: DoorHost;
+    let wdoor: RunningDoor;
+    let dirs: ReturnType<typeof directories>;
+    const key = freshKey();
+    const hopKey = freshKey();
+    const port = () => Number(new URL(wdoor.url).port);
+    /** node:http, because fetch will not send a Host of the test's choosing */
+    const send = (path: string, headers: Record<string, string>) => new Promise<{ status: number; arrival: Arrival; p: ReceiptStatement["predicate"]; bundle: ReceiptBundle }>((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port: port(), path, method: "GET", headers: { host: AUTHORITY, ...headers } }, (res) => {
+        res.resume();
+        res.on("end", () => {
+          const bundle = JSON.parse(readFileSync(join(wfx.receiptsDir, `${res.headers[RECEIPT_HEADER]}.json`), "utf8")) as ReceiptBundle;
+          const p = decode(bundle).predicate;
+          resolve({ status: res.statusCode!, arrival: p.facts[ARRIVAL_FACT]!.value as Arrival, p, bundle });
+        });
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    const verifiedHere = (bundle: ReceiptBundle) => verifyBundle(bundle, { issuerKeys: [loadPublicKey(wfx.doorPub)], principalKeys: [loadPublicKey(wfx.principalPub)], logFile: wfx.logFile });
+    const grantFor2 = (agent: string) => grantHeader(createDelegation(wfx.principalKey, { version: "0.1", principal: "shop-owner", agent, scopes: ["api"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString() }));
+
+    beforeAll(async () => {
+      wfx = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-wba-")), origin.url, { webBotAuth: { agents: [AGENT, "https://hop.example"], authorities: [AUTHORITY] } });
+      dirs = directories({ [AGENT]: jwks(directory(key.x)), "https://hop.example": () => new Response(null, { status: 307, headers: { location: `${AGENT}${DIRECTORY_PATH}` } }) });
+      whost = await createDoorHost(loadDoorConfig(wfx.configFile), { fetch: dirs.f });
+      wdoor = await serveDoor(whost, { port: 0, log: () => {} });
+    }, 60_000);
+    afterAll(async () => {
+      await wdoor?.close();
+      await whost?.close();
+    });
+
+    it("a request signed per Web Bot Auth against its agent's directory is verified as that agent, observed, and its receipt verifies", async () => {
+      const r = await send("/api/orders", signHeaders(key.privateKey, key.keyid));
+      expect(r.status).toBe(200);
+      expect(r.arrival).toMatchObject({ class: "verified", subject: AGENT, grant: "absent", signature: "verified", signatureAgent: AGENT, signatureKeyid: key.keyid, rate: { by: "agent" } });
+      expect(r.arrival.signatureError).toBeUndefined();
+      expect(r.p.agent).toEqual({ id: AGENT, provenance: "observed" });
+      expect(r.p.principal).toEqual({ id: null, provenance: "claimed" });
+      expect(r.p.delegation).toBeUndefined();
+      const v = verifiedHere(r.bundle);
+      expect(v.checks.filter((c) => !c.ok)).toEqual([]);
+      expect(v.checks.map((c) => c.name)).toContain("principal is claimed, not attested");
+      // the signature travels on to the origin, as the draft asks of a proxy
+      expect(origin.seen.at(-1)!.headers["signature-input"]).toContain('tag="web-bot-auth"');
+    });
+
+    it("a bad signature, an expired one, a wrong @authority, a key missing from the directory, and a directory on another origin are claimed and refused", async () => {
+      const tampered = signHeaders(key.privateKey, key.keyid);
+      tampered.signature = tampered.signature!.replace(/:(.)/, (_m, c: string) => `:${c === "A" ? "B" : "A"}`);
+      const old = Math.floor(Date.now() / 1000) - 3600;
+      const cases: [string, Record<string, string>, Record<string, string>, RegExp][] = [
+        ["bad signature", tampered, {}, /does not verify/],
+        ["expired", signHeaders(key.privateKey, key.keyid, { created: old, expires: old + 60 }), {}, /expired/],
+        ["wrong @authority", signHeaders(key.privateKey, key.keyid, { authority: "other.example" }), { host: "other.example" }, /@authority other\.example is not an authority this door serves/],
+        ["key missing", signHeaders(hopKey.privateKey, hopKey.keyid), {}, /is not an Ed25519 key in https:\/\/crawler\.example's directory/],
+        ["another origin", signHeaders(key.privateKey, key.keyid, { agent: "https://hop.example" }), {}, /redirected to https:\/\/crawler\.example/],
+      ];
+      for (const [name, headers, extra, error] of cases) {
+        const r = await send("/api/orders", { ...headers, ...extra });
+        expect({ name, status: r.status }).toEqual({ name, status: 403 });
+        expect(r.arrival).toMatchObject({ class: "claimed", subject: "unknown", signature: "invalid", rate: { by: "remote" } });
+        expect(r.arrival.signatureError).toMatch(error);
+        expect(r.p.agent).toEqual({ id: "unknown", provenance: "claimed" });
+        expect(verifiedHere(r.bundle).ok).toBe(true);
+      }
+    });
+
+    it("a grant presented in a request its agent signed is bound to its sender; under another agent's signature it is wrong-sender", async () => {
+      const bound = await send("/api/orders", { ...signHeaders(key.privateKey, key.keyid), authorization: `Bearer ${grantFor2(AGENT)}` });
+      expect(bound.status).toBe(200);
+      expect(bound.arrival).toMatchObject({ class: "verified", subject: AGENT, grant: "verified", signature: "verified", signatureAgent: AGENT });
+      expect(bound.p.agent).toEqual({ id: AGENT, provenance: "attested" });
+      expect(bound.p.delegation).toBeDefined();
+      expect(verifiedHere(bound.bundle).checks.filter((c) => !c.ok)).toEqual([]);
+      const stolen = await send("/api/orders", { ...signHeaders(key.privateKey, key.keyid), authorization: `Bearer ${grantFor2("shopping-agent")}` });
+      expect(stolen.status).toBe(403);
+      expect(stolen.arrival).toMatchObject({ class: "claimed", subject: "shopping-agent", grant: "wrong-sender", signature: "verified", grantError: `the grant names agent "shopping-agent", and the request is signed by ${AGENT}` });
+      expect(stolen.p.delegation).toBeUndefined();
+      // without a signature the same grant is verified, bearer-grade, as before
+      const bearer = await send("/api/orders", { authorization: `Bearer ${grantFor2("shopping-agent")}` });
+      expect(bearer.arrival).toMatchObject({ class: "verified", grant: "verified", signature: "absent" });
+    });
+
+    it("the same signed request twice: the second is a replay", async () => {
+      const headers = signHeaders(key.privateKey, key.keyid);
+      expect((await send("/api/orders", headers)).arrival.signature).toBe("verified");
+      const again = await send("/api/orders", headers);
+      expect(again.status).toBe(403);
+      expect(again.arrival).toMatchObject({ class: "claimed", signature: "invalid", signatureError: "sig1 repeats a nonce already used" });
+    });
+
+    it("a door without webBotAuth records a signature as unchecked, a claim, and check says which", async () => {
+      const r = await call("GET", "/api/orders", { headers: signHeaders(key.privateKey, key.keyid) });
+      expect(r.res.status).toBe(403);
+      expect(r.arrival).toMatchObject({ class: "claimed", signature: "unchecked" });
+      expect(checkDoorConfig(fx.configFile).find((f) => f.check === "web bot auth")?.message).toContain("unchecked");
+      expect(checkDoorConfig(wfx.configFile).find((f) => f.check === "web bot auth")).toMatchObject({ level: "ok", message: expect.stringContaining(AGENT) });
+      const loose = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-wba-loose-")), origin.url, { webBotAuth: { agents: [AGENT], authorities: [AUTHORITY], requireNonce: false } });
+      expect(checkDoorConfig(loose.configFile).filter((f) => f.check === "web bot auth" && f.level === "warn")).toHaveLength(1);
+      expect(() => loadDoorConfig(buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-wba-bad-")), origin.url, { webBotAuth: { agents: ["http://crawler.example"], authorities: [AUTHORITY] } }).configFile)).toThrow(/https origin/);
+    });
   });
 });
