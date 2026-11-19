@@ -29,21 +29,26 @@ export interface InitRefundsOptions {
 }
 
 export function refundsPolicy(limit: number, currency: string): string {
-  return `// The agent may read a payment, so the gateway can look it up before a refund.
+  return `// The agent may read a payment and its refunds, so the gateway can look them up before a refund.
 permit(principal, action == Action::"stripe.payment_intent", resource);
+permit(principal, action == Action::"stripe.refunds", resource);
 
-// Refunds of at most ${limit} (minor units, ${currency.toUpperCase()}), only against a payment the gateway itself looked up
-// as succeeded in this currency, and never more than that payment received. context.facts.payment comes from the
-// gateway's own call to Stripe, never from the agent.
-@reason("refunds up to the limit, for a payment the gateway saw succeed")
+// One refund per payment, of more than 0 and at most ${limit} (minor units, ${currency.toUpperCase()}), only against a
+// payment the gateway itself looked up as succeeded in this currency, never more than it received, and only while the
+// gateway's own lookup finds no refund on it yet. A retry after a lost response finds the first refund and is denied, so
+// it cannot pay twice. context.facts comes from the gateway's own calls to Stripe, never from the agent.
+@reason("one refund per payment, up to the limit, for a payment the gateway saw succeed")
 permit(principal, action == Action::"stripe.refund", resource)
 when {
   context.args has amount &&
+  context.args.amount > 0 &&
   context.args.amount <= ${limit} &&
   context.facts has payment &&
   context.facts.payment.status == "succeeded" &&
   context.facts.payment.currency == "${currency}" &&
-  context.args.amount <= context.facts.payment.amount_received
+  context.args.amount <= context.facts.payment.amount_received &&
+  context.facts has refunds &&
+  context.facts.refunds.data.isEmpty()
 };
 `;
 }
@@ -69,15 +74,15 @@ export function initRefunds(o: InitRefundsOptions): { dir: string; configFile: s
     version: "0.1",
     principal: PRINCIPAL,
     agent: AGENT,
-    scopes: ["stripe.payment_intent", "stripe.refund"],
+    scopes: ["stripe.payment_intent", "stripe.refunds", "stripe.refund"],
     issuedAt: new Date(now - 1000).toISOString(),
     expiresAt: new Date(now + o.ttlHours * 3600_000).toISOString(),
   });
   writeFileSync(join(dir, "grant.json"), JSON.stringify(grant, null, 2));
-  print(`2. grant.json: ${PRINCIPAL} lets ${AGENT} read payments and refund them for ${o.ttlHours} hours`);
+  print(`2. grant.json: ${PRINCIPAL} lets ${AGENT} read payments and their refunds, and refund them, for ${o.ttlHours} hours`);
 
   writeFileSync(join(dir, "policy.cedar"), refundsPolicy(o.limit, o.currency));
-  print(`3. policy.cedar: refunds up to ${o.limit} ${o.currency.toUpperCase()} minor units, for a payment the gateway saw succeed`);
+  print(`3. policy.cedar: one refund per payment, up to ${o.limit} ${o.currency.toUpperCase()} minor units, for a payment the gateway saw succeed`);
 
   const config = {
     identity: { keyFile: "keys/gateway.key" },
@@ -87,6 +92,7 @@ export function initRefunds(o: InitRefundsOptions): { dir: string; configFile: s
         headerEnv: { authorization: STRIPE_BEARER_ENV },
         tools: [
           { name: "stripe.payment_intent", method: "GET", path: "/v1/payment_intents/{id}", description: "Read a payment", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
+          { name: "stripe.refunds", method: "GET", path: "/v1/refunds", description: "List a payment's refunds", inputSchema: { type: "object", properties: { payment_intent: { type: "string" } }, required: ["payment_intent"] } },
           {
             name: "stripe.refund", method: "POST", path: "/v1/refunds", body: "form", description: "Refund a payment, amount in minor units",
             inputSchema: { type: "object", properties: { payment_intent: { type: "string" }, amount: { type: "integer" }, reason: { type: "string" } }, required: ["payment_intent", "amount"] },
@@ -97,7 +103,10 @@ export function initRefunds(o: InitRefundsOptions): { dir: string; configFile: s
     grantFile: "grant.json",
     trustedPrincipalKeys: ["keys/principal.pub"],
     policyFile: "policy.cedar",
-    facts: [{ name: "payment", tool: "stripe.payment_intent", args: { id: "$args.payment_intent" }, forTools: ["stripe.refund"] }],
+    facts: [
+      { name: "payment", tool: "stripe.payment_intent", args: { id: "$args.payment_intent" }, forTools: ["stripe.refund"] },
+      { name: "refunds", tool: "stripe.refunds", args: { payment_intent: "$args.payment_intent" }, forTools: ["stripe.refund"] },
+    ],
     precommit: ["stripe.refund"],
     receiptsDir: "receipts",
     logFile: "log.jsonl",
@@ -159,27 +168,39 @@ export async function runRefunds(o: RunRefundsOptions): Promise<RunRefundsResult
   process.env[STRIPE_BEARER_ENV] = `Bearer ${key}`;
   const gw = await createGateway(cfg);
   try {
-    const ok = await gw.handleCall({ name: "stripe.refund", arguments: { payment_intent: pi, amount: limit } });
-    const receiptId = String(ok._meta?.[RECEIPT_META_KEY]);
-    const text = (ok.content[0] as { text?: string } | undefined)?.text ?? "";
-    print(`6. the agent asks the gateway to refund ${limit}: ${ok.isError ? "not done: " + text : "refunded"}; receipt ${receiptId}`);
-    const over = await gw.handleCall({ name: "stripe.refund", arguments: { payment_intent: pi, amount: limit + 1 } });
-    print(`7. the agent asks for ${limit + 1}, over the limit: ${over.isError ? "refused by policy, and never sent to Stripe" : "sent"}`);
+    const receiptOf = (r: { _meta?: Record<string, unknown> }) => {
+      const id = String(r._meta?.[RECEIPT_META_KEY]);
+      const bundle = JSON.parse(readFileSync(join(cfg.receiptsDir, `${id}.json`), "utf8")) as ReceiptBundle;
+      return { id, bundle, p: (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as ReceiptStatement).predicate };
+    };
+    // A refusal counts only when the receipt shows the policy denied it and nothing was sent; a Stripe error is not one.
+    const refusedByPolicy = (p: ReceiptStatement["predicate"]) => p.policy?.decision === "deny" && p.execution.status === "denied";
 
-    const bundle = JSON.parse(readFileSync(join(cfg.receiptsDir, `${receiptId}.json`), "utf8")) as ReceiptBundle;
+    const over = receiptOf(await gw.handleCall({ name: "stripe.refund", arguments: { payment_intent: pi, amount: limit + 1 } }));
+    print(`6. the agent asks for ${limit + 1}, over the limit: ${refusedByPolicy(over.p) ? "refused by policy, and never sent to Stripe" : `not refused by policy (${over.p.execution.status})`}; receipt ${over.id}`);
+    const ok = await gw.handleCall({ name: "stripe.refund", arguments: { payment_intent: pi, amount: limit } });
+    const refund = receiptOf(ok);
+    const receiptId = refund.id;
+    const text = (ok.content[0] as { text?: string } | undefined)?.text ?? "";
+    print(`7. the agent asks for ${limit}: ${refund.p.execution.status === "executed" ? "refunded" : "not done: " + text}; receipt ${receiptId}`);
+    const again = receiptOf(await gw.handleCall({ name: "stripe.refund", arguments: { payment_intent: pi, amount: limit } }));
+    print(`8. the agent retries the same refund, as after a lost response: ${refusedByPolicy(again.p) ? "refused, because the gateway found the first refund" : `not refused by policy (${again.p.execution.status})`}; receipt ${again.id}`);
+
+    const bundle = refund.bundle;
     const v = verifyBundle(bundle, {
       issuerKeys: [loadPublicKey(cfg.identity.keyFile.replace(/\.key$/, ".pub"))],
       principalKeys: cfg.trustedPrincipalKeys.map(loadPublicKey),
       logFile: cfg.logFile!,
     });
-    const p = (JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as ReceiptStatement).predicate;
-    print(`8. the receipt, checked with the gateway's and the principal's public keys and the log: ${v.ok ? "VALID" : "INVALID"}`);
+    print(`9. the refund's receipt, checked with the gateway's and the principal's public keys and the log: ${v.ok ? "VALID" : "INVALID"}`);
     for (const line of formatReport(v).split("\n").filter((l) => /^RESULT|^tool|^execution|^policy|^authorization/.test(l))) print(`   ${line}`);
-    if (v.ok && p.execution.status === "executed" && over.isError) {
+    const verified = v.ok && refund.p.execution.status === "executed";
+    const refused = refusedByPolicy(over.p) && refusedByPolicy(again.p);
+    if (verified && refused) {
       print(`\nRun the gateway for an agent: export ${STRIPE_BEARER_ENV}="Bearer $${STRIPE_KEY_ENV}" and agent-custody gateway --config ${configFile}`);
       print(`Anyone can check a receipt: agent-custody verify ${join(cfg.receiptsDir, `${receiptId}.json`)} --issuer-key ${cfg.identity.keyFile.replace(/\.key$/, ".pub")} --principal-key ${cfg.trustedPrincipalKeys[0]} --log ${cfg.logFile}`);
     }
-    return { paymentIntent: pi, refundReceipt: receiptId, refused: !!over.isError, verified: v.ok && p.execution.status === "executed" };
+    return { paymentIntent: pi, refundReceipt: receiptId, refused, verified };
   } finally {
     await gw.close();
     if (previous === undefined) delete process.env[STRIPE_BEARER_ENV];

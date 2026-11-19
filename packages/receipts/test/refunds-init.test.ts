@@ -3,7 +3,7 @@
 // request never reaches Stripe, the receipt verifies, and nothing runs against a live Stripe key.
 import { createServer, type Server } from "node:http";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -15,6 +15,7 @@ type Seen = { method: string; path: string; auth: string | undefined; type: stri
 function fakeStripe(paymentStatus = "succeeded"): Promise<{ server: Server; url: string; seen: Seen[] }> {
   const seen: Seen[] = [];
   const intents = new Map<string, Record<string, unknown>>();
+  const refunds: Record<string, unknown>[] = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -35,9 +36,17 @@ function fakeStripe(paymentStatus = "succeeded"): Promise<{ server: Server; url:
       }
       const m = /^\/v1\/payment_intents\/([^/?]+)$/.exec(req.url!);
       if (req.method === "GET" && m) return intents.has(m[1]!) ? send(200, intents.get(m[1]!)) : send(404, { error: { message: "No such payment_intent" } });
+      const list = /^\/v1\/refunds\?payment_intent=([^&]+)$/.exec(req.url!);
+      if (req.method === "GET" && list) return send(200, { object: "list", data: refunds.filter((r) => r.payment_intent === decodeURIComponent(list[1]!)), has_more: false, url: "/v1/refunds" });
       if (req.method === "POST" && req.url === "/v1/refunds") {
-        if (!form.get("payment_intent") || !form.get("amount")) return send(400, { error: { message: "Must provide payment_intent or charge" } });
-        return send(200, { id: "re_1", object: "refund", amount: Number(form.get("amount")), payment_intent: form.get("payment_intent"), status: "succeeded", reason: null });
+        const pi = intents.get(form.get("payment_intent") ?? "");
+        const amount = Number(form.get("amount"));
+        if (!pi || !form.get("amount")) return send(400, { error: { message: "Must provide payment_intent or charge" } });
+        const refunded = refunds.filter((r) => r.payment_intent === pi.id).reduce((n, r) => n + (r.amount as number), 0);
+        if (amount <= 0 || refunded + amount > (pi.amount_received as number)) return send(400, { error: { message: "Refund amount is greater than unrefunded amount on charge" } });
+        const refund = { id: `re_${refunds.length + 1}`, object: "refund", amount, payment_intent: pi.id, status: "succeeded", reason: null };
+        refunds.push(refund);
+        return send(200, refund);
       }
       send(404, { error: { message: "Unrecognized request URL" } });
     });
@@ -87,6 +96,40 @@ describe("init refunds", () => {
     expect(stripe.seen.slice(start).some((s) => s.path === `/v1/payment_intents/${r.paymentIntent}`)).toBe(true);
   });
 
+  // A refund after a lost response must not pay twice. Stripe has no lookup by idempotency key, so the gateway looks up
+  // the payment's refunds itself and the policy permits one refund per payment.
+  it("refuses a retried refund because the gateway's own lookup finds the first one, and Stripe sees only one", async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), "refunds-")), "pilot");
+    initRefunds({ dir, limit: 5000, currency: "gbp", ttlHours: 24, stripeUrl: stripe.url, print: quiet });
+    const start = stripe.seen.length;
+    const lines: string[] = [];
+    const r = await runRefunds({ dir, env: { STRIPE_SECRET_KEY: "sk_test_pilot" }, print: (l) => lines.push(l) });
+    expect(r.refused).toBe(true);
+    expect(lines.join("\n")).toMatch(/retries the same refund.*refused, because the gateway found the first refund/);
+    expect(stripe.seen.slice(start).filter((s) => s.method === "POST" && s.path === "/v1/refunds")).toHaveLength(1);
+    expect(stripe.seen.slice(start).some((s) => s.path === `/v1/refunds?payment_intent=${r.paymentIntent}`)).toBe(true);
+  });
+
+  // An amount of 0 or less is not a refund; Cedar allows a negative Long, so the policy has to say so.
+  it("denies a refund of 0 or less before it reaches Stripe", async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), "refunds-")), "pilot");
+    initRefunds({ dir, limit: 5000, currency: "gbp", ttlHours: 24, stripeUrl: stripe.url, print: quiet });
+    const { evaluate } = await import("../src/policy.ts");
+    const policy = readFileSync(join(dir, "policy.cedar"), "utf8");
+    const facts = { payment: { status: "succeeded", currency: "gbp", amount_received: 10000 }, refunds: { data: [] } };
+    const ask = (amount: number) => evaluate(policy, { agentId: "refund-agent", tool: "stripe.refund", context: { args: { payment_intent: "pi_1", amount }, facts } }).decision;
+    expect([ask(-1), ask(0), ask(1), ask(5000), ask(5001)]).toEqual(["deny", "deny", "allow", "allow", "deny"]);
+  });
+
+  // --run exits 0 only when the policy refused: a request Stripe received and rejected is not a policy refusal.
+  it("does not count a call that reached Stripe as refused, even when Stripe rejected it", async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), "refunds-")), "pilot");
+    initRefunds({ dir, limit: 5000, currency: "gbp", ttlHours: 24, stripeUrl: stripe.url, print: quiet });
+    writeFileSync(join(dir, "policy.cedar"), '// what --run reads: context.args.amount <= 5000, context.facts.payment.currency == "gbp"\npermit(principal, action, resource);\n');
+    const r = await runRefunds({ dir, env: { STRIPE_SECRET_KEY: "sk_test_pilot" }, print: quiet });
+    expect(r.refused).toBe(false);
+  });
+
   it("refuses a refund against a payment the gateway did not see succeed", async () => {
     const failed = await fakeStripe("requires_payment_method");
     try {
@@ -108,7 +151,7 @@ describe("agent-custody init refunds (CLI)", () => {
     const dir = join(mkdtempSync(join(tmpdir(), "refunds-cli-")), "pilot");
     const first = run(["--dir", dir, "--limit", "2500"]);
     expect(first.status).toBe(0);
-    expect(first.stdout).toContain("refunds up to 2500 GBP minor units");
+    expect(first.stdout).toContain("one refund per payment, up to 2500 GBP minor units");
     expect(first.stdout).toContain("--run");
     expect(run(["--dir", dir]).stderr).toContain("already exists; add --run");
     const live = run(["--dir", dir, "--run"], { STRIPE_SECRET_KEY: "sk_live_x" });

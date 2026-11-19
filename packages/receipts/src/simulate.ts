@@ -5,7 +5,7 @@ import { isCommitment, pathText, restorePaths, under } from "./capture.ts";
 import { canonicalize, dsseVerify, type PublicKeyRef } from "./crypto.ts";
 import { decodeDelegation, DELEGATION_TYPE, delegationValidAt } from "./delegation.ts";
 import { leafHash, verifyInclusion } from "./log.ts";
-import { cedarFactValue, evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
+import { evaluate, policyDigest, type PolicyDecision } from "./policy.ts";
 import { compileRego, evaluateRego } from "./policy-rego.ts";
 import { AUTHORIZATION_PREDICATE_TYPE, RECEIPT_TYPE, TREEHEAD_TYPE, type AuthorizationBundle, type AuthorizationStatement, type ReceiptPredicate, type TreeHead } from "./receipt.ts";
 import { structuralProblem } from "./verify.ts";
@@ -184,7 +184,7 @@ export function simulatePolicy(policyText: string, receipts: Iterable<ReceiptPre
     if (gate) { skip(gate); continue; }
     const context: Record<string, unknown> = {
       args: p.request.args,
-      facts: Object.fromEntries(Object.entries(p.facts).map(([name, fact]) => [name, cedarFactValue(fact.value)])),
+      facts: Object.fromEntries(Object.entries(p.facts).map(([name, fact]) => [name, fact.value])),
     };
     // a door receipt carries a grant only when the arrival presented one; the policy then saw context.grant, else not
     if (p.issuer.kind === "gateway" || (p.issuer.kind === "door" && p.delegation)) {

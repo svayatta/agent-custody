@@ -12,6 +12,7 @@ import { out, step } from "./_out.ts";
 step(1, "a stand-in for Stripe's v1 API: form bodies only, payment intents with null fields as Stripe returns them");
 const refundsSent: string[] = [];
 const intents = new Map<string, Record<string, unknown>>();
+const refunds: Record<string, unknown>[] = [];
 const stripe = createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
@@ -28,9 +29,13 @@ const stripe = createServer((req, res) => {
     }
     const m = /^\/v1\/payment_intents\/([^/?]+)$/.exec(req.url ?? "");
     if (req.method === "GET" && m) return send(200, intents.get(m[1]!));
+    const list = /^\/v1\/refunds\?payment_intent=([^&]+)$/.exec(req.url ?? "");
+    if (req.method === "GET" && list) return send(200, { object: "list", data: refunds.filter((r) => r.payment_intent === list[1]), has_more: false });
     if (req.method === "POST" && req.url === "/v1/refunds") {
       refundsSent.push(body);
-      return send(200, { id: "re_1", amount: Number(form.get("amount")), payment_intent: form.get("payment_intent"), status: "succeeded" });
+      const refund = { id: `re_${refunds.length + 1}`, amount: Number(form.get("amount")), payment_intent: form.get("payment_intent"), status: "succeeded", reason: null };
+      refunds.push(refund);
+      return send(200, refund);
     }
     send(404, { error: { message: "Unrecognized request URL" } });
   });
@@ -47,7 +52,7 @@ step(3, "agent-custody init refunds --dir <dir> --run, with a test-mode key");
 const result = await runRefunds({ dir, env: { STRIPE_SECRET_KEY: "sk_test_example" }, print: (l) => console.log("   " + l) });
 stripe.close();
 
-step(4, "what reached Stripe: one refund, as a form body; the over-limit request never left the gateway");
+step(4, "what reached Stripe: one refund, as a form body; the over-limit request and the retry never left the gateway");
 console.log("   " + refundsSent.join("\n   "));
 
 if (!result.verified || !result.refused || refundsSent.length !== 1) throw new Error("unexpected state");

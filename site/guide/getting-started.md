@@ -33,7 +33,7 @@ agent-custody report --config ~/.config/agent-custody/sdk.json
 
 ## Stripe refunds in one command
 
-For an agent that refunds payments, one command puts the gateway between the agent and Stripe: the gateway's key and a principal's key, a 24-hour grant for `refund-agent`, a refund policy, and the gateway config. The policy permits a refund of at most `--limit` minor units, only against a payment the gateway itself looked up as succeeded, and never more than that payment received. The Stripe key stays in the gateway's environment; the agent never holds it.
+For an agent that refunds payments, one command puts the gateway between the agent and Stripe: the gateway's key and a principal's key, a 24-hour grant for `refund-agent`, a refund policy, and the gateway config. The policy permits one refund per payment, of more than 0 and at most `--limit` minor units, only against a payment the gateway itself looked up as succeeded, never more than that payment received, and only while the gateway's own lookup finds no refund on it yet, so a retry after a lost response cannot pay twice. The Stripe key stays in the gateway's environment; the agent never holds it.
 
 ```bash
 npx -y @agent-custody/receipts init refunds --dir refunds --limit 5000 --currency gbp
@@ -46,7 +46,7 @@ export STRIPE_SECRET_KEY=sk_test_...
 npx -y @agent-custody/receipts init refunds --dir refunds --run
 ```
 
-It makes a test payment of twice the limit directly with Stripe, asks the gateway to refund the limit (allowed, sent, receipted), asks for one more than the limit (refused by policy and never sent), and verifies the refund's receipt with the two public keys and the log. It prints the command that runs the gateway for a real agent and the `verify` command anyone can run on the receipt. Edit `policy.cedar` to change the rule; the gateway applies an edit from the next call.
+It makes a test payment of twice the limit directly with Stripe, asks for one more than the limit (refused by policy and never sent), refunds the limit (allowed, sent, receipted), retries the same refund (refused: the gateway finds the first one), and verifies the refund's receipt with the two public keys and the log. It prints the command that runs the gateway for a real agent and the `verify` command anyone can run on the receipt. Edit `policy.cedar` to change the rule; the gateway applies an edit from the next call.
 
 ## Pick your stack
 
