@@ -4,13 +4,13 @@
 # Only the proxy is published, on loopback: the door answers anyone who reaches it, so it stays on the internal network.
 services:
   origin:
-    image: node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    image: node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
     command: ["node", "/srv/origin.mjs"]
     volumes:
       - ./origin.mjs:/srv/origin.mjs:ro
 
   door:
-    image: node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    image: node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
     user: "${DOOR_USER:-1000:1000}"
     command: ["node", "/app/packages/receipts/src/cli.ts", "door", "--config", "/etc/door/door.json", "--host", "0.0.0.0", "--port", "8780"]
     volumes:
