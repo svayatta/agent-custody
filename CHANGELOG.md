@@ -4,6 +4,8 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **Docs: the Perathos truncation caveat names the case it means** (#220). [docs/perathos.md](packages/receipts/docs/perathos.md) said a cut after the last checkpoint cannot be shown; receipts after the last checkpoint are unsealed either way, so it now says a log cut back to an earlier checkpoint cannot be shown if the head witness was also deleted and no copy of the anchors is kept elsewhere. Wording only, as suggested in the review of #372.
+
 - **`verify-perathos` says where a Perathos log's key can be** (#220). The provenance line said the checkpoint key is held on the agent's host. With a remote signer (Vault, Cloud KMS, or a signing command) the key stays in that service, but the credential to use it is on the host, so the line now says so, and names the MCP proxy as well as hooks as the recorder. Wording only: no check changes.
 
 - **Docs: corrections to the Perathos field mapping, from the Perathos maintainer** (#220). [docs/perathos.md](packages/receipts/docs/perathos.md) now describes the MCP proxy, the head witness, remote signers, preconditions, Gate approvals, and anchors as Perathos defines them, and labels the fixed `ts` form and the one-key rule as agent-custody's own checks.
