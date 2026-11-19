@@ -2,9 +2,9 @@
 // door runs inside the app: the app, not an origin, runs an allowed request; the body the policy read must reach the
 // app's own body parser unchanged; the grant must never reach the app; a request that can change something is in the
 // log before the app runs; and the receipt records what the app answered, or says it could not see it.
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
-import type { IncomingMessage, Server } from "node:http";
+import { request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ import { GRANT_HEADER, grantHeader } from "../src/gateway-http.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { verifyBundle } from "../src/verify.ts";
+import { DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, jwkThumbprint, parseDictionary, signatureBase, type SfInnerList } from "../src/web-bot-auth.ts";
 import { buildDoorFixture, type DoorFixture } from "../scripts/door-fixture.ts";
 
 const decode = (b: ReceiptBundle) => JSON.parse(Buffer.from(b.envelope.payload, "base64").toString()) as ReceiptStatement;
@@ -256,5 +257,78 @@ describe("the door as a route-handler wrapper (Next.js App Router)", () => {
     await expect(THROWS(at("/api/throws", { headers: grant }))).rejects.toThrow("database down");
     const thrown = readdirSync(fx.receiptsDir).filter((f) => /^[0-9a-f-]{36}\.json$/.test(f)).map((f) => decode(JSON.parse(readFileSync(join(fx.receiptsDir, f), "utf8")) as ReceiptBundle).predicate).find((p) => (p.request.args as { path?: string }).path === "/api/throws");
     expect(thrown?.execution).toMatchObject({ status: "error", error: expect.stringContaining("the handler threw: database down; the app may have acted") });
+  });
+});
+
+// The signature check is part of the decision the in-process door shares with the proxy: a request signed per Web Bot
+// Auth, with no grant, must reach the app as `verified`, its agent observed, through the middleware and the wrapper alike.
+describe("the in-process door checks Web Bot Auth signatures", () => {
+  const CRAWLER = "https://crawler.example";
+  const SITE = "shop.example";
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const x = publicKey.export({ format: "jwk" }).x!;
+  const keyid = jwkThumbprint(x);
+  const stub = (async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url !== `${CRAWLER}${DIRECTORY_PATH}`) throw new Error(`the test fetched ${url}`);
+    return new Response(JSON.stringify({ keys: [{ kty: "OKP", crv: "Ed25519", x }] }), { headers: { "content-type": DIRECTORY_MEDIA_TYPE } });
+  }) as typeof fetch;
+  let n = 0;
+  const signedHeaders = (target: string) => {
+    const created = Math.floor(Date.now() / 1000);
+    const headers: Record<string, string> = { "signature-agent": `crawler="${CRAWLER}"` };
+    headers["signature-input"] = `sig1=("@authority" "signature-agent";key="crawler");created=${created};expires=${created + 60};keyid="${keyid}";alg="ed25519";nonce="app-${process.pid}-${++n}";tag="web-bot-auth"`;
+    const base = signatureBase({ method: "GET", target, authority: SITE, header: (h) => (Object.hasOwn(headers, h) ? [headers[h]!] : undefined) }, parseDictionary(headers["signature-input"]).get("sig1") as SfInnerList);
+    headers.signature = `sig1=:${sign(null, Buffer.from(base), privateKey).toString("base64")}:`;
+    return headers;
+  };
+  let fx: DoorFixture;
+  let guard: InProcessDoor;
+  let server: Server;
+  const seen: (string | undefined)[] = [];
+  beforeAll(async () => {
+    fx = appFixture("wba", { webBotAuth: { agents: [CRAWLER], authorities: [SITE] } });
+    guard = door(fx.configFile, { autoFlush: false, fetch: stub });
+    const app = express();
+    app.use(guard);
+    app.get("/api/orders", (req, res) => { seen.push(req.get(CLASS_HEADER)); res.json({ orders: [] }); });
+    await new Promise<void>((r) => { server = app.listen(0, "127.0.0.1", () => r()); });
+  });
+  afterAll(async () => {
+    guard?.close();
+    server?.closeAllConnections();
+    await new Promise<void>((r) => server?.close(() => r()));
+  });
+  const expectSignedAgent = async (id: string | null) => {
+    const p = await receiptOf(fx, id);
+    expect(p.facts[ARRIVAL_FACT]!.value).toMatchObject({ class: "verified", subject: CRAWLER, grant: "absent", signature: "verified", signatureAgent: CRAWLER, signatureKeyid: keyid });
+    expect(p.agent).toEqual({ id: CRAWLER, provenance: "observed" });
+    expect(p.execution.status).toBe("executed");
+    expect(verifies(fx, id).ok).toBe(true);
+  };
+
+  it("through the Express middleware: a signed request with no grant is verified as its signature agent", async () => {
+    // node:http, because fetch will not send a Host of the test's choosing, and the Host is the authority the signature covers
+    const res = await new Promise<{ status: number; id: string | null }>((resolve, reject) => {
+      const req = httpRequest({ host: "127.0.0.1", port: (server.address() as AddressInfo).port, path: "/api/orders", headers: { host: SITE, ...signedHeaders("/api/orders") } }, (r) => {
+        r.resume();
+        r.on("end", () => resolve({ status: r.statusCode!, id: (r.headers[RECEIPT_HEADER] as string | undefined) ?? null }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    expect(res.status).toBe(200);
+    expect(seen).toEqual(["verified"]);
+    await expectSignedAgent(res.id);
+  });
+
+  it("through the route wrapper: the same, with the authority taken from the request's URL", async () => {
+    const GET = guard.route(async (req: Request) => Response.json({ class: req.headers.get(CLASS_HEADER) }));
+    const res = await GET(new Request(`https://${SITE}/api/orders`, { headers: signedHeaders("/api/orders") }));
+    expect(await res.json()).toEqual({ class: "verified" });
+    await expectSignedAgent(res.headers.get(RECEIPT_HEADER));
+    // the wrapper is not what admitted it: the same route without a signature is unknown, and refused
+    const unsigned = await GET(new Request(`https://${SITE}/api/orders`));
+    expect(unsigned.status).toBe(403);
   });
 });

@@ -113,10 +113,13 @@ function watchAnswer(res: ServerResponse): () => { bytes: number; digest: string
   return () => ({ bytes, digest: hash.digest("hex") });
 }
 
-/** The fetch request as the door reads it. Without a socket the address is the proxy's `X-Forwarded-For` under `trustProxy`, else `unknown`. */
+/**
+ * The fetch request as the door reads it. Without a socket the address is the proxy's `X-Forwarded-For` under
+ * `trustProxy`, else `unknown`. Without a `Host` field (a `Request` built in code) the authority is the URL's.
+ */
 function fetchRequest(request: Request): DoorRequest {
   const url = new URL(request.url);
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { host: url.host };
   request.headers.forEach((v, k) => { headers[k] = v; });
   return { method: request.method, url: url.pathname + url.search, headers, socket: {} };
 }

@@ -1,5 +1,5 @@
 // Aspect: the door in-process, as Express middleware and as a Next.js route-handler wrapper. Source: src/door-app.ts, src/door.ts
-// Run:    node examples/47-door-app.ts
+// Run:    node examples/48-door-app.ts
 //
 // Tutorial 40 puts the door in front of a site as a reverse proxy. A Node site can run the same decision loop inside its
 // own process instead: `app.use(door("door.json"))` in Express, or `export const POST = guard.route(handler)` in a
@@ -22,7 +22,7 @@ import { buildDoorFixture } from "../scripts/door-fixture.ts";
 import { out, step } from "./_out.ts";
 
 step(1, "door.json without an origin: the door runs inside the app, so there is nothing to relay to");
-const fx = buildDoorFixture(out("47-door-app"), "http://unused.invalid", { origin: undefined });
+const fx = buildDoorFixture(out("48-door-app"), "http://unused.invalid", { origin: undefined });
 const config = JSON.parse(readFileSync(fx.configFile, "utf8")) as Record<string, unknown>;
 console.log("   config keys:", Object.keys(config).join(", "));
 const guard = door(fx.configFile);

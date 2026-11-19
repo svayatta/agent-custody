@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { agentOrigin, normalizeAuthority } from "./web-bot-auth.ts";
 
 /** Where receipts are logged: a local file, or a log reached over HTTP whose bearer token comes from an environment variable. */
 const LogSchema = z.object({ url: z.string().url(), tokenEnv: z.string().min(1).optional(), /** send leaf hashes only; the log never holds the receipt. Use it for any log run by someone else */ hashOnly: z.boolean().optional(), /** milliseconds one append may take before the log counts as unreachable; default 10000 */ timeoutMs: z.number().int().positive().optional(), /** the log's public key files; every append's answer is checked against them before a call is forwarded. Without them the log's key document is fetched from the log itself on first use and pinned, which catches a log that turns dishonest later but not one dishonest from the start; required with precommit. */ keys: z.array(z.string().min(1)).optional(), /** the id the log must write into every tree head; an answer for another log is refused */ logId: z.string().min(1).optional() });
@@ -294,6 +295,31 @@ export const DoorConfigSchema = z.object({
     /** checks with the provider at once; an arrival past this is `unavailable`, never relayed on a pass it did not get. Default 64 */
     maxInFlight: z.number().int().positive().default(64),
   }).refine((c) => !c.action || c.provider === "turnstile", { message: "challenge.action is a Turnstile field; hCaptcha does not report an action" }).optional(),
+  /**
+   * Web Bot Auth: an RFC 9421 signature tagged `web-bot-auth`, Ed25519, checked against the key the `Signature-Agent`
+   * origin publishes at /.well-known/http-message-signatures-directory. The door fetches only the directories of `agents`,
+   * so an arrival cannot point it at a URL of its choosing.
+   */
+  webBotAuth: z.object({
+    /** the signature agents whose directories the door fetches, as https origins (`https://crawler.example`) */
+    agents: z.array(z.string().refine((u) => { try { return agentOrigin(u) === new URL(u).origin; } catch { return false; } }, { message: "a signature agent is an https origin, with no path, query, or credentials" }).transform((u) => new URL(u).origin)).min(1),
+    /** the authorities (host, or host:port) this door serves; a signature must cover `@authority` and name one of them */
+    authorities: z.array(z.string().min(1).transform(normalizeAuthority)).min(1),
+    /** refuse a signature without a nonce; with one, a signature serves one request. Default true */
+    requireNonce: z.boolean().default(true),
+    /** the longest after `created` a signature is accepted, whatever its `expires`. Default 300 */
+    maxAgeSeconds: z.number().int().positive().default(300),
+    /** how far the signer's clock may be from the door's. Default 60 */
+    clockSkewSeconds: z.number().int().nonnegative().default(60),
+    /** one directory fetch's budget. Default 3000 */
+    timeoutMs: z.number().int().positive().default(3_000),
+    /** the largest directory the door reads. Default 64 KiB */
+    maxDirectoryBytes: z.number().int().positive().default(64 * 1024),
+    /** how long a fetched directory is kept; a failed fetch is retried after 30 s. Default 300 */
+    cacheSeconds: z.number().int().positive().default(300),
+    /** nonces remembered at once; past this a signature is `unavailable`. Default 100000 */
+    maxNonces: z.number().int().positive().default(100_000),
+  }).optional(),
   receiptsDir: z.string(),
   logFile: z.string().optional(),
   log: LogSchema.optional(),
