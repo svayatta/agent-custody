@@ -368,6 +368,27 @@ export function verifyBundle(bundle: ReceiptBundle, opts: VerifyOptions): Verify
     const how = back.restored.get(pathKey(w));
     add(`withheld ${pathText(w)}`, !problem, problem ?? (how ? `holds against the ${how} value` : committedNote([w])));
   }
+  // A fact its source signed (the door's partner verdict): the issuer marks it attested after checking the signature
+  // under its configured key, and the reader checks it again under the key it trusts for that source. The signature
+  // binds this receipt and route, so a verdict moved from another arrival fails here.
+  for (const [name, f] of Object.entries(p.facts)) {
+    if (f.provenance !== "attested") continue;
+    const label = `fact ${name} signature (upstream key)`;
+    const value = region(["facts", name, "value"]);
+    const envPath = ["facts", name, "attestation"];
+    const stillWithheld = (note?.withheld ?? []).some((w) => pathKey(w) === pathKey(envPath)) && back.missing.some((w) => pathKey(w) === pathKey(envPath));
+    const restored = (full.facts as Record<string, { value?: unknown; attestation?: unknown }>)[name];
+    const env = restored?.attestation as Envelope | undefined;
+    const wellFormed = !!env && typeof env === "object" && typeof env.payload === "string" && Array.isArray(env.signatures);
+    if (value.problem || value.missing.length) add(`fact ${name} signature not checked`, true, "the value is withheld; disclose it or give the capture key to check its signature");
+    else if (stillWithheld) add(label, false, "the value is in clear but its signature is withheld; disclose it or give the capture key to check it");
+    else if (!wellFormed) add(label, false, "the fact is marked attested and carries no signature, and the capture note does not say it is withheld");
+    else if (!opts.upstreamKeys?.length) add(label, false, "the fact is marked attested; give the signer's public key (--upstream-key) to check it");
+    else {
+      const u = checkUpstream(env, opts.upstreamKeys, { receiptId: p.receiptId, tool: p.tool.name, contentDigest: digestOf(restored!.value) });
+      add(label, u.ok, u.ok ? `keyid ${short(u.keyid)}` : u.error);
+    }
+  }
   const evidence = executedOrFailed && "upstream" in p.execution ? p.execution.upstream : undefined;
   if (executedOrFailed && evidence) {
     // The evidence as restored: the delivery body or the signed envelope may have been withheld with the result. A
@@ -597,7 +618,14 @@ export function formatReport(r: VerifyResult): string {
   row("model", p.model.provenance, p.model.id === null ? "(none supplied)" : idText(p.model.id));
   row("tool", p.tool.provenance, p.tool.name);
   row("args", p.request.provenance, p.request.args);
-  for (const [k, f] of Object.entries(p.facts)) row(`fact.${k}`, f.provenance, f.value);
+  for (const [k, f] of Object.entries(p.facts)) {
+    if (f.provenance !== "attested") {
+      row(`fact.${k}`, f.provenance, f.value);
+      continue;
+    }
+    const signed = r.checks.find((c) => c.name === `fact ${k} signature (upstream key)`);
+    row(`fact.${k}`, f.provenance, `${JSON.stringify(f.value)}${signed ? (signed.ok ? ` (signed by ${signed.detail})` : " (signature FAILED)") : " (signature not checked)"}`);
+  }
   if (p.reconciliation) row("policy", "-", "(none evaluated: a provider read, not a call)");
   else if (p.policy) row("policy", p.policy.provenance, `${p.policy.decision}${p.policy.enforced === false ? " (observe mode, not enforced)" : ""} [${p.policy.reasons.join(",")}] policy ${short(p.policy.policyDigest)}`);
   else row("policy", "-", "(none evaluated)");
