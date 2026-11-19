@@ -176,6 +176,11 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
     if (!process.env[cfg.challenge.secretEnv]) add("error", "credentials", `challenge secret variable ${cfg.challenge.secretEnv} is not set in this environment`);
     add("ok", "challenge", `${cfg.challenge.provider} tokens in the ${cfg.challenge.header} header are verified with the provider; the outcome is context.facts.arrival.challenge.outcome, and class is unchanged by it`);
   } else add("ok", "challenge", "no challenge: an unknown arrival has no way to become anything else on this door");
+  if (cfg.webBotAuth) {
+    const w = cfg.webBotAuth;
+    add("ok", "web bot auth", `Ed25519 signatures tagged web-bot-auth from ${w.agents.join(", ")} are checked against their directories, for ${w.authorities.join(", ")}, at most ${w.maxAgeSeconds} s after created; a verified signature without a grant makes the arrival verified as its origin`);
+    if (!w.requireNonce) add("warn", "web bot auth", `requireNonce is false: a signature without a nonce can be replayed for up to ${w.maxAgeSeconds + w.clockSkewSeconds} s, and a minimal one covers only the authority, so the replay may use any method and path`);
+  } else add("ok", "web bot auth", "no webBotAuth: a Signature-Input header is recorded as signature \"unchecked\", a claim");
   const dir = writableAncestor(cfg.receiptsDir);
   if (!dir) add("error", "paths", `${cfg.receiptsDir} cannot be created: no writable directory above it`);
   else add("ok", "paths", `receipts go to ${cfg.receiptsDir}`);

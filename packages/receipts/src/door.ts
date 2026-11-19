@@ -2,8 +2,9 @@
 // agent's tools. Every arrival, a browser, an API client, or an agent, is classified by what it presented, decided by
 // the Cedar policy for its route, forwarded to the origin or refused, and receipted either way. Nothing here detects
 // an agent: `unknown` means nothing was presented, `claimed` means something was asserted and could not be checked,
-// and `verified` means a grant signed by a trusted principal names this agent for this route. The same key, policy
-// language, issuer, log, and verifier as the gateway; the receipt's issuer kind is `door`.
+// and `verified` means a grant signed by a trusted principal names this agent for this route, or a Web Bot Auth
+// signature checked against the key its agent's directory publishes. The same key, policy language, issuer, log, and
+// verifier as the gateway; the receipt's issuer kind is `door`.
 import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
@@ -14,6 +15,7 @@ import { digestOf, loadPrivateKey, loadPublicKey, sha256Hex, type Envelope, type
 import { decodeDelegation, delegationValidAt, verifyDelegation, type Delegation } from "./delegation.ts";
 import { parseGrantHeader, GRANT_HEADER } from "./gateway-http.ts";
 import { createIssuer, ReceiptPending, type FlushResult } from "./issue.ts";
+import { createWebBotAuthVerifier, normalizeAuthority, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
@@ -34,13 +36,22 @@ export type ArrivalClass = "verified" | "claimed" | "unknown";
 /** What the door observed about one arrival. Every field is the door's own observation; none is the caller's claim about itself except `declared`, which says so. */
 export interface Arrival {
   class: ArrivalClass;
-  /** the agent named in a verified grant, else the name the caller declared, else "unknown" */
+  /** the agent named in a verified grant, else the signature agent of a verified signature, else the name the caller declared, else "unknown" */
   subject: string;
-  /** what became of the grant header: a trusted grant in scope for this route, one out of scope, one that did not verify, or none */
-  grant: "verified" | "out-of-scope" | "invalid" | "absent";
+  /**
+   * What became of the grant header: a trusted grant in scope for this route, one out of scope, one that did not verify,
+   * one presented by another agent (`wrong-sender`: the request is signed by a signature agent the grant does not name),
+   * or none.
+   */
+  grant: "verified" | "out-of-scope" | "invalid" | "wrong-sender" | "absent";
   grantError?: string;
-  /** an RFC 9421 `Signature-Input` header was present; the door does not check it yet */
-  signature: boolean;
+  /** What became of an RFC 9421 signature tagged `web-bot-auth`: see `SignatureCheck`. `unchecked` when the door has no `webBotAuth` config */
+  signature: SignatureCheck["outcome"];
+  /** the `Signature-Agent` origin; checked only when `signature` is `verified` */
+  signatureAgent?: string;
+  /** the signature's keyid, the RFC 7638 thumbprint of the agent's key; checked only when `signature` is `verified` */
+  signatureKeyid?: string;
+  signatureError?: string;
   /** the agent name from the `x-agent-custody-agent` header, when sent; a claim */
   declared?: string;
   remote: string;
@@ -207,8 +218,10 @@ export function createRateTracker(now: () => number = () => performance.now(), l
 
 export interface Classified {
   arrival: Arrival;
-  /** set when the arrival is verified: the grant, as presented */
+  /** set when the arrival is verified by a grant: the grant, as presented */
   delegation?: { envelope: Envelope; grant: Delegation; principalKeyid: string };
+  /** set when a verified signature names the arrival's agent: alone, or bound to the grant that names the same agent */
+  signer?: { agent: string; keyid: string };
 }
 
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "proxy-connection"]);
@@ -317,23 +330,46 @@ export function remoteOf(req: IncomingMessage, trustProxy: boolean): string {
   return req.socket.remoteAddress ?? "unknown";
 }
 
+/** The request as RFC 9421 reads it: the target as received, the `Host` as the authority, and every value of each field. */
+export function signedRequestOf(req: IncomingMessage): SignedRequest {
+  const distinct = req.headersDistinct;
+  return {
+    method: (req.method ?? "GET").toUpperCase(),
+    target: req.url ?? "/",
+    authority: normalizeAuthority(typeof req.headers.host === "string" ? req.headers.host : ""),
+    header: (name) => (Object.hasOwn(distinct, name) ? distinct[name] : undefined),
+  };
+}
+
 /**
  * What the arrival presented, checked where it can be. A grant signed by a trusted principal, in its window, naming this
  * route among its scopes, makes the arrival `verified` and its principal attested. A grant that is out of scope, expired,
  * or signed by a stranger leaves the arrival `claimed`: it asserted an identity the door could not accept for this route.
- * An `x-agent-custody-agent` header or an HTTP signature header alone is `claimed`. Nothing at all is `unknown`.
+ * Without a grant, a Web Bot Auth signature the door verified (`signature`, from `createWebBotAuthVerifier`) makes the
+ * arrival `verified` as its signature agent. With both, the signature binds the grant to its sender when the grant names
+ * that signature agent; a grant presented under another agent's signature is `wrong-sender` and the arrival `claimed`.
+ * An `x-agent-custody-agent` header or a signature that did not verify alone is `claimed`. Nothing at all is `unknown`.
+ * Without `signature`, a `Signature-Input` header is recorded as `unchecked`.
  */
-export function classifyArrival(req: IncomingMessage, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string): Classified {
+export function classifyArrival(req: IncomingMessage, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string, signature?: SignatureCheck): Classified {
   const url = requestUrl(req);
   const method = (req.method ?? "GET").toUpperCase();
   const declaredRaw = req.headers[AGENT_HEADER];
   const declared = typeof declaredRaw === "string" && declaredRaw.trim() ? declaredRaw.trim().slice(0, 200) : undefined;
-  const signature = typeof req.headers["signature-input"] === "string";
+  const sig: SignatureCheck = signature ?? (req.headers["signature-input"] !== undefined ? { outcome: "unchecked" } : { outcome: "absent" });
+  const signer = sig.outcome === "verified" ? { agent: sig.agent, keyid: sig.keyid } : undefined;
+  const sigFields = {
+    signature: sig.outcome,
+    ...("agent" in sig && sig.agent ? { signatureAgent: sig.agent } : {}),
+    ...("keyid" in sig && sig.keyid ? { signatureKeyid: sig.keyid } : {}),
+    ...("error" in sig ? { signatureError: sig.error } : {}),
+  };
   const norm = normalizePath(url.pathname);
-  const base = { signature, ...(declared ? { declared } : {}), remote: remoteOf(req, trustProxy), method, path: "path" in norm ? norm.path : url.pathname, route };
+  const base = { ...sigFields, ...(declared ? { declared } : {}), remote: remoteOf(req, trustProxy), method, path: "path" in norm ? norm.path : url.pathname, route };
   const envelope = parseGrantHeader(req);
   if (!envelope) {
-    const claimed = !!declared || signature;
+    if (signer) return { arrival: { class: "verified", subject: signer.agent, grant: "absent", ...base }, signer };
+    const claimed = !!declared || sig.outcome !== "absent";
     return { arrival: { class: claimed ? "claimed" : "unknown", subject: declared ?? "unknown", grant: "absent", ...base } };
   }
   const checked = verifyDelegation(envelope, trusted);
@@ -343,7 +379,9 @@ export function classifyArrival(req: IncomingMessage, trusted: PublicKeyRef[], r
   const grant = checked.delegation;
   if (!delegationValidAt(grant, at)) return { arrival: { class: "claimed", subject: grant.agent, grant: "invalid", grantError: "the grant is outside its validity window", ...base } };
   if (!grant.scopes.includes(route)) return { arrival: { class: "claimed", subject: grant.agent, grant: "out-of-scope", grantError: `route "${route}" is not in the grant's scopes`, ...base } };
-  return { arrival: { class: "verified", subject: grant.agent, grant: "verified", ...base }, delegation: { envelope, grant, principalKeyid: checked.keyid } };
+  // The signature proves who sent the request. A grant for one agent in a request another agent signed was handed on or taken.
+  if (signer && signer.agent !== grant.agent) return { arrival: { class: "claimed", subject: grant.agent, grant: "wrong-sender", grantError: `the grant names agent "${grant.agent}", and the request is signed by ${signer.agent}`, ...base } };
+  return { arrival: { class: "verified", subject: grant.agent, grant: "verified", ...base }, delegation: { envelope, grant, principalKeyid: checked.keyid }, ...(signer ? { signer } : {}) };
 }
 
 export interface DoorOptions {
@@ -453,6 +491,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
   const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework: "http" };
   const precommit = new Set(cfg.precommit);
   const rates = createRateTracker();
+  const webBotAuth = cfg.webBotAuth ? createWebBotAuthVerifier(cfg.webBotAuth, f) : undefined;
 
   // The policy, re-read when the file changes, as the gateway does; a file that does not parse is refused and the
   // policy in force stays. The bytes and the metadata come from one open file.
@@ -518,9 +557,11 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     const norm = normalizePath(url.pathname);
     const path = "path" in norm ? norm.path : url.pathname;
     const route = "path" in norm ? matchRoute(cfg.routes, cfg.unmatchedRoute, method, path) : cfg.unmatchedRoute;
-    const { arrival, delegation } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp);
-    const by = delegation ? "agent" : "remote";
-    arrival.rate = { by, ...rates.hit(`${by}:${delegation ? arrival.subject : arrival.remote}`) };
+    const signature = webBotAuth ? await webBotAuth.verify(signedRequestOf(req)) : undefined;
+    const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature);
+    const checkedAgent = arrival.class === "verified";
+    const by = checkedAgent ? "agent" : "remote";
+    arrival.rate = { by, ...rates.hit(`${by}:${checkedAgent ? arrival.subject : arrival.remote}`) };
     if (cfg.challenge && challengeHeader) {
       const c = cfg.challenge;
       const token = req.headers[challengeHeader];
@@ -563,13 +604,13 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     };
     const facts: Record<string, FactRecord> = { [ARRIVAL_FACT]: { tool: "door.arrival", args: {}, value: arrival, resultDigest: digestOf(arrival), provenance: "observed" } };
 
-    // The Cedar principal is an agent the door checked: the one a verified grant names. A declared name, or the agent a
-    // rejected grant names, stays in the arrival fact as a claim, so a permit on `principal == Agent::"x"` cannot be
-    // satisfied by sending a header.
+    // The Cedar principal is an agent the door checked: the one a verified grant names, or the signature agent of a
+    // verified signature. A declared name, or the agent a rejected grant names, stays in the arrival fact as a claim, so
+    // a permit on `principal == Agent::"x"` cannot be satisfied by sending a header.
     let policy: PolicyDecision;
     try {
       policy = evaluate(policyText, {
-        agentId: delegation ? delegation.grant.agent : "unknown",
+        agentId: checkedAgent ? arrival.subject : "unknown",
         tool: route,
         context: { args: cedarArgs(args), facts: { [ARRIVAL_FACT]: arrival }, ...(delegation ? { grant: { principal: delegation.grant.principal, scopes: delegation.grant.scopes } } : {}) },
       });
@@ -584,7 +625,8 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
       timestamp,
       issuer: issuedBy,
       principal: delegation ? { id: delegation.grant.principal, keyid: delegation.principalKeyid, provenance: "attested" as const } : { id: null, provenance: "claimed" as const },
-      agent: { id: arrival.subject, provenance: delegation ? "attested" as const : "claimed" as const },
+      // a signature alone is the door's own check against a directory it fetched, which a reader of the receipt cannot repeat
+      agent: { id: arrival.subject, provenance: delegation ? "attested" as const : signer ? "observed" as const : "claimed" as const },
       ...(delegation ? { delegation: { envelope: delegation.envelope, provenance: "attested" as const } } : {}),
       tool: { name: route, provenance: "observed" as const },
       request: { args, argsDigest: digestOf(args), provenance: "claimed" as const },

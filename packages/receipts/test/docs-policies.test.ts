@@ -127,7 +127,7 @@ describe("docs/policies.md examples", () => {
   });
 
   it("16: the door: the catalogue is open to anyone, a refund needs a verified arrival and a small amount", () => {
-    const arrival = (cls: string) => ({ arrival: { class: cls, subject: cls === "verified" ? "shopping-agent" : "unknown", grant: cls === "verified" ? "verified" : "absent", signature: false, remote: "127.0.0.1", method: "POST", path: "/refunds", route: "refund" } });
+    const arrival = (cls: string) => ({ arrival: { class: cls, subject: cls === "verified" ? "shopping-agent" : "unknown", grant: cls === "verified" ? "verified" : "absent", signature: "absent", remote: "127.0.0.1", method: "POST", path: "/refunds", route: "refund" } });
     const door = (route: string, args: Record<string, unknown>, cls: string) => ({ agentId: cls === "verified" ? "shopping-agent" : "unknown", tool: route, context: { args, facts: arrival(cls), ...(cls === "verified" ? { grant: { principal: "shop-owner", scopes: ["refund"] } } : {}) } });
     expect(evaluate(blocks[16]!, door("catalogue", { method: "GET", path: "/catalogue/shoes" }, "unknown")).decision).toBe("allow");
     expect(evaluate(blocks[16]!, door("refund", { method: "POST", path: "/refunds", body: { amount: 1000 } }, "unknown")).decision).toBe("deny");
