@@ -120,6 +120,7 @@ export default withMermaid(
             { text: "The egress witness", link: "/receipts/egress" },
             { text: "Writing egress policies", link: "/guide/egress-policies" },
             { text: "The door", link: "/receipts/door" },
+            { text: "The door in your Node app", link: "/receipts/door-middleware" },
             { text: "Door signals", link: "/receipts/door-signals" },
             { text: "Safe financial operations", link: "/receipts/financial-operations" },
             { text: "Completeness", link: "/receipts/completeness" },

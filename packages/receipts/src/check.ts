@@ -70,11 +70,11 @@ function onPath(command: string): boolean {
   return (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync(join(d, command)));
 }
 
-/** True when the file is a door config rather than a gateway config: it names an origin, which no gateway config has. */
+/** True when the file is a door config rather than a gateway config: it names an origin or door routes, which no gateway config has. An in-process door's config has routes and no origin. */
 export function isDoorConfig(configPath: string): boolean {
   try {
     const raw = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
-    return !!raw && typeof raw === "object" && !Array.isArray(raw) && "origin" in raw && !("upstream" in raw) && !("upstreams" in raw);
+    return !!raw && typeof raw === "object" && !Array.isArray(raw) && ("origin" in raw || "routes" in raw) && !("upstream" in raw) && !("upstreams" in raw) && !("agents" in raw);
   } catch {
     return false;
   }
@@ -163,10 +163,13 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
   add("ok", "precommit", cfg.precommit.includes("*") ? "every arrival is committed to the log before it is relayed" : `every POST, PUT, PATCH, and DELETE${cfg.precommit.length ? `, and every arrival at ${cfg.precommit.join(", ")},` : ""} is committed to the log before it is relayed`);
   if (cfg.routes.length === 0) add("warn", "routes", `no routes: every arrival is the action "${cfg.unmatchedRoute}"`);
   else add("ok", "routes", `${cfg.routes.length} route(s); unmatched arrivals are "${cfg.unmatchedRoute}"`);
-  const origin = new URL(cfg.origin.url);
-  if (origin.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)) add("warn", "origin", `${cfg.origin.url} is plain HTTP to a remote host; the relayed traffic is not encrypted on that leg`);
-  else add("ok", "origin", `relays to ${cfg.origin.url}`);
-  for (const [, variable] of Object.entries(cfg.origin.headerEnv ?? {})) if (!process.env[variable]) add("error", "credentials", `origin header variable ${variable} is not set in this environment`);
+  if (!cfg.origin) add("ok", "origin", "no origin: a config for the door in-process (Express or Next.js); `agent-custody door` needs origin.url");
+  else {
+    const origin = new URL(cfg.origin.url);
+    if (origin.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)) add("warn", "origin", `${cfg.origin.url} is plain HTTP to a remote host; the relayed traffic is not encrypted on that leg`);
+    else add("ok", "origin", `relays to ${cfg.origin.url}`);
+    for (const [, variable] of Object.entries(cfg.origin.headerEnv ?? {})) if (!process.env[variable]) add("error", "credentials", `origin header variable ${variable} is not set in this environment`);
+  }
   if (cfg.log?.tokenEnv && !process.env[cfg.log.tokenEnv]) add("error", "credentials", `log token variable ${cfg.log.tokenEnv} is not set in this environment`);
   if (cfg.splunk?.tokenEnv && !process.env[cfg.splunk.tokenEnv]) add("error", "credentials", `splunk token variable ${cfg.splunk.tokenEnv} is not set in this environment`);
   for (const v of Object.values(cfg.otel?.headersEnv ?? {})) if (!process.env[v]) add("error", "credentials", `otel header variable ${v} is not set in this environment`);

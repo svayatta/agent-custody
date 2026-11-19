@@ -254,13 +254,13 @@ export type DoorRouteConfig = z.infer<typeof DoorRouteSchema>;
  */
 export const DoorConfigSchema = z.object({
   identity: z.object({ keyFile: z.string() }),
-  /** where allowed requests go: the site or API the door stands in front of */
+  /** where allowed requests go: the site or API the door stands in front of. The proxy needs it; the in-process door (`door-app.ts`) passes the request to the app instead and refuses a config that names one */
   origin: z.object({
     url: z.string().url(),
     headers: z.record(z.string(), z.string()).optional(),
     headerEnv: z.record(z.string(), z.string().min(1)).optional(),
     timeoutMs: z.number().int().positive().default(30_000),
-  }),
+  }).optional(),
   routes: z.array(DoorRouteSchema).default([]),
   /** the action name for an arrival no route matches; default "other" */
   unmatchedRoute: z.string().min(1).default("other"),

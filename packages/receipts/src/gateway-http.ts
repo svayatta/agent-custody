@@ -22,7 +22,7 @@ export function grantHeader(envelope: Envelope): string {
   return Buffer.from(JSON.stringify(envelope)).toString("base64url");
 }
 
-export function parseGrantHeader(req: IncomingMessage): Envelope | null {
+export function parseGrantHeader(req: Pick<IncomingMessage, "headers">): Envelope | null {
   const explicit = req.headers[GRANT_HEADER];
   const auth = req.headers.authorization ?? "";
   const raw = typeof explicit === "string" && explicit ? explicit : auth.startsWith("Bearer ") ? auth.slice(7) : "";
