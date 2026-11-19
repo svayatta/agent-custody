@@ -167,6 +167,17 @@ agent-custody report --config ~/.config/agent-custody/sdk.json
 
 `node examples/38-incident-replay.ts` runs the hook in enforce mode with scripted events. `terraform plan` runs. `terraform destroy -auto-approve` and `rm -rf ~` are denied before they run, and a reviewer verifies the denial receipts with the public key only. The page [An incident replay](../../../site/guide/incident-replay.md) shows the output and the limit: a credential in the agent's environment goes around the hook.
 
+### What the hook does not stop
+
+The hook stops a shell command, a file edit, or an MCP tool call that the agent makes. Read these limits before you rely on it.
+
+- **A credential in the agent's environment goes around the hook.** If the shell of the agent holds a cloud key or a database password, a process that the agent starts can use it. The hook does not stop that process.
+- **The starter list matches the text of a command.** It catches the plain form of each command. It is not a sandbox.
+- **Some tools are not seen.** The hook matches `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and MCP tools. It does not see `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, or `Task`. The starter deny list has rules for `Bash` only.
+- **The record is the agent's own report.** Every field is `claimed`. The signature shows that the record did not change after the hook wrote it. It does not show that the hook saw every call.
+
+To cover more, keep production credentials out of the agent's environment, and put a gateway between the agent and the tools that touch production. [Credential custody and egress lockdown](../../../site/guide/credential-custody.md) shows how. The [threat model](threat-model.md) lists what each part defends, and what it does not. No independent witness runs yet, and the hosted log is not anchored on mainnet yet.
+
 ### Register the hook by hand
 
 Register the hook command in `.claude/settings.json`. The same command handles all three events.

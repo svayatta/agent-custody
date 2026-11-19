@@ -1,6 +1,33 @@
 # Contributing
 
-This file holds the rules for one area of the code at a time. The rules for every change are in `CLAUDE.md`, the commands are in the root README, the site rules are in `site/README.md`, and the deploy checks are in `deploy/README.md`.
+This file holds the rules for one area of the code at a time. The rules for every change are in `CLAUDE.md`, the commands are in [Working in the repository](#working-in-the-repository) below, the site rules are in `site/README.md`, and the deploy checks are in `deploy/README.md`.
+
+## Working in the repository
+
+```bash
+bun install                         # one install for the whole workspace
+bun run test                        # every package
+bun run build                       # dist/ for every package, what consumers install
+bun run test:python                 # the Python package, with uv; needs node for the sidecar
+bun run ci                          # everything the GitHub workflow runs; the pre-push hook runs it before any push to main
+bun run demo                        # the receipts demo: keys, grant, policy, tool calls, verification, a tampering attempt
+```
+
+The source runs on plain Node 22 or later with no build step. `bun run build` makes the `dist/` that consumers install. Package-level commands, such as the CLI and the tutorials, run from inside that package's directory; each package README says how. The rest of this file has the rules for a change, a release, and a publish.
+
+## Layout
+
+```
+package.json          workspace root: typecheck, test, and demo across packages
+tsconfig.base.json    compiler options shared by every package
+action.yml            the GitHub Action that verifies receipts on a pull request (packages/receipts/docs/github-action.md)
+packages/receipts/    the receipts package: src, test, examples, scripts, docs
+packages/python/      the Python client package: agent_custody, tests run with uv against a real sidecar
+packages/state/       the state package: src, test, examples
+deploy/               containers for the log, the witness, and the gateway: compose files, Kubernetes manifests, and the runbook
+site/                 the website, generated from this repository's markdown by VitePress
+spec/lean/            a Lean 4 model of the verifier's core with machine-checked proofs and a differential fuzzer; not shipped
+```
 
 ## Files that change together
 

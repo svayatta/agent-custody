@@ -4,6 +4,7 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **Docs: a short root README with a Getting started section.** The README now says what agent-custody is, then gives copy-pasteable steps: the prerequisites, the refund demo, the packages, the gateway in a container and from source (keys, a grant, a policy, a config, `check --connect`, `gateway --http`), the Claude Code hook, and the development commands. Everything else is a categorised list of links. Nothing was dropped: the components table moved to `site/guide/pieces.md` and the SDK and ledger walkthrough to `site/guide/getting-started.md`, which included them from the README; the hook's limits to `docs/sdk.md` ("What the hook does not stop"); the egress diagram to `docs/egress.md`; the commands and the layout block to `CONTRIBUTING.md`; and the sections that repeated a page (the refund demo, the incident replay, the egress witness, agent sessions in this repository, the plan) are links to that page.
 - **Release images no longer race npm.** The image workflows waited for npm to serve the new version's own document, but `npm install` reads the package document in npm's abbreviated install format, which the registry's CDN can serve stale for minutes longer; the 0.16.7 log image build failed with `notarget` after the wait had passed. `.github/scripts/wait-for-npm.sh` now waits until both documents list the version, three times in a row, for up to 15 minutes.
 
 ## 0.16.7 — 2026-11-19
