@@ -18,7 +18,7 @@ const PROVIDER_SCRIPT: Record<Challenge["provider"], string> = {
 /** The browser script for a door's challenge config. Public: it carries the provider, the site key, the header, and the action. */
 export function formScript(challenge: Challenge): string {
   const settings = { provider: challenge.provider, siteKey: challenge.siteKey, header: challenge.header, src: PROVIDER_SCRIPT[challenge.provider], ...(challenge.action ? { action: challenge.action } : {}) };
-  return `// agent-custody door: form protector. <script src="${FORM_SCRIPT_PATH}" defer></script>; data-forms on the tag selects the forms.
+  return `// agent-custody door: form protector. Load it with a script tag, src ${FORM_SCRIPT_PATH} and defer; data-forms on the tag selects the forms.
 (() => {
   "use strict";
   const settings = ${JSON.stringify(settings).replace(/</g, "\\u003c")};
@@ -48,6 +48,12 @@ export function formScript(challenge: Challenge): string {
     const widget = api().render(box, options);
     let sending = false;
     form.addEventListener("submit", async (event) => {
+      // a button's formaction, formmethod, and formenctype override the form's; a GET or another site's action goes natively
+      const via = event.submitter;
+      const attr = (name, fallback) => (via && via.hasAttribute && via.hasAttribute(name) ? via.getAttribute(name) : fallback);
+      const method = (attr("formmethod", form.getAttribute("method")) || "get").toLowerCase();
+      const to = new URL(attr("formaction", form.getAttribute("action")) || location.href, location.href);
+      if (method !== "post" || to.origin !== location.origin) return;
       event.preventDefault();
       if (sending) return;
       const token = api().getResponse(widget);
@@ -59,9 +65,9 @@ export function formScript(challenge: Challenge): string {
       note.textContent = "";
       const data = new FormData(form, event.submitter || undefined);
       for (const field of tokenFields) data.delete(field);
-      const multipart = (form.getAttribute("enctype") || "").toLowerCase() === "multipart/form-data";
+      const multipart = (attr("formenctype", form.getAttribute("enctype")) || "").toLowerCase() === "multipart/form-data";
       try {
-        const res = await fetch(target, { method: "POST", body: multipart ? data : new URLSearchParams(data), headers: { [settings.header]: token }, credentials: "same-origin", signal: AbortSignal.timeout(30000) });
+        const res = await fetch(to, { method: "POST", body: multipart ? data : new URLSearchParams(data), headers: { [settings.header]: token }, credentials: "same-origin", signal: AbortSignal.timeout(30000) });
         if (res.redirected) return location.assign(res.url);
         const type = res.headers.get("content-type") || "";
         if (res.status === 403 && type.includes("application/json")) {
@@ -78,7 +84,8 @@ export function formScript(challenge: Challenge): string {
         }
         note.textContent = res.ok ? "Sent." : "The form was not sent: HTTP " + res.status + ".";
       } catch (error) {
-        note.textContent = "The form was not sent: the site could not be reached.";
+        // a failure after the door relayed the form (a redirect to another site, a timeout) looks the same as one before
+        note.textContent = "The answer did not arrive, and the form may have been sent. Check before you send it again.";
       } finally {
         sending = false;
         // a token serves one request

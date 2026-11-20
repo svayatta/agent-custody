@@ -145,7 +145,7 @@ export function door(config: string | DoorConfig, options: DoorAppOptions = {}):
 
   const middleware = (req: IncomingMessage, res: ServerResponse, next: (err?: unknown) => void): void => {
     // the script is public and the same for every arrival: served, not decided or receipted
-    if (script && req.method === "GET" && req.url === FORM_SCRIPT_PATH) {
+    if (script && req.method === "GET" && (req.url ?? "").split("?")[0] === FORM_SCRIPT_PATH) {
       res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
       res.end(script);
       return;

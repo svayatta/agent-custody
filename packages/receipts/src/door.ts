@@ -1034,7 +1034,7 @@ export async function serveDoor(host: DoorHost, opts: DoorServerOptions): Promis
       res.end(JSON.stringify({ keyid: host.keyid, policyDigest: host.policyDigest(), version: DOOR_VERSION, pendingReceipts: host.pendingReceipts() }));
       return;
     }
-    if (req.method === "GET" && req.url === FORM_SCRIPT_PATH) {
+    if (req.method === "GET" && (req.url ?? "").split("?")[0] === FORM_SCRIPT_PATH) {
       const script = host.formScript?.() ?? null;
       if (!script) {
         res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });

@@ -42,6 +42,7 @@ const site = async () => {
 
 interface FakeForm {
   attrs: Record<string, string>;
+  noButton?: boolean;
   fields: [string, string][];
   handlers: ((e: unknown) => Promise<void>)[];
   inserted: { className: string; textContent: string }[];
@@ -52,7 +53,7 @@ const formOf = (attrs: Record<string, string>, fields: [string, string][] = []):
  * Runs the script in a DOM stand-in: forms that report their attributes and fields, a provider whose token is
  * `token()`, and `fetch` passed through. Returns what the script did to the page.
  */
-function runScript(script: string, o: { origin: string; forms: FakeForm[]; token: () => string; fetch: typeof fetch; dataForms?: string }) {
+function runScript(script: string, o: { origin: string; forms: FakeForm[]; token: () => string; fetch: typeof fetch; dataForms?: string; provider?: "turnstile" | "hcaptcha" }) {
   const widget = { rendered: [] as Record<string, unknown>[], reset: 0 };
   const page = { assigned: [] as string[], written: [] as string[], selector: "" };
   let loader: { src?: string; onload?: () => void } = {};
@@ -66,7 +67,7 @@ function runScript(script: string, o: { origin: string; forms: FakeForm[]; token
       page.selector = selector;
       return o.forms.map((f) => ({
         getAttribute: (n: string) => f.attrs[n] ?? null,
-        querySelector: () => ({ before: (...els: FakeForm["inserted"]) => f.inserted.push(...els) }),
+        querySelector: () => (f.noButton ? null : { before: (...els: FakeForm["inserted"]) => f.inserted.push(...els) }),
         append: (...els: FakeForm["inserted"]) => f.inserted.push(...els),
         addEventListener: (type: string, fn: FakeForm["handlers"][number]) => { if (type === "submit") f.handlers.push(fn); },
         fields: f.fields,
@@ -83,16 +84,22 @@ function runScript(script: string, o: { origin: string; forms: FakeForm[]; token
     delete(name: string) { this.entries = this.entries.filter(([k]) => k !== name); }
     [Symbol.iterator]() { return this.entries[Symbol.iterator](); }
   }
-  const turnstile = {
+  const widgetApi = {
     render: (_box: unknown, options: Record<string, unknown>) => { widget.rendered.push(options); return `w${widget.rendered.length}`; },
     getResponse: () => o.token(),
     reset: () => { widget.reset += 1; },
   };
   const location = { href: `${o.origin}/contact`, origin: o.origin, assign: (u: string) => page.assigned.push(u) };
-  runInNewContext(script, { document, location, window: { turnstile }, fetch: o.fetch, URL, URLSearchParams, FormData: FormDataStandIn, AbortSignal, console });
+  runInNewContext(script, { document, location, window: { [o.provider ?? "turnstile"]: widgetApi }, fetch: o.fetch, URL, URLSearchParams, FormData: FormDataStandIn, AbortSignal, console });
   return { widget, page, loader: () => loader };
 }
-const submit = (f: FakeForm) => Promise.all(f.handlers.map((h) => h({ preventDefault() {}, submitter: null })));
+/** Fires the form's submit handlers, from a button with these attributes when given; reports whether the native post was stopped. */
+const submit = async (f: FakeForm, button?: Record<string, string>) => {
+  let stopped = false;
+  const submitter = button ? { hasAttribute: (n: string) => Object.hasOwn(button, n), getAttribute: (n: string) => button[n] ?? null } : null;
+  await Promise.all(f.handlers.map((h) => h({ preventDefault: () => { stopped = true; }, submitter })));
+  return stopped;
+};
 const noteOf = (f: FakeForm) => f.inserted.find((e) => e.className === "agent-custody-challenge-note")?.textContent;
 
 describe("the form protector", () => {
@@ -145,6 +152,10 @@ describe("the form protector", () => {
     expect(script).not.toContain(SECRET_ENV);
     expect(() => new Script(script)).not.toThrow();
     expect(script).toBe(formScript(loadDoorConfig(fx.configFile).challenge!));
+    // a cache-busting query string still gets the script, not a decision
+    const busted = await fetch(`${running.url}${FORM_SCRIPT_PATH}?v=2`);
+    expect(busted.status).toBe(200);
+    expect(await busted.text()).toBe(script);
   });
 
   it("a passed check reaches the site once, form-encoded, with the receipt id and without the token; the page shows the site's answer and the widget is reset", async () => {
@@ -221,6 +232,58 @@ describe("the form protector", () => {
     expect(sent[0]!.init.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("a button's formmethod GET or formaction on another site posts natively; its formaction and formenctype on this site are used", async () => {
+    const { script } = await served();
+    const sent: { url: string; init: RequestInit }[] = [];
+    const recording: typeof fetch = async (input, init) => { sent.push({ url: String(input), init: init! }); return new Response("<p>ok</p>", { headers: { "content-type": "text/html" } }); };
+    const contact = formOf({ method: "post", action: "/contact" }, [["message", "Hi"]]);
+    const run = runScript(script, { origin: running.url, forms: [contact], token: () => "good", fetch: recording });
+    run.loader().onload!();
+    expect(await submit(contact, { formmethod: "get" })).toBe(false);
+    expect(await submit(contact, { formaction: "https://elsewhere.example/post" })).toBe(false);
+    expect(sent).toHaveLength(0);
+    expect(await submit(contact, { formaction: "/contact/urgent", formenctype: "multipart/form-data" })).toBe(true);
+    expect(sent.map((s) => s.url)).toEqual([`${running.url}/contact/urgent`]);
+    expect(sent[0]!.init.body).not.toBeInstanceOf(URLSearchParams);
+  });
+
+  it("when the answer does not arrive the page says the form may have been sent, and the widget is reset", async () => {
+    const { script } = await served();
+    const failing: typeof fetch = async () => { throw new TypeError("Failed to fetch"); };
+    const contact = formOf({ method: "post", action: "/contact" }, [["message", "Hi"]]);
+    const run = runScript(script, { origin: running.url, forms: [contact], token: () => "good", fetch: failing });
+    run.loader().onload!();
+    await submit(contact);
+    expect(noteOf(contact)).toBe("The answer did not arrive, and the form may have been sent. Check before you send it again.");
+    expect(run.widget.reset).toBe(1);
+  });
+
+  it("hCaptcha: its script and widget, no Turnstile-only options, its token field removed; a form without a submit button gets the widget at its end", async () => {
+    const script = formScript({ provider: "hcaptcha", siteKey: "hc-site", secretEnv: "UNUSED", header: "x-agent-custody-challenge", timeoutMs: 5000, hostnames: ["shop.example"], maxInFlight: 64 } as Parameters<typeof formScript>[0]);
+    const sent: { url: string; init: RequestInit }[] = [];
+    const recording: typeof fetch = async (input, init) => { sent.push({ url: String(input), init: init! }); return new Response("{}", { headers: { "content-type": "application/json" } }); };
+    const bare = { ...formOf({ method: "post", action: "/contact" }, [["message", "Hi"], ["h-captcha-response", "tok"], ["g-recaptcha-response", "tok"]]), noButton: true };
+    const run = runScript(script, { origin: running.url, forms: [bare], token: () => "hc-token", fetch: recording, provider: "hcaptcha" });
+    expect(run.loader().src).toBe("https://js.hcaptcha.com/1/api.js?render=explicit");
+    run.loader().onload!();
+    expect(run.widget.rendered).toEqual([{ sitekey: "hc-site" }]);
+    expect(bare.inserted.map((e) => e.className)).toEqual(["agent-custody-challenge", "agent-custody-challenge-note"]);
+    await submit(bare);
+    expect((sent[0]!.init.headers as Record<string, string>)["x-agent-custody-challenge"]).toBe("hc-token");
+    expect(String(sent[0]!.init.body)).toBe("message=Hi");
+    expect(noteOf(bare)).toBe("Sent.");
+  });
+
+  it("a config value cannot close the script element or inject code: '<' is escaped, and the value arrives intact", () => {
+    const siteKey = 'k</script><script>alert(1)</script>"';
+    const script = formScript({ provider: "turnstile", siteKey, secretEnv: "UNUSED", header: "x-agent-custody-challenge", timeoutMs: 5000, hostnames: ["shop.example"], maxInFlight: 64 } as Parameters<typeof formScript>[0]);
+    expect(script).not.toContain("</script>");
+    const form = formOf({ method: "post", action: "/contact" });
+    const run = runScript(script, { origin: "https://shop.example", forms: [form], token: () => "", fetch });
+    run.loader().onload!();
+    expect(run.widget.rendered).toEqual([{ sitekey: siteKey, "response-field": false }]);
+  });
+
   it("a door with no challenge has no form protector: 404, and the in-process door has none either", async () => {
     const plain = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-form-plain-")), shop.url);
     const h = await createDoorHost(loadDoorConfig(plain.configFile));
@@ -245,7 +308,7 @@ describe("the form protector", () => {
     const server = createServer((req, res) => guard(req, res, () => { appRan += 1; res.end("app"); }));
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     try {
-      const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}${FORM_SCRIPT_PATH}`);
+      const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}${FORM_SCRIPT_PATH}?v=3`);
       expect(res.status).toBe(200);
       expect(res.headers.get(RECEIPT_HEADER)).toBeNull();
       expect(await res.text()).toBe(guard.formScript());
