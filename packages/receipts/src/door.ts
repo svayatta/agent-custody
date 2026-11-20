@@ -19,6 +19,7 @@ import { createIssuer, ReceiptPending, type FlushResult } from "./issue.ts";
 import { createWebBotAuthVerifier, normalizeAuthority, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
 import { createPartnerEngine, PARTNER_FACT, PARTNER_TOOL, type ArrivalPartner, type PartnerVerdict } from "./door-partner.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
+import { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
 import { createRevocationList } from "./revocation.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
@@ -441,6 +442,8 @@ export interface DoorHost {
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
   flushOutbox(): Promise<FlushResult>;
   pendingReceipts(): number;
+  /** the form protector script, when the door has a challenge to protect forms with */
+  formScript?(): string | null;
   close(): Promise<void>;
 }
 
@@ -955,6 +958,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     handle,
     flushOutbox: core.flushOutbox,
     pendingReceipts: core.pendingReceipts,
+    formScript: () => (cfg.challenge ? formScript(cfg.challenge) : null),
     async close() {
       core.close();
     },
@@ -998,6 +1002,7 @@ function createAuthzHost(cfg: DoorConfig, options: DoorOptions): DoorHost {
     handle,
     flushOutbox: core.flushOutbox,
     pendingReceipts: core.pendingReceipts,
+    formScript: () => (cfg.challenge ? formScript(cfg.challenge) : null),
     async close() {
       core.close();
     },
@@ -1015,7 +1020,11 @@ export interface RunningDoor {
   close(): Promise<void>;
 }
 
-/** Serves a door host over plain HTTP. Bind to loopback or put TLS in front. `GET /.well-known/agent-custody-door` answers the key id and the policy digest. */
+/**
+ * Serves a door host over plain HTTP. Bind to loopback or put TLS in front. `GET /.well-known/agent-custody-door` answers
+ * the key id and the policy digest; with a challenge configured, `GET /.well-known/agent-custody-door/form.js` is the
+ * form protector script.
+ */
 export async function serveDoor(host: DoorHost, opts: DoorServerOptions): Promise<RunningDoor> {
   const bind = opts.host ?? "127.0.0.1";
   const log = opts.log ?? ((m) => console.error(m));
@@ -1023,6 +1032,17 @@ export async function serveDoor(host: DoorHost, opts: DoorServerOptions): Promis
     if (req.method === "GET" && req.url === "/.well-known/agent-custody-door") {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify({ keyid: host.keyid, policyDigest: host.policyDigest(), version: DOOR_VERSION, pendingReceipts: host.pendingReceipts() }));
+      return;
+    }
+    if (req.method === "GET" && req.url === FORM_SCRIPT_PATH) {
+      const script = host.formScript?.() ?? null;
+      if (!script) {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "this door has no challenge configured, so it has no form protector" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
+      res.end(script);
       return;
     }
     host.handle(req, res).catch((e: unknown) => {

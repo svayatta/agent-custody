@@ -178,6 +178,17 @@ RESULT: VERIFIED
 
 The refund was in the log before your handler ran. The output is cut to the lines that matter; the full report lists every check. Your receipt ids differ; take them from the `x-agent-custody-receipt` headers. The output above is from the Express app, run from this repository at the commit that added the in-process door, with the headers cut to the door's; a Next.js route's receipt says `door / fetch-route`.
 
+## A form protected by the challenge
+
+With `challenge` in the config, a page protects a form with one line, `<script src="/.well-known/agent-custody-door/form.js" defer></script>` ([protecting a form with one line](door.md#protecting-a-form-with-one-line)). In Express the middleware answers that path itself, before it decides anything. In Next.js, add a route at `app/.well-known/agent-custody-door/form.js/route.ts`:
+
+```ts
+import { guard } from "@/lib/door";
+export const GET = () => new Response(guard.formScript(), { headers: { "content-type": "text/javascript; charset=utf-8" } });
+```
+
+The form's own route is wrapped as any other: `export const POST = guard.route(handler)`.
+
 ## What your code receives
 
 An allowed request reaches your code with:

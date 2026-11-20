@@ -21,6 +21,7 @@ export { formatPerathosReport, PERATHOS_RECEIPT_V1, perathosHead, perathosReceip
 export type { PerathosCheck, PerathosOptions, PerathosReport } from "./perathos.ts";
 export { loadAcsGuardianConfig } from "./config.ts";
 export type { AcsGuardianConfig } from "./config.ts";
+export { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
 export type { Arrival, ArrivalChallenge, ArrivalClass, ArrivalRate, ChallengeCheck, Classified, DoorHost, DoorOptions, DoorRequest, DoorServerOptions, RateTracker, RateTrackerLimits, RunningDoor } from "./door.ts";
 export type { SignatureCheck, SignedRequest, WebBotAuthOptions, WebBotAuthVerifier } from "./web-bot-auth.ts";
 export * from "./capture.ts";

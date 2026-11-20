@@ -9,7 +9,10 @@ import { Readable } from "node:stream";
 import { loadDoorConfig, type DoorConfig } from "./config.ts";
 import { digestOf } from "./crypto.ts";
 import { CLASS_HEADER, RECEIPT_HEADER, createDoorCore, readBody, readStream, sendAnswer, type Arrival, type DoorAnswer, type DoorCore, type DoorDecision, type DoorOptions, type DoorRequest } from "./door.ts";
+import { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
 import type { FlushResult } from "./issue.ts";
+
+export { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
 import type { ReceiptPredicate } from "./receipt.ts";
 
 type Execution = ReceiptPredicate["execution"];
@@ -33,6 +36,8 @@ export interface InProcessDoor {
   policyDigest(): string;
   flushOutbox(): Promise<FlushResult>;
   pendingReceipts(): number;
+  /** the form protector script for the config's challenge, or null without one; the middleware serves it at FORM_SCRIPT_PATH */
+  formScript(): string | null;
   close(): void;
 }
 
@@ -136,7 +141,15 @@ export function door(config: string | DoorConfig, options: DoorAppOptions = {}):
   if (cfg.authz) throw new Error("the in-process door passes an allowed request to the app it runs in; authz is for the door answering nginx or Envoy checks (`agent-custody door`)");
   const core = createDoorCore(cfg, { ...options, autoFlush: options.autoFlush ?? true }, MIDDLEWARE_FRAMEWORK);
 
+  const script = cfg.challenge ? formScript(cfg.challenge) : null;
+
   const middleware = (req: IncomingMessage, res: ServerResponse, next: (err?: unknown) => void): void => {
+    // the script is public and the same for every arrival: served, not decided or receipted
+    if (script && req.method === "GET" && req.url === FORM_SCRIPT_PATH) {
+      res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
+      res.end(script);
+      return;
+    }
     if (!core.admit()) {
       req.resume();
       return sendAnswer(res, core.busy());
@@ -253,6 +266,7 @@ export function door(config: string | DoorConfig, options: DoorAppOptions = {}):
     policyDigest: core.policyDigest,
     flushOutbox: core.flushOutbox,
     pendingReceipts: core.pendingReceipts,
+    formScript: () => script,
     close: core.close,
   });
 }
