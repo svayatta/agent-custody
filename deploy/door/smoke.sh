@@ -2,10 +2,11 @@
 # Smoke test for the gateway image in door mode, through the compose file in proxy/: the door creates its key, becomes
 # healthy in front of the stand-in origin, relays an unknown arrival's catalogue read (200, and the origin gets the receipt
 # id), refuses an unknown arrival's refund (403, and the origin never sees it), relays a refund from an agent with a grant
-# (200, verified), refuses the same agent's refund above the policy's amount bound and below it (403), answers each with a receipt id,
+# (200, verified), refuses the same agent's refund above the policy's amount bound and below it (403), revokes the grant
+# through the running container and refuses its next refund (403, recorded as claimed and revoked), answers each with a receipt id,
 # and every one of those receipts verifies against the door's public key, the principal's key, and the local log. Then
 # `docker compose stop` closes the door (exit 0, not SIGKILL).
-# Usage: ./smoke.sh <name>:<tag>   needs docker with compose, curl, and a free port 18780
+# Usage: ./smoke.sh <name>:<tag>   needs docker with compose, curl, jq, and a free port 18780
 set -eu
 image="${1:?usage: smoke.sh <name>:<tag>}"
 repository="${image%:*}"
@@ -78,6 +79,13 @@ call large-refund -X POST -H 'content-type: application/json' -H "authorization:
 call negative-refund -X POST -H 'content-type: application/json' -H "authorization: Bearer $grant" --data '{"order":"o_4","amount":-1}'
 [ "$status" = 403 ] || fail "a negative refund answered $status, not 403: $(body negative-refund)"
 
+# the README's revoke command: the grant on stdin, its digest into /data/revoked.json, read by the running door
+compose exec -T door agent-custody revoke --config /config/door.json --grant /dev/stdin < "$work/grant.json" > /dev/null 2>&1 || fail "revoke failed"
+call revoked-refund -X POST -H 'content-type: application/json' -H "authorization: Bearer $grant" --data '{"order":"o_5","amount":100}'
+[ "$status" = 403 ] || fail "a refund with the revoked grant answered $status, not 403: $(body revoked-refund)"
+seen=$(jq -r .envelope.payload "$work/data/receipts/$id.json" | base64 -d | jq -r '.predicate.facts.arrival.value | "\(.class) \(.grant)"')
+[ "$seen" = "claimed revoked" ] || fail "the revoked grant's receipt records the arrival as '$seen', not 'claimed revoked'"
+
 for id in $ids; do
   report=$(cli verify "/work/data/receipts/$id.json" --issuer-key /work/data/keys/door.pub --principal-key /work/keys/principal.pub --log /work/data/log.jsonl 2>&1) \
     || fail "receipt $id did not verify: $report"
@@ -89,4 +97,4 @@ elapsed=$(( $(date +%s) - start ))
 code=$(docker inspect -f '{{.State.ExitCode}}' "$door")
 [ "$code" = 0 ] || fail "the door stopped with exit code $code, not 0 (SIGKILL is 137)"
 [ "$elapsed" -le 8 ] || fail "docker compose stop took ${elapsed}s: the door ignored SIGTERM"
-echo "smoke: ok (door mode: key created, healthy, catalogue read relayed, unknown refund refused, granted refund relayed, refunds above and below the bound refused, $(echo "$ids" | wc -w | tr -d ' ') receipts verified, stopped in ${elapsed}s with exit 0)"
+echo "smoke: ok (door mode: key created, healthy, catalogue read relayed, unknown refund refused, granted refund relayed, refunds above and below the bound refused, revoked grant refused, $(echo "$ids" | wc -w | tr -d ' ') receipts verified, stopped in ${elapsed}s with exit 0)"

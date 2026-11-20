@@ -6,6 +6,7 @@
     { "name": "refund", "methods": ["POST"], "path": "/refunds" }
   ],
   "trustedPrincipalKeys": ["keys/principal.pub"],
+  "revokedGrants": "/data/revoked.json",
   "policyFile": "policy.cedar",
   "receiptsDir": "/data/receipts",
   "logFile": "/data/log.jsonl"
