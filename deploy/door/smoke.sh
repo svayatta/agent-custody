@@ -80,11 +80,12 @@ call negative-refund -X POST -H 'content-type: application/json' -H "authorizati
 [ "$status" = 403 ] || fail "a negative refund answered $status, not 403: $(body negative-refund)"
 
 # the README's revoke command: the grant on stdin, its digest into /data/revoked.json, read by the running door
-compose exec -T door agent-custody revoke --config /config/door.json --grant /dev/stdin < "$work/grant.json" > /dev/null 2>&1 || fail "revoke failed"
+compose exec -T door agent-custody revoke --config /config/door.json --grant /dev/stdin < "$work/grant.json" > "$work/revoke.out" 2>&1 || fail "revoke failed: $(cat "$work/revoke.out")"
 call revoked-refund -X POST -H 'content-type: application/json' -H "authorization: Bearer $grant" --data '{"order":"o_5","amount":100}'
 [ "$status" = 403 ] || fail "a refund with the revoked grant answered $status, not 403: $(body revoked-refund)"
-seen=$(jq -r .envelope.payload "$work/data/receipts/$id.json" | base64 -d | jq -r '.predicate.facts.arrival.value | "\(.class) \(.grant)"')
-[ "$seen" = "claimed revoked" ] || fail "the revoked grant's receipt records the arrival as '$seen', not 'claimed revoked'"
+# grantError tells apart a revocation the door matched and a revocation file it could not read, which also refuses the grant
+seen=$(jq -r .envelope.payload "$work/data/receipts/$id.json" | base64 -d | jq -r '.predicate.facts.arrival.value | "\(.class) \(.grant) \(.grantError)"')
+[ "$seen" = "claimed revoked the grant has been revoked" ] || fail "the revoked grant's receipt records the arrival as '$seen', not 'claimed revoked the grant has been revoked'"
 
 for id in $ids; do
   report=$(cli verify "/work/data/receipts/$id.json" --issuer-key /work/data/keys/door.pub --principal-key /work/keys/principal.pub --log /work/data/log.jsonl 2>&1) \
