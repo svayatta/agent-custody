@@ -289,6 +289,7 @@ src/policy-rego.ts Rego: compiled with opa build, evaluated in-process with the 
 src/opa-server.ts  an OPA server's Data API as the policy, with bundle revisions as the digest
 src/simulate.ts    replay recorded policy decisions against a proposed Cedar or Rego policy, grouped changes and run digest
 src/delegation.ts  signed delegation grants
+src/revocation.ts  the revoked-grants file the gateway and the door share: re-read when it changes, written by rename
 src/approval.ts    exact-action human approvals, distinct trusted signatures, persistent single-use consumption
 src/receipt.ts     receipt and authorization statement types and provenance labels
 src/issue.ts       sign, log, and write a receipt, or commit an authorization first; shared by every producer

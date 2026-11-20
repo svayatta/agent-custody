@@ -201,6 +201,18 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
     const ldir = writableAncestor(cfg.logFile);
     if (!ldir) add("error", "paths", `${cfg.logFile} cannot be written`);
   }
+  if (cfg.revokedGrants) {
+    if (!existsSync(cfg.revokedGrants)) add("ok", "revokedGrants", `no grant is revoked yet; \`agent-custody revoke --config\` creates ${cfg.revokedGrants}`);
+    else {
+      try {
+        const list = JSON.parse(readFileSync(cfg.revokedGrants, "utf8")) as unknown;
+        if (!Array.isArray(list)) throw new Error("expected a JSON array of grant digests");
+        add("ok", "revokedGrants", `${list.length} revoked grant(s) in ${cfg.revokedGrants}`);
+      } catch (e) {
+        add("error", "revokedGrants", `${cfg.revokedGrants}: ${e instanceof Error ? e.message : String(e)}; the door refuses to start, and a file that becomes unreadable while it runs makes every grant revoked`);
+      }
+    }
+  } else if (cfg.trustedPrincipalKeys.length > 0) add("warn", "revokedGrants", "no revokedGrants file: a grant cannot be revoked at this door before it expires");
   return out;
 }
 

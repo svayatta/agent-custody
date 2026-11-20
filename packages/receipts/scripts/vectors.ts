@@ -3,7 +3,8 @@
 // verifier written elsewhere can prove it agrees. Regenerate only when the format changes, never to make a test pass.
 import { withhold } from "../src/capture.ts";
 import { APPROVAL_META_KEY, APPROVAL_TYPE, createApproval } from "../src/approval.ts";
-import { createDelegation, delegateFrom, DELEGATION_TYPE } from "../src/delegation.ts";
+import { createDelegation, delegateFrom, DELEGATION_TYPE, grantDigest } from "../src/delegation.ts";
+import { writeRevokedGrants } from "../src/revocation.ts";
 import nodeFs, { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -534,7 +535,7 @@ try {
   // a partner detection engine asked about the API route only, so the catalogue and refund cases carry no verdict
   const engineKey = generateKeyPair();
   const partner = await startPartner(engineKey);
-  const dfx = buildDoorFixture(mkdtempSync(join(tmpdir(), "vectors-door-")), origin.url, { partner: { engine: "stub-engine", url: partner.url, keyFile: "keys/engine.pub", routes: ["api"] } });
+  const dfx = buildDoorFixture(mkdtempSync(join(tmpdir(), "vectors-door-")), origin.url, { partner: { engine: "stub-engine", url: partner.url, keyFile: "keys/engine.pub", routes: ["api"] }, revokedGrants: "revoked.json" });
   key("door", dfx.doorPub);
   key("door-principal", dfx.principalPub);
   key("door-partner", writeApprovalKeyPair(engineKey, join(dfx.dir, "keys"), "engine").pubFile);
@@ -553,6 +554,24 @@ try {
     const verifiedRefund = await arrive("POST", "/refunds", { authorization: `Bearer ${grantHeader(grant)}` }, { order: "o_2", amount: 4500 });
     const partnerOrders = await arrive("GET", "/api/orders", { authorization: `Bearer ${grantHeader(grant)}`, "user-agent": "Mozilla/5.0 (vectors)" });
     const partnerInvoices = await arrive("GET", "/api/invoices", { authorization: `Bearer ${grantHeader(grant)}`, "user-agent": "Mozilla/5.0 (vectors)" });
+    // A passport presented to the door, case by case. A grant the door does not accept leaves the arrival claimed and
+    // the receipt without a delegation; the arrival fact says why. The re-signed cases paste a grant the door refused
+    // into a receipt as if the door had accepted it, and a verifier catches each with the delegation checks.
+    const window = (fromMs: number, toMs: number) => ({ issuedAt: new Date(Date.now() + fromMs).toISOString(), expiresAt: new Date(Date.now() + toMs).toISOString() });
+    const refundGrant = (agent: string, signer: KeyPair, w = window(-1000, 3600_000), extra: { agentKey?: string } = {}) => createDelegation(signer, { version: "0.1", principal: "shop-owner", agent, scopes: ["refund"], ...w, ...extra });
+    const expiredGrant = refundGrant("late-agent", dfx.principalKey, window(-7200_000, -3600_000));
+    const strangerGrant = refundGrant("stranger-agent", generateKeyPair());
+    const revokedGrant = refundGrant("revoked-agent", dfx.principalKey);
+    const leadKey = generateKeyPair();
+    const leadGrant = refundGrant("lead-agent", dfx.principalKey, window(-1000, 3600_000), { agentKey: publicKeyToPem(leadKey.publicKey) });
+    const helperGrant = delegateFrom(leadGrant, leadKey, { agent: "helper-agent", scopes: ["refund"] });
+    const passport = (g: Envelope) => ({ authorization: `Bearer ${grantHeader(g)}` });
+    const grantExpired = await arrive("POST", "/refunds", passport(expiredGrant), { order: "o_g1", amount: 100 });
+    const grantStranger = await arrive("POST", "/refunds", passport(strangerGrant), { order: "o_g2", amount: 100 });
+    const grantDelegated = await arrive("POST", "/refunds", passport(helperGrant), { order: "o_g3", amount: 100 });
+    writeRevokedGrants(join(dfx.dir, "revoked.json"), [grantDigest(revokedGrant), grantDigest(leadGrant)]);
+    const grantRevoked = await arrive("POST", "/refunds", passport(revokedGrant), { order: "o_g4", amount: 100 });
+    const grantRevokedParent = await arrive("POST", "/refunds", passport(helperGrant), { order: "o_g5", amount: 100 });
     const dlog = logLines(dfx.logFile);
     addCase({ name: "door-unknown-executed", description: "An arrival that presented nothing reads a public route through the door: issuer kind door, principal claimed, agent `unknown` claimed, the arrival fact observed, relayed and executed. Verifies with the door's key alone.", bundle: readCatalogue, ...D, principalKeys: [], log: dlog });
     addCase({ name: "door-unknown-denied", description: "The same unknown arrival asks for a refund and the policy refuses it: a denied door receipt, nothing relayed, verified without any principal key.", bundle: refusedRefund, ...D, principalKeys: [], log: dlog });
@@ -560,6 +579,24 @@ try {
     addCase({ name: "door-verified-without-principal-trust", description: "The verified refund checked without the principal's key: the delegation signature fails, as for a gateway receipt.", bundle: verifiedRefund, ...D, principalKeys: [], log: dlog });
     const doorKey = loadPrivateKey(join(dfx.dir, "keys", "door.key"));
     addCase({ name: "resigned-door-no-policy", description: "A door receipt re-signed with its policy decision removed. A door decides every arrival by policy, so `door receipt carries a policy decision` fails.", bundle: resigned(readCatalogue, doorKey, (st) => { st.predicate.policy = null; }), ...D, principalKeys: [], log: dlog });
+    // what the door would have written had it accepted the grant: the principal attested, the grant as the delegation, the refund allowed and executed
+    const accepted = (bundle: ReceiptBundle, g: Envelope, principalKeyid: string) => resigned(bundle, doorKey, (st) => {
+      const d = JSON.parse(Buffer.from(g.payload, "base64").toString()) as { principal: string; agent: string };
+      st.predicate.principal = { id: d.principal, keyid: principalKeyid, provenance: "attested" };
+      st.predicate.agent = { id: d.agent, provenance: "attested" };
+      st.predicate.delegation = { envelope: g, provenance: "attested" };
+      st.predicate.policy = decode(verifiedRefund).predicate.policy;
+      st.predicate.execution = decode(verifiedRefund).predicate.execution;
+    });
+    const principalKeyid = keys["door-principal"]!.keyid;
+    addCase({ name: "door-grant-expired", description: "An agent presents a grant from the shop's principal whose window ended an hour ago. The door classifies the arrival `claimed` (`grant: \"invalid\"`, the window in `grantError`) and refuses the refund. The receipt carries no delegation, its principal is claimed, and it verifies.", bundle: grantExpired, ...D, log: dlog });
+    addCase({ name: "resigned-door-grant-expired", description: "The expired grant pasted into the refused arrival's receipt as an accepted passport, the refund marked executed, re-signed with the door's key: `delegation valid at receipt time` fails (and the log inclusion of the changed leaf).", bundle: accepted(grantExpired, expiredGrant, principalKeyid), ...D, log: dlog });
+    addCase({ name: "door-grant-wrong-key", description: "An agent presents a grant naming the shop's principal but signed with a key the door does not trust. The arrival is `claimed` (`grant: \"invalid\"`), the refund refused, and the receipt verifies with no delegation.", bundle: grantStranger, ...D, log: dlog });
+    addCase({ name: "resigned-door-grant-wrong-key", description: "The stranger's grant pasted into that receipt as an accepted passport and re-signed with the door's key: `delegation signature (principal key)` fails against the shop's principal key (and the log inclusion of the changed leaf).", bundle: accepted(grantStranger, strangerGrant, principalKeyid), ...D, log: dlog });
+    addCase({ name: "door-grant-revoked", description: "An agent presents a grant from the shop's principal, in its window and scope, whose digest is in the door's `revokedGrants` file. The arrival is `claimed` (`grant: \"revoked\"`), the refund refused, and the receipt verifies with no delegation and the principal claimed. Revocation is the door's state, not the grant's: a verifier reads it from the arrival fact, and a receipt the door wrote before the revocation still verifies.", bundle: grantRevoked, ...D, log: dlog });
+    addCase({ name: "door-grant-delegated", description: "A sub-agent presents a grant delegated to it by an agent whose grant names its key (principal → lead-agent → helper-agent). The door verifies the chain and relays the refund; `delegation chain to the principal` appears and passes, and the principal and the sub-agent are attested.", bundle: grantDelegated, ...D, log: dlog });
+    addCase({ name: "door-grant-delegated-without-principal-trust", description: "The delegated refund checked without the principal's key: the chain does not reach a trusted principal, so `delegation signature (principal key)` and `delegation chain to the principal` fail.", bundle: grantDelegated, ...D, principalKeys: [], log: dlog });
+    addCase({ name: "door-grant-delegated-parent-revoked", description: "The same sub-agent's grant after its parent's digest is put in `revokedGrants`. Revoking a grant revokes the grants delegated from it: the arrival is `claimed` (`grant: \"revoked\"`, a grant above it in its chain), the refund refused, and the receipt verifies with no delegation.", bundle: grantRevokedParent, ...D, log: dlog });
     addCase({ name: "door-partner-attested", description: "A verified agent reads the API, and the door asks its partner detection engine about the arrival. The engine signs its verdict for this receipt and route (the upstream attestation format, over the digest of the verdict); the receipt carries the `partner` fact as attested with the plain envelope beside it. With the engine's key given as an upstream key, `fact partner signature (upstream key)` passes in both verifiers.", bundle: partnerOrders, ...D, upstreamKeys: ["door-partner"], log: dlog });
     addCase({ name: "door-partner-without-key", description: "The same receipt checked without the engine's key. The fact is marked attested and the reader cannot confirm it, so `fact partner signature (upstream key)` fails rather than being skipped.", bundle: partnerOrders, ...D, log: dlog });
     addCase({ name: "door-partner-wrong-key", description: "The same receipt with the principal's key offered as the engine's key: `fact partner signature (upstream key)` fails; everything else passes.", bundle: partnerOrders, ...D, upstreamKeys: ["door-principal"], log: dlog });
