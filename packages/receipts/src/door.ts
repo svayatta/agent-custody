@@ -13,12 +13,13 @@ import type { AddressInfo } from "node:net";
 import type { DoorConfig, DoorRouteConfig } from "./config.ts";
 import { captureKeyFrom } from "./capture.ts";
 import { digestOf, loadPrivateKey, loadPublicKey, sha256Hex, type Envelope, type PublicKeyRef } from "./crypto.ts";
-import { decodeDelegation, delegationValidAt, verifyDelegation, type Delegation } from "./delegation.ts";
+import { decodeDelegation, delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { parseGrantHeader, GRANT_HEADER } from "./gateway-http.ts";
 import { createIssuer, ReceiptPending, type FlushResult } from "./issue.ts";
 import { createWebBotAuthVerifier, normalizeAuthority, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
 import { createPartnerEngine, PARTNER_FACT, PARTNER_TOOL, type ArrivalPartner, type PartnerVerdict } from "./door-partner.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
+import { createRevocationList } from "./revocation.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
 import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
@@ -47,10 +48,11 @@ export interface Arrival {
   subject: string;
   /**
    * What became of the grant header: a trusted grant in scope for this route, one out of scope, one that did not verify,
+   * one revoked (`revoked`: it, or a grant above it in its chain, is in `revokedGrants`, or that file cannot be read),
    * one presented by another agent (`wrong-sender`: the request is signed by a signature agent the grant does not name),
    * or none.
    */
-  grant: "verified" | "out-of-scope" | "invalid" | "wrong-sender" | "absent";
+  grant: "verified" | "out-of-scope" | "invalid" | "revoked" | "wrong-sender" | "absent";
   grantError?: string;
   /** What became of an RFC 9421 signature tagged `web-bot-auth`: see `SignatureCheck`. `unchecked` when the door has no `webBotAuth` config */
   signature: SignatureCheck["outcome"];
@@ -385,9 +387,10 @@ export function signedRequestOf(req: DoorRequest): SignedRequest {
  * arrival `verified` as its signature agent. With both, the signature binds the grant to its sender when the grant names
  * that signature agent; a grant presented under another agent's signature is `wrong-sender` and the arrival `claimed`.
  * An `x-agent-custody-agent` header or a signature that did not verify alone is `claimed`. Nothing at all is `unknown`.
- * Without `signature`, a `Signature-Input` header is recorded as `unchecked`.
+ * Without `signature`, a `Signature-Input` header is recorded as `unchecked`. `revoked`, when given, says why a grant
+ * that verified is revoked (from its chain's digests, leaf first), or null when it is not; a revoked grant is `claimed`.
  */
-export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string, signature?: SignatureCheck): Classified {
+export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string, signature?: SignatureCheck, revoked?: (chainDigests: string[]) => string | null): Classified {
   const url = requestUrl(req);
   const method = (req.method ?? "GET").toUpperCase();
   const declaredRaw = req.headers[AGENT_HEADER];
@@ -413,6 +416,8 @@ export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route
   const subject = declared ?? asserted ?? "unknown";
   if (!checked.ok) return { arrival: { class: "claimed", subject, grant: "invalid", grantError: checked.error, ...base } };
   const grant = checked.delegation;
+  const revocation = revoked?.(grantChainDigests(envelope));
+  if (revocation) return { arrival: { class: "claimed", subject: grant.agent, grant: "revoked", grantError: revocation, ...base } };
   if (!delegationValidAt(grant, at)) return { arrival: { class: "claimed", subject: grant.agent, grant: "invalid", grantError: "the grant is outside its validity window", ...base } };
   if (!grant.scopes.includes(route)) return { arrival: { class: "claimed", subject: grant.agent, grant: "out-of-scope", grantError: `route "${route}" is not in the grant's scopes`, ...base } };
   // The signature proves who sent the request. A grant for one agent in a request another agent signed was handed on or taken.
@@ -566,6 +571,18 @@ const json = (status: number, headers: Record<string, string>, body: unknown): D
 export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetch"> & { fetch?: typeof fetch }, framework: string): DoorCore {
   const key = loadPrivateKey(cfg.identity.keyFile);
   const trusted = cfg.trustedPrincipalKeys.map(loadPublicKey);
+  const revocations = createRevocationList(cfg.revokedGrants);
+  revocations.reload();
+  const revoked = (chainDigests: string[]): string | null => {
+    try {
+      revocations.reload();
+    } catch (e) {
+      // fail closed: a revocation list that cannot be read revokes every grant until it can
+      return `the grant cannot be checked against the revocation list (${e instanceof Error ? e.message : String(e)})`;
+    }
+    if (!revocations.has(chainDigests)) return null;
+    return revocations.has(chainDigests.slice(0, 1)) ? "the grant has been revoked" : "a grant above it in its chain has been revoked";
+  };
   const captureKey = cfg.captureKeyEnv ? captureKeyFrom(process.env[cfg.captureKeyEnv] ?? (() => { throw new Error(`capture key: environment variable ${cfg.captureKeyEnv} is not set`); })()) : undefined;
   for (const [route, rule] of Object.entries(cfg.capture ?? {})) {
     for (const side of [rule.args, rule.result, rule.facts]) if (side?.mode === "encrypted" && !captureKey) throw new Error(`capture for ${route} uses mode encrypted, which needs captureKeyEnv`);
@@ -624,7 +641,7 @@ export function createDoorCore(cfg: DoorConfig, options: Omit<DoorOptions, "fetc
     const path = "path" in norm ? norm.path : url.pathname;
     const route = "path" in norm ? matchRoute(cfg.routes, cfg.unmatchedRoute, method, path) : cfg.unmatchedRoute;
     const signature = webBotAuth ? await webBotAuth.verify(signedRequestOf(req)) : undefined;
-    const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature);
+    const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature, revoked);
     const checkedAgent = arrival.class === "verified";
     const by = checkedAgent ? "agent" : "remote";
     arrival.rate = { by, ...rates.hit(`${by}:${checkedAgent ? arrival.subject : arrival.remote}`) };

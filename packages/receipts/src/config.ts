@@ -268,6 +268,8 @@ export const DoorConfigSchema = z.object({
   unmatchedRoute: z.string().min(1).default("other"),
   /** principal keys whose grants the door accepts as a passport: an arrival carrying one of their grants, in scope for its route, is `verified` */
   trustedPrincipalKeys: z.array(z.string()).default([]),
+  /** a JSON file listing digests of revoked grant envelopes, the same file and format as the gateway's (`agent-custody revoke --config door.json` appends to it); re-read whenever it changes, checked on every arrival. A grant it lists, or one whose chain it lists, is `revoked` */
+  revokedGrants: z.string().min(1).optional(),
   policyFile: z.string(),
   /** "enforce" (default) refuses what the policy denies; "observe" forwards everything and records the decision with `enforced: false` */
   mode: z.enum(["enforce", "observe"]).optional(),
@@ -412,6 +414,7 @@ export function loadDoorConfig(path: string): DoorConfig {
     ...cfg,
     identity: { keyFile: r(cfg.identity.keyFile) },
     trustedPrincipalKeys: cfg.trustedPrincipalKeys.map(r),
+    ...(cfg.revokedGrants ? { revokedGrants: r(cfg.revokedGrants) } : {}),
     policyFile: r(cfg.policyFile),
     receiptsDir: r(cfg.receiptsDir),
     ...(cfg.logFile ? { logFile: r(cfg.logFile) } : {}),

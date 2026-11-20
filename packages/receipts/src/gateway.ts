@@ -1,7 +1,7 @@
 // The MCP gateway: sits between an agent and its upstreams, MCP servers or REST APIs, enforces scope + Cedar policy,
 // and emits a signed, logged receipt for every tool call, allowed or denied.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -24,6 +24,8 @@ import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDe
 import { compileRego, evaluateRego, isRegoFile, type RegoPolicy } from "./policy-rego.ts";
 import { createOpaServerPolicy } from "./opa-server.ts";
 import type { ApprovalRecord, AuthorizationBundle, AuthorizationPredicate, FactRecord, OperationEvidence, ReceiptBundle, ReceiptPredicate, ReceiptStatement } from "./receipt.ts";
+import { createRevocationList } from "./revocation.ts";
+export { writeRevokedGrants } from "./revocation.ts";
 import { OPERATION_META_KEY, OperationStore, ownerAlive, type OperationRecord, type OperationStatus } from "./operations.ts";
 
 export const GATEWAY_VERSION = "0.1.0";
@@ -148,12 +150,6 @@ export interface GatewayHost {
 }
 
 /** Writes the revocation list whole, by rename, so a gateway re-reading it never sees half a file. */
-export function writeRevokedGrants(path: string, digests: string[]): void {
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(digests, null, 2) + "\n");
-  renameSync(tmp, path);
-}
-
 export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOptions = {}): Promise<GatewayHost> {
   const gatewayKey = loadPrivateKey(cfg.identity.keyFile);
   const trusted = cfg.trustedPrincipalKeys.map(loadPublicKey);
@@ -296,32 +292,10 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     if (cfg.approvals?.tools.some((rule) => rule.tool === f.tool)) throw new Error(`fact "${f.name}" uses tool ${f.tool}, which requires approval; a fact lookup must be a read that does not require approval`);
   }
 
-  // Revoked grants: digests of grant envelopes, from the file the operator edits (or `revoke` appends to), re-read
-  // whenever the file changes. Checked when a session opens and again on every call, so revocation takes effect on
-  // the next call of a running session, without a key rotation.
-  const revokedSet = new Set<string>();
-  let revokedSeen = "";
-  const reloadRevoked = () => {
-    if (!cfg.revokedGrants) return;
-    if (!existsSync(cfg.revokedGrants)) {
-      if (revokedSeen !== "absent") { revokedSet.clear(); revokedSeen = "absent"; }
-      return;
-    }
-    // inode as well as mtime: `revoke` replaces the file by rename, so two writes in one mtime tick are still seen
-    const st = statSync(cfg.revokedGrants);
-    const m = `${st.ino}:${st.mtimeMs}:${st.size}`;
-    if (m === revokedSeen) return;
-    const list = JSON.parse(readFileSync(cfg.revokedGrants, "utf8")) as unknown;
-    if (!Array.isArray(list)) throw new Error(`${cfg.revokedGrants}: expected a JSON array of grant digests`);
-    revokedSet.clear();
-    for (const d of list) if (typeof d === "string") revokedSet.add(d);
-    revokedSeen = m;
-  };
-  const revoke = (digest: string) => {
-    reloadRevoked();
-    revokedSet.add(digest);
-    if (cfg.revokedGrants) writeRevokedGrants(cfg.revokedGrants, [...revokedSet]);
-  };
+  // Revoked grants, re-read whenever the file changes. Checked when a session opens and again on every call, so
+  // revocation takes effect on the next call of a running session, without a key rotation.
+  const revocations = createRevocationList(cfg.revokedGrants);
+  const revoke = (digest: string) => revocations.add(digest);
 
   // One host, as many upstreams as the agents' jobs need. Each tool name belongs to exactly one upstream, decided at
   // startup, so a receipt's tool is unambiguous and consumed facts flow across them.
@@ -445,17 +419,17 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     const principalKeyid = grant.keyid;
     const chainDigests = grantChainDigests(grantEnvelope);
     const grantDigest = chainDigests[0]!;
-    reloadRevoked();
-    if (chainDigests.some((d) => revokedSet.has(d))) throw new Error("delegation grant has been revoked");
+    revocations.reload();
+    if (revocations.has(chainDigests)) throw new Error("delegation grant has been revoked");
     /** Why the grant is not in force at `at`, or null. Asked on every call, and again just before a forward. */
     const grantProblem = (at: string = new Date().toISOString()): string | null => {
       try {
-        reloadRevoked();
+        revocations.reload();
       } catch (e) {
         // fail closed: a revocation list that cannot be read revokes everything until it can
         return `cannot be checked against the revocation list (${e instanceof Error ? e.message : String(e)})`;
       }
-      if (chainDigests.some((d) => revokedSet.has(d))) return "has been revoked";
+      if (revocations.has(chainDigests)) return "has been revoked";
       if (!delegationValidAt(delegation, at)) return Date.parse(at) < Date.parse(delegation.issuedAt) ? "is not yet valid" : "has expired";
       return null;
     };
@@ -764,10 +738,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
     revoke,
     policyDigest: () => currentPolicy().digest,
     tools: () => advertised.map((t) => t.name),
-    revoked: () => {
-      reloadRevoked();
-      return [...revokedSet];
-    },
+    revoked: () => revocations.list(),
     async reconcile(operationId) {
       if (!operations) throw new Error("gateway has no financial operations configured");
       const op = operations.get(operationId);

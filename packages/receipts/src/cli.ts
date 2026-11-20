@@ -92,8 +92,10 @@ const USAGE = `agent-custody <command>
                                                    a narrower grant for a sub-agent, signed by the agent the parent names; the parent travels inside
   reveal <bundle> --capture-key-env NAME --issuer-key <pub> [--out <file>] [--include-salts]   the values a receipt withheld (capture mode encrypted), as a disclosure file
                                                    for verify --disclose; needs the customer's capture key
-  revoke --config <gateway.json> --grant <grant.json>     revokes a grant: its digest goes into the config's revokedGrants file, every
-                                                   session under it or under a grant delegated from it refuses its next call, and no new session opens for them
+  revoke --config <gateway.json|door.json> --grant <grant.json>
+                                                   revokes a grant: its digest goes into the config's revokedGrants file. At a gateway, every
+                                                   session under it or under a grant delegated from it refuses its next call, and no new session opens for them;
+                                                   at a door, an arrival carrying it, or a grant delegated from it, is claimed with grant "revoked"
   reconcile --config <gateway.json> --operation <uuid>   operator-only provider lookup; commits a receipt before closing an unknown/pending financial operation
   console --config <gateway.json> [--port 8795] [--host 127.0.0.1] [--token-env CONSOLE_TOKEN | --token-file <path>] [--gateway-url <url>] [--state-dir <dir>]
                                                    the admin console for a gateway: its config and tools, a config check, receipts with a verdict each, a policy editor that
@@ -324,15 +326,16 @@ async function main(argv: string[]): Promise<number> {
     case "revoke": {
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, grant: { type: "string" } } });
       if (!values.config || !values.grant) throw new Error("revoke needs --config and --grant");
-      const cfg = loadConfig(values.config);
-      if (!cfg.revokedGrants) throw new Error("revoke needs revokedGrants in the config: the file the gateway re-reads on every call");
+      const door = isDoorConfig(values.config);
+      const cfg = door ? loadDoorConfig(values.config) : loadConfig(values.config);
+      if (!cfg.revokedGrants) throw new Error(`revoke needs revokedGrants in the config: the file the ${door ? "door re-reads on every arrival" : "gateway re-reads on every call"}`);
       const envelope = JSON.parse(readFileSync(values.grant, "utf8")) as Envelope;
       const chain = decodeDelegation(envelope);
       if (!chain) throw new Error(`${values.grant} is not a delegation grant`);
       const digest = grantDigest(envelope);
       const list = existsSync(cfg.revokedGrants) ? (JSON.parse(readFileSync(cfg.revokedGrants, "utf8")) as string[]) : [];
       if (!list.includes(digest)) writeRevokedGrants(cfg.revokedGrants, [...list, digest]);
-      console.log(`revoked ${chain.agent}'s grant from ${chain.principal} (${digest.slice(0, 12)}…): ${cfg.revokedGrants} now lists ${list.includes(digest) ? list.length : list.length + 1} grant(s); a running gateway refuses it on its next call`);
+      console.log(`revoked ${chain.agent}'s grant from ${chain.principal} (${digest.slice(0, 12)}…): ${cfg.revokedGrants} now lists ${list.includes(digest) ? list.length : list.length + 1} grant(s); ${door ? "a running door classifies it as revoked on its next arrival" : "a running gateway refuses it on its next call"}`);
       return 0;
     }
     case "gateway": {

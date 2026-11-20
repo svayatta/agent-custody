@@ -1,18 +1,19 @@
-// Aspect: the door, a receipted reverse proxy in front of your own site or API. Source: src/door.ts, src/config.ts
+// Aspect: the door, a receipted reverse proxy in front of your own site or API. Source: src/door.ts, src/config.ts, src/revocation.ts
 // Run:    node examples/40-door.ts
 //
 // The gateway stands in front of an agent's tools. The door stands in front of a business: a shop's API here. Every
 // arrival is classified by what it presented, decided by the Cedar policy for its route, relayed or refused, and
 // receipted either way. An unknown arrival may read the catalogue and may not refund; an agent carrying a grant signed
 // by the shop's principal key is verified and may refund a positive amount up to £50, and that refund is committed to
-// the log before it is relayed; a grant signed by a stranger leaves it claimed.
+// the log before it is relayed; a grant signed by a stranger leaves it claimed, and so does a grant the shop revoked.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey } from "../src/crypto.ts";
-import { createDelegation } from "../src/delegation.ts";
+import { createDelegation, grantDigest } from "../src/delegation.ts";
 import { ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, createDoorHost, serveDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
+import { writeRevokedGrants } from "../src/revocation.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { formatReport, verifyBundle } from "../src/verify.ts";
 import { buildDoorFixture, startOrigin } from "../scripts/door-fixture.ts";
@@ -20,7 +21,7 @@ import { out, step } from "./_out.ts";
 
 step(1, "a stand-in shop API, and the door in front of it from door.json");
 const origin = await startOrigin();
-const fx = buildDoorFixture(out("40-door"), origin.url);
+const fx = buildDoorFixture(out("40-door"), origin.url, { revokedGrants: "revoked.json" });
 console.log("   policy:\n" + readFileSync(join(fx.dir, "policy.cedar"), "utf8").split("\n").map((l) => "     " + l).join("\n"));
 const host = await createDoorHost(loadDoorConfig(fx.configFile));
 const door = await serveDoor(host, { port: 0, log: () => {} });
@@ -51,10 +52,16 @@ step(4, "a grant signed by a stranger is claimed, not verified, and the policy r
 const forged = createDelegation(generateKeyPair(), { version: "0.1", principal: "shop-owner", agent: "shopping-agent", scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() });
 await show("POST /refunds forged ", await fetch(`${door.url}/refunds`, { method: "POST", headers: { authorization: `Bearer ${grantHeader(forged)}`, "content-type": "application/json" }, body: JSON.stringify({ order: "o_4", amount: 100 }) }));
 
-step(5, "the origin saw only what was allowed, with the arrival's address and the receipt id on each request");
+step(5, "the shop revokes the shopping agent's grant: the running door refuses the next refund it carries, no restart");
+// what `agent-custody revoke --config door.json --grant grant.json` writes
+writeRevokedGrants(join(fx.dir, "revoked.json"), [grantDigest(grant)]);
+const revokedRes = await fetch(`${door.url}/refunds`, { method: "POST", headers: passport, body: JSON.stringify({ order: "o_5", amount: 100 }) });
+await show("POST /refunds revoked", revokedRes);
+
+step(6, "the origin saw only what was allowed, with the arrival's address and the receipt id on each request");
 console.log("   requests at the origin:", origin.seen.map((s) => `${s.method} ${s.path} (receipt ${String(s.headers[RECEIPT_HEADER]).slice(0, 8)}, ${s.headers[CLASS_HEADER]})`).join("; "));
 
-step(6, "anyone with the door's and the principal's public keys verifies the receipts; the refusal verifies without a principal key at all");
+step(7, "anyone with the door's and the principal's public keys verifies the receipts; the refusal verifies without a principal key at all");
 const keys = { issuerKeys: [loadPublicKey(fx.doorPub)], principalKeys: [loadPublicKey(fx.principalPub)], logFile: fx.logFile };
 const okReport = verifyBundle(JSON.parse(readFileSync(join(fx.receiptsDir, `${allowed}.json`), "utf8")), keys);
 console.log(formatReport(okReport).split("\n").slice(0, 12).map((l) => "   " + l).join("\n"));
@@ -65,4 +72,5 @@ await door.close();
 await host.close();
 await origin.close();
 if (!okReport.ok || !refusedReport.ok) throw new Error("a receipt did not verify");
+if (revokedRes.status !== 403) throw new Error(`the revoked grant was answered ${revokedRes.status}, not 403`);
 console.log("\nOK");

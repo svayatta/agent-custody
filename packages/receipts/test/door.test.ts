@@ -8,6 +8,7 @@
 // a response too large to relay is still recorded as the origin's act. Every receipt the door writes verifies with
 // public keys, the right principal and agent provenance, and the arrival fact the policy decided on.
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -16,8 +17,9 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { checkDoorConfig, isDoorConfig } from "../src/check.ts";
 import { loadDoorConfig } from "../src/config.ts";
-import { generateKeyPair, loadPublicKey, sha256Hex } from "../src/crypto.ts";
-import { createDelegation } from "../src/delegation.ts";
+import { generateKeyPair, loadPublicKey, publicKeyToPem, sha256Hex, type Envelope } from "../src/crypto.ts";
+import { createDelegation, delegateFrom, grantDigest } from "../src/delegation.ts";
+import { writeRevokedGrants } from "../src/revocation.ts";
 import { isCommitment } from "../src/capture.ts";
 import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, cedarArgs, createDoorHost, createRateTracker, matchRoute, RATE_BURST_MS, RATE_MINUTE_MS, normalizePath, queryOf, remoteOf, serveDoor, verifyChallengeToken, MAX_CHALLENGE_TOKEN, type Arrival, type ChallengeCheck, type DoorHost, type RunningDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
@@ -253,6 +255,105 @@ describe("rate", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// A grant stands until it expires unless the door can be told otherwise. Revocation is the operator's way to withdraw a
+// passport that leaked or an agent that misbehaves, now, at a running door, without rotating the principal's key.
+describe("revoked grants", () => {
+  const cliPath = join(import.meta.dirname, "..", "src", "cli.ts");
+  let rfx: DoorFixture;
+  let rhost: DoorHost;
+  let rdoor: RunningDoor;
+  const revokedFile = () => join(rfx.dir, "revoked.json");
+  const rgrant = (agent: string, extra: { agentKey?: string } = {}) => createDelegation(rfx.principalKey, { version: "0.1", principal: "shop-owner", agent, scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString(), ...extra });
+  const refund = async (grant: Envelope, order: string) => {
+    const res = await fetch(`${rdoor.url}/refunds`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${grantHeader(grant)}` }, body: JSON.stringify({ order, amount: 100 }) });
+    await res.text();
+    const bundle = bundleAt(rfx.receiptsDir, res);
+    const st = decode(bundle);
+    const ok = verifyBundle(bundle, { issuerKeys: [loadPublicKey(rfx.doorPub)], principalKeys: [loadPublicKey(rfx.principalPub)], logFile: rfx.logFile }).ok;
+    return { res, st, ok, arrival: st.predicate.facts[ARRIVAL_FACT]!.value as Arrival };
+  };
+
+  beforeAll(async () => {
+    rfx = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-revoked-")), origin.url, { revokedGrants: "revoked.json" });
+    rhost = await createDoorHost(loadDoorConfig(rfx.configFile));
+    rdoor = await serveDoor(rhost, { port: 0, log: () => {} });
+  }, 60_000);
+  afterAll(async () => {
+    await rdoor?.close();
+    await rhost?.close();
+  });
+
+  it("`agent-custody revoke --config door.json` withdraws a grant at a running door: the next arrival is claimed, refused, and its receipt verifies", async () => {
+    const grant = rgrant("refund-agent");
+    const grantFile = join(rfx.dir, "grant.json");
+    writeFileSync(grantFile, JSON.stringify(grant));
+    const before = await refund(grant, "o_r1");
+    expect(before.res.status).toBe(200);
+    expect(before.arrival).toMatchObject({ class: "verified", grant: "verified" });
+
+    const cli = spawnSync(process.execPath, [cliPath, "revoke", "--config", rfx.configFile, "--grant", grantFile], { encoding: "utf8" });
+    expect(cli.status, cli.stderr).toBe(0);
+    expect(cli.stdout).toMatch(/revoked refund-agent's grant from shop-owner/);
+    expect(cli.stdout).toMatch(/door classifies it as revoked/);
+    expect(JSON.parse(readFileSync(revokedFile(), "utf8"))).toEqual([grantDigest(grant)]);
+
+    const after = await refund(grant, "o_r2");
+    expect(after.res.status).toBe(403);
+    expect(after.arrival).toMatchObject({ class: "claimed", subject: "refund-agent", grant: "revoked", grantError: "the grant has been revoked" });
+    // a revoked grant attests nothing: the principal is claimed, the Cedar principal is not the agent
+    expect(after.st.predicate.principal).toEqual({ id: null, provenance: "claimed" });
+    expect(after.st.predicate.delegation).toBeUndefined();
+    expect(after.st.predicate.policy?.decision).toBe("deny");
+    expect(after.ok).toBe(true);
+
+    // another grant from the same principal is untouched
+    expect((await refund(rgrant("other-agent"), "o_r3")).res.status).toBe(200);
+  });
+
+  it("revoking a grant revokes the grants delegated from it, and the reason says it was a link above", async () => {
+    const parentAgent = generateKeyPair();
+    const parent = rgrant("lead-agent", { agentKey: publicKeyToPem(parentAgent.publicKey) });
+    const child = delegateFrom(parent, parentAgent, { agent: "helper-agent", scopes: ["refund"] });
+    expect((await refund(child, "o_d1")).arrival).toMatchObject({ class: "verified", subject: "helper-agent" });
+    writeRevokedGrants(revokedFile(), [...(JSON.parse(readFileSync(revokedFile(), "utf8")) as string[]), grantDigest(parent)]);
+    const after = await refund(child, "o_d2");
+    expect(after.res.status).toBe(403);
+    expect(after.arrival).toMatchObject({ class: "claimed", subject: "helper-agent", grant: "revoked", grantError: "a grant above it in its chain has been revoked" });
+    expect(after.ok).toBe(true);
+  });
+
+  it("a revocation file that cannot be read revokes every grant until it can: fail closed, never open", async () => {
+    const saved = readFileSync(revokedFile(), "utf8");
+    const grant = rgrant("steady-agent");
+    try {
+      writeFileSync(revokedFile(), "{ not json");
+      const during = await refund(grant, "o_u1");
+      expect(during.res.status).toBe(403);
+      expect(during.arrival).toMatchObject({ class: "claimed", grant: "revoked" });
+      expect(during.arrival.grantError).toMatch(/cannot be checked against the revocation list/);
+      expect(during.ok).toBe(true);
+    } finally {
+      writeFileSync(revokedFile(), saved);
+    }
+    expect((await refund(grant, "o_u2")).res.status).toBe(200);
+  });
+
+  it("a door whose revocation file cannot be read at start refuses to start; a missing file is an empty list", async () => {
+    const bad = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-revoked-bad-")), origin.url, { revokedGrants: "revoked.json" });
+    writeFileSync(join(bad.dir, "revoked.json"), JSON.stringify({ digests: [] }));
+    await expect(createDoorHost(loadDoorConfig(bad.configFile))).rejects.toThrow(/expected a JSON array of grant digests/);
+    expect(checkDoorConfig(bad.configFile).filter((f) => f.level === "error").map((f) => f.check)).toContain("revokedGrants");
+    const missing = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-revoked-missing-")), origin.url, { revokedGrants: "revoked.json" });
+    const h = await createDoorHost(loadDoorConfig(missing.configFile));
+    await h.close();
+    expect(checkDoorConfig(missing.configFile).find((f) => f.check === "revokedGrants")?.level).toBe("ok");
+  });
+
+  it("`check` warns when a door trusts principals and has no revocation file", () => {
+    expect(checkDoorConfig(fx.configFile).find((f) => f.check === "revokedGrants")).toMatchObject({ level: "warn" });
   });
 });
 
