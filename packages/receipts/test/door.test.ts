@@ -9,7 +9,7 @@
 // public keys, the right principal and agent provenance, and the arrival fact the policy decided on.
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -28,6 +28,22 @@ import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { verifyBundle } from "../src/verify.ts";
 import { buildDoorFixture, startOrigin, type DoorFixture, type Origin } from "../scripts/door-fixture.ts";
 import { createWebBotAuthVerifier, DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, jwkThumbprint, parseDictionary, signatureBase, type SfInnerList, type SignedRequest, type WebBotAuthOptions } from "../src/web-bot-auth.ts";
+
+// The policy engine is the real one unless a test arms a fault: an engine that throws must refuse, never relay.
+const policyFault = vi.hoisted(() => ({ throwNext: false }));
+vi.mock("../src/policy.ts", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/policy.ts")>();
+  return {
+    ...real,
+    evaluate: (...a: Parameters<typeof real.evaluate>) => {
+      if (policyFault.throwNext) {
+        policyFault.throwNext = false;
+        throw new Error("the policy engine failed");
+      }
+      return real.evaluate(...a);
+    },
+  };
+});
 
 let origin: Origin;
 let fx: DoorFixture;
@@ -1496,5 +1512,187 @@ describe("web bot auth", () => {
       expect(checkDoorConfig(loose.configFile).filter((f) => f.check === "web bot auth" && f.level === "warn")).toHaveLength(1);
       expect(() => loadDoorConfig(buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-wba-bad-")), origin.url, { webBotAuth: { agents: ["http://crawler.example"], authorities: [AUTHORITY] } }).configFile)).toThrow(/https origin/);
     });
+  });
+});
+
+// The paths a door takes when something around it fails: each must refuse or stop, never relay on a guess.
+describe("failures around the door", () => {
+  const fresh = (name: string, extra: Record<string, unknown> = {}) => buildDoorFixture(mkdtempSync(join(tmpdir(), `agent-custody-door-${name}-`)), origin.url, extra);
+  const served = async (f: DoorFixture, options: Parameters<typeof createDoorHost>[1] = {}) => {
+    const h = await createDoorHost(loadDoorConfig(f.configFile), options);
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    return { h, d, close: async () => { await d.close(); await h.close(); } };
+  };
+
+  it("a policy engine that throws is a deny: the arrival is refused, the origin never hears of it, and the receipt records the error and verifies", async () => {
+    const before = origin.seen.length;
+    policyFault.throwNext = true;
+    const r = await call("GET", "/catalogue/socks");
+    expect(policyFault.throwNext).toBe(false);
+    expect(r.res.status).toBe(403);
+    expect(origin.seen.length).toBe(before);
+    expect(r.p.policy).toMatchObject({ decision: "deny", errors: ["the policy engine failed"] });
+    expect(r.p.execution.status).toBe("denied");
+    expect(verified(r.bundle).ok).toBe(true);
+    // the next arrival is decided by the engine as before
+    expect((await call("GET", "/catalogue/socks")).res.status).toBe(200);
+  });
+
+  it("a policy that does not parse stops the door at start; one that cannot be read later leaves the policy in force", async () => {
+    const bad = fresh("bad-policy");
+    writeFileSync(join(bad.dir, "policy.cedar"), "permit(principal, action, resource");
+    await expect(createDoorHost(loadDoorConfig(bad.configFile))).rejects.toThrow(/does not parse/);
+
+    const gone = fresh("gone-policy");
+    const s = await served(gone);
+    const errors: string[] = [];
+    const quiet = console.error;
+    console.error = (m: string) => { errors.push(String(m)); };
+    try {
+      const digest = s.h.policyDigest();
+      const policyFile = join(gone.dir, "policy.cedar");
+      renameSync(policyFile, `${policyFile}.away`);
+      const read = await fetch(`${s.d.url}/catalogue/hats`);
+      expect(read.status).toBe(200);
+      const refund = await fetch(`${s.d.url}/refunds`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ order: "o_g", amount: 100 }) });
+      expect(refund.status).toBe(403);
+      expect(s.h.policyDigest()).toBe(digest);
+      expect(errors.some((e) => e.includes("cannot read") && e.includes(`policy ${digest} stays in force`))).toBe(true);
+      renameSync(`${policyFile}.away`, policyFile);
+    } finally {
+      console.error = quiet;
+      await s.close();
+    }
+  });
+
+  it("a capture config the door cannot honour stops it at start: no key variable, or encrypted capture without a key; with the key it starts", async () => {
+    const variable = "DOOR_TEST_CAPTURE_KEY";
+    delete process.env[variable];
+    const unset = fresh("capture-unset", { captureKeyEnv: variable });
+    await expect(createDoorHost(loadDoorConfig(unset.configFile))).rejects.toThrow(`environment variable ${variable} is not set`);
+    const keyless = fresh("capture-keyless", { capture: { refund: { args: { mode: "encrypted" } } } });
+    await expect(createDoorHost(loadDoorConfig(keyless.configFile))).rejects.toThrow("capture for refund uses mode encrypted, which needs captureKeyEnv");
+    process.env[variable] = "11".repeat(32);
+    try {
+      const keyed = fresh("capture-keyed", { captureKeyEnv: variable, capture: { refund: { args: { mode: "encrypted" } } } });
+      const h = await createDoorHost(loadDoorConfig(keyed.configFile));
+      await h.close();
+    } finally {
+      delete process.env[variable];
+    }
+  });
+
+  it("an origin header from the environment reaches the origin and never the receipt; an unset variable stops the door at start", async () => {
+    const variable = "DOOR_TEST_ORIGIN_KEY";
+    delete process.env[variable];
+    const unset = fresh("origin-env-unset", { origin: { url: origin.url, headerEnv: { "x-shop-key": variable } } });
+    await expect(createDoorHost(loadDoorConfig(unset.configFile))).rejects.toThrow(`environment variable ${variable} is not set`);
+    process.env[variable] = "shop-secret-value";
+    const set = fresh("origin-env-set", { origin: { url: origin.url, headerEnv: { "x-shop-key": variable } } });
+    const s = await served(set);
+    try {
+      const res = await fetch(`${s.d.url}/catalogue/belts`);
+      expect(res.status).toBe(200);
+      expect(origin.seen.at(-1)!.headers["x-shop-key"]).toBe("shop-secret-value");
+      expect(readFileSync(join(set.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")).not.toContain("shop-secret-value");
+    } finally {
+      delete process.env[variable];
+      await s.close();
+    }
+  });
+
+  it("a source past 64 expired arrivals has its window compacted, and its counts stay exact", () => {
+    let t = 0;
+    const tracker = createRateTracker(() => t);
+    for (let i = 0; i < 100; i++) tracker.hit("remote:busy");
+    t = RATE_MINUTE_MS + 1;
+    // 100 arrivals have left the minute: the compaction drops them, and the counts are this arrival alone
+    expect(tracker.hit("remote:busy")).toEqual({ burst: 1, minute: 1 });
+    t += 1;
+    expect(tracker.hit("remote:busy")).toEqual({ burst: 2, minute: 2 });
+    t += RATE_BURST_MS;
+    expect(tracker.hit("remote:busy")).toEqual({ burst: 1, minute: 3 });
+  });
+
+  it("a route whose path is `*` takes every path its methods allow", () => {
+    const routes = [{ name: "reads", methods: ["GET" as const], path: "*" }, { name: "rest", path: "*" }];
+    expect(matchRoute(routes, "other", "GET", "/anything/at/all")).toBe("reads");
+    expect(matchRoute(routes, "other", "DELETE", "/anything")).toBe("rest");
+  });
+
+  it("an origin answer with no body is relayed and recorded as zero bytes", async () => {
+    const empty = await rawOrigin((res) => { res.writeHead(204); res.end(); });
+    const f = fresh("empty-body", { origin: { url: empty.url } });
+    const s = await served(f);
+    try {
+      const res = await fetch(`${s.d.url}/catalogue/x`);
+      expect(res.status).toBe(204);
+      const st = decode(bundleAt(f.receiptsDir, res));
+      expect(st.predicate.execution).toMatchObject({ status: "executed", result: { status: 204, bodyBytes: 0, bodyDigest: sha256Hex(Buffer.alloc(0)) } });
+    } finally {
+      await s.close();
+      await empty.close();
+    }
+  });
+
+  it("an origin on a port fetch refuses to dial was never reached: 502, not the 504 that says the origin may have acted", async () => {
+    // 6000 (X11) is on the fetch standard's list of bad ports: the request is refused before a connection is made
+    const url = "http://127.0.0.1:6000";
+    const f = fresh("bad-port", { origin: { url, timeoutMs: 2000 } });
+    const s = await served(f);
+    try {
+      const res = await fetch(`${s.d.url}/catalogue/x`);
+      expect(res.status).toBe(502);
+      expect(decode(bundleAt(f.receiptsDir, res)).predicate.execution).toMatchObject({ status: "error", error: expect.stringContaining("could not be reached") });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("a JSON content type with a body that is not JSON is decided without the body: the policy sees no amount and refuses the refund", async () => {
+    const res = await fetch(`${door.url}/refunds`, { method: "POST", headers: { authorization: `Bearer ${grantHeader(grantFor("shopping-agent", ["refund"]))}`, "content-type": "application/json" }, body: "{ amount: 100" });
+    expect(res.status).toBe(403);
+    const st = decode(bundleAt(fx.receiptsDir, res));
+    expect((st.predicate.request.args as { body?: unknown }).body).toBeUndefined();
+    expect(st.predicate.policy?.decision).toBe("deny");
+    expect(verified(bundleAt(fx.receiptsDir, res)).ok).toBe(true);
+  });
+
+  it("with autoFlush the door retries its outbox on a timer, and stops when it is closed", async () => {
+    let appends = 0;
+    const refusing: LogSink = { kind: "file", where: "refusing", append: async () => { appends += 1; throw new Error("the log is down"); } };
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const f = fresh("autoflush");
+    const s = await served(f, { log: refusing, autoFlush: true });
+    try {
+      const res = await fetch(`${s.d.url}/catalogue/x`);
+      expect(res.status).toBe(200);
+      expect(s.h.pendingReceipts()).toBe(1);
+      const tried = appends;
+      vi.advanceTimersByTime(30_000);
+      await vi.waitFor(() => expect(appends).toBeGreaterThan(tried));
+      expect(s.h.pendingReceipts()).toBe(1);
+      await s.close();
+      const afterClose = appends;
+      vi.advanceTimersByTime(60_000);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(appends).toBe(afterClose);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a handler that fails before it answers gets a 500 that says the outcome is unknown, and the failure is logged", async () => {
+    const logged: string[] = [];
+    const failing: DoorHost = { keyid: "k", policyDigest: () => "p", pendingReceipts: () => 0, flushOutbox: async () => ({ flushed: 0, remaining: 0 }) as never, close: async () => {}, handle: async () => { throw new Error("the disk is gone"); } };
+    const d = await serveDoor(failing, { port: 0, log: (m) => logged.push(m) });
+    try {
+      const res = await fetch(`${d.url}/catalogue/x`);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "the door failed before it could answer; whether the origin acted on the request is unknown", receipt: null });
+      expect(logged).toEqual(["agent-custody door: the disk is gone"]);
+    } finally {
+      await d.close();
+    }
   });
 });
