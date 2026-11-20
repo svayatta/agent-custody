@@ -164,6 +164,8 @@ agent-custody grant --key keys/principal.key --principal user_456 --agent suppor
 
 Programmatically: `createDelegation(principalKey, payload): Envelope`, `verifyDelegation(envelope, trustedPrincipalKeys): { ok: true, delegation, keyid, chain } | { ok: false, error }`, `delegationValidAt(delegation, isoInstant): boolean`.
 
+**An agent named by its key.** `--did-key` with `--agent-key` and no `--agent` sets the grant's `agent` to the [did:key](https://w3c-ccg.github.io/did-key-spec/) of that Ed25519 key (`did:key:z6Mk...`), and keeps the key in `agentKey`. `didKeyOf(publicKey): string` derives it and `publicKeyFromDidKey(did): PublicKeyRef` decodes it, throwing when it does not name an Ed25519 key. To the gateway the identifier is the agent's name, compared as a string. The door checks it on every link of the chain: [a did:key agent](/receipts/door#a-did-key-agent). A did:key names a key; a grant for one is still bearer-grade, and nothing here checks that the sender holds the key.
+
 ### Delegation chains
 
 An agent whose grant names its key delegates a narrower grant to a sub-agent:
