@@ -4,6 +4,8 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **The door's example config can revoke grants.** `deploy/door/proxy/config/door.json` names `revokedGrants: /data/revoked.json`, and `deploy/door/README.md` gives the command that revokes a grant in the running container, with the grant on stdin. `deploy/door/smoke.sh` now runs that command and checks that the next refund carrying the grant is refused, with a receipt that records the arrival as `claimed` with `grant: "revoked"`.
+
 ## 0.16.9 — 2026-11-20
 
 - **The door can revoke a grant** (#258). With `revokedGrants` in the door config, the gateway's revocation file and format, a grant can be withdrawn before it expires: `agent-custody revoke --config door.json --grant grant.json` appends its digest, and a running door classifies the next arrival carrying it as `claimed`, with the new `grant: "revoked"` and the reason in `grantError`, so the Cedar principal is not the agent and the receipt attests no principal. Revoking a grant revokes the grants delegated from it. The check runs after the signature and before the window and the scope. A revocation file that cannot be read stops the door from starting, and one that becomes unreadable while it runs revokes every grant until it can be read; a missing file is an empty list. `agent-custody check` reports the file, errors on one it cannot read, and warns when a door trusts principals and has no revocation file. The gateway and the door now read the file through one module, `src/revocation.ts`; the gateway's behaviour is unchanged. Guide: [revoking a grant](packages/receipts/docs/door.md#revoking-a-grant), [door signals](packages/receipts/docs/door-signals.md).
