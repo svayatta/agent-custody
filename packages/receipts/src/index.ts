@@ -62,6 +62,7 @@ export * from "./config.ts";
 export * from "./operations.ts";
 export * from "./crypto.ts";
 export * from "./delegation.ts";
+export { base58btcDecode, base58btcEncode, DID_KEY_PREFIX, didKeyOf, publicKeyFromDidKey } from "./did-key.ts";
 export * from "./approval.ts";
 export * from "./gateway.ts";
 export * from "./issue.ts";

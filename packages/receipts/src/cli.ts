@@ -10,6 +10,7 @@ import { loadAcsGuardianConfig, loadConfig, loadDoorConfig, loadEgressConfig, lo
 import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
 import type { Envelope } from "./crypto.ts";
 import { createDelegation, decodeDelegation, delegateFrom, grantDigest } from "./delegation.ts";
+import { didKeyOf } from "./did-key.ts";
 import { createGateway, createGatewayHost, serveStdio, writeRevokedGrants } from "./gateway.ts";
 import { postgresResolver, serveLog } from "./log-sink.ts";
 import { importLogFile, PostgresTenancy, type PostgresLike, type Plan } from "./log-store.ts";
@@ -87,7 +88,8 @@ const USAGE = `agent-custody <command>
 
   keygen  --dir <dir> --name <name>
   grant   --key <principal.key> --principal <id> --agent <id> --scopes <a,b> [--ttl-hours 24] [--agent-key <agent.pub>] --out <file>
-                                                   --agent-key names the agent's own key in the grant, so the agent may delegate
+                                                   --agent-key names the agent's own key in the grant, so the agent may delegate;
+                                                   --did-key with --agent-key and no --agent names the agent by that key's did:key
   delegate --key <agent.key> --parent <grant.json> --agent <sub-agent> --scopes <a,b> [--ttl-hours N] [--agent-key <sub.pub>] --out <file>
                                                    a narrower grant for a sub-agent, signed by the agent the parent names; the parent travels inside
   reveal <bundle> --capture-key-env NAME --issuer-key <pub> [--out <file>] [--include-salts]   the values a receipt withheld (capture mode encrypted), as a disclosure file
@@ -275,22 +277,25 @@ async function main(argv: string[]): Promise<number> {
           scopes: { type: "string" },
           "ttl-hours": { type: "string", default: "24" },
           "agent-key": { type: "string" },
+          "did-key": { type: "boolean", default: false },
           out: { type: "string" },
         },
       });
-      if (!values.key || !values.principal || !values.agent || !values.scopes || !values.out) throw new Error("grant needs --key --principal --agent --scopes --out");
+      if (values["did-key"] && (!values["agent-key"] || values.agent)) throw new Error("--did-key names the agent by the did:key of --agent-key, so it needs --agent-key and no --agent");
+      const agent = values["did-key"] ? didKeyOf(loadPublicKey(values["agent-key"]!).publicKey) : values.agent;
+      if (!values.key || !values.principal || !agent || !values.scopes || !values.out) throw new Error("grant needs --key --principal --agent (or --agent-key with --did-key) --scopes --out");
       const now = Date.now();
       const env = createDelegation(loadPrivateKey(values.key), {
         version: "0.1",
         principal: values.principal,
-        agent: values.agent,
+        agent,
         scopes: values.scopes.split(",").map((s) => s.trim()).filter(Boolean),
         issuedAt: new Date(now).toISOString(),
         expiresAt: new Date(now + Number(values["ttl-hours"]) * 3600_000).toISOString(),
         ...(values["agent-key"] ? { agentKey: readFileSync(values["agent-key"], "utf8") } : {}),
       });
       writeFileSync(values.out, JSON.stringify(env, null, 2));
-      console.log(`wrote ${values.out}`);
+      console.log(`wrote ${values.out}${values["did-key"] ? ` for ${agent}` : ""}`);
       return 0;
     }
     case "delegate": {
