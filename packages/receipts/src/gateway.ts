@@ -149,7 +149,6 @@ export interface GatewayHost {
   close(): Promise<void>;
 }
 
-/** Writes the revocation list whole, by rename, so a gateway re-reading it never sees half a file. */
 export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOptions = {}): Promise<GatewayHost> {
   const gatewayKey = loadPrivateKey(cfg.identity.keyFile);
   const trusted = cfg.trustedPrincipalKeys.map(loadPublicKey);
