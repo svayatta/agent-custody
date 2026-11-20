@@ -53,7 +53,11 @@ export function formScript(challenge: Challenge): string {
       const attr = (name, fallback) => (via && via.hasAttribute && via.hasAttribute(name) ? via.getAttribute(name) : fallback);
       const method = (attr("formmethod", form.getAttribute("method")) || "get").toLowerCase();
       const to = new URL(attr("formaction", form.getAttribute("action")) || location.href, location.href);
-      if (method !== "post" || to.origin !== location.origin) return;
+      if (method !== "post" || to.origin !== location.origin) {
+        // the browser reads the fields after this event: a disabled field is left out, so the token does not go along
+        for (const name of tokenFields) form.querySelectorAll('[name="' + name + '"]').forEach((el) => { el.disabled = true; });
+        return;
+      }
       event.preventDefault();
       if (sending) return;
       const token = api().getResponse(widget);

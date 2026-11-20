@@ -43,6 +43,8 @@ const site = async () => {
 interface FakeForm {
   attrs: Record<string, string>;
   noButton?: boolean;
+  /** the widget's hidden fields, as elements the script may disable */
+  hidden?: { name: string; disabled: boolean }[];
   fields: [string, string][];
   handlers: ((e: unknown) => Promise<void>)[];
   inserted: { className: string; textContent: string }[];
@@ -68,6 +70,7 @@ function runScript(script: string, o: { origin: string; forms: FakeForm[]; token
       return o.forms.map((f) => ({
         getAttribute: (n: string) => f.attrs[n] ?? null,
         querySelector: () => (f.noButton ? null : { before: (...els: FakeForm["inserted"]) => f.inserted.push(...els) }),
+        querySelectorAll: (sel: string) => (f.hidden ?? []).filter((el) => sel === `[name="${el.name}"]`),
         append: (...els: FakeForm["inserted"]) => f.inserted.push(...els),
         addEventListener: (type: string, fn: FakeForm["handlers"][number]) => { if (type === "submit") f.handlers.push(fn); },
         fields: f.fields,
@@ -272,6 +275,15 @@ describe("the form protector", () => {
     expect((sent[0]!.init.headers as Record<string, string>)["x-agent-custody-challenge"]).toBe("hc-token");
     expect(String(sent[0]!.init.body)).toBe("message=Hi");
     expect(noteOf(bare)).toBe("Sent.");
+
+    // a button that posts natively (GET here) takes no token with it: the widget's hidden fields are disabled first
+    const hidden = [{ name: "h-captcha-response", disabled: false }, { name: "g-recaptcha-response", disabled: false }, { name: "message", disabled: false }];
+    const withFields = { ...formOf({ method: "post", action: "/contact" }, [["message", "Hi"]]), hidden };
+    const again = runScript(script, { origin: running.url, forms: [withFields], token: () => "hc-token", fetch: recording, provider: "hcaptcha" });
+    again.loader().onload!();
+    expect(await submit(withFields, { formmethod: "get" })).toBe(false);
+    expect(hidden.map((el) => [el.name, el.disabled])).toEqual([["h-captcha-response", true], ["g-recaptcha-response", true], ["message", false]]);
+    expect(sent).toHaveLength(1);
   });
 
   it("a config value cannot close the script element or inject code: '<' is escaped, and the value arrives intact", () => {
