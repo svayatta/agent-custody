@@ -8,7 +8,8 @@
 // a response too large to relay is still recorded as the origin's act. Every receipt the door writes verifies with
 // public keys, the right principal and agent provenance, and the arrival fact the policy decided on.
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,8 +17,9 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { checkDoorConfig, isDoorConfig } from "../src/check.ts";
 import { loadDoorConfig } from "../src/config.ts";
-import { generateKeyPair, loadPublicKey, sha256Hex } from "../src/crypto.ts";
-import { createDelegation } from "../src/delegation.ts";
+import { generateKeyPair, loadPublicKey, publicKeyToPem, sha256Hex, type Envelope } from "../src/crypto.ts";
+import { createDelegation, delegateFrom, grantDigest } from "../src/delegation.ts";
+import { writeRevokedGrants } from "../src/revocation.ts";
 import { isCommitment } from "../src/capture.ts";
 import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, cedarArgs, createDoorHost, createRateTracker, matchRoute, RATE_BURST_MS, RATE_MINUTE_MS, normalizePath, queryOf, remoteOf, serveDoor, verifyChallengeToken, MAX_CHALLENGE_TOKEN, type Arrival, type ChallengeCheck, type DoorHost, type RunningDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
@@ -26,6 +28,22 @@ import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { verifyBundle } from "../src/verify.ts";
 import { buildDoorFixture, startOrigin, type DoorFixture, type Origin } from "../scripts/door-fixture.ts";
 import { createWebBotAuthVerifier, DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, jwkThumbprint, parseDictionary, signatureBase, type SfInnerList, type SignedRequest, type WebBotAuthOptions } from "../src/web-bot-auth.ts";
+
+// The policy engine is the real one unless a test arms a fault: an engine that throws must refuse, never relay.
+const policyFault = vi.hoisted(() => ({ throwNext: false }));
+vi.mock("../src/policy.ts", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/policy.ts")>();
+  return {
+    ...real,
+    evaluate: (...a: Parameters<typeof real.evaluate>) => {
+      if (policyFault.throwNext) {
+        policyFault.throwNext = false;
+        throw new Error("the policy engine failed");
+      }
+      return real.evaluate(...a);
+    },
+  };
+});
 
 let origin: Origin;
 let fx: DoorFixture;
@@ -253,6 +271,105 @@ describe("rate", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// A grant stands until it expires unless the door can be told otherwise. Revocation is the operator's way to withdraw a
+// passport that leaked or an agent that misbehaves, now, at a running door, without rotating the principal's key.
+describe("revoked grants", () => {
+  const cliPath = join(import.meta.dirname, "..", "src", "cli.ts");
+  let rfx: DoorFixture;
+  let rhost: DoorHost;
+  let rdoor: RunningDoor;
+  const revokedFile = () => join(rfx.dir, "revoked.json");
+  const rgrant = (agent: string, extra: { agentKey?: string } = {}) => createDelegation(rfx.principalKey, { version: "0.1", principal: "shop-owner", agent, scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString(), ...extra });
+  const refund = async (grant: Envelope, order: string) => {
+    const res = await fetch(`${rdoor.url}/refunds`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${grantHeader(grant)}` }, body: JSON.stringify({ order, amount: 100 }) });
+    await res.text();
+    const bundle = bundleAt(rfx.receiptsDir, res);
+    const st = decode(bundle);
+    const ok = verifyBundle(bundle, { issuerKeys: [loadPublicKey(rfx.doorPub)], principalKeys: [loadPublicKey(rfx.principalPub)], logFile: rfx.logFile }).ok;
+    return { res, st, ok, arrival: st.predicate.facts[ARRIVAL_FACT]!.value as Arrival };
+  };
+
+  beforeAll(async () => {
+    rfx = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-revoked-")), origin.url, { revokedGrants: "revoked.json" });
+    rhost = await createDoorHost(loadDoorConfig(rfx.configFile));
+    rdoor = await serveDoor(rhost, { port: 0, log: () => {} });
+  }, 60_000);
+  afterAll(async () => {
+    await rdoor?.close();
+    await rhost?.close();
+  });
+
+  it("`agent-custody revoke --config door.json` withdraws a grant at a running door: the next arrival is claimed, refused, and its receipt verifies", async () => {
+    const grant = rgrant("refund-agent");
+    const grantFile = join(rfx.dir, "grant.json");
+    writeFileSync(grantFile, JSON.stringify(grant));
+    const before = await refund(grant, "o_r1");
+    expect(before.res.status).toBe(200);
+    expect(before.arrival).toMatchObject({ class: "verified", grant: "verified" });
+
+    const cli = spawnSync(process.execPath, [cliPath, "revoke", "--config", rfx.configFile, "--grant", grantFile], { encoding: "utf8" });
+    expect(cli.status, cli.stderr).toBe(0);
+    expect(cli.stdout).toMatch(/revoked refund-agent's grant from shop-owner/);
+    expect(cli.stdout).toMatch(/door classifies it as revoked/);
+    expect(JSON.parse(readFileSync(revokedFile(), "utf8"))).toEqual([grantDigest(grant)]);
+
+    const after = await refund(grant, "o_r2");
+    expect(after.res.status).toBe(403);
+    expect(after.arrival).toMatchObject({ class: "claimed", subject: "refund-agent", grant: "revoked", grantError: "the grant has been revoked" });
+    // a revoked grant attests nothing: the principal is claimed, the Cedar principal is not the agent
+    expect(after.st.predicate.principal).toEqual({ id: null, provenance: "claimed" });
+    expect(after.st.predicate.delegation).toBeUndefined();
+    expect(after.st.predicate.policy?.decision).toBe("deny");
+    expect(after.ok).toBe(true);
+
+    // another grant from the same principal is untouched
+    expect((await refund(rgrant("other-agent"), "o_r3")).res.status).toBe(200);
+  });
+
+  it("revoking a grant revokes the grants delegated from it, and the reason says it was a link above", async () => {
+    const parentAgent = generateKeyPair();
+    const parent = rgrant("lead-agent", { agentKey: publicKeyToPem(parentAgent.publicKey) });
+    const child = delegateFrom(parent, parentAgent, { agent: "helper-agent", scopes: ["refund"] });
+    expect((await refund(child, "o_d1")).arrival).toMatchObject({ class: "verified", subject: "helper-agent" });
+    writeRevokedGrants(revokedFile(), [...(JSON.parse(readFileSync(revokedFile(), "utf8")) as string[]), grantDigest(parent)]);
+    const after = await refund(child, "o_d2");
+    expect(after.res.status).toBe(403);
+    expect(after.arrival).toMatchObject({ class: "claimed", subject: "helper-agent", grant: "revoked", grantError: "a grant above it in its chain has been revoked" });
+    expect(after.ok).toBe(true);
+  });
+
+  it("a revocation file that cannot be read revokes every grant until it can: fail closed, never open", async () => {
+    const saved = readFileSync(revokedFile(), "utf8");
+    const grant = rgrant("steady-agent");
+    try {
+      writeFileSync(revokedFile(), "{ not json");
+      const during = await refund(grant, "o_u1");
+      expect(during.res.status).toBe(403);
+      expect(during.arrival).toMatchObject({ class: "claimed", grant: "revoked" });
+      expect(during.arrival.grantError).toMatch(/cannot be checked against the revocation list/);
+      expect(during.ok).toBe(true);
+    } finally {
+      writeFileSync(revokedFile(), saved);
+    }
+    expect((await refund(grant, "o_u2")).res.status).toBe(200);
+  });
+
+  it("a door whose revocation file cannot be read at start refuses to start; a missing file is an empty list", async () => {
+    const bad = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-revoked-bad-")), origin.url, { revokedGrants: "revoked.json" });
+    writeFileSync(join(bad.dir, "revoked.json"), JSON.stringify({ digests: [] }));
+    await expect(createDoorHost(loadDoorConfig(bad.configFile))).rejects.toThrow(/expected a JSON array of grant digests/);
+    expect(checkDoorConfig(bad.configFile).filter((f) => f.level === "error").map((f) => f.check)).toContain("revokedGrants");
+    const missing = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-revoked-missing-")), origin.url, { revokedGrants: "revoked.json" });
+    const h = await createDoorHost(loadDoorConfig(missing.configFile));
+    await h.close();
+    expect(checkDoorConfig(missing.configFile).find((f) => f.check === "revokedGrants")?.level).toBe("ok");
+  });
+
+  it("`check` warns when a door trusts principals and has no revocation file", () => {
+    expect(checkDoorConfig(fx.configFile).find((f) => f.check === "revokedGrants")).toMatchObject({ level: "warn" });
   });
 });
 
@@ -1395,5 +1512,187 @@ describe("web bot auth", () => {
       expect(checkDoorConfig(loose.configFile).filter((f) => f.check === "web bot auth" && f.level === "warn")).toHaveLength(1);
       expect(() => loadDoorConfig(buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-wba-bad-")), origin.url, { webBotAuth: { agents: ["http://crawler.example"], authorities: [AUTHORITY] } }).configFile)).toThrow(/https origin/);
     });
+  });
+});
+
+// The paths a door takes when something around it fails: each must refuse or stop, never relay on a guess.
+describe("failures around the door", () => {
+  const fresh = (name: string, extra: Record<string, unknown> = {}) => buildDoorFixture(mkdtempSync(join(tmpdir(), `agent-custody-door-${name}-`)), origin.url, extra);
+  const served = async (f: DoorFixture, options: Parameters<typeof createDoorHost>[1] = {}) => {
+    const h = await createDoorHost(loadDoorConfig(f.configFile), options);
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    return { h, d, close: async () => { await d.close(); await h.close(); } };
+  };
+
+  it("a policy engine that throws is a deny: the arrival is refused, the origin never hears of it, and the receipt records the error and verifies", async () => {
+    const before = origin.seen.length;
+    policyFault.throwNext = true;
+    const r = await call("GET", "/catalogue/socks");
+    expect(policyFault.throwNext).toBe(false);
+    expect(r.res.status).toBe(403);
+    expect(origin.seen.length).toBe(before);
+    expect(r.p.policy).toMatchObject({ decision: "deny", errors: ["the policy engine failed"] });
+    expect(r.p.execution.status).toBe("denied");
+    expect(verified(r.bundle).ok).toBe(true);
+    // the next arrival is decided by the engine as before
+    expect((await call("GET", "/catalogue/socks")).res.status).toBe(200);
+  });
+
+  it("a policy that does not parse stops the door at start; one that cannot be read later leaves the policy in force", async () => {
+    const bad = fresh("bad-policy");
+    writeFileSync(join(bad.dir, "policy.cedar"), "permit(principal, action, resource");
+    await expect(createDoorHost(loadDoorConfig(bad.configFile))).rejects.toThrow(/does not parse/);
+
+    const gone = fresh("gone-policy");
+    const s = await served(gone);
+    const errors: string[] = [];
+    const quiet = console.error;
+    console.error = (m: string) => { errors.push(String(m)); };
+    try {
+      const digest = s.h.policyDigest();
+      const policyFile = join(gone.dir, "policy.cedar");
+      renameSync(policyFile, `${policyFile}.away`);
+      const read = await fetch(`${s.d.url}/catalogue/hats`);
+      expect(read.status).toBe(200);
+      const refund = await fetch(`${s.d.url}/refunds`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ order: "o_g", amount: 100 }) });
+      expect(refund.status).toBe(403);
+      expect(s.h.policyDigest()).toBe(digest);
+      expect(errors.some((e) => e.includes("cannot read") && e.includes(`policy ${digest} stays in force`))).toBe(true);
+      renameSync(`${policyFile}.away`, policyFile);
+    } finally {
+      console.error = quiet;
+      await s.close();
+    }
+  });
+
+  it("a capture config the door cannot honour stops it at start: no key variable, or encrypted capture without a key; with the key it starts", async () => {
+    const variable = "DOOR_TEST_CAPTURE_KEY";
+    delete process.env[variable];
+    const unset = fresh("capture-unset", { captureKeyEnv: variable });
+    await expect(createDoorHost(loadDoorConfig(unset.configFile))).rejects.toThrow(`environment variable ${variable} is not set`);
+    const keyless = fresh("capture-keyless", { capture: { refund: { args: { mode: "encrypted" } } } });
+    await expect(createDoorHost(loadDoorConfig(keyless.configFile))).rejects.toThrow("capture for refund uses mode encrypted, which needs captureKeyEnv");
+    process.env[variable] = "11".repeat(32);
+    try {
+      const keyed = fresh("capture-keyed", { captureKeyEnv: variable, capture: { refund: { args: { mode: "encrypted" } } } });
+      const h = await createDoorHost(loadDoorConfig(keyed.configFile));
+      await h.close();
+    } finally {
+      delete process.env[variable];
+    }
+  });
+
+  it("an origin header from the environment reaches the origin and never the receipt; an unset variable stops the door at start", async () => {
+    const variable = "DOOR_TEST_ORIGIN_KEY";
+    delete process.env[variable];
+    const unset = fresh("origin-env-unset", { origin: { url: origin.url, headerEnv: { "x-shop-key": variable } } });
+    await expect(createDoorHost(loadDoorConfig(unset.configFile))).rejects.toThrow(`environment variable ${variable} is not set`);
+    process.env[variable] = "shop-secret-value";
+    const set = fresh("origin-env-set", { origin: { url: origin.url, headerEnv: { "x-shop-key": variable } } });
+    const s = await served(set);
+    try {
+      const res = await fetch(`${s.d.url}/catalogue/belts`);
+      expect(res.status).toBe(200);
+      expect(origin.seen.at(-1)!.headers["x-shop-key"]).toBe("shop-secret-value");
+      expect(readFileSync(join(set.receiptsDir, `${res.headers.get(RECEIPT_HEADER)}.json`), "utf8")).not.toContain("shop-secret-value");
+    } finally {
+      delete process.env[variable];
+      await s.close();
+    }
+  });
+
+  it("a source past 64 expired arrivals has its window compacted, and its counts stay exact", () => {
+    let t = 0;
+    const tracker = createRateTracker(() => t);
+    for (let i = 0; i < 100; i++) tracker.hit("remote:busy");
+    t = RATE_MINUTE_MS + 1;
+    // 100 arrivals have left the minute: the compaction drops them, and the counts are this arrival alone
+    expect(tracker.hit("remote:busy")).toEqual({ burst: 1, minute: 1 });
+    t += 1;
+    expect(tracker.hit("remote:busy")).toEqual({ burst: 2, minute: 2 });
+    t += RATE_BURST_MS;
+    expect(tracker.hit("remote:busy")).toEqual({ burst: 1, minute: 3 });
+  });
+
+  it("a route whose path is `*` takes every path its methods allow", () => {
+    const routes = [{ name: "reads", methods: ["GET" as const], path: "*" }, { name: "rest", path: "*" }];
+    expect(matchRoute(routes, "other", "GET", "/anything/at/all")).toBe("reads");
+    expect(matchRoute(routes, "other", "DELETE", "/anything")).toBe("rest");
+  });
+
+  it("an origin answer with no body is relayed and recorded as zero bytes", async () => {
+    const empty = await rawOrigin((res) => { res.writeHead(204); res.end(); });
+    const f = fresh("empty-body", { origin: { url: empty.url } });
+    const s = await served(f);
+    try {
+      const res = await fetch(`${s.d.url}/catalogue/x`);
+      expect(res.status).toBe(204);
+      const st = decode(bundleAt(f.receiptsDir, res));
+      expect(st.predicate.execution).toMatchObject({ status: "executed", result: { status: 204, bodyBytes: 0, bodyDigest: sha256Hex(Buffer.alloc(0)) } });
+    } finally {
+      await s.close();
+      await empty.close();
+    }
+  });
+
+  it("an origin on a port fetch refuses to dial was never reached: 502, not the 504 that says the origin may have acted", async () => {
+    // 6000 (X11) is on the fetch standard's list of bad ports: the request is refused before a connection is made
+    const url = "http://127.0.0.1:6000";
+    const f = fresh("bad-port", { origin: { url, timeoutMs: 2000 } });
+    const s = await served(f);
+    try {
+      const res = await fetch(`${s.d.url}/catalogue/x`);
+      expect(res.status).toBe(502);
+      expect(decode(bundleAt(f.receiptsDir, res)).predicate.execution).toMatchObject({ status: "error", error: expect.stringContaining("could not be reached") });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("a JSON content type with a body that is not JSON is decided without the body: the policy sees no amount and refuses the refund", async () => {
+    const res = await fetch(`${door.url}/refunds`, { method: "POST", headers: { authorization: `Bearer ${grantHeader(grantFor("shopping-agent", ["refund"]))}`, "content-type": "application/json" }, body: "{ amount: 100" });
+    expect(res.status).toBe(403);
+    const st = decode(bundleAt(fx.receiptsDir, res));
+    expect((st.predicate.request.args as { body?: unknown }).body).toBeUndefined();
+    expect(st.predicate.policy?.decision).toBe("deny");
+    expect(verified(bundleAt(fx.receiptsDir, res)).ok).toBe(true);
+  });
+
+  it("with autoFlush the door retries its outbox on a timer, and stops when it is closed", async () => {
+    let appends = 0;
+    const refusing: LogSink = { kind: "file", where: "refusing", append: async () => { appends += 1; throw new Error("the log is down"); } };
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const f = fresh("autoflush");
+    const s = await served(f, { log: refusing, autoFlush: true });
+    try {
+      const res = await fetch(`${s.d.url}/catalogue/x`);
+      expect(res.status).toBe(200);
+      expect(s.h.pendingReceipts()).toBe(1);
+      const tried = appends;
+      vi.advanceTimersByTime(30_000);
+      await vi.waitFor(() => expect(appends).toBeGreaterThan(tried));
+      expect(s.h.pendingReceipts()).toBe(1);
+      await s.close();
+      const afterClose = appends;
+      vi.advanceTimersByTime(60_000);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(appends).toBe(afterClose);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a handler that fails before it answers gets a 500 that says the outcome is unknown, and the failure is logged", async () => {
+    const logged: string[] = [];
+    const failing: DoorHost = { keyid: "k", policyDigest: () => "p", pendingReceipts: () => 0, flushOutbox: async () => ({ flushed: 0, remaining: 0 }) as never, close: async () => {}, handle: async () => { throw new Error("the disk is gone"); } };
+    const d = await serveDoor(failing, { port: 0, log: (m) => logged.push(m) });
+    try {
+      const res = await fetch(`${d.url}/catalogue/x`);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "the door failed before it could answer; whether the origin acted on the request is unknown", receipt: null });
+      expect(logged).toEqual(["agent-custody door: the disk is gone"]);
+    } finally {
+      await d.close();
+    }
   });
 });
