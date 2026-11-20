@@ -145,7 +145,7 @@ bun run site:dev
 - [The gateway](packages/receipts/docs/usage.md): grants, Cedar policy, MCP, REST, and A2A upstreams, and remote logs. [Writing policies](packages/receipts/docs/policies.md), for tools and for memory.
 - Agents that move money: [safe financial operations](packages/receipts/docs/financial-operations.md), [human approvals](packages/receipts/docs/approvals.md), and [completeness](packages/receipts/docs/completeness.md) against the provider's records.
 - Calls that go around the gateway: [the egress witness](packages/receipts/docs/egress.md), [credential custody and lockdown](site/guide/credential-custody.md), and [egress policies](site/guide/egress-policies.md).
-- The door in front of your own site or API: [quick start](packages/receipts/docs/door-quickstart.md), [the door](packages/receipts/docs/door.md), [behind nginx or Envoy](deploy/door/README.md), and [in Go, Rails, Django, and Spring](packages/receipts/docs/door-languages.md).
+- The door in front of your own site or API: [quick start](packages/receipts/docs/door-quickstart.md), [the door](packages/receipts/docs/door.md), [as a service from the gateway image, or behind nginx or Envoy](deploy/door/README.md), and [in Go, Rails, Django, and Spring](packages/receipts/docs/door-languages.md).
 - Governed memory: [the state package](packages/state/README.md), its [examples](packages/state/examples), and the [live Codex recovery demo](packages/receipts/docs/codex-recovery.md).
 - [Compliance](packages/receipts/docs/compliance.md): which artefact is evidence for which SOC 2, ISO 27001, EU AI Act, DORA, and other requirement.
 

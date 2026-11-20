@@ -4,10 +4,10 @@
 #     tags `edge` and `sha-<short sha>`;
 #   - a finished release for a version tag builds from the published npm package of that version and pushes
 #     `<version>`, `<major>.<minor>` and `latest`;
-#   - a pull request that touches deploy/gateway builds the image and runs the smoke test, and pushes nothing.
+#   - a pull request that touches deploy/gateway or deploy/door builds the image and runs the smoke tests, and pushes nothing.
 # Run it by hand with a version to rebuild a release, or with none to rebuild main. Every build is smoke-tested
-# (deploy/gateway/smoke.sh) before it is pushed. Every pushed image carries a provenance attestation and an SBOM and
-# is signed with cosign, keyless, by this workflow's identity (deploy/gateway/README.md says how to verify one). Uses the repository's own token; no personal token.
+# (deploy/gateway/smoke.sh, then deploy/door/smoke.sh for door mode) before it is pushed. Every pushed image carries a
+# provenance attestation and an SBOM and is signed with cosign, keyless, by this workflow's identity (deploy/gateway/README.md says how to verify one). Uses the repository's own token; no personal token.
 # The first push creates the package as private: make it public once in the package's settings.
 name: gateway-image
 
@@ -17,6 +17,7 @@ on:
     paths:
       - "packages/receipts/**"
       - "deploy/gateway/**"
+      - "deploy/door/**"
       - ".github/workflows/gateway-image.yml"
       - ".github/scripts/wait-for-npm.sh"
       - ".github/scripts/require-release-commit.sh"
@@ -24,6 +25,7 @@ on:
     paths:
       - "packages/receipts/src/cli.ts"
       - "deploy/gateway/**"
+      - "deploy/door/**"
       - ".github/workflows/gateway-image.yml"
   workflow_run:
     workflows: [release]
@@ -75,15 +77,20 @@ jobs:
           echo "$leftover" | jq -e '.services.agent.environment.EGRESS_SECRET_RESEARCH_AGENT == "ci-secret"'
           echo "$leftover" | jq -e '.services.gateway.environment.EGRESS_SECRET_RESEARCH_AGENT == "leftover"'
           rm deploy/gateway/.env
+      - name: the door's compose file is valid with its required version set
+        env:
+          AGENT_CUSTODY_GATEWAY_VERSION: ci
+        run: docker compose -f deploy/door/proxy/docker-compose.yaml config -q
       - run: kubectl kustomize deploy/gateway/k8s > /dev/null
       - run: kubectl kustomize deploy/gateway/lockdown/k8s > /dev/null
-      - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh deploy/gateway/lockdown/vm/check-lockdown.sh .github/scripts/*.sh
+      - run: kubectl kustomize deploy/door/k8s > /dev/null
+      - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh deploy/door/smoke.sh deploy/gateway/lockdown/vm/check-lockdown.sh .github/scripts/*.sh
       - name: the VM lockdown ruleset and units parse
         run: |
           sudo apt-get install -y -qq nftables > /dev/null
           sudo useradd --system agent
           sudo nft -c -f deploy/gateway/lockdown/vm/agent-lockdown.nft
-          systemd-analyze verify deploy/gateway/agent-custody-gateway.service deploy/gateway/lockdown/vm/agent-custody-egress.service deploy/gateway/lockdown/vm/agent-custody-lockdown.service
+          systemd-analyze verify deploy/gateway/agent-custody-gateway.service deploy/door/agent-custody-door.service deploy/gateway/lockdown/vm/agent-custody-egress.service deploy/gateway/lockdown/vm/agent-custody-lockdown.service
           unit="$RUNNER_TEMP/units"; mkdir -p "$unit/demo-agent.service.d"
           printf '[Service]\nExecStart=/bin/true\n' > "$unit/demo-agent.service"
           cp deploy/gateway/lockdown/vm/agent-lockdown.conf "$unit/demo-agent.service.d/"
@@ -182,6 +189,9 @@ jobs:
           cache-from: type=gha,scope=gateway-${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=gateway-${{ matrix.platform }}
       - run: deploy/gateway/smoke.sh gateway-smoke:local
+      - name: smoke-test door mode
+        # a rebuild of a release from before door mode checks out a tag without it
+        run: if [ -f deploy/door/smoke.sh ]; then deploy/door/smoke.sh gateway-smoke:local; else echo "this release has no door mode"; fi
       - name: log in to the registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4

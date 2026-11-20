@@ -2,6 +2,7 @@
 # serve (default): starts the shared gateway on 0.0.0.0, creating the gateway key on first start.
 # console: starts the admin console for that gateway (token from CONSOLE_TOKEN), as a separate container of this image.
 # egress: starts the egress witness on 0.0.0.0, creating its key on first start; extra arguments replace the defaults.
+# door: starts the door on 0.0.0.0, creating its key on first start, after the same config check as serve.
 # init: writes a starter config, an example policy, and a demo principal key and grant into /config.
 # Anything else is passed to the agent-custody CLI, so `docker exec <container> revoke --config ... --grant ...` works.
 # Every command but egress refuses to run with an EGRESS_SECRET_* variable in its environment (below).
@@ -15,6 +16,9 @@ set -eu
 : "${EGRESS_CONFIG:=/config/egress.json}"
 : "${EGRESS_KEY:=$DATA_DIR/keys/egress.key}"
 : "${EGRESS_PORT:=8791}"
+: "${DOOR_CONFIG:=/config/door.json}"
+: "${DOOR_KEY:=$DATA_DIR/keys/door.key}"
+: "${DOOR_PORT:=8780}"
 config_dir=$(dirname "$GATEWAY_CONFIG")
 
 # An agent's proxy secret for the egress witness (left in .env, which the gateway, the console and init load) would let
@@ -29,28 +33,48 @@ if [ "${1:-serve}" != egress ]; then
   fi
 fi
 
+# make_key <key file> <what>: creates the key on first start and prints its public half
+make_key() {
+  if [ ! -f "$1" ]; then
+    key_dir=$(dirname "$1"); key_name=$(basename "$1" .key)
+    mkdir -p "$key_dir"
+    agent-custody keygen --dir "$key_dir" --name "$key_name" >&2
+    echo "gateway: created the $2 key. Verifiers check receipts with its public key:" >&2
+    cat "$key_dir/$key_name.pub" >&2
+  fi
+}
+
+# check_config <config> <what>: GATEWAY_CHECK=strict (the default) refuses to start on a config the check calls an error,
+# advisory prints the findings and starts anyway, off skips the check
+check_config() {
+  case "${GATEWAY_CHECK:-strict}" in
+    off) ;;
+    advisory) agent-custody check --config "$1" >&2 || echo "gateway: the config check found errors; starting anyway (GATEWAY_CHECK=advisory)" >&2 ;;
+    strict) agent-custody check --config "$1" >&2 || { echo "gateway: the config check found errors, so the $2 is not starting. Fix them, or set GATEWAY_CHECK=advisory to start anyway" >&2; exit 1; } ;;
+    *) echo "gateway: GATEWAY_CHECK must be strict, advisory, or off" >&2; exit 1 ;;
+  esac
+}
+
 case "${1:-serve}" in
   serve)
     if [ ! -f "$GATEWAY_CONFIG" ]; then
       echo "gateway: $GATEWAY_CONFIG not found. Mount your config at $config_dir, or write a starter one with: init" >&2
       exit 1
     fi
-    if [ ! -f "$GATEWAY_KEY" ]; then
-      key_dir=$(dirname "$GATEWAY_KEY"); key_name=$(basename "$GATEWAY_KEY" .key)
-      mkdir -p "$key_dir"
-      agent-custody keygen --dir "$key_dir" --name "$key_name" >&2
-      echo "gateway: created the gateway key. Verifiers check receipts with its public key:" >&2
-      cat "$key_dir/$key_name.pub" >&2
-    fi
-    # GATEWAY_CHECK=strict (the default) refuses to start on a config the check calls an error, advisory prints the findings
-    # and starts anyway, off skips the check
-    case "${GATEWAY_CHECK:-strict}" in
-      off) ;;
-      advisory) agent-custody check --config "$GATEWAY_CONFIG" >&2 || echo "gateway: the config check found errors; starting anyway (GATEWAY_CHECK=advisory)" >&2 ;;
-      strict) agent-custody check --config "$GATEWAY_CONFIG" >&2 || { echo "gateway: the config check found errors, so the gateway is not starting. Fix them, or set GATEWAY_CHECK=advisory to start anyway" >&2; exit 1; } ;;
-      *) echo "gateway: GATEWAY_CHECK must be strict, advisory, or off" >&2; exit 1 ;;
-    esac
+    make_key "$GATEWAY_KEY" gateway
+    check_config "$GATEWAY_CONFIG" gateway
     exec agent-custody gateway --config "$GATEWAY_CONFIG" --http --host 0.0.0.0 --port "$GATEWAY_PORT" --idle-minutes "$GATEWAY_IDLE_MINUTES"
+    ;;
+  door)
+    # the door in front of a site: the same image, a container of its own with its own key, which verifiers trust
+    # separately. The key is created at DOOR_KEY and the healthcheck probes DOOR_PORT, so keep identity.keyFile equal to DOOR_KEY.
+    if [ ! -f "$DOOR_CONFIG" ]; then
+      echo "gateway: $DOOR_CONFIG not found. Mount the door config there, or set DOOR_CONFIG" >&2
+      exit 1
+    fi
+    make_key "$DOOR_KEY" door
+    check_config "$DOOR_CONFIG" door
+    exec agent-custody door --config "$DOOR_CONFIG" --host 0.0.0.0 --port "$DOOR_PORT"
     ;;
   egress)
     # the egress witness: the same image, a container of its own that holds only the agents' proxy secrets, never a tool

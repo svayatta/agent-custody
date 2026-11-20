@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-custody-door
+  labels: { app: agent-custody-door }
+spec:
+  selector: { app: agent-custody-door }
+  ports:
+    - { name: http, port: 8780, targetPort: http }

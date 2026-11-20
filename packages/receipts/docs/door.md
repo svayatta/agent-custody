@@ -14,6 +14,8 @@ agent-custody check --config door.json
 agent-custody door --config door.json --port 8780
 ```
 
+To run it as a service, the gateway image has a `door` mode (`docker run ... ghcr.io/svayatta/agent-custody-gateway:<version> door`, config at `/config/door.json`, key created at `/data/keys/door.key`), and [deploy/door](../../../deploy/door/README.md#as-a-reverse-proxy-from-the-gateway-image) has a compose file in front of a stand-in site, Kubernetes manifests, a systemd unit, and the smoke test that every build of the image passes.
+
 ## The config file
 
 `door.json`, paths relative to the file. Loaded with `loadDoorConfig(path)`.

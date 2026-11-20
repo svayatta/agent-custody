@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-custody-door
+  labels: { app: agent-custody-door }
+spec:
+  # One replica: the local log has one writer, and rate counts and Web Bot Auth nonces live in memory.
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: agent-custody-door }
+  template:
+    metadata:
+      labels: { app: agent-custody-door }
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: door
+          image: ghcr.io/svayatta/agent-custody-gateway
+          args: ["door"]
+          ports:
+            - { name: http, containerPort: 8780 }
+          env:
+            - { name: DOOR_CONFIG, value: /config/door.json }
+          # credentials the door reads at startup (origin.headerEnv, a challenge secret); the Secret is optional here
+          envFrom:
+            - secretRef: { name: door-env, optional: true }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /.well-known/agent-custody-door, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /.well-known/agent-custody-door, port: http }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: config
+          configMap: { name: door-config }
+        - name: data
+          persistentVolumeClaim: { claimName: agent-custody-door-data }
+        - name: tmp
+          emptyDir: {}
