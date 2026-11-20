@@ -8,11 +8,12 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { checkCompleteness, formatCompleteness, stripeSource, type CompletenessOptions } from "../src/completeness.ts";
-import { loadConfig } from "../src/config.ts";
+import { checkCompleteness, formatCompleteness, githubSource, stripeSource, type CompletenessOptions } from "../src/completeness.ts";
+import { loadConfig, loadSdkConfig } from "../src/config.ts";
 import { loadPublicKey } from "../src/crypto.ts";
 import { createGateway, RECEIPT_META_KEY } from "../src/gateway.ts";
-import { buildFixture, type Fixture } from "../scripts/fixture.ts";
+import { createSdkIssuer, receiptIdOf } from "../src/sdk/index.ts";
+import { buildFixture, buildSdkFixture, type Fixture, type SdkFixture } from "../scripts/fixture.ts";
 
 const KEY = "rk_test_auditor_read_only";
 
@@ -298,7 +299,7 @@ describe("completeness from the provider's side", () => {
 
   it("calls a receipt unmatchable when the id path does not reach a string in its result", async () => {
     const report = await checkCompleteness(opts(theProvider(), { idPath: "refund_id.0" }));
-    expect(report.unmatchable).toEqual(expect.arrayContaining(refunds.map((r) => ({ receiptId: r.receiptId, reason: 'the result has no string at "refund_id.0"' }))));
+    expect(report.unmatchable).toEqual(expect.arrayContaining(refunds.map((r) => ({ receiptId: r.receiptId, reason: 'the result has no string or integer at "refund_id.0"' }))));
     expect(report.unmatchable).toHaveLength(2);
     expect(report.matched).toEqual([]);
     expect(report.providerOnly.map((p) => p.providerId).sort()).toEqual(refunds.map((r) => r.refundId).sort());
@@ -380,5 +381,119 @@ describe("completeness from the provider's side", () => {
     expect(run(["--provider", "paypal", "--key-env", "K"], { K: KEY }).stderr).toMatch(/supports --provider stripe/);
     expect(run(["--provider", "stripe", "--key-env", "K", "--object", "charges"], { K: KEY }).stderr).toMatch(/--object is one of refunds, payouts, transfers/);
     expect(run(["--provider", "stripe", "--key-env", "K", "--beneficiary", "charge"], { K: KEY }).stderr).toMatch(/--beneficiary takes/);
+    expect(run(["--provider", "github", "--key-env", "K"], { K: KEY }).stderr).toMatch(/--provider github needs --repo/);
+    expect(run(["--provider", "stripe", "--repo", "acme/shop", "--key-env", "K"], { K: KEY }).stderr).toMatch(/--repo is for --provider github/);
+    expect(run(["--provider", "github", "--repo", "acme/shop", "--key-env", "COMPLETENESS_TEST_KEY"]).stderr).toMatch(/COMPLETENESS_TEST_KEY is not set/);
+    expect(run(["--provider", "github", "--repo", "acme/shop", "--key-env", "K", "--object", "refunds"], { K: KEY }).stderr).toMatch(/--object is one of pushes, merges, releases/);
+  });
+});
+
+/** Answers the activity and releases lists the way GitHub does: an array, one entry a page, the next page in a Link header. */
+function githubStub(lists: { activity?: Record<string, unknown>[]; releases?: Record<string, unknown>[] }, nextOrigin = "https://api.github.com") {
+  const calls: URL[] = [];
+  const f = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input instanceof Request ? input.url : input));
+    calls.push(url);
+    if ((init?.headers as Record<string, string> | undefined)?.authorization !== `Bearer ${KEY}`) return new Response("unauthorised", { status: 401 });
+    const list = lists[url.pathname.split("/").pop() as "activity" | "releases"] ?? [];
+    const page = Number(url.searchParams.get("page") ?? 1);
+    const headers = page < list.length ? { link: `<${nextOrigin}${url.pathname}?page=${page + 1}>; rel="next"` } : undefined;
+    return Response.json(list.slice(page - 1, page), headers ? { headers } : {});
+  }) as typeof fetch;
+  return { f, calls };
+}
+
+describe("completeness against GitHub", () => {
+  const sha = (c: string) => c.repeat(40);
+  let fx: SdkFixture;
+  let sinceMs: number;
+  let untilMs: number;
+  let now: string;
+  const receipts: Record<string, string> = {};
+  const opts = (object: "pushes" | "merges" | "releases", tool: string, stub: ReturnType<typeof githubStub>, extra: Partial<CompletenessOptions> = {}) => ({
+    receiptsDir: fx.receiptsDir,
+    verify: { issuerKeys: [loadPublicKey(fx.appPub)], principalKeys: [], logFile: fx.logFile },
+    source: githubSource({ token: KEY, repo: "acme/shop", object, fetch: stub.f }),
+    tools: [tool],
+    sinceMs,
+    untilMs,
+    ...extra,
+  });
+  const entry = (activity_type: string, after: string, timestamp = now, ref = "refs/heads/main") => ({ activity_type, ref, before: sha("9"), after, timestamp });
+
+  beforeAll(async () => {
+    fx = buildSdkFixture(mkdtempSync(join(tmpdir(), "completeness-github-")), "permit(principal, action, resource);");
+    sinceMs = Date.now() - 60_000;
+    const issuer = createSdkIssuer(loadSdkConfig(fx.configFile));
+    const record = async (tool: string, args: Record<string, unknown>, result: unknown) => {
+      const ev = { tool, args };
+      receipts[tool] = receiptIdOf(await issuer.record(ev, { status: "executed", result: { content: [{ type: "text", text: JSON.stringify(result) }] } }, issuer.decide(ev)));
+    };
+    await record("github.merge", { pull_number: 7 }, { sha: sha("a"), merged: true });
+    await record("github.push", { branch: "main" }, { object: { sha: sha("b") } });
+    await record("github.release", { tag_name: "v1.0.0" }, { id: 4242, tag_name: "v1.0.0" });
+    now = new Date().toISOString();
+    untilMs = Date.now() + 60_000;
+  });
+  afterAll(() => rmSync(fx.dir, { recursive: true, force: true }));
+
+  it("matches a merge by the commit the branch moved to, reads every page, and stops at the first entry older than the window", async () => {
+    const old = new Date(sinceMs - 3600_000).toISOString();
+    const stub = githubStub({ activity: [entry("branch_deletion", sha("0")), entry("push", sha("b")), entry("pr_merge", sha("a")), entry("pr_merge", sha("c"), old), entry("pr_merge", sha("d"), old)] });
+    const report = await checkCompleteness(opts("merges", "github.merge", stub, { idPath: "sha" }));
+    expect(report.matched).toEqual([{ receiptId: receipts["github.merge"], providerId: sha("a") }]);
+    expect(report.complete).toBe(true);
+    expect(report.provider).toBe("github merges in acme/shop");
+    expect(stub.calls[0]!.pathname).toBe("/repos/acme/shop/activity");
+    // five entries, one a page: the fourth is older than the window, so the fifth page is never asked for
+    expect(stub.calls).toHaveLength(4);
+  });
+
+  it("reports a push made with another token as an action with no receipt, force pushes included", async () => {
+    const stub = githubStub({ activity: [entry("force_push", sha("e")), entry("push", sha("b")), entry("pr_merge", sha("a"))] });
+    const report = await checkCompleteness(opts("pushes", "github.push", stub, { idPath: "object.sha" }));
+    expect(report.matched.map((m) => m.providerId)).toEqual([sha("b")]);
+    expect(report.providerOnly.map((x) => x.providerId)).toEqual([sha("e")]);
+    expect(report.complete).toBe(false);
+  });
+
+  it("reports a push that creates a branch: GitHub lists it only as a branch creation", async () => {
+    const stub = githubStub({ activity: [entry("branch_creation", sha("f"), now, "refs/heads/outside"), entry("push", sha("b"))] });
+    const report = await checkCompleteness(opts("pushes", "github.push", stub, { idPath: "object.sha" }));
+    expect(report.providerOnly.map((x) => x.providerId)).toEqual([sha("f")]);
+    expect(report.complete).toBe(false);
+  });
+
+  it("reports a second move to a commit that has a receipt, and reads a push that GitHub records twice as one", async () => {
+    const twice = await checkCompleteness(opts("pushes", "github.push", githubStub({ activity: [entry("push", sha("b")), entry("push", sha("b"))] }), { idPath: "object.sha" }));
+    expect(twice.matched).toHaveLength(1);
+    expect(twice.complete).toBe(true);
+    // the gated commit goes to a second branch with another token, and a later force push resets main to it
+    const later = new Date(Date.parse(now) + 1000).toISOString();
+    const stub = githubStub({ activity: [entry("force_push", sha("b"), later), entry("branch_creation", sha("b"), now, "refs/heads/release"), entry("push", sha("b"))] });
+    const report = await checkCompleteness(opts("pushes", "github.push", stub, { idPath: "object.sha" }));
+    expect(report.matched).toEqual([{ receiptId: receipts["github.push"], providerId: sha("b") }]);
+    expect(report.providerOnly).toEqual([expect.objectContaining({ providerId: sha("b"), repeated: true }), expect.objectContaining({ providerId: sha("b"), repeated: true })]);
+    expect(report.complete).toBe(false);
+    expect(formatCompleteness(report)).toMatch(/the receipt for this id accounts for another action/);
+  });
+
+  it("matches a release by its numeric id, compares a beneficiary field, and reports a receipt whose release GitHub does not have", async () => {
+    const release = (id: number, tag_name: string) => ({ id, tag_name, created_at: now, published_at: now });
+    const moved = await checkCompleteness(opts("releases", "github.release", githubStub({ releases: [release(4242, "v9.9.9")] }), { beneficiary: { tag_name: "tag_name" } }));
+    expect(moved.matched).toHaveLength(1);
+    expect(moved.mismatches).toEqual([{ receiptId: receipts["github.release"], providerId: "4242", field: "tag_name", receipt: "v1.0.0", provider: "v9.9.9" }]);
+    const gone = await checkCompleteness(opts("releases", "github.release", githubStub({ releases: [release(1, "v0.1.0")] })));
+    expect(gone.receiptOnly.map((x) => x.providerId)).toEqual(["4242"]);
+    expect(gone.providerOnly.map((x) => x.providerId)).toEqual(["1"]);
+  });
+
+  it("stops on a GitHub error, and never sends the token to a host that a Link header names", async () => {
+    const wrong = githubSource({ token: "wrong", repo: "acme/shop", object: "releases", fetch: githubStub({}).f });
+    await expect(checkCompleteness({ ...opts("releases", "github.release", githubStub({})), source: wrong })).rejects.toThrow(/HTTP 401/);
+    const stub = githubStub({ releases: [{ id: 1, created_at: now }, { id: 2, created_at: now }] }, "https://evil.example");
+    await expect(checkCompleteness(opts("releases", "github.release", stub))).rejects.toThrow(/another host/);
+    expect(stub.calls).toHaveLength(1);
+    expect(() => githubSource({ token: KEY, repo: "acme/shop/../../user", object: "pushes" })).toThrow(/owner\/name/);
   });
 });
