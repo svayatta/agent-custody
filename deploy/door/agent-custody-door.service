@@ -8,8 +8,10 @@
 #   sudo -u custody agent-custody keygen --dir /var/lib/agent-custody/keys --name door
 #   sudo systemctl enable --now agent-custody-door
 #
-# The paths in door.json: identity.keyFile = /var/lib/agent-custody/keys/door.key, and receiptsDir and logFile under
-# /var/lib/agent-custody. Put your TLS proxy in front of 127.0.0.1:8780.
+# The paths in door.json: identity.keyFile = /var/lib/agent-custody/keys/door.key, and receiptsDir, logFile and
+# revokedGrants under /var/lib/agent-custody (revokedGrants = /var/lib/agent-custody/revoked.json: the example config's
+# /data/revoked.json does not exist here, so `agent-custody revoke --config /etc/agent-custody/door.json` would fail).
+# Put your TLS proxy in front of 127.0.0.1:8780.
 [Unit]
 Description=agent-custody door
 After=network-online.target
