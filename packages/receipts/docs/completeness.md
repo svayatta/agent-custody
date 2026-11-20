@@ -8,7 +8,7 @@ For a window and a set of tools, it lists the provider's objects and matches eac
 
 | section | meaning | what to do |
 | --- | --- | --- |
-| provider actions with no receipt | an object the provider created in the window that no verified receipt names | the finding this command exists for: an action taken outside the gateway, or by a gateway whose receipts you were not given |
+| provider actions with no receipt | an object the provider created in the window that no verified receipt names, or a second object with an id that a receipt already accounts for | the finding this command exists for: an action taken outside the gateway, or by a gateway whose receipts you were not given |
 | receipts the provider does not have | an executed receipt in the window whose object the provider has no record of | a receipt for something that did not happen at the provider, or an object in another account or mode |
 | mismatches | a matched pair whose amount, currency (ignoring case), or a beneficiary field differs | the receipt and the provider disagree about what happened |
 | one provider object, several receipts | more than one verified receipt names the same provider object; each is still compared with it | one action recorded twice, or receipts that contradict each other |
@@ -63,7 +63,7 @@ Each run checks one repository and one object kind. Run the command one time for
 
 | `--object` | what GitHub lists | the id that the receipt must carry | `--id-path` for GitHub's own response |
 | --- | --- | --- | --- |
-| `pushes` | each push and each force push to a branch, from the repository's activity list | the commit that the branch moved to (`after`) | `object.sha` for an updated ref, `commit.sha` for a written file |
+| `pushes` | each push, each force push, and each branch creation, from the repository's activity list | the commit that the branch moved to (`after`) | `object.sha` for a created or updated ref, `commit.sha` for a written file |
 | `merges` | each merged pull request, merge queue included, from the same activity list | the commit that the branch moved to: the merge commit | `sha` |
 | `releases` | each release, by its publication time, or by its creation time while it is a draft | the release's numeric id | `id` |
 
@@ -72,7 +72,10 @@ GitHub objects have no amount and no currency, so those comparisons do not run. 
 Limits that apply to GitHub only:
 
 - **Deleted branches are not supported.** GitHub answers a branch deletion with an empty body, so a receipt carries no identifier that the activity list also has.
-- **A commit identifies a push.** When the same commit goes to a second branch, GitHub lists a second push with the same id, and that push matches the receipt of the first one.
+- **A branch creation is a push.** GitHub lists a push that creates a branch only as a branch creation, so `pushes` includes each branch creation. A branch that someone creates in the GitHub web interface is listed too.
+- **A commit identifies a push.** The id is the commit, not the branch. A receipt accounts for one listed action with its id. When the same commit goes to a second branch, or a force push moves a branch back to it, the report lists that action as a provider action with no receipt. This is correct for an action outside the gateway. When an agent moves two branches to the same commit through the gateway, two receipts name one id: the report lists them under "one provider object, several receipts", and you compare them by hand.
+- **GitHub records some pushes twice.** Entries with the same branch, the same two commits, and the same time are read as one push.
+- **Releases are slow on a large repository.** GitHub gives no time order for releases, so each run reads every page of them.
 - **A push of several commits has one id.** The id is the last commit, which is the commit that the tool's result must carry.
 - **Draft releases.** GitHub shows a draft release only to a token with write access. A read-only token lists published releases.
 - **Tags are not listed.** The activity list covers branches.

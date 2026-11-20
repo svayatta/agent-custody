@@ -84,11 +84,12 @@ export interface GitHubSourceOptions {
   fetch?: typeof fetch;
 }
 
-const GITHUB_ACTIVITY: Partial<Record<GitHubObject, string[]>> = { pushes: ["push", "force_push"], merges: ["pr_merge", "merge_queue_merge"] };
+const GITHUB_ACTIVITY: Partial<Record<GitHubObject, string[]>> = { pushes: ["push", "force_push", "branch_creation"], merges: ["pr_merge", "merge_queue_merge"] };
 
 /**
  * Lists one repository's pushes or merged pull requests (from its activity list) or its releases, every page. The id of
- * a push or a merge is the commit the ref moved to (`after`); the id of a release is its numeric id, as a string.
+ * a push or a merge is the commit the ref moved to (`after`); the id of a release is its numeric id, as a string. A push
+ * that creates a branch is listed only as `branch_creation`, so `pushes` reads that kind too.
  */
 export function githubSource(o: GitHubSourceOptions): ProviderSource {
   if (!/^[\w.-]+\/[\w.-]+$/.test(o.repo)) throw new Error(`github: the repository is "owner/name"; got "${o.repo}"`);
@@ -99,6 +100,7 @@ export function githubSource(o: GitHubSourceOptions): ProviderSource {
     name: `github ${o.object} in ${o.repo}`,
     async *list(sinceMs, untilMs) {
       let url: URL | undefined = new URL(`repos/${o.repo}/${kinds ? "activity" : "releases"}?per_page=100`, base);
+      const listed = new Set<string>();
       while (url) {
         // the next page comes from a response header: the token goes only to the host it was given for
         if (url.origin !== base.origin) throw new Error(`github ${o.object}: the next page is on another host, ${url.origin}`);
@@ -114,6 +116,12 @@ export function githubSource(o: GitHubSourceOptions): ProviderSource {
           // the activity list is newest first, so nothing after an older entry is in the window; releases have no such order
           if (kinds && createdMs < sinceMs) older = true;
           if (createdMs < sinceMs || createdMs >= untilMs || (kinds && !kinds.includes(String(obj.activity_type)))) continue;
+          if (kinds) {
+            // GitHub records some pushes twice: the same ref, commits, and time under two activity ids
+            const move = [obj.ref, obj.before, obj.after, obj.timestamp].join(" ");
+            if (listed.has(move)) continue;
+            listed.add(move);
+          }
           yield { id: String(id), createdMs, raw: obj };
         }
         const next: string | undefined = older ? undefined : /<([^>]+)>;\s*rel="next"/.exec(res.headers.get("link") ?? "")?.[1];
@@ -155,7 +163,7 @@ export interface CompletenessReport {
   receiptsRead: number;
   matched: { receiptId: string; providerId: string }[];
   /** provider objects in the window with no verified receipt: actions taken outside the gateway */
-  providerOnly: { providerId: string; created: string; amount?: number; currency?: string }[];
+  providerOnly: { providerId: string; created: string; amount?: number; currency?: string; repeated?: true }[];
   /** executed receipts in the window whose provider object the provider does not have */
   receiptOnly: { receiptId: string; providerId: string; timestamp: string }[];
   mismatches: { receiptId: string; providerId: string; field: string; receipt: unknown; provider: unknown }[];
@@ -285,13 +293,15 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
 
   const seen = new Set<string>();
   for await (const obj of o.source.list(o.sinceMs - margin, o.untilMs + margin)) {
+    // a second object with an id already listed is another action: the receipts for that id account for the first one
+    const repeated = seen.has(obj.id);
     seen.add(obj.id);
     const receipts = byProviderId.get(obj.id) ?? [];
     // the margin finds a receipt across the window's edge; it does not widen the period reported on
     const inScope = inWindow(obj.createdMs) || receipts.some((p) => inWindow(Date.parse(p.timestamp)));
     if (!inScope) continue;
-    if (!receipts.length) {
-      report.providerOnly.push({ providerId: obj.id, created: iso(obj.createdMs), ...(obj.amount !== undefined ? { amount: obj.amount } : {}), ...(obj.currency !== undefined ? { currency: obj.currency } : {}) });
+    if (!receipts.length || repeated) {
+      report.providerOnly.push({ providerId: obj.id, created: iso(obj.createdMs), ...(obj.amount !== undefined ? { amount: obj.amount } : {}), ...(obj.currency !== undefined ? { currency: obj.currency } : {}), ...(repeated && receipts.length ? { repeated: true as const } : {}) });
       continue;
     }
     if (receipts.length > 1) report.duplicates.push({ providerId: obj.id, receiptIds: receipts.map((p) => p.receiptId) });
@@ -332,7 +342,7 @@ export function formatCompleteness(r: CompletenessReport): string {
   const section = (title: string, rows: string[]) => {
     if (rows.length) lines.push("", `${title} (${rows.length})`, ...rows.map((row) => `  ${row}`));
   };
-  section("PROVIDER ACTIONS WITH NO RECEIPT", r.providerOnly.map((x) => `${x.providerId} created ${x.created}${x.amount !== undefined ? ` amount ${x.amount}${x.currency ? ` ${x.currency}` : ""}` : ""}`));
+  section("PROVIDER ACTIONS WITH NO RECEIPT", r.providerOnly.map((x) => `${x.providerId} created ${x.created}${x.amount !== undefined ? ` amount ${x.amount}${x.currency ? ` ${x.currency}` : ""}` : ""}${x.repeated ? "; the receipt for this id accounts for another action" : ""}`));
   section("RECEIPTS THE PROVIDER DOES NOT HAVE", r.receiptOnly.map((x) => `${x.receiptId} names ${x.providerId}, signed ${x.timestamp}`));
   section("MISMATCHES", r.mismatches.map((x) => `${x.receiptId} / ${x.providerId}: ${x.field} is ${JSON.stringify(x.receipt)} in the receipt, ${JSON.stringify(x.provider)} at the provider`));
   section("ONE PROVIDER OBJECT, SEVERAL RECEIPTS", r.duplicates.map((x) => `${x.providerId} is named by ${x.receiptIds.join(", ")}`));

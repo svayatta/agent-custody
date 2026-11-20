@@ -931,6 +931,7 @@ async function main(argv: string[]): Promise<number> {
       if (values.provider !== "stripe" && values.provider !== "github") throw new Error(`completeness supports --provider stripe or github; got "${values.provider ?? ""}"`);
       const github = values.provider === "github";
       if (github && !values.repo) throw new Error("--provider github needs --repo <owner>/<name>");
+      if (!github && values.repo) throw new Error("--repo is for --provider github");
       const objects = github ? ["pushes", "merges", "releases"] : ["refunds", "payouts", "transfers"];
       const object = values.object ?? objects[0]!;
       if (!objects.includes(object)) throw new Error(`--object is one of ${objects.join(", ")}; got "${object}"`);

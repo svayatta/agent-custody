@@ -382,6 +382,7 @@ describe("completeness from the provider's side", () => {
     expect(run(["--provider", "stripe", "--key-env", "K", "--object", "charges"], { K: KEY }).stderr).toMatch(/--object is one of refunds, payouts, transfers/);
     expect(run(["--provider", "stripe", "--key-env", "K", "--beneficiary", "charge"], { K: KEY }).stderr).toMatch(/--beneficiary takes/);
     expect(run(["--provider", "github", "--key-env", "K"], { K: KEY }).stderr).toMatch(/--provider github needs --repo/);
+    expect(run(["--provider", "stripe", "--repo", "acme/shop", "--key-env", "K"], { K: KEY }).stderr).toMatch(/--repo is for --provider github/);
     expect(run(["--provider", "github", "--repo", "acme/shop", "--key-env", "COMPLETENESS_TEST_KEY"]).stderr).toMatch(/COMPLETENESS_TEST_KEY is not set/);
     expect(run(["--provider", "github", "--repo", "acme/shop", "--key-env", "K", "--object", "refunds"], { K: KEY }).stderr).toMatch(/--object is one of pushes, merges, releases/);
   });
@@ -418,7 +419,7 @@ describe("completeness against GitHub", () => {
     untilMs,
     ...extra,
   });
-  const entry = (activity_type: string, after: string, timestamp = now) => ({ activity_type, ref: "refs/heads/main", after, timestamp });
+  const entry = (activity_type: string, after: string, timestamp = now, ref = "refs/heads/main") => ({ activity_type, ref, before: sha("9"), after, timestamp });
 
   beforeAll(async () => {
     fx = buildSdkFixture(mkdtempSync(join(tmpdir(), "completeness-github-")), "permit(principal, action, resource);");
@@ -454,6 +455,27 @@ describe("completeness against GitHub", () => {
     expect(report.matched.map((m) => m.providerId)).toEqual([sha("b")]);
     expect(report.providerOnly.map((x) => x.providerId)).toEqual([sha("e")]);
     expect(report.complete).toBe(false);
+  });
+
+  it("reports a push that creates a branch: GitHub lists it only as a branch creation", async () => {
+    const stub = githubStub({ activity: [entry("branch_creation", sha("f"), now, "refs/heads/outside"), entry("push", sha("b"))] });
+    const report = await checkCompleteness(opts("pushes", "github.push", stub, { idPath: "object.sha" }));
+    expect(report.providerOnly.map((x) => x.providerId)).toEqual([sha("f")]);
+    expect(report.complete).toBe(false);
+  });
+
+  it("reports a second move to a commit that has a receipt, and reads a push that GitHub records twice as one", async () => {
+    const twice = await checkCompleteness(opts("pushes", "github.push", githubStub({ activity: [entry("push", sha("b")), entry("push", sha("b"))] }), { idPath: "object.sha" }));
+    expect(twice.matched).toHaveLength(1);
+    expect(twice.complete).toBe(true);
+    // the gated commit goes to a second branch with another token, and a later force push resets main to it
+    const later = new Date(Date.parse(now) + 1000).toISOString();
+    const stub = githubStub({ activity: [entry("force_push", sha("b"), later), entry("branch_creation", sha("b"), now, "refs/heads/release"), entry("push", sha("b"))] });
+    const report = await checkCompleteness(opts("pushes", "github.push", stub, { idPath: "object.sha" }));
+    expect(report.matched).toEqual([{ receiptId: receipts["github.push"], providerId: sha("b") }]);
+    expect(report.providerOnly).toEqual([expect.objectContaining({ providerId: sha("b"), repeated: true }), expect.objectContaining({ providerId: sha("b"), repeated: true })]);
+    expect(report.complete).toBe(false);
+    expect(formatCompleteness(report)).toMatch(/the receipt for this id accounts for another action/);
   });
 
   it("matches a release by its numeric id, compares a beneficiary field, and reports a receipt whose release GitHub does not have", async () => {
