@@ -4,6 +4,8 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **The door's systemd note names `revokedGrants`.** The note at the top of `deploy/door/agent-custody-door.service` lists the `door.json` paths to move under `/var/lib/agent-custody` on a plain VM. It now includes `revokedGrants`: an operator who kept the example config's `/data/revoked.json` got a door that started, and an `agent-custody revoke` that failed.
+
 - **The door's example config can revoke grants.** `deploy/door/proxy/config/door.json` names `revokedGrants: /data/revoked.json`, and `deploy/door/README.md` gives the command that revokes a grant in the running container, with the grant on stdin. `deploy/door/smoke.sh` now runs that command and checks that the next refund carrying the grant is refused, with a receipt that records the arrival as `claimed` with `grant: "revoked"`.
 
 ## 0.16.9 — 2026-11-20
