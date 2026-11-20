@@ -72,6 +72,57 @@ export function stripeSource(o: StripeSourceOptions): ProviderSource {
   };
 }
 
+export type GitHubObject = "pushes" | "merges" | "releases";
+
+export interface GitHubSourceOptions {
+  /** a read-only token; from the environment, never a flag */
+  token: string;
+  /** the repository, as "owner/name" */
+  repo: string;
+  object: GitHubObject;
+  baseUrl?: string;
+  fetch?: typeof fetch;
+}
+
+const GITHUB_ACTIVITY: Partial<Record<GitHubObject, string[]>> = { pushes: ["push", "force_push"], merges: ["pr_merge", "merge_queue_merge"] };
+
+/**
+ * Lists one repository's pushes or merged pull requests (from its activity list) or its releases, every page. The id of
+ * a push or a merge is the commit the ref moved to (`after`); the id of a release is its numeric id, as a string.
+ */
+export function githubSource(o: GitHubSourceOptions): ProviderSource {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(o.repo)) throw new Error(`github: the repository is "owner/name"; got "${o.repo}"`);
+  const f = o.fetch ?? fetch;
+  const base = new URL(o.baseUrl ?? "https://api.github.com/");
+  const kinds = GITHUB_ACTIVITY[o.object];
+  return {
+    name: `github ${o.object} in ${o.repo}`,
+    async *list(sinceMs, untilMs) {
+      let url: URL | undefined = new URL(`repos/${o.repo}/${kinds ? "activity" : "releases"}?per_page=100`, base);
+      while (url) {
+        // the next page comes from a response header: the token goes only to the host it was given for
+        if (url.origin !== base.origin) throw new Error(`github ${o.object}: the next page is on another host, ${url.origin}`);
+        const res: Response = await f(url, { headers: { authorization: `Bearer ${o.token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" }, signal: AbortSignal.timeout(15_000) });
+        if (!res.ok) throw new Error(`github ${o.object}: HTTP ${res.status}`);
+        const page = (await res.json()) as Record<string, unknown>[];
+        if (!Array.isArray(page)) throw new Error(`github ${o.object}: the answer is not a list`);
+        let older = false;
+        for (const obj of page) {
+          const id = kinds ? obj.after : obj.id;
+          const createdMs = Date.parse(String(kinds ? obj.timestamp : (obj.published_at ?? obj.created_at)));
+          if (!(typeof id === "string" ? id.length : Number.isSafeInteger(id)) || !Number.isFinite(createdMs)) throw new Error(`github ${o.object}: an object without an id or a time`);
+          // the activity list is newest first, so nothing after an older entry is in the window; releases have no such order
+          if (kinds && createdMs < sinceMs) older = true;
+          if (createdMs < sinceMs || createdMs >= untilMs || (kinds && !kinds.includes(String(obj.activity_type)))) continue;
+          yield { id: String(id), createdMs, raw: obj };
+        }
+        const next: string | undefined = older ? undefined : /<([^>]+)>;\s*rel="next"/.exec(res.headers.get("link") ?? "")?.[1];
+        url = next ? new URL(next) : undefined;
+      }
+    },
+  };
+}
+
 export interface CompletenessOptions {
   /** the auditor's copy of the receipts directory */
   receiptsDir: string;
@@ -151,7 +202,8 @@ function providerIdOf(p: ReceiptPredicate, idPath: string): { id: string } | { r
     return { reason: "the result's text is not JSON" };
   }
   const id = at(parsed, idPath);
-  return typeof id === "string" && id.length ? { id } : { reason: `the result has no string at "${idPath}"` };
+  if (Number.isSafeInteger(id)) return { id: String(id) };
+  return typeof id === "string" && id.length ? { id } : { reason: `the result has no string or integer at "${idPath}"` };
 }
 
 /** A call argument, or that a capture rule withholds it: listed fields stay in clear beside one `$rest` commitment. */
