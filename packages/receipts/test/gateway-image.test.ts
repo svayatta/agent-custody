@@ -79,6 +79,21 @@ describe("the gateway image entrypoint", () => {
     expect(off.stderr).toContain("GATEWAY_CHECK must be");
   });
 
+  it("door refuses to start without a config, and on a config the check calls an error", () => {
+    const missing = spawnSync("sh", [entrypoint, "door"], { cwd: receipts, env: { ...env, DOOR_CONFIG: join(dir, "no-door.json") }, encoding: "utf8", timeout: 30_000 });
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain("no-door.json not found");
+    const doorDir = join(dir, "door-config");
+    mkdirSync(doorDir);
+    writeFileSync(join(doorDir, "door.json"), JSON.stringify({ identity: { keyFile: join(data, "keys", "door.key") }, origin: { url: "http://127.0.0.1:1" }, routes: [{ name: "all", path: "*" }], policyFile: "policy.cedar", recieptsDir: "receipts" }));
+    writeFileSync(join(doorDir, "policy.cedar"), 'permit(principal, action == Action::"all", resource);\n');
+    const bad = spawnSync("sh", [entrypoint, "door"], { cwd: receipts, env: { ...env, DOOR_CONFIG: join(doorDir, "door.json") }, encoding: "utf8", timeout: 30_000 });
+    expect(bad.status).toBe(1);
+    expect(bad.stderr).toContain("recieptsDir");
+    expect(bad.stderr).toContain("the door is not starting");
+    expect(existsSync(join(data, "keys", "door.key"))).toBe(true);
+  });
+
   it("console refuses to start without a token", () => {
     const without = spawnSync("sh", [entrypoint, "console"], { cwd: receipts, env: { ...env, CONSOLE_TOKEN: "", CONSOLE_TOKEN_FILE: join(dir, "no-such-token") }, encoding: "utf8", timeout: 30_000 });
     expect(without.status).toBe(1);

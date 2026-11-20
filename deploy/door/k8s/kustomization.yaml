@@ -1,0 +1,24 @@
+# The door on Kubernetes, from the gateway image in door mode: one replica (the local log has one writer), a volume for
+# the door key, receipts and the local log, and a ClusterIP Service. Route your site's traffic to the Service with your
+# Ingress or mesh, and point origin.url in door.json at the site's own Service. TLS is yours to add: the door speaks
+# plain HTTP and a grant is a bearer credential.
+#
+#   kubectl create namespace agent-custody-door
+#   kubectl -n agent-custody-door create configmap door-config --from-file=door.json --from-file=policy.cedar --from-file=principal.pub
+#   kubectl -n agent-custody-door create secret generic door-env --from-literal=DOOR_SECRET='...'      only if door.json reads one
+#   kubectl apply -k deploy/door/k8s
+#
+# A ConfigMap flattens directories, so list the public key at its flat name in door.json (trustedPrincipalKeys:
+# ["principal.pub"]). Keep identity.keyFile at /data/keys/door.key: the key is created there on first start.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agent-custody-door
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+# Set the release before applying: `kustomize edit set image ghcr.io/svayatta/agent-custody-gateway=ghcr.io/svayatta/agent-custody-gateway:<version>`
+# or a digest with @sha256:. There is no default; the version must be a release that has door mode.
+images:
+  - name: ghcr.io/svayatta/agent-custody-gateway
+    newTag: "SET-A-RELEASE-VERSION"

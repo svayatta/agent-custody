@@ -1,0 +1,33 @@
+# The door on a plain VM, without containers, in front of a site on the same host. Install the package (npm install -g
+# @agent-custody/receipts), create the user and the directories below, put door.json, policy.cedar and the principals'
+# public keys in /etc/agent-custody, and any credential the door reads (origin.headerEnv, a challenge secret) in
+# /etc/agent-custody/door.env (mode 0600).
+#
+#   sudo useradd --system --home /var/lib/agent-custody --create-home custody
+#   sudo install -d -o custody -g custody /var/lib/agent-custody/keys
+#   sudo -u custody agent-custody keygen --dir /var/lib/agent-custody/keys --name door
+#   sudo systemctl enable --now agent-custody-door
+#
+# The paths in door.json: identity.keyFile = /var/lib/agent-custody/keys/door.key, and receiptsDir and logFile under
+# /var/lib/agent-custody. Put your TLS proxy in front of 127.0.0.1:8780.
+[Unit]
+Description=agent-custody door
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=custody
+EnvironmentFile=-/etc/agent-custody/door.env
+ExecStart=/usr/bin/env agent-custody door --config /etc/agent-custody/door.json --host 127.0.0.1 --port 8780
+Restart=on-failure
+RestartSec=5
+# SIGTERM closes the door cleanly; give in-flight arrivals time to finish
+TimeoutStopSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/agent-custody
+
+[Install]
+WantedBy=multi-user.target

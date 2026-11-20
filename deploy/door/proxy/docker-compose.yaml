@@ -1,0 +1,56 @@
+# The door as a reverse proxy in front of a site: the gateway image in door mode, with the stand-in origin (../origin.mjs)
+# as the site. Every arrival is classified, decided by the policy for its route, relayed or refused, and receipted in /data.
+#
+#   mkdir -p config/keys && cp principal.pub config/keys/     the public key of the principal whose grants the door trusts
+#   docker compose up -d                                      the door on 127.0.0.1:8780, plain HTTP
+#
+# Only the door is published, on loopback; the origin is reachable only through it. Put TLS in front before it crosses a
+# network. Set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release that has door mode. For an image of your own, set
+# AGENT_CUSTODY_GATEWAY_REPOSITORY to its name and AGENT_CUSTODY_GATEWAY_VERSION to its tag.
+
+name: agent-custody-door
+
+services:
+  door:
+    # two flat variables: a default nested around a required one is read differently by different Compose versions
+    image: ${AGENT_CUSTODY_GATEWAY_REPOSITORY:-ghcr.io/svayatta/agent-custody-gateway}:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
+    command: ["door"]
+    restart: unless-stopped
+    user: "${DOOR_UID:-10001}:${DOOR_GID:-10001}"
+    # credentials the door reads at startup (origin.headerEnv, a challenge secret, the log's token) come from the environment
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ${DOOR_CONFIG_DIR:-./config}:/config:ro
+      - ${DOOR_DATA:-door-data}:/data
+    environment:
+      # the port inside the container is fixed; DOOR_PORT in .env is the host port only
+      DOOR_PORT: "8780"
+    ports:
+      - "${DOOR_BIND:-127.0.0.1}:${DOOR_PORT:-8780}:8780"
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - origin
+
+  origin:
+    # the site: replace it with your own service, and point origin.url in config/door.json at it
+    image: node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
+    command: ["node", "/srv/origin.mjs"]
+    init: true
+    restart: unless-stopped
+    volumes:
+      - ../origin.mjs:/srv/origin.mjs:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  door-data:

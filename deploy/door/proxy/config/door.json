@@ -1,0 +1,12 @@
+{
+  "identity": { "keyFile": "/data/keys/door.key" },
+  "origin": { "url": "http://origin:8081" },
+  "routes": [
+    { "name": "catalogue", "methods": ["GET", "HEAD"], "path": "/catalogue/*" },
+    { "name": "refund", "methods": ["POST"], "path": "/refunds" }
+  ],
+  "trustedPrincipalKeys": ["keys/principal.pub"],
+  "policyFile": "policy.cedar",
+  "receiptsDir": "/data/receipts",
+  "logFile": "/data/log.jsonl"
+}
