@@ -5,13 +5,15 @@
 #   docker compose up -d                                      the door on 127.0.0.1:8780, plain HTTP
 #
 # Only the door is published, on loopback; the origin is reachable only through it. Put TLS in front before it crosses a
-# network. Set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release that has door mode, or AGENT_CUSTODY_GATEWAY_IMAGE to an image.
+# network. Set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release that has door mode. For an image of your own, set
+# AGENT_CUSTODY_GATEWAY_REPOSITORY to its name and AGENT_CUSTODY_GATEWAY_VERSION to its tag.
 
 name: agent-custody-door
 
 services:
   door:
-    image: ${AGENT_CUSTODY_GATEWAY_IMAGE:-ghcr.io/svayatta/agent-custody-gateway:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}}
+    # two flat variables: a default nested around a required one is read differently by different Compose versions
+    image: ${AGENT_CUSTODY_GATEWAY_REPOSITORY:-ghcr.io/svayatta/agent-custody-gateway}:${AGENT_CUSTODY_GATEWAY_VERSION:?set AGENT_CUSTODY_GATEWAY_VERSION in .env to a release version}
     command: ["door"]
     restart: unless-stopped
     user: "${DOOR_UID:-10001}:${DOOR_GID:-10001}"

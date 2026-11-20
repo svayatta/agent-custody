@@ -9,10 +9,10 @@ The gateway image (`ghcr.io/svayatta/agent-custody-gateway`, [deploy/gateway](..
 | file | what it is |
 | --- | --- |
 | [proxy/docker-compose.yaml](proxy/docker-compose.yaml) | the image in door mode in front of the stand-in origin ([origin.mjs](origin.mjs)); only the door is published, on `127.0.0.1:8780` |
-| [proxy/config/](proxy/config) | its `door.json` and `policy.cedar`: the catalogue is public, a refund is for a verified agent and at most 5000 minor units (this door relays, so the policy reads the body) |
+| [proxy/config/](proxy/config) | its `door.json` and `policy.cedar`: the catalogue is public, a refund is for a verified agent, of more than 0 and at most 5000 minor units (this door relays, so the policy reads the body) |
 | [k8s/](k8s/kustomization.yaml) | Deployment, Service, and volume claim, one replica, the image in door mode; the header of `kustomization.yaml` lists the steps |
 | [agent-custody-door.service](agent-custody-door.service) | systemd, on a plain VM: the published package on `127.0.0.1:8780` |
-| [smoke.sh](smoke.sh) | runs the compose file with a given image: a catalogue read relayed, an unknown arrival's refund refused, a granted refund relayed, a refund above the bound refused, every receipt verified, and a clean stop |
+| [smoke.sh](smoke.sh) | runs the compose file with a given image: a catalogue read relayed, an unknown arrival's refund refused, a granted refund relayed, refunds above the bound and below 1 refused, every receipt verified, and a clean stop |
 
 ```bash
 cd deploy/door/proxy
@@ -22,7 +22,7 @@ docker compose up -d
 curl -i http://127.0.0.1:8780/catalogue/shoes                         # 200 from the origin, with X-Agent-Custody-Receipt
 ```
 
-The principal's key pair and a grant are made on the principal's own machine (`agent-custody keygen --name principal`, then `agent-custody grant --key principal.key --principal <you> --agent <agent> --scopes refund --ttl-hours 1 --out grant.json`); only `principal.pub` goes in `config/keys`. An agent presents the grant as `Authorization: Bearer <base64url of grant.json>`. To try a build of your own, set `AGENT_CUSTODY_GATEWAY_IMAGE` to its tag instead of the version, and run `deploy/door/smoke.sh <image>`; the `gateway-image` workflow runs it on every build of the image.
+The principal's key pair and a grant are made on the principal's own machine (`agent-custody keygen --name principal`, then `agent-custody grant --key principal.key --principal <you> --agent <agent> --scopes refund --ttl-hours 1 --out grant.json`); only `principal.pub` goes in `config/keys`. An agent presents the grant as `Authorization: Bearer <base64url of grant.json>`. To try a build of your own, set `AGENT_CUSTODY_GATEWAY_REPOSITORY` to its name and `AGENT_CUSTODY_GATEWAY_VERSION` to its tag, and run `deploy/door/smoke.sh <name>:<tag>`; the `gateway-image` workflow runs it on every build of the image.
 
 In door mode the container reads `DOOR_CONFIG` (default `/config/door.json`), creates the door's key at `DOOR_KEY` (default `/data/keys/door.key`) on first start and prints its public half in the log, checks the config like the gateway (`GATEWAY_CHECK`), and listens on `DOOR_PORT` (default 8780), which the image's healthcheck probes at `/.well-known/agent-custody-door`. Keep `identity.keyFile` in `door.json` equal to `DOOR_KEY`, and give absolute `/data/...` paths for the receipts and the log. Verifiers check the door's receipts with its public key (`/data/keys/door.pub`), never the gateway's. Point `origin.url` at your own site and replace the `origin` service with it; every field is in [the reference](../../site/reference/door.md#config). Run one replica: the local log has one writer, and the rate counts and Web Bot Auth nonces live in memory.
 
