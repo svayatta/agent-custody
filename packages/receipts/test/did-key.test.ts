@@ -10,9 +10,9 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey, publicKeyToPem, writeKeyPair, type Envelope, type KeyPair } from "../src/crypto.ts";
-import { createDelegation, decodeDelegation } from "../src/delegation.ts";
+import { createDelegation, decodeDelegation, delegateFrom, grantDigest } from "../src/delegation.ts";
 import { base58btcDecode, base58btcEncode, didKeyOf, publicKeyFromDidKey } from "../src/did-key.ts";
-import { ARRIVAL_FACT, RECEIPT_HEADER, createDoorHost, serveDoor, type Arrival, type DoorHost, type RunningDoor } from "../src/door.ts";
+import { ARRIVAL_FACT, RECEIPT_HEADER, classifyArrival, createDoorHost, serveDoor, type Arrival, type DoorHost, type DoorRequest, type RunningDoor } from "../src/door.ts";
 import { grantHeader } from "../src/gateway-http.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { verifyBundle } from "../src/verify.ts";
@@ -52,7 +52,13 @@ describe("did:key for Ed25519", () => {
     expect(publicKeyFromDidKey(did).keyid).toBe(kp.keyid);
   });
 
+  it("keeps leading zero bytes: each is a '1'", () => {
+    expect(base58btcEncode(Uint8Array.from([0, 0, 1]))).toBe("112");
+    expect([...base58btcDecode("112")]).toEqual([0, 0, 1]);
+  });
+
   it("refuses what does not name an Ed25519 key, saying why", () => {
+    expect(() => publicKeyFromDidKey(`did:key:z${"6".repeat(200)}`)).toThrow("the did:key is 209 characters; an Ed25519 did:key is 56");
     expect(() => publicKeyFromDidKey("did:web:shop.example")).toThrow("is not a base58btc did:key");
     expect(() => publicKeyFromDidKey("did:key:z6Mk0OIl")).toThrow('"0" is not a base58btc character');
     expect(() => publicKeyFromDidKey(`did:key:${SPEC_X25519_OF_FIRST}`)).toThrow("does not name an Ed25519 key");
@@ -95,6 +101,8 @@ describe("a did:key grant at the door", () => {
     expect(verified.res.status).toBe(200);
     expect(verified.arrival).toMatchObject({ class: "verified", grant: "verified", subject: did });
     expect(verified.st.predicate.agent).toEqual({ id: did, provenance: "attested" });
+    // bearer-grade: verified with no request signature, so a did:key says which key, not that the sender holds it
+    expect(verified.arrival.signature).toBe("absent");
     expect(verified.ok).toBe(true);
     // agentKey is optional: the did:key names the key by itself
     expect((await refund(grantFrom(fx.principalKey, did))).arrival.class).toBe("verified");
@@ -123,6 +131,35 @@ describe("a did:key grant at the door", () => {
     expect(nothing.ok).toBe(true);
 
     expect(new Set([verified.id, garbled.id, twoKeys.id, stranger.id, nothing.id]).size).toBe(5);
+  });
+
+  /** The door's classification of a refund arriving with this grant, and optionally a request signature it verified. */
+  const classify = (g: Envelope, signature?: Parameters<typeof classifyArrival>[5], revoked?: Parameters<typeof classifyArrival>[6]) => {
+    const req = { method: "POST", url: "/refunds", headers: { host: "shop.example", authorization: `Bearer ${grantHeader(g)}` }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
+    return classifyArrival(req, [loadPublicKey(fx.principalPub)], "refund", false, new Date().toISOString(), signature, revoked).arrival;
+  };
+
+  it("under a Web Bot Auth signature a did:key grant is wrong-sender: the signature names an https origin, never a did:key", () => {
+    const a = classify(grantFrom(fx.principalKey, did), { outcome: "verified", agent: "https://crawler.example", keyid: "k1", label: "sig1" });
+    expect(a).toMatchObject({ class: "claimed", grant: "wrong-sender", subject: did });
+  });
+
+  it("a revoked did:key grant is revoked, before its did:key is read", () => {
+    const g = grantFrom(fx.principalKey, did);
+    expect(classify(g, undefined, (digests) => (digests.includes(grantDigest(g)) ? "the grant has been revoked" : null))).toMatchObject({ class: "claimed", grant: "revoked" });
+  });
+
+  it("every link of a chain is checked: a parent whose did:key and agentKey disagree makes the sub-agent claimed", () => {
+    const lead = generateKeyPair();
+    const leadDid = didKeyOf(lead.publicKey);
+    const good = grantFrom(fx.principalKey, leadDid, { agentKey: publicKeyToPem(lead.publicKey) });
+    expect(classify(delegateFrom(good, lead, { agent: "helper", scopes: ["refund"] }))).toMatchObject({ class: "verified", subject: "helper" });
+
+    // the parent names the agent did:key:A and agentKey B; B signs the sub-grant, so the chain verifies, and the door refuses it
+    const other = generateKeyPair();
+    const split = grantFrom(fx.principalKey, leadDid, { agentKey: publicKeyToPem(other.publicKey) });
+    const a = classify(delegateFrom(split, other, { agent: "helper", scopes: ["refund"] }));
+    expect(a).toMatchObject({ class: "claimed", grant: "invalid", subject: "helper", grantError: `link 0 (${leadDid}): the grant's agentKey is not the key its did:key agent names` });
   });
 
   it("`agent-custody grant --did-key` names the agent by its key's did:key, and needs --agent-key without --agent", () => {

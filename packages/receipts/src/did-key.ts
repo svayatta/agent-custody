@@ -51,6 +51,8 @@ export function didKeyOf(publicKey: KeyObject): string {
 
 /** The Ed25519 key a did:key names; throws, saying why, when it does not decode to one. */
 export function publicKeyFromDidKey(did: string): PublicKeyRef {
+  // an Ed25519 did:key is 56 characters; the decode is quadratic, so a much longer one is refused before it
+  if (did.length > 100) throw new Error(`the did:key is ${did.length} characters; an Ed25519 did:key is 56`);
   if (!did.startsWith(`${DID_KEY_PREFIX}z`)) throw new Error(`"${did.slice(0, 40)}" is not a base58btc did:key (did:key:z...)`);
   const bytes = base58btcDecode(did.slice(DID_KEY_PREFIX.length + 1));
   if (bytes[0] !== ED25519_PUB[0] || bytes[1] !== ED25519_PUB[1]) throw new Error("the did:key does not name an Ed25519 key (multicodec 0xed01)");

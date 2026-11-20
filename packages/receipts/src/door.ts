@@ -420,10 +420,13 @@ export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route
   const revocation = revoked?.(grantChainDigests(envelope));
   if (revocation) return { arrival: { class: "claimed", subject: grant.agent, grant: "revoked", grantError: revocation, ...base } };
   // An agent named by a did:key is its key: the identifier must decode to an Ed25519 key, and the grant's agentKey, if
-  // it names one, must be that key, or the grant says two things about who the agent is.
-  if (grant.agent.startsWith(DID_KEY_PREFIX)) {
-    const named = didKeyAgent(grant.agent, grant.agentKey);
-    if (named) return { arrival: { class: "claimed", subject: grant.agent, grant: "invalid", grantError: named, ...base } };
+  // it names one, must be that key, or the grant says two things about who the agent is. Every link of a chain, since a
+  // parent's agentKey is what verified the link below it.
+  for (const [i, link] of checked.chain.entries()) {
+    if (!link.agent.startsWith(DID_KEY_PREFIX)) continue;
+    const named = didKeyAgent(link.agent, link.agentKey);
+    const where = i === checked.chain.length - 1 ? "" : `link ${i} (${link.agent}): `;
+    if (named) return { arrival: { class: "claimed", subject: grant.agent, grant: "invalid", grantError: where + named, ...base } };
   }
   if (!delegationValidAt(grant, at)) return { arrival: { class: "claimed", subject: grant.agent, grant: "invalid", grantError: "the grant is outside its validity window", ...base } };
   if (!grant.scopes.includes(route)) return { arrival: { class: "claimed", subject: grant.agent, grant: "out-of-scope", grantError: `route "${route}" is not in the grant's scopes`, ...base } };
