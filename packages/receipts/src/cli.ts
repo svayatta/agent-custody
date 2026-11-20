@@ -18,7 +18,7 @@ import { connectSigner, fetchLogKeys, localSigner, serveSigner, type RetiredKey,
 import { fetchWitnessKeys, Witness } from "./witness.ts";
 import { checkLog, formatLogCheck } from "./log-check.ts";
 import { Anchor, ANCHOR_CHAINS, resolveAnchorChain } from "./anchor.ts";
-import { checkCompleteness, formatCompleteness, stripeSource, type StripeObject } from "./completeness.ts";
+import { checkCompleteness, formatCompleteness, githubSource, stripeSource, type GitHubObject, type StripeObject } from "./completeness.ts";
 import { evmChain } from "./anchor-evm.ts";
 import { serveHttp } from "./gateway-http.ts";
 import { createDoorHost, serveDoor } from "./door.ts";
@@ -151,6 +151,7 @@ const USAGE = `agent-custody <command>
   policy simulate --policy <proposed.cedar|.rego> --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--approval-key <pub>]... [--log-key <pub>]... [--json] [--out <file>]
   completeness --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--log-id <id>]
                --provider stripe --object refunds|payouts|transfers --key-env NAME --tool <name>... --since <ISO> --until <ISO>
+               (or --provider github --repo <owner>/<name> --object pushes|merges|releases)
                [--id-path id] [--amount-field amount] [--currency-field currency] [--beneficiary <arg>=<field>]... [--json]
                                                  for an auditor: lists the provider's objects in the window with a read-only key, and
                                                  matches each to a verified receipt by the provider's object id; reports actions with no
@@ -913,7 +914,8 @@ async function main(argv: string[]): Promise<number> {
           log: { type: "string" },
           "log-id": { type: "string" },
           provider: { type: "string" },
-          object: { type: "string", default: "refunds" },
+          object: { type: "string" },
+          repo: { type: "string" },
           "key-env": { type: "string" },
           tool: { type: "string", multiple: true },
           since: { type: "string" },
@@ -925,10 +927,14 @@ async function main(argv: string[]): Promise<number> {
           json: { type: "boolean", default: false },
         },
       });
-      if (!values.receipts || !values["issuer-key"]?.length || !values["key-env"] || !values.tool?.length || !values.since || !values.until) throw new Error("completeness needs --receipts, --issuer-key, --provider stripe, --key-env, --tool, --since and --until");
-      if (values.provider !== "stripe") throw new Error(`completeness supports --provider stripe; got "${values.provider ?? ""}"`);
-      const objects: StripeObject[] = ["refunds", "payouts", "transfers"];
-      if (!objects.includes(values.object as StripeObject)) throw new Error(`--object is one of ${objects.join(", ")}; got "${values.object}"`);
+      if (!values.receipts || !values["issuer-key"]?.length || !values["key-env"] || !values.tool?.length || !values.since || !values.until) throw new Error("completeness needs --receipts, --issuer-key, --provider, --key-env, --tool, --since and --until");
+      if (values.provider !== "stripe" && values.provider !== "github") throw new Error(`completeness supports --provider stripe or github; got "${values.provider ?? ""}"`);
+      const github = values.provider === "github";
+      if (github && !values.repo) throw new Error("--provider github needs --repo <owner>/<name>");
+      if (!github && values.repo) throw new Error("--repo is for --provider github");
+      const objects = github ? ["pushes", "merges", "releases"] : ["refunds", "payouts", "transfers"];
+      const object = values.object ?? objects[0]!;
+      if (!objects.includes(object)) throw new Error(`--object is one of ${objects.join(", ")}; got "${object}"`);
       const sinceMs = Date.parse(values.since);
       const untilMs = Date.parse(values.until);
       if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs) || untilMs <= sinceMs) throw new Error("--since and --until must be ISO times, --until after --since");
@@ -948,7 +954,7 @@ async function main(argv: string[]): Promise<number> {
           ...(values.log ? { logFile: values.log } : {}),
           ...(values["log-id"] ? { logId: values["log-id"] } : {}),
         },
-        source: stripeSource({ secretKey: secretFrom(values["key-env"]), object: values.object as StripeObject }),
+        source: github ? githubSource({ token: secretFrom(values["key-env"]), repo: values.repo!, object: object as GitHubObject }) : stripeSource({ secretKey: secretFrom(values["key-env"]), object: object as StripeObject }),
         tools: values.tool,
         sinceMs,
         untilMs,

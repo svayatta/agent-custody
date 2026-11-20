@@ -1,6 +1,6 @@
 # Completeness
 
-A verified receipt proves what went through the gateway. Nothing on the gateway's side can see an action that never went through it: whoever holds the Stripe key can issue a refund straight through Stripe's API. The provider's own record is the only place that action shows. `agent-custody completeness` lets an auditor check it, with a read-only key of their own.
+A verified receipt proves what went through the gateway. Nothing on the gateway's side can see an action that never went through it: whoever holds the Stripe key can issue a refund straight through Stripe's API. The provider's own record is the only place that action shows. `agent-custody completeness` lets an auditor check it, with a read-only key of their own. It supports two providers: Stripe and GitHub.
 
 ## What it reports
 
@@ -8,7 +8,7 @@ For a window and a set of tools, it lists the provider's objects and matches eac
 
 | section | meaning | what to do |
 | --- | --- | --- |
-| provider actions with no receipt | an object the provider created in the window that no verified receipt names | the finding this command exists for: an action taken outside the gateway, or by a gateway whose receipts you were not given |
+| provider actions with no receipt | an object the provider created in the window that no verified receipt names, or a second object with an id that a receipt already accounts for | the finding this command exists for: an action taken outside the gateway, or by a gateway whose receipts you were not given |
 | receipts the provider does not have | an executed receipt in the window whose object the provider has no record of | a receipt for something that did not happen at the provider, or an object in another account or mode |
 | mismatches | a matched pair whose amount, currency (ignoring case), or a beneficiary field differs | the receipt and the provider disagree about what happened |
 | one provider object, several receipts | more than one verified receipt names the same provider object; each is still compared with it | one action recorded twice, or receipts that contradict each other |
@@ -37,23 +37,54 @@ agent-custody completeness --receipts ./receipts --issuer-key gateway.pub --prin
 | --- | --- | --- |
 | `--receipts <dir>` | | the auditor's copy of the receipts directory, authorization files included |
 | `--issuer-key`, `--principal-key`, `--approval-key`, `--log-key`, `--log`, `--log-id` | | how each receipt is verified, as for `verify` |
-| `--provider stripe` | | the provider; Stripe is the only one so far |
-| `--object` | `refunds` | `refunds`, `payouts`, or `transfers` |
-| `--key-env NAME` | | the environment variable holding the read-only key; never a flag value |
+| `--provider` | | `stripe` or `github` |
+| `--object` | `refunds` for Stripe, `pushes` for GitHub | Stripe: `refunds`, `payouts`, or `transfers`. GitHub: `pushes`, `merges`, or `releases` |
+| `--repo <owner>/<name>` | | GitHub only: the repository to list |
+| `--key-env NAME` | | the environment variable holding the read-only key or token; never a flag value |
 | `--tool <name>` | | each tool whose executed calls create provider objects; repeatable |
 | `--since`, `--until` | | the window, ISO times; `--until` is exclusive |
-| `--id-path` | `id` | where the provider's object id sits in the JSON of the result's first text item; Stripe's own response uses `id` |
+| `--id-path` | `id` | where the provider's object id sits in the JSON of the result's first text item, a string or an integer; Stripe's own response uses `id` |
 | `--amount-field`, `--currency-field` | `amount`, `currency` | the call arguments compared with the provider's amount and currency |
 | `--beneficiary <arg>=<field>` | | a call argument that must equal a provider field, such as `charge=charge` or `customer_id=metadata.customer_id`; repeatable |
 | `--json` | | the full report as JSON |
 
 Use a restricted Stripe key with read-only access to the objects you check. The command only lists objects: it never creates, retries, or reconciles anything. The operator's `reconcile` command is a different thing: it settles one financial operation through the gateway and writes a receipt.
 
+## GitHub
+
+```bash
+export GITHUB_AUDIT_TOKEN=github_pat_...   # a fine-grained token with read-only access to Contents, held by the auditor
+agent-custody completeness --receipts ./receipts --issuer-key gateway.pub --principal-key principal.pub \
+  --log log.jsonl --provider github --repo acme/shop --object merges --key-env GITHUB_AUDIT_TOKEN \
+  --tool github.merge_pull_request --id-path sha --since 2026-10-01T00:00:00Z --until 2026-11-01T00:00:00Z
+```
+
+Each run checks one repository and one object kind. Run the command one time for each kind that the agents can do.
+
+| `--object` | what GitHub lists | the id that the receipt must carry | `--id-path` for GitHub's own response |
+| --- | --- | --- | --- |
+| `pushes` | each push, each force push, and each branch creation, from the repository's activity list | the commit that the branch moved to (`after`) | `object.sha` for a created or updated ref, `commit.sha` for a written file |
+| `merges` | each merged pull request, merge queue included, from the same activity list | the commit that the branch moved to: the merge commit | `sha` |
+| `releases` | each release, by its publication time, or by its creation time while it is a draft | the release's numeric id | `id` |
+
+GitHub objects have no amount and no currency, so those comparisons do not run. `--beneficiary` compares a call argument with a field of the listed object, for example `--beneficiary tag_name=tag_name` for releases.
+
+Limits that apply to GitHub only:
+
+- **Deleted branches are not supported.** GitHub answers a branch deletion with an empty body, so a receipt carries no identifier that the activity list also has.
+- **A branch creation is a push.** GitHub lists a push that creates a branch only as a branch creation, so `pushes` includes each branch creation. A branch that someone creates in the GitHub web interface is listed too.
+- **A commit identifies a push.** The id is the commit, not the branch. A receipt accounts for one listed action with its id. When the same commit goes to a second branch, or a force push moves a branch back to it, the report lists that action as a provider action with no receipt. This is correct for an action outside the gateway. When an agent moves two branches to the same commit through the gateway, two receipts name one id: the report lists them under "one provider object, several receipts", and you compare them by hand.
+- **GitHub records some pushes twice.** Entries with the same branch, the same two commits, and the same time are read as one push.
+- **Releases are slow on a large repository.** GitHub gives no time order for releases, so each run reads every page of them.
+- **A push of several commits has one id.** The id is the last commit, which is the commit that the tool's result must carry.
+- **Draft releases.** GitHub shows a draft release only to a token with write access. A read-only token lists published releases.
+- **Tags are not listed.** The activity list covers branches.
+
 ## Limits
 
 - **The receipts you were given.** The check proves completeness against those receipts. A second gateway, or a second receipts directory, that issued receipts you were not handed shows up as provider actions with no receipt, which is the correct finding.
 - **One provider account and mode per run.** Test-mode and live-mode objects are separate lists.
 - **The id must be readable.** A capture rule that withholds the result content also withholds the object id inside it, and such receipts are reported as unmatchable, never as matched or missing. A rule that keeps `content` in clear (`result: { mode: "digest", clear: ["content"] }`) leaves the id readable. Likewise, keep the amount, currency, and beneficiary arguments in clear, or those comparisons are reported as unmatchable. Reading values from disclosures is still to come.
-- **Stripe first.** Other providers, and on-chain transfers from an agent's wallet, are `ProviderSource` implementations still to come.
+- **Stripe and GitHub.** Other providers, and on-chain transfers from an agent's wallet, are `ProviderSource` implementations still to come.
 
-In code, `checkCompleteness({ receiptsDir, verify, source, tools, sinceMs, untilMs })` returns the report, `stripeSource({ secretKey, object })` lists Stripe objects, and `formatCompleteness(report)` prints it. Example 35 runs the whole check against a stand-in for Stripe's list API.
+In code, `checkCompleteness({ receiptsDir, verify, source, tools, sinceMs, untilMs })` returns the report, `stripeSource({ secretKey, object })` lists Stripe objects, `githubSource({ token, repo, object })` lists GitHub objects, and `formatCompleteness(report)` prints it. Example 35 runs the whole check against a stand-in for Stripe's list API, and example 53 runs it against a stand-in for GitHub's activity list.
