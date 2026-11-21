@@ -2,11 +2,13 @@
 // can see an action that never did. An auditor with a read-only key of their own lists the provider's objects over a
 // window and matches each one to a verified receipt by the provider's object id, which the receipt's result carries.
 // A provider object with no receipt is an action taken outside the gateway; a receipt with no provider object is an
-// action the provider does not have. Nothing here writes, retries, or calls the provider for anything but a list.
+// action the provider does not have. A door receipt records the origin's answer by digest only, so it carries no
+// provider id: it is matched by its own receipt id, which the origin copies from the door's receipt header into the
+// provider object. Nothing here writes, retries, or calls the provider for anything but a list.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isCommitment, REST } from "./capture.ts";
-import type { AuthorizationBundle, ReceiptBundle, ReceiptPredicate } from "./receipt.ts";
+import type { AuthorizationBundle, IssuerKind, ReceiptBundle, ReceiptPredicate } from "./receipt.ts";
 import { verifyOrphanAuthorization } from "./simulate.ts";
 import { verifyBundle, type VerifyOptions } from "./verify.ts";
 
@@ -143,7 +145,12 @@ export interface CompletenessOptions {
   untilMs: number;
   /** where the provider's object id sits in the JSON of the result's first text item; default "id" */
   idPath?: string;
-  /** the call argument that holds the amount in minor units; default "amount" */
+  /**
+   * where a provider object carries the id of the door receipt that relayed its request; default
+   * "metadata.agent_custody_receipt". Door receipts are matched only by this field.
+   */
+  receiptIdPath?: string;
+  /** the call argument that holds the amount in minor units; default "amount". For a door receipt, a field of the JSON body */
   amountField?: string;
   /** the call argument that holds the currency; default "currency", compared case-insensitively when both sides have one */
   currencyField?: string;
@@ -161,10 +168,11 @@ export interface CompletenessReport {
   tools: string[];
   window: { since: string; until: string };
   receiptsRead: number;
-  matched: { receiptId: string; providerId: string }[];
+  /** `kind` is the issuer kind of the receipt: `gateway` matched by the provider id, `door` by the receipt id the object carries */
+  matched: { receiptId: string; providerId: string; kind: IssuerKind }[];
   /** provider objects in the window with no verified receipt: actions taken outside the gateway */
   providerOnly: { providerId: string; created: string; amount?: number; currency?: string; repeated?: true }[];
-  /** executed receipts in the window whose provider object the provider does not have */
+  /** executed receipts in the window whose provider object the provider does not have; never a door receipt, which names no provider object */
   receiptOnly: { receiptId: string; providerId: string; timestamp: string }[];
   mismatches: { receiptId: string; providerId: string; field: string; receipt: unknown; provider: unknown }[];
   /** provider objects that more than one verified receipt names: one action recorded twice, or receipts that disagree */
@@ -220,8 +228,17 @@ function argOf(args: Record<string, unknown>, field: string): { value: unknown }
   return isCommitment(args[REST]) ? { withheld: true } : { value: undefined };
 }
 
+/** A door receipt's arguments are the HTTP request: the call's own arguments are the JSON body, or withheld with it. */
+function doorArgs(args: Record<string, unknown>): Record<string, unknown> {
+  if (!Object.hasOwn(args, "body")) return isCommitment(args[REST]) ? { [REST]: args[REST] } : {};
+  const body = args.body;
+  if (isCommitment(body)) return { [REST]: body };
+  return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+}
+
 export async function checkCompleteness(o: CompletenessOptions): Promise<CompletenessReport> {
   const idPath = o.idPath ?? "id";
+  const receiptIdPath = o.receiptIdPath ?? "metadata.agent_custody_receipt";
   const amountField = o.amountField ?? "amount";
   const currencyField = o.currencyField ?? "currency";
   const margin = o.marginMs ?? 15 * 60_000;
@@ -246,6 +263,7 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
   const names = readdirSync(o.receiptsDir, { withFileTypes: true }).filter((e) => (e.isFile() || e.isSymbolicLink()) && e.name.endsWith(".json")).map((e) => e.name).sort();
   const outcomes = new Set<string>();
   const byProviderId = new Map<string, ReceiptPredicate[]>();
+  const doorReceipts = new Map<string, ReceiptPredicate>();
   for (const name of names) {
     if (name.endsWith(AUTHORIZATION)) continue;
     report.receiptsRead++;
@@ -268,6 +286,10 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
     }
     outcomes.add(p.receiptId);
     if (!tools.has(p.tool.name) || p.reconciliation || p.execution.status !== "executed") continue;
+    if (p.issuer.kind === "door") {
+      doorReceipts.set(p.receiptId, p);
+      continue;
+    }
     const id = providerIdOf(p, idPath);
     if ("reason" in id) {
       if (inWindow(Date.parse(p.timestamp))) report.unmatchable.push({ receiptId: p.receiptId, reason: id.reason });
@@ -292,22 +314,29 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
   }
 
   const seen = new Set<string>();
+  const claimed = new Set<string>();
   for await (const obj of o.source.list(o.sinceMs - margin, o.untilMs + margin)) {
-    // a second object with an id already listed is another action: the receipts for that id account for the first one
+    // a second object with an id already listed, or naming a door receipt already claimed, is another action: the
+    // receipt accounts for the first one
     const repeated = seen.has(obj.id);
     seen.add(obj.id);
-    const receipts = byProviderId.get(obj.id) ?? [];
+    const tag = at(obj.raw, receiptIdPath);
+    const door = typeof tag === "string" ? doorReceipts.get(tag) : undefined;
+    const doorRepeated = !!door && claimed.has(door.receiptId);
+    if (door) claimed.add(door.receiptId);
+    const named = [...(byProviderId.get(obj.id) ?? []), ...(door ? [door] : [])];
+    const receipts = [...(repeated ? [] : byProviderId.get(obj.id) ?? []), ...(door && !doorRepeated ? [door] : [])];
     // the margin finds a receipt across the window's edge; it does not widen the period reported on
-    const inScope = inWindow(obj.createdMs) || receipts.some((p) => inWindow(Date.parse(p.timestamp)));
+    const inScope = inWindow(obj.createdMs) || named.some((p) => inWindow(Date.parse(p.timestamp)));
     if (!inScope) continue;
-    if (!receipts.length || repeated) {
-      report.providerOnly.push({ providerId: obj.id, created: iso(obj.createdMs), ...(obj.amount !== undefined ? { amount: obj.amount } : {}), ...(obj.currency !== undefined ? { currency: obj.currency } : {}), ...(repeated && receipts.length ? { repeated: true as const } : {}) });
+    if (!receipts.length) {
+      report.providerOnly.push({ providerId: obj.id, created: iso(obj.createdMs), ...(obj.amount !== undefined ? { amount: obj.amount } : {}), ...(obj.currency !== undefined ? { currency: obj.currency } : {}), ...(named.length ? { repeated: true as const } : {}) });
       continue;
     }
     if (receipts.length > 1) report.duplicates.push({ providerId: obj.id, receiptIds: receipts.map((p) => p.receiptId) });
     for (const p of receipts) {
-      report.matched.push({ receiptId: p.receiptId, providerId: obj.id });
-      const args = p.request.args;
+      report.matched.push({ receiptId: p.receiptId, providerId: obj.id, kind: p.issuer.kind });
+      const args = p.issuer.kind === "door" ? doorArgs(p.request.args) : p.request.args;
       const withheld = (arg: string) => report.unmatchable.push({ receiptId: p.receiptId, reason: `the argument "${arg}" is withheld under a capture rule, so it cannot be compared` });
       const amount = argOf(args, amountField);
       if ("withheld" in amount) {
@@ -337,8 +366,14 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
   return report;
 }
 
+function matchedByKind(r: CompletenessReport): string {
+  const counts = new Map<string, number>();
+  for (const m of r.matched) counts.set(m.kind, (counts.get(m.kind) ?? 0) + 1);
+  return counts.size ? ` (${[...counts].map(([k, n]) => `${n} ${k}`).join(", ")})` : "";
+}
+
 export function formatCompleteness(r: CompletenessReport): string {
-  const lines = [`${r.provider} for ${r.tools.join(", ")}, ${r.window.since} to ${r.window.until}: ${r.receiptsRead} receipt(s) read, ${r.matched.length} matched`];
+  const lines = [`${r.provider} for ${r.tools.join(", ")}, ${r.window.since} to ${r.window.until}: ${r.receiptsRead} receipt(s) read, ${r.matched.length} matched${matchedByKind(r)}`];
   const section = (title: string, rows: string[]) => {
     if (rows.length) lines.push("", `${title} (${rows.length})`, ...rows.map((row) => `  ${row}`));
   };

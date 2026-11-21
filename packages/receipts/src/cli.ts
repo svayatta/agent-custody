@@ -154,9 +154,10 @@ const USAGE = `agent-custody <command>
   completeness --receipts <dir> --issuer-key <pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--log-id <id>]
                --provider stripe --object refunds|payouts|transfers --key-env NAME --tool <name>... --since <ISO> --until <ISO>
                (or --provider github --repo <owner>/<name> --object pushes|merges|releases)
-               [--id-path id] [--amount-field amount] [--currency-field currency] [--beneficiary <arg>=<field>]... [--json]
+               [--id-path id] [--receipt-id-path metadata.agent_custody_receipt] [--amount-field amount] [--currency-field currency] [--beneficiary <arg>=<field>]... [--json]
                                                  for an auditor: lists the provider's objects in the window with a read-only key, and
-                                                 matches each to a verified receipt by the provider's object id; reports actions with no
+                                                 matches each to a verified receipt: a gateway receipt by the provider's object id, a door
+                                                 receipt by the receipt id the object carries; reports actions with no
                                                  receipt, receipts the provider does not have, and mismatched amounts; exits 1 unless complete
                                                    replay verified local receipts against a proposed policy using their recorded inputs;
                                                    --out saves the full JSON report. Exits 1 when any call could not be evaluated.
@@ -926,6 +927,7 @@ async function main(argv: string[]): Promise<number> {
           since: { type: "string" },
           until: { type: "string" },
           "id-path": { type: "string" },
+          "receipt-id-path": { type: "string" },
           "amount-field": { type: "string" },
           "currency-field": { type: "string" },
           beneficiary: { type: "string", multiple: true },
@@ -964,6 +966,7 @@ async function main(argv: string[]): Promise<number> {
         sinceMs,
         untilMs,
         ...(values["id-path"] ? { idPath: values["id-path"] } : {}),
+        ...(values["receipt-id-path"] ? { receiptIdPath: values["receipt-id-path"] } : {}),
         ...(values["amount-field"] ? { amountField: values["amount-field"] } : {}),
         ...(values["currency-field"] ? { currencyField: values["currency-field"] } : {}),
         ...(Object.keys(beneficiary).length ? { beneficiary } : {}),

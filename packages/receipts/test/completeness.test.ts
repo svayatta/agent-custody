@@ -9,11 +9,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { checkCompleteness, formatCompleteness, githubSource, stripeSource, type CompletenessOptions } from "../src/completeness.ts";
-import { loadConfig, loadSdkConfig } from "../src/config.ts";
+import { loadConfig, loadDoorConfig, loadSdkConfig } from "../src/config.ts";
 import { loadPublicKey } from "../src/crypto.ts";
 import { createGateway, RECEIPT_META_KEY } from "../src/gateway.ts";
 import { createSdkIssuer, receiptIdOf } from "../src/sdk/index.ts";
 import { buildFixture, buildSdkFixture, type Fixture, type SdkFixture } from "../scripts/fixture.ts";
+import { buildDoorFixture, startOrigin } from "../scripts/door-fixture.ts";
+import { createDelegation } from "../src/delegation.ts";
+import { createDoorHost, RECEIPT_HEADER, serveDoor } from "../src/door.ts";
+import { grantHeader } from "../src/gateway-http.ts";
 
 const KEY = "rk_test_auditor_read_only";
 
@@ -292,7 +296,7 @@ describe("completeness from the provider's side", () => {
     expect(JSON.parse(Buffer.from(receipt.envelope.payload, "base64").toString()).predicate.execution.result).toHaveProperty("$rest");
     const { refund_id } = JSON.parse(made[0]!.text) as { refund_id: string };
     const report = await checkCompleteness(w([{ id: refund_id, created: Math.floor(Date.now() / 1000), amount: 300 }]));
-    expect(report.matched).toEqual([{ receiptId: made[0]!.receiptId, providerId: refund_id }]);
+    expect(report.matched).toEqual([{ receiptId: made[0]!.receiptId, providerId: refund_id, kind: "gateway" }]);
     expect(report.complete).toBe(true);
     rmSync(g.dir, { recursive: true, force: true });
   });
@@ -441,7 +445,7 @@ describe("completeness against GitHub", () => {
     const old = new Date(sinceMs - 3600_000).toISOString();
     const stub = githubStub({ activity: [entry("branch_deletion", sha("0")), entry("push", sha("b")), entry("pr_merge", sha("a")), entry("pr_merge", sha("c"), old), entry("pr_merge", sha("d"), old)] });
     const report = await checkCompleteness(opts("merges", "github.merge", stub, { idPath: "sha" }));
-    expect(report.matched).toEqual([{ receiptId: receipts["github.merge"], providerId: sha("a") }]);
+    expect(report.matched).toEqual([{ receiptId: receipts["github.merge"], providerId: sha("a"), kind: "sdk" }]);
     expect(report.complete).toBe(true);
     expect(report.provider).toBe("github merges in acme/shop");
     expect(stub.calls[0]!.pathname).toBe("/repos/acme/shop/activity");
@@ -472,7 +476,7 @@ describe("completeness against GitHub", () => {
     const later = new Date(Date.parse(now) + 1000).toISOString();
     const stub = githubStub({ activity: [entry("force_push", sha("b"), later), entry("branch_creation", sha("b"), now, "refs/heads/release"), entry("push", sha("b"))] });
     const report = await checkCompleteness(opts("pushes", "github.push", stub, { idPath: "object.sha" }));
-    expect(report.matched).toEqual([{ receiptId: receipts["github.push"], providerId: sha("b") }]);
+    expect(report.matched).toEqual([{ receiptId: receipts["github.push"], providerId: sha("b"), kind: "sdk" }]);
     expect(report.providerOnly).toEqual([expect.objectContaining({ providerId: sha("b"), repeated: true }), expect.objectContaining({ providerId: sha("b"), repeated: true })]);
     expect(report.complete).toBe(false);
     expect(formatCompleteness(report)).toMatch(/the receipt for this id accounts for another action/);
@@ -495,5 +499,93 @@ describe("completeness against GitHub", () => {
     await expect(checkCompleteness(opts("releases", "github.release", stub))).rejects.toThrow(/another host/);
     expect(stub.calls).toHaveLength(1);
     expect(() => githubSource({ token: KEY, repo: "acme/shop/../../user", object: "pushes" })).toThrow(/owner\/name/);
+  });
+});
+
+// A refund can reach Stripe through a site behind the door. The door records the origin's answer by digest only, so its
+// receipt names no Stripe object; the origin copies the door's receipt id into the refund's metadata instead.
+describe("completeness against door receipts as well as gateway receipts", () => {
+  let fx: Fixture;
+  let sinceMs: number;
+  let untilMs: number;
+  let doorPub: string;
+  let doorPrincipalPub: string;
+  let gateway: { receiptId: string; refundId: string };
+  let doorReceiptId: string;
+  const created = () => Math.floor(Date.now() / 1000);
+  const run = (objects: StubObject[]) =>
+    checkCompleteness({
+      receiptsDir: fx.receiptsDir,
+      verify: { issuerKeys: [loadPublicKey(fx.gatewayPub), loadPublicKey(doorPub)], principalKeys: [loadPublicKey(fx.principalPub), loadPublicKey(doorPrincipalPub)], logFile: fx.logFile },
+      source: stripeSource({ secretKey: KEY, object: "refunds", fetch: stripeStub(objects).f }),
+      tools: ["stripe.refund", "refund"],
+      sinceMs,
+      untilMs,
+      idPath: "refund_id",
+    });
+
+  beforeAll(async () => {
+    fx = buildFixture(mkdtempSync(join(tmpdir(), "completeness-door-")));
+    sinceMs = Date.now() - 60_000;
+    const gw = await createGateway(loadConfig(fx.configFile));
+    try {
+      const r = await gw.handleCall({ name: "stripe.refund", arguments: { customer_id: "cust_123", amount: 5000, currency: "GBP" } });
+      gateway = { receiptId: String(r._meta![RECEIPT_META_KEY]), refundId: (JSON.parse((r.content as { text: string }[])[0]!.text) as { refund_id: string }).refund_id };
+    } finally {
+      await gw.close();
+    }
+    // the door writes into the same receipts directory and log as the gateway
+    const origin = await startOrigin();
+    const dfx = buildDoorFixture(mkdtempSync(join(tmpdir(), "completeness-door-site-")), origin.url, { receiptsDir: fx.receiptsDir, logFile: fx.logFile });
+    doorPub = dfx.doorPub;
+    doorPrincipalPub = dfx.principalPub;
+    const host = await createDoorHost(loadDoorConfig(dfx.configFile));
+    const running = await serveDoor(host, { port: 0, log: () => {} });
+    try {
+      const grant = createDelegation(dfx.principalKey, { version: "0.1", principal: "shop-owner", agent: "refund-agent", scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() });
+      const res = await fetch(`${running.url}/refunds`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${grantHeader(grant)}` }, body: JSON.stringify({ order: "ord_1", amount: 1200 }) });
+      await res.text();
+      expect(res.status).toBe(200);
+      doorReceiptId = res.headers.get(RECEIPT_HEADER)!;
+      // what the origin hands on to Stripe: the receipt id the door sent with the request
+      expect(origin.seen.at(-1)!.headers[RECEIPT_HEADER]).toBe(doorReceiptId);
+    } finally {
+      await running.close();
+      await host.close();
+      await origin.close();
+    }
+    untilMs = Date.now() + 60_000;
+  }, 60_000);
+  afterAll(() => rmSync(fx.dir, { recursive: true, force: true }));
+
+  const both = (): StubObject[] => [
+    { id: gateway.refundId, created: created(), amount: 5000, currency: "gbp" },
+    { id: "re_through_door", created: created(), amount: 1200, currency: "gbp", metadata: { agent_custody_receipt: doorReceiptId } },
+  ];
+
+  it("reconciles a refund made through the gateway and one made through the door, and says which kind matched each", async () => {
+    const report = await run(both());
+    expect(report.complete).toBe(true);
+    expect(report.matched).toEqual([
+      { receiptId: gateway.receiptId, providerId: gateway.refundId, kind: "gateway" },
+      { receiptId: doorReceiptId, providerId: "re_through_door", kind: "door" },
+    ].sort((a, b) => a.receiptId.localeCompare(b.receiptId)));
+    expect(formatCompleteness(report)).toMatch(/2 matched \((1 gateway, 1 door|1 door, 1 gateway)\)/);
+  });
+
+  it("still reports a refund made straight against Stripe, and a second refund that names a door receipt already claimed", async () => {
+    const report = await run([...both(), { id: "re_direct", created: created(), amount: 900, currency: "gbp" }, { id: "re_reused_tag", created: created(), amount: 1200, currency: "gbp", metadata: { agent_custody_receipt: doorReceiptId } }]);
+    expect(report.complete).toBe(false);
+    expect(report.providerOnly.map((x) => [x.providerId, x.repeated])).toEqual(expect.arrayContaining([["re_direct", undefined], ["re_reused_tag", true]]));
+    expect(report.providerOnly).toHaveLength(2);
+  });
+
+  it("compares the amount with the door receipt's JSON body, and never lists an untagged door receipt as missing at the provider", async () => {
+    const [g, d] = both();
+    const report = await run([g!, { ...d!, amount: 4800 }]);
+    expect(report.mismatches).toEqual([{ receiptId: doorReceiptId, providerId: "re_through_door", field: "amount", receipt: 1200, provider: 4800 }]);
+    const untagged = await run([g!]);
+    expect(untagged.complete).toBe(true);
+    expect(untagged.receiptOnly).toEqual([]);
   });
 });
