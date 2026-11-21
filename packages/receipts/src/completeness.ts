@@ -147,7 +147,8 @@ export interface CompletenessOptions {
   idPath?: string;
   /**
    * where a provider object carries the id of the door receipt that relayed its request; default
-   * "metadata.agent_custody_receipt". Door receipts are matched only by this field.
+   * "metadata.agent_custody_receipt". A door receipt matches only by this field, only when the origin answered 2xx,
+   * and only an object created within `marginMs` of the receipt.
    */
   receiptIdPath?: string;
   /** the call argument that holds the amount in minor units; default "amount". For a door receipt, a field of the JSON body */
@@ -287,7 +288,9 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
     outcomes.add(p.receiptId);
     if (!tools.has(p.tool.name) || p.reconciliation || p.execution.status !== "executed") continue;
     if (p.issuer.kind === "door") {
-      doorReceipts.set(p.receiptId, p);
+      // the door records any origin answer below 500 as executed; only a 2xx can have made the object
+      const status = (p.execution as { result?: { status?: unknown } }).result?.status;
+      if (typeof status === "number" && status >= 200 && status < 300) doorReceipts.set(p.receiptId, p);
       continue;
     }
     const id = providerIdOf(p, idPath);
@@ -321,7 +324,9 @@ export async function checkCompleteness(o: CompletenessOptions): Promise<Complet
     const repeated = seen.has(obj.id);
     seen.add(obj.id);
     const tag = at(obj.raw, receiptIdPath);
-    const door = typeof tag === "string" ? doorReceipts.get(tag) : undefined;
+    const tagged = typeof tag === "string" ? doorReceipts.get(tag) : undefined;
+    // the object is made while the door relays: a receipt from another time cannot account for it
+    const door = tagged && Math.abs(obj.createdMs - Date.parse(tagged.timestamp)) <= margin ? tagged : undefined;
     const doorRepeated = !!door && claimed.has(door.receiptId);
     if (door) claimed.add(door.receiptId);
     const named = [...(byProviderId.get(obj.id) ?? []), ...(door ? [door] : [])];

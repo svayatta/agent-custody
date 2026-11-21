@@ -512,16 +512,18 @@ describe("completeness against door receipts as well as gateway receipts", () =>
   let doorPrincipalPub: string;
   let gateway: { receiptId: string; refundId: string };
   let doorReceiptId: string;
+  let refusedReceiptId: string;
   const created = () => Math.floor(Date.now() / 1000);
-  const run = (objects: StubObject[]) =>
+  const run = (objects: StubObject[], marginMs?: number) =>
     checkCompleteness({
       receiptsDir: fx.receiptsDir,
       verify: { issuerKeys: [loadPublicKey(fx.gatewayPub), loadPublicKey(doorPub)], principalKeys: [loadPublicKey(fx.principalPub), loadPublicKey(doorPrincipalPub)], logFile: fx.logFile },
       source: stripeSource({ secretKey: KEY, object: "refunds", fetch: stripeStub(objects).f }),
-      tools: ["stripe.refund", "refund"],
+      tools: ["stripe.refund", "refund", "api"],
       sinceMs,
       untilMs,
       idPath: "refund_id",
+      ...(marginMs !== undefined ? { marginMs } : {}),
     });
 
   beforeAll(async () => {
@@ -542,13 +544,18 @@ describe("completeness against door receipts as well as gateway receipts", () =>
     const host = await createDoorHost(loadDoorConfig(dfx.configFile));
     const running = await serveDoor(host, { port: 0, log: () => {} });
     try {
-      const grant = createDelegation(dfx.principalKey, { version: "0.1", principal: "shop-owner", agent: "refund-agent", scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() });
+      const grant = createDelegation(dfx.principalKey, { version: "0.1", principal: "shop-owner", agent: "refund-agent", scopes: ["refund", "api"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() });
       const res = await fetch(`${running.url}/refunds`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${grantHeader(grant)}` }, body: JSON.stringify({ order: "ord_1", amount: 1200 }) });
       await res.text();
       expect(res.status).toBe(200);
       doorReceiptId = res.headers.get(RECEIPT_HEADER)!;
       // what the origin hands on to Stripe: the receipt id the door sent with the request
       expect(origin.seen.at(-1)!.headers[RECEIPT_HEADER]).toBe(doorReceiptId);
+      // the origin refuses this one: the door still records it as executed, with the origin's 404
+      const refused = await fetch(`${running.url}/api/missing`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${grantHeader(grant)}` }, body: JSON.stringify({ amount: 1200 }) });
+      await refused.text();
+      expect(refused.status).toBe(404);
+      refusedReceiptId = refused.headers.get(RECEIPT_HEADER)!;
     } finally {
       await running.close();
       await host.close();
@@ -578,6 +585,21 @@ describe("completeness against door receipts as well as gateway receipts", () =>
     expect(report.complete).toBe(false);
     expect(report.providerOnly.map((x) => [x.providerId, x.repeated])).toEqual(expect.arrayContaining([["re_direct", undefined], ["re_reused_tag", true]]));
     expect(report.providerOnly).toHaveLength(2);
+  });
+
+  it("does not let a door receipt whose origin answered other than 2xx cover a refund made straight against Stripe", async () => {
+    const [g] = both();
+    const report = await run([g!, { id: "re_hidden", created: created(), amount: 1200, currency: "gbp", metadata: { agent_custody_receipt: refusedReceiptId } }]);
+    expect(report.complete).toBe(false);
+    expect(report.providerOnly.map((x) => x.providerId)).toEqual(["re_hidden"]);
+    expect(report.matched.map((m) => m.kind)).toEqual(["gateway"]);
+  });
+
+  it("does not let a door receipt cover a refund made outside the margin around it", async () => {
+    const [g, d] = both();
+    const report = await run([g!, { ...d!, created: Math.ceil(sinceMs / 1000) }], 5_000);
+    expect(report.providerOnly.map((x) => x.providerId)).toEqual(["re_through_door"]);
+    expect(report.matched.map((m) => m.kind)).toEqual(["gateway"]);
   });
 
   it("compares the amount with the door receipt's JSON body, and never lists an untagged door receipt as missing at the provider", async () => {

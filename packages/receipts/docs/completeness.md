@@ -69,15 +69,22 @@ agent-custody completeness --receipts ./receipts --issuer-key gateway.pub --issu
 
 A refund made through the gateway matches its gateway receipt. A refund made through the door matches its door receipt. A refund made directly against Stripe's API has no tag, and the report shows it as a provider action with no receipt.
 
+A door receipt matches a Stripe object only when both of these are true:
+
+- The origin answered with a 2xx status. The door records every answer below 500 as executed, but a 4xx answer made no refund. A refund that carries the id of a refused request is a provider action with no receipt.
+- Stripe created the object within the margin (`marginMs`, default fifteen minutes) of the receipt's time. A refund that carries the id of an older or a later request is a provider action with no receipt.
+
+If a capture rule withholds the result, the door receipt shows no status, and it matches no object.
+
 What a matched door receipt proves:
 
 - The door received a request on that route, the policy decided it, and the door relayed it to the origin. The arrival fact records who the caller was and how the door checked it.
-- The origin answered with a status below 500.
+- The origin answered with a 2xx status, within the margin of the time when Stripe created the object.
 - The Stripe object holds the receipt id. That id is a random UUID that the door made for that one request.
 
 What a matched door receipt does not prove:
 
-- **That the request caused the refund.** The link between them is the origin's word: the origin copies the tag. An origin can put a valid receipt id on a refund that it made for another reason. A second object with an id that is already matched shows as a provider action with no receipt.
+- **That the request caused the refund.** The link between them is the origin's word: the origin copies the tag. An origin can put a valid receipt id on a refund that it made for another reason. The 2xx status and the time limit stop a person who holds the Stripe key from reusing the id of a refused or old request. They do not stop the origin. A second object with an id that is already matched shows as a provider action with no receipt.
 - **The amount, without a capture rule.** By default the door withholds the request body, and the comparison is unmatchable. Keep `body` in clear for the route (`capture: { refund: { args: { mode: "digest", clear: ["method", "path", "body"] } } }`) and the amount, currency, and beneficiary fields are compared with the body. These are the body's field names, not Stripe's.
 - **That a relayed request made a refund.** A door receipt names no Stripe object, so a door receipt with no matching object is not a finding. The report does not list it as a receipt that the provider does not have.
 
