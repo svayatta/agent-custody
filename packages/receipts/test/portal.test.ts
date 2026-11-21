@@ -13,7 +13,7 @@ import { generateKeyPair } from "../src/crypto.ts";
 import { httpLog, postgresResolver, serveLog, type RunningLog } from "../src/log-sink.ts";
 import { readFileSync } from "node:fs";
 import { AUDIT_ACTIONS, PLAN_QUOTAS, PostgresTenancy } from "../src/log-store.ts";
-import { founderNote, PLAN_CARDS, PortalStore, qrMatrix, qrSvg, renderMail, readSession, readSessionVia, ROLES, sendFollowUps, servePortal, signSession, totp, verifyStripeSignature, type Role, type RunningPortal } from "../src/portal.ts";
+import { deliverMail, founderNote, PLAN_CARDS, PortalStore, qrMatrix, qrSvg, renderMail, readSession, readSessionVia, ROLES, sendFollowUps, servePortal, signSession, totp, verifyStripeSignature, type Role, type RunningPortal } from "../src/portal.ts";
 import { policyDigest } from "../src/policy.ts";
 import { standInIdp } from "../scripts/idp-standin.ts";
 
@@ -25,14 +25,18 @@ const stripeCalls: { path: string; body: URLSearchParams }[] = [];
 const mails: { to: string[]; subject: string; text: string; html: string; from: string; reply_to?: string; headers?: Record<string, string> }[] = [];
 /** who GitHub says the signed-in user is; a test changes it to play another person */
 let gh = { id: 4242, email: "Octo@Example.com" };
+/** the emails GitHub reports for the signed-in user; a test changes it to play a user with no verified email */
+let ghEmails: { email: string; primary: boolean; verified: boolean }[] | null = null;
+/** the claims Google's id token carries; a test changes it to play a user whose email is not verified */
+let googleClaims = { sub: "g-1", email: "Gina@Example.com", email_verified: true };
 // GitHub's and Google's endpoints, stood in: a code becomes a token, a token becomes a subject and a verified email
 const oauthFetch: typeof fetch = async (url, init) => {
   const u = String(url);
   const j = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   if (u === "https://github.com/login/oauth/access_token") { const b = JSON.parse(String(init?.body)); return j(b.code === "gh-code" && b.client_secret === "gh_secret" ? { access_token: "gh-token" } : { error: "bad_verification_code" }); }
   if (u === "https://api.github.com/user") return j({ id: gh.id, login: "octo" });
-  if (u === "https://api.github.com/user/emails") return j([{ email: "old@example.com", primary: false, verified: false }, { email: gh.email, primary: true, verified: true }]);
-  if (u === "https://oauth2.googleapis.com/token") { const b = new URLSearchParams(String(init?.body)); const claims = Buffer.from(JSON.stringify({ sub: "g-1", email: "Gina@Example.com", email_verified: true })).toString("base64url"); return j(b.get("code") === "g-code" ? { id_token: `h.${claims}.s` } : { error: "invalid_grant" }); }
+  if (u === "https://api.github.com/user/emails") return j(ghEmails ?? [{ email: "old@example.com", primary: false, verified: false }, { email: gh.email, primary: true, verified: true }]);
+  if (u === "https://oauth2.googleapis.com/token") { const b = new URLSearchParams(String(init?.body)); const claims = Buffer.from(JSON.stringify(googleClaims)).toString("base64url"); return j(b.get("code") === "g-code" ? { id_token: `h.${claims}.s` } : { error: "invalid_grant" }); }
   return new Response("not stood in: " + u, { status: 500 });
 };
 const mailFetch: typeof fetch = async (_url, init) => { mails.push(JSON.parse(String(init?.body))); return new Response("{}", { status: 200 }); };
@@ -453,6 +457,96 @@ describe("email verification and account linking (issue #103)", () => {
     const session = again.setCookies.find((c) => c.startsWith("custody_session="))!.split(";")[0]!;
     expect(readSession(SECRET, session.split("=")[1]!)).toBe(uid);
     gh = { id: 4242, email: "Octo@Example.com" };
+  });
+});
+
+describe("provider sign-in rejections (issue #282)", () => {
+  // Each rejection answers its status, and no session cookie is set.
+  const oauthStart = async (provider: "github" | "google", cookie?: string, link = false) => {
+    const start = await fetch(new URL(`auth/${provider}${link ? "?link=1" : ""}`, portal.url), { redirect: "manual", headers: cookie ? { cookie } : {} });
+    if (start.status !== 302) return { status: start.status, state: "", stateCookie: "" };
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    return { status: 302, state, stateCookie: start.headers.get("set-cookie")!.split(";")[0]! };
+  };
+  const oauthCallback = async (provider: "github" | "google", code: string, state: string) =>
+    fetch(new URL(`auth/${provider}/callback?code=${code}&state=${state}`, portal.url), { headers: { cookie: `custody_oauth=${state}` } });
+  const noSession = (res: Response) => res.headers.getSetCookie().find((c) => c.startsWith("custody_session=")) === undefined;
+
+  it("GitHub with no verified email is refused with 502 and no session", async () => {
+    ghEmails = [{ email: "old@example.com", primary: false, verified: false }];
+    try {
+      const { state } = await oauthStart("github");
+      const cb = await oauthCallback("github", "gh-code", state);
+      expect(cb.status).toBe(502);
+      expect((await cb.json()) as { error: string }).toMatchObject({ error: expect.stringContaining("GitHub gave no verified email") });
+      expect(noSession(cb)).toBe(true);
+    } finally { ghEmails = null; }
+  });
+
+  it("Google with no id token is refused with 502 and no session", async () => {
+    const { state } = await oauthStart("google");
+    const cb = await oauthCallback("google", "wrong", state);
+    expect(cb.status).toBe(502);
+    expect((await cb.json()) as { error: string }).toMatchObject({ error: expect.stringContaining("invalid_grant") });
+    expect(noSession(cb)).toBe(true);
+  });
+
+  it("Google with an unverified email is refused with 502 and no session", async () => {
+    googleClaims = { sub: "g-1", email: "Gina@Example.com", email_verified: false };
+    try {
+      const { state } = await oauthStart("google");
+      const cb = await oauthCallback("google", "g-code", state);
+      expect(cb.status).toBe(502);
+      expect((await cb.json()) as { error: string }).toMatchObject({ error: expect.stringContaining("Google gave no verified email") });
+      expect(noSession(cb)).toBe(true);
+    } finally { googleClaims = { sub: "g-1", email: "Gina@Example.com", email_verified: true }; }
+  });
+
+  it("Stripe's webhook without a signature is refused with 400", async () => {
+    const res = await fetch(new URL("stripe/webhook", portal.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "evt_nosig", created: 1_700_000_000, type: "checkout.session.completed", data: { object: {} } }) });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toEqual({ error: "bad signature" });
+  });
+
+  it("a mail failure is logged and reported as not sent", async () => {
+    const logged: string[] = [];
+    const failing: typeof fetch = async () => new Response("nope", { status: 500 });
+    const refused = await deliverMail({ apiKey: "re_test", from: "hello@example.test", fetch: failing }, { to: "x@example.com", subject: "s", text: "t" }, (m) => { logged.push(m); });
+    expect(refused).toBe(false);
+    expect(logged).toEqual([expect.stringContaining("mail to x@example.com refused: 500")]);
+    const throwing: typeof fetch = async () => { throw new Error("the provider is down"); };
+    expect(await deliverMail({ apiKey: "re_test", from: "hello@example.test", fetch: throwing }, { to: "y@example.com", subject: "s", text: "t" }, (m) => { logged.push(m); })).toBe(false);
+    expect(logged[1]).toContain("mail to y@example.com failed: the provider is down");
+  });
+
+  it("linking GitHub verifies the owner's address when the emails match", async () => {
+    const b = browser();
+    expect((await b.call("POST", "/api/login", { email: "two@example.com", password: "a-long-enough-password" })).status).toBe(200);
+    gh = { id: 999, email: "Two@Example.com" };
+    try {
+      const start = await fetch(new URL("auth/github?link=1", portal.url), { redirect: "manual", headers: { cookie: b.cookieValue() } });
+      expect(start.status).toBe(302);
+      const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+      const cb = await fetch(new URL(`auth/github/callback?code=gh-code&state=${state}`, portal.url), { headers: { cookie: `custody_oauth=${state}` } });
+      expect(cb.status).toBe(200);
+      expect(await cb.text()).toContain("GitHub is linked to two@example.com");
+      expect((await b.call("GET", "/api/me")).json).toMatchObject({ emailVerified: true, identities: ["github"] });
+    } finally { gh = { id: 4242, email: "Octo@Example.com" }; }
+  });
+
+  it("a link started before a password change is refused: the account that started it is gone", async () => {
+    const b = browser();
+    expect((await b.call("POST", "/api/login", { email: "two@example.com", password: "a-long-enough-password" })).status).toBe(200);
+    const start = await fetch(new URL("auth/github?link=1", portal.url), { redirect: "manual", headers: { cookie: b.cookieValue() } });
+    expect(start.status).toBe(302);
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    // the password change must land strictly after the state was signed, or the state still counts as fresh
+    await new Promise((r) => setTimeout(r, 10));
+    expect((await b.call("POST", "/api/password/change", { current: "a-long-enough-password", password: "a-different-long-password" })).status).toBe(200);
+    const cb = await fetch(new URL(`auth/github/callback?code=gh-code&state=${state}`, portal.url), { headers: { cookie: `custody_oauth=${state}` } });
+    expect(cb.status).toBe(401);
+    expect((await cb.json()) as { error: string }).toEqual({ error: "the account that started the link no longer exists" });
+    expect(noSession(cb)).toBe(true);
   });
 });
 
@@ -1194,6 +1288,27 @@ describe("enterprise sign-in", () => {
 
     const twoAts = await signIn("sso-co", { email: "a@evil.example@sso.example" });
     expect([twoAts.status, sessionOf(twoAts)]).toEqual([403, undefined]);
+  });
+
+  it("a tenant with no SSO set up, and a SAML metadata request for an OIDC tenant, are both refused with 404", async () => {
+    const none = await get("auth/sso/acme");
+    expect(none.status).toBe(404);
+    expect(await none.text()).toContain("No single sign-on is set up for that organisation.");
+    expect(sessionOf(none)).toBeUndefined();
+    await setup("sso-co", "sso.example");
+    const saml = await get("auth/sso/sso-co/saml");
+    expect(saml.status).toBe(404);
+    expect(await saml.text()).toContain("This organisation does not use SAML.");
+    expect(sessionOf(saml)).toBeUndefined();
+  });
+
+  it("an SSO start whose provider discovery fails is refused with 502", async () => {
+    await tenancy.addTenant("broken-co", "broken-co", "test");
+    await store.setSso({ tenant: "broken-co", protocol: "oidc", config: { issuer: "https://idp.broken.example", clientId: "c", clientSecret: "s" }, domains: ["broken.example"], defaultRole: "readonly", enforced: false });
+    const start = await get("auth/sso/broken-co");
+    expect(start.status).toBe(502);
+    expect(await start.text()).toContain("Single sign-on start failed.");
+    expect(sessionOf(start)).toBeUndefined();
   });
 
   it("an address registered first never locks the person out: a bare account, an account that created a tenant, and an account with a linked provider all lose the address to the provider's sign-in", async () => {
