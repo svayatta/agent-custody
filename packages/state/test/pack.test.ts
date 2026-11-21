@@ -116,7 +116,11 @@ describe("custody pack negative verification cases", () => {
 
   it("reports a cited receipt whose bundle file is gone as missing", async () => {
     const { dir, ledgerFile, factId, packKey, keys, pack } = await makePack();
-    const someId = Object.keys(pack.receipts)[0]!;
+    // the assert event's receipt is cited by the history itself, so it stays wanted after its file is gone;
+    // a blast-only receipt would drop out of the blast walk once its file is gone and never be reported missing
+    const first = pack.history[0]!;
+    const someId = first.kind === "assert" ? first.fact.source.receiptId : first.source.receiptId;
+    expect(someId).toBeTruthy();
     unlinkSync(join(dir, "receipts", `${someId}.json`));
     const again = await buildPack(new Ledger(ledgerFile), join(dir, "receipts"), factId);
     expect(again.missingReceipts).toContain(someId);
