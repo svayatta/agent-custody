@@ -13,7 +13,7 @@ import { decodeDelegation, delegationValidAt, grantChainDigests, verifyDelegatio
 import { parseGrantHeader, GRANT_HEADER } from "./grant-header.ts";
 import type { Issuer } from "./issue.ts";
 import { ReceiptPending, type FlushResult } from "./receipt-pending.ts";
-import { createWebBotAuthVerifier, normalizeAuthority, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
+import { createWebBotAuthVerifier, normalizeAuthority, type NonceStore, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
 import { createPartnerEngine, PARTNER_FACT, PARTNER_TOOL, type ArrivalPartner, type PartnerVerdict } from "./door-partner.ts";
 import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
@@ -586,6 +586,8 @@ export interface DoorIO {
   fetch: typeof fetch;
   /** false where a process-wide timer cannot run (a Worker) */
   timers: boolean;
+  /** where Web Bot Auth nonces are kept; this process's memory when absent */
+  nonceStore?: NonceStore;
 }
 
 /** The decision loop for a door config over the given I/O; `framework` is the receipt's `issuer.framework`. Throws when the config cannot be served. */
@@ -609,7 +611,7 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
   const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework };
   const precommit = new Set(cfg.precommit);
   const rates = createRateTracker(undefined, { sweepTimer: io.timers });
-  const webBotAuth = cfg.webBotAuth ? createWebBotAuthVerifier(cfg.webBotAuth, f) : undefined;
+  const webBotAuth = cfg.webBotAuth ? createWebBotAuthVerifier(cfg.webBotAuth, f, undefined, io.nonceStore) : undefined;
   const partner = cfg.partner ? createPartnerEngine(cfg.partner, f) : undefined;
 
   // The policy, re-read on every arrival, as the gateway does; a text that does not parse is refused and the policy in

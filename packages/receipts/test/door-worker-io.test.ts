@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { digestOf, generateKeyPair, publicKeyToPem } from "../src/crypto.ts";
 import { createDelegation } from "../src/delegation.ts";
 import { createDoorCoreWith, relayToOrigin, type DoorIO, type DoorRequest } from "../src/door-core.ts";
-import { CLOUDFLARE_FACT, cloudflareFacts, pemKeys, r2Store, workerDoorConfig, type DoorWorkerEnv, type R2BucketLike } from "../src/door-worker.ts";
+import { CLOUDFLARE_FACT, cloudflareFacts, durableNonceStore, pemKeys, r2Store, workerDoorConfig, type DoorWorkerEnv, type DurableObjectNamespaceLike, type R2BucketLike } from "../src/door-worker.ts";
 import { grantHeader } from "../src/grant-header.ts";
 import { fileLog, type LogSink } from "../src/log-sink.ts";
 import { createObjectIssuer, type ObjectStore } from "../src/object-issuer.ts";
@@ -174,6 +174,16 @@ describe("the Worker's config", () => {
   it("names a missing binding", () => {
     expect(() => workerDoorConfig(baseEnv({ DOOR_POLICY: "" }))).toThrow(/needs DOOR_POLICY/);
     expect(() => workerDoorConfig({ ...baseEnv(), RECEIPTS: undefined as unknown as R2BucketLike })).toThrow(/RECEIPTS bucket/);
+  });
+
+  it("will not check Web Bot Auth without the shared nonce store, and a store that cannot answer a claim throws rather than answering one", async () => {
+    const webBotAuth = { agents: ["https://crawler.test"], authorities: ["shop.test"] };
+    expect(() => workerDoorConfig(baseEnv({ DOOR_CONFIG: JSON.stringify({ routes: [], webBotAuth }) }))).toThrow(/webBotAuth, which needs the NONCES Durable Object binding/);
+    const answering = (res: () => Promise<Response>): DurableObjectNamespaceLike => ({ idFromName: (n) => n, get: () => ({ fetch: res }) });
+    expect(workerDoorConfig({ ...baseEnv({ DOOR_CONFIG: JSON.stringify({ routes: [], webBotAuth }) }), NONCES: answering(async () => Response.json({ claim: "claimed" })) }).webBotAuth).toBeDefined();
+    await expect(durableNonceStore(answering(async () => new Response("overloaded", { status: 503 }))).claim("k", Date.now() + 1000)).rejects.toThrow("the nonce object answered 503");
+    await expect(durableNonceStore(answering(async () => Response.json({ claim: "maybe" }))).claim("k", Date.now() + 1000)).rejects.toThrow("answered 200 maybe");
+    await expect(durableNonceStore(answering(() => Promise.reject(new Error("the object is resetting")))).claim("k", Date.now() + 1000)).rejects.toThrow("the object is resetting");
   });
 
   it("reads every public key in a variable", () => {

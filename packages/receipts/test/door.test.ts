@@ -27,7 +27,7 @@ import type { LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { verifyBundle } from "../src/verify.ts";
 import { buildDoorFixture, startOrigin, type DoorFixture, type Origin } from "../scripts/door-fixture.ts";
-import { createWebBotAuthVerifier, DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, jwkThumbprint, parseDictionary, signatureBase, type SfInnerList, type SignedRequest, type WebBotAuthOptions } from "../src/web-bot-auth.ts";
+import { createMemoryNonceStore, createWebBotAuthVerifier, DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, jwkThumbprint, parseDictionary, signatureBase, type NonceStore, type SfInnerList, type SignedRequest, type WebBotAuthOptions } from "../src/web-bot-auth.ts";
 
 // The policy engine is the real one unless a test arms a fault: an engine that throws must refuse, never relay.
 const policyFault = vi.hoisted(() => ({ throwNext: false }));
@@ -1334,6 +1334,30 @@ describe("web bot auth", () => {
     // and the A.2.2 layout, Signature-Agent as a dictionary member, signed with the RFC's private key
     const dict = signHeaders(rfcPrivate, RFC_KEYID, { agent: SA, authority: "example.com", created: 1735689600, expires: 4889289600 });
     expect(await v.verify(signed("/", "example.com", dict))).toMatchObject({ outcome: "verified", agent: SA, keyid: RFC_KEYID });
+  });
+
+  it("refuses, through a nonce store two doors share, a signature replayed to the other door, and is unavailable when the store cannot answer", async () => {
+    // two door processes (or Worker isolates) behind one site: each one's memory alone would accept the other's nonce once
+    const k = freshKey();
+    const { f } = directories({ [AGENT]: jwks(directory(k.x)) });
+    const shared = createMemoryNonceStore(1000);
+    const claims: string[] = [];
+    const store: NonceStore = { claim: (key, until) => { claims.push(key); return shared.claim(key, until); } };
+    const first = createWebBotAuthVerifier(options(), f, undefined, store);
+    const second = createWebBotAuthVerifier(options(), f, undefined, store);
+    const headers = signHeaders(k.privateKey, k.keyid, { nonce: "once" });
+    expect((await first.verify(signed("/", AUTHORITY, headers))).outcome).toBe("verified");
+    expect(await second.verify(signed("/", AUTHORITY, headers))).toMatchObject({ outcome: "invalid", error: "sig1 repeats a nonce already used" });
+    expect(claims).toEqual([`${AGENT} ${k.keyid} once`, `${AGENT} ${k.keyid} once`]);
+    // a forged signature with a fresh nonce claims nothing, so it cannot spend the nonce of the request it copies
+    await second.verify(signed("/", AUTHORITY, signHeaders(freshKey().privateKey, k.keyid, { nonce: "spent?" })));
+    expect(claims).toHaveLength(2);
+    expect(first.nonces()).toBeUndefined();
+
+    const down = createWebBotAuthVerifier(options(), f, undefined, { claim: async () => { throw new Error("connection reset"); } });
+    expect(await down.verify(signed("/", AUTHORITY, signHeaders(k.privateKey, k.keyid)))).toMatchObject({ outcome: "unavailable", error: "the door could not reach its nonce store, so it cannot refuse a replay: connection reset", agent: AGENT, keyid: k.keyid });
+    const full = createWebBotAuthVerifier(options(), f, undefined, { claim: () => "full" });
+    expect(await full.verify(signed("/", AUTHORITY, signHeaders(k.privateKey, k.keyid)))).toMatchObject({ outcome: "unavailable", error: "the door's nonce store is full and cannot record another" });
   });
 
   it("refuses a signature with no nonce when one is required, and without the requirement bounds its replay by maxAgeSeconds", async () => {

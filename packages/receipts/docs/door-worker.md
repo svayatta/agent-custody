@@ -16,7 +16,8 @@ It is the same code as the reverse proxy, the in-process door, and authz mode, w
 | receipts whose log append failed | the outbox, flushed every 30 seconds | the bucket's outbox, flushed by a cron trigger every minute |
 | trusted principal keys, revoked grants | files, re-read | the `TRUSTED_PRINCIPAL_KEYS` and `REVOKED_GRANTS` variables; a change is a deploy |
 | the arrival's address | the socket, or `X-Forwarded-For` with `trustProxy` | `CF-Connecting-IP`, which Cloudflare sets |
-| Web Bot Auth nonces, arrival rates | one process's memory | one isolate's memory |
+| Web Bot Auth nonces | one process's memory | a Durable Object per nonce, which every isolate reaches (the `NONCES` binding) |
+| arrival rates | one process's memory | one isolate's memory |
 
 ## What reaches the policy
 
@@ -39,8 +40,20 @@ There is no lock between isolates. Two flushes at once can each append the same 
 - **Bundle.** 517 KB of JavaScript (115 KB gzipped), plus Cedar's WebAssembly: 4.3 MB, 1.42 MB gzipped. That is about 1.5 MB compressed, within the free plan's 3 MB and the paid plans' 10 MB.
 - **CPU time.** A warm decision for a `GET`, run locally in workerd (Miniflare 4.20260730), takes 3.2 ms median and 3.5 ms at the 90th percentile. That is wall time, including a local log append of about 0.6 ms and an R2 write. workerd does not expose CPU time to the code it runs, so the figure to plan with is the one in the Workers dashboard of a real deployment. The first request of an isolate also instantiates Cedar's module and parses the policy, which is not in that figure. The free plan allows 10 ms of CPU per request, which a cold start may exceed. The paid plans allow far more.
 - **What the Node door does that the Worker does not:** authz mode for nginx and Envoy, a partner engine, OpenTelemetry and Splunk export, a local receipts directory, a local log file, `trustProxy`, and reloading the policy or the revocation list without a deploy.
-- **Nonces live in one isolate.** Cloudflare runs many isolates, in many places, and starts new ones at will. A captured Web Bot Auth signature is refused a second time by the isolate that saw it, but another isolate accepts it once, until `maxAgeSeconds`. The Node door has the same limit across processes; at the edge there are simply more of them. Keep `maxAgeSeconds` short.
+- **Each Web Bot Auth signature costs a Durable Object request.** See [Web Bot Auth nonces](#web-bot-auth-nonces): one claim per verified signature that carries a nonce, and a wait of up to 3 seconds when the object is slow.
 - **Arrival rates live in one isolate too.** A pace rule sees what one isolate counted.
+
+## Web Bot Auth nonces
+
+Cloudflare runs many isolates, in many places, and starts new ones at will. If each isolate remembered nonces in its own memory, a captured signature refused by the isolate that saw it would be accepted once by any other, until `maxAgeSeconds`. So the Worker keeps each nonce in a Durable Object, `DoorNonce`, named by the signature's agent, key id, and nonce. Every isolate that sees that nonce reaches the same object, wherever it runs. The object answers one claim at a time: of two arrivals with one nonce, even at two isolates at once, one is verified and the other is a replay. It holds the nonce until the signature could no longer be accepted (the earlier of `expires` and `created + maxAgeSeconds`, plus `clockSkewSeconds`), and then an alarm empties it.
+
+A nonce is claimed only after the signature verifies, so a forged signature cannot spend the nonce of the request it copies. A replay costs a directory lookup (usually cached) and a signature check before it is refused.
+
+With `webBotAuth` in `DOOR_CONFIG`, the Worker needs the `NONCES` binding and answers 500, relaying nothing, without it. The template's `wrangler.toml` declares it, and `wrangler deploy` creates the class. If the object cannot be reached, throws, or does not answer within 3 seconds, the signature is `unavailable`, as when a Node door's nonce memory is full. It is never `verified`. `maxNonces` bounds a Node door's memory and does not apply to the Worker.
+
+What it costs: one Durable Object request, one storage write, and one alarm for each verified signature that carries a nonce. The object is created near the isolate that made the first claim, so a replay sent from far away waits for a round trip there.
+
+Workers KV was not used. It is eventually consistent: a nonce written at one location can take up to a minute to be seen at another, so a replay sent there in that time would be accepted.
 
 ## The signing key
 
@@ -52,6 +65,8 @@ The key is a Worker secret: stored by Cloudflare, given to the Worker as a bindi
   - an unknown arrival on a protected route is refused and never reaches the origin;
   - a verified Web Bot Auth arrival is relayed and its receipt verifies;
   - a forged signature, or the same signature twice, is not verified;
+  - with two copies of the Worker (two isolates) sharing one `DoorNonce` namespace, a signature verified at one is refused at the other, and of the same signature sent to both at once only one is verified;
+  - a Worker whose nonce object fails gives `unavailable`, not `verified`;
   - a grant is checked at the edge;
   - a precommit request is not relayed when the log is down;
   - a safe request's receipt goes to the outbox and the cron appends it;
@@ -59,7 +74,7 @@ The key is a Worker secret: stored by Cloudflare, given to the Worker as a bindi
   - the Worker's Ed25519 signature is byte for byte the one Node makes over the same bytes;
   - `agent-custody verify` accepts a Worker receipt;
   - a config that names a file is refused with nothing relayed.
-- `test/door-worker-io.test.ts` checks the bucket issuer in Node, where a store can be made to fail: a precommit request whose authorization the bucket cannot store is not relayed.
+- `test/door-worker-io.test.ts` checks the bucket issuer in Node, where a store can be made to fail: a precommit request whose authorization the bucket cannot store is not relayed. It also checks that a config with `webBotAuth` is refused without `NONCES`, and that a nonce object answering an error or no claim throws rather than answering one.
 - [56-door-worker.ts](../examples/56-door-worker.ts) is the same run as a tutorial.
 
 A deployment to Cloudflare itself, with the receipts it produced, is not recorded here yet.

@@ -9,7 +9,7 @@ export { serveConsole, type ConsoleOptions, type RunningConsole } from "./consol
 export { checkConfig, formatFindings, type CheckFinding, type CheckOptions } from "./check.ts";
 export { GRANT_HEADER, grantHeader, parseGrantHeader, serveHttp } from "./gateway-http.ts";
 export { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, DOOR_DEFAULT_CAPTURE, DOOR_VERSION, MAX_CHALLENGE_TOKEN, RECEIPT_HEADER, RATE_BURST_MS, RATE_MINUTE_MS, cedarArgs, classifyArrival, createDoorHost, createRateTracker, matchRoute, normalizePath, remoteOf, serveDoor, signedRequestOf, verifyChallengeToken } from "./door.ts";
-export { DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, WEB_BOT_AUTH_TAG, agentOrigin, createWebBotAuthVerifier, jwkThumbprint, normalizeAuthority, parseDictionary, signatureBase } from "./web-bot-auth.ts";
+export { DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, WEB_BOT_AUTH_TAG, agentOrigin, createMemoryNonceStore, createWebBotAuthVerifier, jwkThumbprint, normalizeAuthority, parseDictionary, signatureBase } from "./web-bot-auth.ts";
 export { DESTINATION_FACT, EGRESS_VERSION, PROXY_REALM, checkProxyCredential, createEgressHost, destinationName, normalizeHost, parseAuthority, publicOnlyLookup, serveEgress } from "./egress.ts";
 export { internalAddress } from "./addresses.ts";
 export { DRAFT_WARNING, draftEgressPolicy } from "./egress-draft.ts";
@@ -23,7 +23,7 @@ export { loadAcsGuardianConfig } from "./config.ts";
 export type { AcsGuardianConfig } from "./config.ts";
 export { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
 export type { Arrival, ArrivalChallenge, ArrivalClass, ArrivalRate, ChallengeCheck, Classified, DoorHost, DoorOptions, DoorRequest, DoorServerOptions, RateTracker, RateTrackerLimits, RunningDoor } from "./door.ts";
-export type { SignatureCheck, SignedRequest, WebBotAuthOptions, WebBotAuthVerifier } from "./web-bot-auth.ts";
+export type { NonceState, NonceStore, SignatureCheck, SignedRequest, WebBotAuthOptions, WebBotAuthVerifier } from "./web-bot-auth.ts";
 export * from "./capture.ts";
 export { A2A_CARD_PATH, A2A_RECEIPT_METADATA_KEY, A2A_STREAM_META_KEY, a2aUpstream, fetchAgentCard, serveA2a, textOf } from "./a2a.ts";
 export { deliverMail, founderNote, PortalStore, portalHandler, readSession, readSessionVia, sendFollowUps, servePortal, signSession, SsoRefusedError, stripeRequest, verifyStripeSignature } from "./portal.ts";

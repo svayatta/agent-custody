@@ -28,6 +28,16 @@ crons = ["* * * * *"]
 binding = "RECEIPTS"
 bucket_name = "agent-custody-door-receipts"
 
+# Web Bot Auth nonces: one Durable Object per agent, key id, and nonce, reached by every isolate, so a signature replayed
+# to another isolate or location is refused. Needed when DOOR_CONFIG has webBotAuth. `wrangler deploy` creates the class.
+[[durable_objects.bindings]]
+name = "NONCES"
+class_name = "DoorNonce"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DoorNonce"]
+
 [vars]
 ORIGIN_URL = "https://shop.example.com"
 # Your tenant on the hosted log, and the hosted log's public key (curl https://log.agent-custody.dev/.well-known/agent-custody-log.json).

@@ -1,6 +1,6 @@
 // The door as a Cloudflare Worker: the same decision core as the Node door (door-core.ts), with its I/O from the Worker's
 // bindings. The signing key and the log token are secrets; the door config, the policy, the origin, and the log are
-// variables; receipts go to an R2 bucket and to the log over HTTP. Built for workerd by scripts/build-door-worker.ts,
+// variables; receipts go to an R2 bucket and to the log over HTTP; Web Bot Auth nonces go to a Durable Object. Built for workerd by scripts/build-door-worker.ts,
 // deployed from deploy/door/cloudflare-worker/.
 import { createPrivateKey, createPublicKey } from "node:crypto";
 import { DoorConfigSchema, type DoorConfig } from "./config.ts";
@@ -9,6 +9,7 @@ import { createDoorCoreWith, DOOR_VERSION, jsonAnswer, readStream, RECEIPT_HEADE
 import { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
 import { httpLog } from "./log-http.ts";
 import { createObjectIssuer, type ObjectStore } from "./object-issuer.ts";
+import type { NonceStore } from "./web-bot-auth.ts";
 
 /** What the Worker needs of an R2 bucket binding. */
 export interface R2BucketLike {
@@ -16,6 +17,23 @@ export interface R2BucketLike {
   get(key: string): Promise<{ text(): Promise<string> } | null>;
   list(options: { prefix: string; cursor?: string }): Promise<{ objects: { key: string }[]; truncated: boolean; cursor?: string }>;
   delete(key: string): Promise<void>;
+}
+
+/** What the Worker needs of a Durable Object namespace binding. */
+export interface DurableObjectNamespaceLike {
+  idFromName(name: string): unknown;
+  get(id: never): { fetch(url: string, init: RequestInit): Promise<Response> };
+}
+
+/** What a Durable Object is given of its own state. */
+export interface DurableObjectStateLike {
+  storage: {
+    get(key: string): Promise<unknown>;
+    put(key: string, value: unknown): Promise<void>;
+    setAlarm(at: number): Promise<void>;
+    deleteAll(): Promise<void>;
+  };
+  blockConcurrencyWhile<T>(f: () => Promise<T>): Promise<T>;
 }
 
 /** The Worker's bindings. Any other string binding is a secret the door config may name (`challenge.secretEnv`, `captureKeyEnv`, `origin.headerEnv`). */
@@ -44,6 +62,8 @@ export interface DoorWorkerEnv {
   LOG_TOKEN?: string;
   /** the bucket the receipt bundles, authorizations, salts, and outbox go to */
   RECEIPTS: R2BucketLike;
+  /** the `DoorNonce` Durable Object namespace that remembers Web Bot Auth nonces for every isolate; needed with `webBotAuth` */
+  NONCES?: DurableObjectNamespaceLike;
   [binding: string]: unknown;
 }
 
@@ -88,6 +108,7 @@ export function workerDoorConfig(env: DoorWorkerEnv): DoorConfig {
   for (const [field, why] of Object.entries(NOT_IN_A_WORKER)) if (Object.hasOwn(raw, field)) throw new Error(`DOOR_CONFIG has ${field}, which a Worker does not take: ${why}`);
   const origin = (raw.origin ?? {}) as Record<string, unknown>;
   if (Object.hasOwn(origin, "url")) throw new Error("DOOR_CONFIG has origin.url: the origin is the ORIGIN_URL variable");
+  if (raw.webBotAuth && !env.NONCES) throw new Error("DOOR_CONFIG has webBotAuth, which needs the NONCES Durable Object binding: one isolate's memory cannot refuse a signature replayed to another");
   return DoorConfigSchema.parse({
     ...raw,
     identity: { keyFile: "(the DOOR_KEY secret)" },
@@ -117,6 +138,53 @@ export function r2Store(bucket: R2BucketLike): ObjectStore {
   };
 }
 
+/** how long the door waits for the nonce store before it calls a signature `unavailable` */
+const NONCE_STORE_TIMEOUT_MS = 3000;
+
+/**
+ * Web Bot Auth nonces in Durable Objects, one object per `<agent> <keyid> <nonce>`: every isolate that claims a key
+ * reaches the same object, wherever it runs, and that object answers one claim at a time. An object that cannot be
+ * reached, or answers anything but a claim, throws, and the verifier calls the signature `unavailable`.
+ */
+export function durableNonceStore(ns: DurableObjectNamespaceLike, timeoutMs = NONCE_STORE_TIMEOUT_MS): NonceStore {
+  return {
+    async claim(key, until) {
+      const stub = ns.get(ns.idFromName(key) as never);
+      const res = await stub.fetch("https://door-nonce/claim", { method: "POST", body: JSON.stringify({ until }), signal: AbortSignal.timeout(timeoutMs) });
+      const body = (await res.json().catch(() => null)) as { claim?: unknown } | null;
+      if (!res.ok || (body?.claim !== "claimed" && body?.claim !== "replayed")) throw new Error(`the nonce object answered ${res.status}${body?.claim === undefined ? "" : ` ${String(body.claim)}`}`);
+      return body.claim;
+    },
+  };
+}
+
+/**
+ * The Durable Object behind `durableNonceStore`: it holds one nonce until the signature it came with could no longer be
+ * accepted, then an alarm empties it. Claims are answered one at a time, so of two arrivals with one nonce, one is
+ * `claimed` and the other `replayed`.
+ */
+export class DoorNonce {
+  state: DurableObjectStateLike;
+  constructor(state: DurableObjectStateLike) {
+    this.state = state;
+  }
+  async fetch(request: Request): Promise<Response> {
+    const { until } = (await request.json()) as { until?: unknown };
+    if (typeof until !== "number" || !Number.isFinite(until)) return Response.json({ error: "until must be a time in milliseconds" }, { status: 400 });
+    const claim = await this.state.blockConcurrencyWhile(async () => {
+      const held = await this.state.storage.get("until");
+      if (typeof held === "number" && held > Date.now()) return "replayed";
+      await this.state.storage.put("until", until);
+      await this.state.storage.setAlarm(until);
+      return "claimed";
+    });
+    return Response.json({ claim });
+  }
+  async alarm(): Promise<void> {
+    await this.state.storage.deleteAll();
+  }
+}
+
 /** The door's I/O from the Worker's bindings: the key from a secret, the policy and keys from variables, receipts to R2 and the log. */
 export function workerDoorIO(env: DoorWorkerEnv, f: typeof fetch): DoorIO {
   const privateKey = createPrivateKey(env.DOOR_KEY);
@@ -139,6 +207,7 @@ export function workerDoorIO(env: DoorWorkerEnv, f: typeof fetch): DoorIO {
     issuer: (capture) => createObjectIssuer(key, store, sink, { capture }),
     fetch: f,
     timers: false,
+    ...(env.NONCES ? { nonceStore: durableNonceStore(env.NONCES) } : {}),
   };
 }
 
