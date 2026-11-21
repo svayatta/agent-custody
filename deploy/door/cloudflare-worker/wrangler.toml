@@ -1,0 +1,62 @@
+# The agent-custody door as a Cloudflare Worker. Variables only: the signing key and the log token are secrets, set
+# with `wrangler secret put DOOR_KEY` and `wrangler secret put LOG_TOKEN`, never written here. README.md has the steps.
+name = "agent-custody-door"
+main = "dist/index.js"
+compatibility_date = "2025-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# The bundle is built by the door's own build script, which is also what the tests run: one ES module and the Cedar
+# WebAssembly beside it.
+no_bundle = true
+[build]
+command = "node ../../../packages/receipts/scripts/build-door-worker.ts dist"
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = false
+
+# Put the Worker in front of the site. Uncomment and set your zone; a subrequest from a Worker to its own zone goes to
+# the origin, so ORIGIN_URL may be the site's own hostname.
+# routes = [{ pattern = "shop.example.com/*", zone_name = "example.com" }]
+
+# Every minute, append the receipts whose log append failed and were kept in the bucket's outbox.
+[triggers]
+crons = ["* * * * *"]
+
+[[r2_buckets]]
+binding = "RECEIPTS"
+bucket_name = "agent-custody-door-receipts"
+
+[vars]
+ORIGIN_URL = "https://shop.example.com"
+# Your tenant on the hosted log, and the hosted log's public key (curl https://log.agent-custody.dev/.well-known/agent-custody-log.json).
+# The hosted log is run by someone other than the site, so it is sent leaf hashes only: it never holds a receipt.
+LOG_URL = "https://log.agent-custody.dev/t/YOUR-TENANT/"
+LOG_HASH_ONLY = "true"
+# The log id every tree head must name, if your log writes one: an answer for another log is then refused.
+# LOG_ID = "YOUR-TENANT"
+LOG_KEYS = """
+-----BEGIN PUBLIC KEY-----
+REPLACE WITH THE LOG'S PUBLIC KEY
+-----END PUBLIC KEY-----
+"""
+# The principal keys whose grants this door accepts as a passport, SPKI PEM, one or more. Empty: no grant is trusted.
+TRUSTED_PRINCIPAL_KEYS = ""
+# Digests of revoked grants, as `agent-custody revoke` writes them.
+REVOKED_GRANTS = "[]"
+DOOR_POLICY = """
+// Anyone may read the catalogue. Only an agent with a grant for "orders" may place an order.
+permit(principal, action == Action::"catalogue", resource);
+permit(principal, action == Action::"orders", resource)
+  when { context.facts.arrival.class == "verified" };
+"""
+DOOR_CONFIG = """
+{
+  "routes": [
+    { "name": "catalogue", "path": "/products/*", "methods": ["GET", "HEAD"] },
+    { "name": "orders", "path": "/orders", "methods": ["POST"] }
+  ],
+  "precommit": ["orders"]
+}
+"""

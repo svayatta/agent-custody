@@ -498,6 +498,12 @@ function unreached(e: unknown): boolean {
 export type Execution = ReceiptPredicate["execution"];
 type ReceiptHead = Omit<ReceiptPredicate, "session" | "model" | "execution" | "authorization">;
 
+/** A fact the runtime observed for itself: the tool the receipt names as its source, and the value. Not signed by anyone: the door's own observation. */
+export interface ObservedFact {
+  tool: string;
+  value: unknown;
+}
+
 /** One arrival as the door decided it, before anything was relayed or passed on. */
 export interface DoorDecision {
   receiptId: string;
@@ -535,8 +541,13 @@ export interface DoorCore {
   admit(): boolean;
   release(): void;
   busy(): DoorAnswer;
-  /** `framework`, when given, is the receipt's `issuer.framework` in place of the core's. `read` is null when the door never sees the body (an authz check): the receipt then records none */
-  decide(req: DoorRequest, receiptId: string, read: ((max: number) => Promise<BodyRead>) | null, framework?: string): Promise<DoorDecision>;
+  /**
+   * `framework`, when given, is the receipt's `issuer.framework` in place of the core's. `read` is null when the door never
+   * sees the body (an authz check): the receipt then records none. `observed` are facts the runtime saw for itself (a
+   * Worker's Cloudflare Bot Management score), by name: each enters the receipt labelled `observed` and the policy as
+   * `context.facts.<name>`. A name the door uses itself (`arrival`, `partner`) is refused.
+   */
+  decide(req: DoorRequest, receiptId: string, read: ((max: number) => Promise<BodyRead>) | null, framework?: string, observed?: Record<string, ObservedFact>): Promise<DoorDecision>;
   /** a header the door consumed and never passes on: the grant (and `Authorization` when it carried it), the declared agent, the challenge token */
   consumed(name: string, req: DoorRequest, arrival: Arrival): boolean;
   /** writes the receipt; null when it could not be written, after saying why on stderr */
@@ -623,7 +634,8 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     return policyNow;
   };
 
-  async function decide(req: DoorRequest, receiptId: string, readArrivalBody: ((max: number) => Promise<BodyRead>) | null, framework?: string): Promise<DoorDecision> {
+  async function decide(req: DoorRequest, receiptId: string, readArrivalBody: ((max: number) => Promise<BodyRead>) | null, framework?: string, observed: Record<string, ObservedFact> = {}): Promise<DoorDecision> {
+    for (const name of Object.keys(observed)) if (name === ARRIVAL_FACT || name === PARTNER_FACT) throw new Error(`an observed fact cannot be named ${name}: the door records that fact itself`);
     const timestamp = new Date().toISOString();
     const url = requestUrl(req);
     const method = (req.method ?? "GET").toUpperCase();
@@ -687,6 +699,7 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
       ...(read === null ? {} : body ? { bodyBytes: body.length, bodyDigest: sha256Hex(body) } : { bodyBytes: (read as { bytes: number }).bytes, bodyOversized: true }),
     };
     const facts: Record<string, FactRecord> = {
+      ...Object.fromEntries(Object.entries(observed).map(([name, o]) => [name, { tool: o.tool, args: {}, value: o.value, resultDigest: digestOf(o.value), provenance: "observed" as const }])),
       [ARRIVAL_FACT]: { tool: "door.arrival", args: {}, value: arrival, resultDigest: digestOf(arrival), provenance: "observed" },
       ...(verdict ? { [PARTNER_FACT]: { tool: PARTNER_TOOL, args: {}, value: verdict.value, resultDigest: digestOf(verdict.value), provenance: "attested" as const, attestation: verdict.signature } } : {}),
     };
@@ -699,7 +712,7 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
       policy = evaluate(policyText, {
         agentId: checkedAgent ? arrival.subject : "unknown",
         tool: route,
-        context: { args: cedarArgs(args), facts: { [ARRIVAL_FACT]: arrival, ...(verdict ? { [PARTNER_FACT]: verdict.value } : {}) }, ...(delegation ? { grant: { principal: delegation.grant.principal, scopes: delegation.grant.scopes } } : {}) },
+        context: { args: cedarArgs(args), facts: { ...Object.fromEntries(Object.entries(observed).map(([name, o]) => [name, o.value])), [ARRIVAL_FACT]: arrival, ...(verdict ? { [PARTNER_FACT]: verdict.value } : {}) }, ...(delegation ? { grant: { principal: delegation.grant.principal, scopes: delegation.grant.scopes } } : {}) },
       });
     } catch (e) {
       policy = { decision: "deny", reasons: [], errors: [String(e instanceof Error ? e.message : e)], policyDigest: pDigest };
