@@ -8,20 +8,23 @@
 // a log that refuses means nothing is relayed. A permit for a host name never becomes a request to an internal address,
 // because a name the agent chose, or a DNS answer someone else chose, would otherwise reach the metadata service. A
 // connection still committing or connecting when the witness stops cannot outlive close().
+// A plain HTTP relay ends the same way its tunnel does: a destination that never connects, one that stalls after its
+// headers, one that resets, a witness that stops mid-relay, or an agent that abandons the request each leaves the
+// receipt the end state names, or says plainly why there is none.
 // Every receipt verifies with public keys alone. A Rego policy file decides on the same request as Cedar, an unverified
 // agent is not its principal either, and a reload that does not compile leaves the policy in force: a broken edit must
 // never open, or silently close, the agent's network.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
 import { createServer as createTcpServer, type AddressInfo, type LookupFunction } from "node:net";
 import { internalAddress, isAddressLiteral, sameAddress } from "../src/addresses.ts";
-import type { LogSink } from "../src/log-sink.ts";
+import { fileLog, type LogSink } from "../src/log-sink.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadEgressConfig } from "../src/config.ts";
-import { loadPublicKey, sha256Hex } from "../src/crypto.ts";
+import { loadPrivateKey, loadPublicKey, sha256Hex } from "../src/crypto.ts";
 import { RECEIPT_HEADER } from "../src/door.ts";
 import { DESTINATION_FACT, checkProxyCredential, createEgressHost, type EgressOptions, destinationName, normalizeHost, parseAuthority, serveEgress, type Destination, type EgressResult } from "../src/egress.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
@@ -325,6 +328,180 @@ describe("the witness's limits and modes", () => {
     const fx = buildEgressFixture(mkdtempSync(join(tmpdir(), "egress-")), { agents: [{ id: "other", secretEnv: "EGRESS_TEST_UNSET_VARIABLE" }] });
     delete process.env.EGRESS_TEST_UNSET_VARIABLE;
     await expect(createEgressHost(loadEgressConfig(fx.configFile))).rejects.toThrow(/EGRESS_TEST_UNSET_VARIABLE is not set/);
+  });
+});
+
+describe("the plain relay's end states", () => {
+  // The tunnel's idle-timeout and witness-stopped ends are covered above; a plain HTTP relay reaches the same ends
+  // through different code, and its connect timeout, idle timeout, reset, stop-early, and agent-abort paths had no test.
+  const ANY = `permit(principal == Agent::"${EGRESS_AGENT}", action, resource);\n`;
+  const neverAnswering: LookupFunction = ((_name: string, _o: unknown, _cb: (e: Error | null, a?: { address: string; family: number }[]) => void) => {
+    // never answers: a destination that is still connecting
+  }) as unknown as LookupFunction;
+
+  // A plain request whose answer may end by the witness destroying the response, not by a clean end.
+  function plainThrough(port: number, target: string) {
+    return new Promise<{ status: number | undefined; id: string; body: string }>((resolve, reject) => {
+      let text = "";
+      const req = request({ host: "127.0.0.1", port, method: "GET", path: target, headers: { "proxy-authorization": good } }, (res) => {
+        res.on("data", (c) => (text += c));
+        res.on("close", () => resolve({ status: res.statusCode, id: res.headers[RECEIPT_HEADER] as string, body: text }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  // The receipt of a relay the agent never got an answer for, so no receipt id came back in a header.
+  async function waitForNewBundle(fx: EgressFixture): Promise<ReceiptBundle> {
+    for (let i = 0; i < 200; i++) {
+      const bundles = readdirSync(fx.receiptsDir).filter((f) => f.endsWith(".json") && !f.endsWith(".authorization.json"));
+      if (bundles.length) return JSON.parse(readFileSync(join(fx.receiptsDir, bundles[0]!), "utf8")) as ReceiptBundle;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error("no receipt bundle appeared");
+  }
+
+  it("a plain request to a destination that never connects answers 502 and receipts the timeout", async () => {
+    const w = await start({ connectTimeoutMs: 300 }, ANY, { lookup: neverAnswering });
+    try {
+      const answer = await plainThrough(w.port, "http://slow.example:443/");
+      expect(answer.status).toBe(502);
+      expect(JSON.parse(answer.body).error).toContain("could not be reached");
+      const b = await waitForReceipt(w.fx, answer.id);
+      const p = decode(b).predicate;
+      expect(p.execution).toMatchObject({ status: "error" });
+      expect(String((p.execution as { error: string }).error)).toContain("no connection within 300 ms");
+      expect(failing(verified(w.fx, b))).toEqual([]);
+    } finally { await w.stop(); }
+  });
+
+  it("a tunnel to a destination that never connects answers 502 and receipts the timeout", async () => {
+    const w = await start({ connectTimeoutMs: 300 }, ANY, { lookup: neverAnswering });
+    try {
+      const a = await connectThrough(w.port, "slow.example:443", good);
+      expect(a.status).toBe(502);
+      expect(JSON.parse(a.body).error).toBe("the destination could not be reached");
+      a.socket.destroy();
+      const b = await waitForReceipt(w.fx, a.headers[RECEIPT_HEADER]!);
+      const p = decode(b).predicate;
+      expect(p.execution).toMatchObject({ status: "error" });
+      expect(String((p.execution as { error: string }).error)).toContain("no connection within 300 ms");
+      expect(failing(verified(w.fx, b))).toEqual([]);
+    } finally { await w.stop(); }
+  });
+
+  it("a plain relay whose destination stalls after its headers is receipted as idle-timeout", async () => {
+    const origin: Server = createServer((req, res) => { req.resume(); res.writeHead(200, { "content-type": "text/plain" }); });
+    const oport = await new Promise<number>((r) => origin.listen(0, "127.0.0.1", () => r((origin.address() as AddressInfo).port)));
+    const w = await start({ idleTimeoutMs: 300 });
+    try {
+      const answer = await plainThrough(w.port, `http://127.0.0.1:${oport}/`);
+      expect(answer.status).toBe(200);
+      const b = await waitForReceipt(w.fx, answer.id);
+      const p = decode(b).predicate;
+      expect(p.execution.status).toBe("executed");
+      expect((p.execution as { result: EgressResult }).result).toMatchObject({ status: 200, end: "idle-timeout" });
+      expect(failing(verified(w.fx, b))).toEqual([]);
+    } finally { await w.stop(); await new Promise<void>((r) => origin.close(() => r())); }
+  });
+
+  it("a plain relay whose destination resets after its headers is receipted as reset", async () => {
+    const origin: Server = createServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { "content-type": "text/plain" });
+      // Destroying with an error resets the connection, so the witness sees an upstream reset rather than a clean end.
+      res.write("part", () => res.socket?.destroy(new Error("reset by test")));
+    });
+    const oport = await new Promise<number>((r) => origin.listen(0, "127.0.0.1", () => r((origin.address() as AddressInfo).port)));
+    const w = await start();
+    try {
+      const answer = await plainThrough(w.port, `http://127.0.0.1:${oport}/`);
+      expect(answer.status).toBe(200);
+      const b = await waitForReceipt(w.fx, answer.id);
+      const p = decode(b).predicate;
+      expect(p.execution.status).toBe("executed");
+      expect((p.execution as { result: EgressResult }).result).toMatchObject({ status: 200, end: "reset" });
+      expect(failing(verified(w.fx, b))).toEqual([]);
+    } finally { await w.stop(); await new Promise<void>((r) => origin.close(() => r())); }
+  });
+
+  it("a plain relay still waiting on its destination is receipted as witness-stopped when the witness stops", async () => {
+    let arrived!: () => void;
+    const gotRequest = new Promise<void>((r) => { arrived = r; });
+    const origin: Server = createServer((req, res) => { req.resume(); arrived(); });
+    const oport = await new Promise<number>((r) => origin.listen(0, "127.0.0.1", () => r((origin.address() as AddressInfo).port)));
+    const w = await start();
+    try {
+      const pending = plainThrough(w.port, `http://127.0.0.1:${oport}/`);
+      await gotRequest;
+      await w.host.close();
+      const answer = await pending;
+      expect(answer.status).toBeUndefined();
+      const b = await waitForNewBundle(w.fx);
+      const p = decode(b).predicate;
+      expect(p.execution.status).toBe("executed");
+      expect((p.execution as { result: EgressResult }).result).toMatchObject({ end: "witness-stopped" });
+      expect(failing(verified(w.fx, b))).toEqual([]);
+    } finally { await w.host.close().catch(() => undefined); await w.running.close(); await new Promise<void>((r) => origin.close(() => r())); }
+  });
+
+  it("a plain relay whose log commit is still waiting when the witness stops answers 503 and receipts the stop", async () => {
+    const fx = buildEgressFixture(mkdtempSync(join(tmpdir(), "egress-")), {});
+    const key = loadPrivateKey(join(fx.dir, "keys", "egress.key"));
+    const real = fileLog(fx.logFile, key);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let appends = 0;
+    let gated = true;
+    const log: LogSink = {
+      kind: "file",
+      where: "gated",
+      append: async (leaf) => {
+        appends += 1;
+        if (gated) { gated = false; await gate; }
+        return real.append(leaf);
+      },
+    };
+    const host = await createEgressHost(loadEgressConfig(fx.configFile), { log });
+    const running = await serveEgress(host, { port: 0, log: () => {} });
+    const port = Number(new URL(running.url).port);
+    try {
+      const pending = plainThrough(port, "http://127.0.0.1:1/");
+      for (let i = 0; i < 200 && appends === 0; i++) await new Promise((r) => setTimeout(r, 25));
+      expect(appends).toBeGreaterThan(0);
+      const closing = host.close();
+      release();
+      await closing;
+      const answer = await pending;
+      expect(answer.status).toBe(503);
+      expect(JSON.parse(answer.body).error).toBe("the witness stopped before the connection opened");
+      const b = await waitForReceipt(fx, answer.id);
+      const p = decode(b).predicate;
+      expect(p.execution).toMatchObject({ status: "error", error: "the witness stopped before the connection opened" });
+      expect(failing(verified(fx, b))).toEqual([]);
+    } finally { await host.close().catch(() => undefined); await running.close(); }
+  });
+
+  it("a plain relay the agent abandons is receipted as reset", async () => {
+    let arrived!: () => void;
+    const gotRequest = new Promise<void>((r) => { arrived = r; });
+    const origin: Server = createServer((req, res) => { req.resume(); arrived(); });
+    const oport = await new Promise<number>((r) => origin.listen(0, "127.0.0.1", () => r((origin.address() as AddressInfo).port)));
+    const w = await start();
+    try {
+      const req = request({ host: "127.0.0.1", port: w.port, method: "POST", path: `http://127.0.0.1:${oport}/`, headers: { "proxy-authorization": good, "content-length": "100" } }, (res) => { res.resume(); });
+      req.on("error", () => undefined);
+      req.write("abc");
+      await gotRequest;
+      await new Promise((r) => setTimeout(r, 100));
+      req.destroy();
+      const b = await waitForNewBundle(w.fx);
+      const p = decode(b).predicate;
+      expect(p.execution.status).toBe("executed");
+      expect((p.execution as { result: EgressResult }).result).toMatchObject({ end: "reset", bytesUp: 3 });
+      expect(failing(verified(w.fx, b))).toEqual([]);
+    } finally { await w.stop(); await new Promise<void>((r) => origin.close(() => r())); }
   });
 });
 
