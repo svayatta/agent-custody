@@ -1,11 +1,11 @@
 // The pack is the artefact counsel gets. It must verify as a whole, and fail as a whole when any receipt in it is
 // touched or any cited receipt is absent.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createDelegation, createGateway, generateKeyPair, loadPublicKey, RECEIPT_META_KEY, writeKeyPair, loadConfig } from "@agent-custody/receipts";
+import { createDelegation, createGateway, digestOf, dsseSign, generateKeyPair, loadPublicKey, RECEIPT_META_KEY, writeKeyPair, loadConfig } from "@agent-custody/receipts";
 import { Ledger } from "../src/ledger.ts";
 import { buildPack, signPack, verifyPack } from "../src/pack.ts";
 
@@ -76,3 +76,92 @@ import { loadPrivateKey } from "@agent-custody/receipts";
 function generateKeyPairFrom(keyFile: string) {
   return loadPrivateKey(keyFile);
 }
+
+describe("custody pack negative verification cases", () => {
+  async function makePack() {
+    const dir = mkdtempSync(join(tmpdir(), "pack-negative-"));
+    writeKeyPair(generateKeyPair(), join(dir, "keys"), "gateway");
+    const principalKp = generateKeyPair();
+    writeKeyPair(principalKp, join(dir, "keys"), "principal");
+    const packKey = writeKeyPair(generateKeyPair(), join(dir, "keys"), "pack");
+    const now = Date.now();
+    writeFileSync(join(dir, "grant.json"), JSON.stringify(createDelegation(principalKp, { version: "0.1", principal: "user_456", agent: "support-agent", scopes: ["memory.write", "memory.read", "memory.hold", "memory.release", "memory.forget"], issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 3600_000).toISOString() })));
+    writeFileSync(join(dir, "policy.cedar"), `permit(principal, action, resource);\n`);
+    const ledgerFile = join(dir, "ledger.jsonl");
+    writeFileSync(join(dir, "gateway.json"), JSON.stringify({ identity: { keyFile: "keys/gateway.key" }, upstream: { command: process.execPath, args: [join(import.meta.dirname, "..", "src", "cli.ts"), "serve", "--ledger", ledgerFile] }, grantFile: "grant.json", trustedPrincipalKeys: ["keys/principal.pub"], policyFile: "policy.cedar", receiptsDir: "receipts", logFile: "log.jsonl" }));
+    const gw = await createGateway(loadConfig(join(dir, "gateway.json")));
+    const w = await gw.handleCall({ name: "memory.write", arguments: { subject: "person:1", predicate: "email", value: "dana@example.com", space: "team:support" } });
+    const factId = value(w).fact.factId;
+    await gw.handleCall({ name: "memory.read", arguments: { subject: "person:1" } });
+    await gw.handleCall({ name: "memory.write", arguments: { subject: "person:1", predicate: "tier", value: "gold", space: "team:support" } });
+    await gw.handleCall({ name: "memory.hold", arguments: { factId, reason: "matter 12" } });
+    await gw.handleCall({ name: "memory.release", arguments: { factId, reason: "matter closed" } });
+    await gw.handleCall({ name: "memory.forget", arguments: { factId, reason: "deletion request 4471" } });
+    await gw.close();
+    const pack = await buildPack(new Ledger(ledgerFile), join(dir, "receipts"), factId);
+    const keys = { issuerKeys: [loadPublicKey(join(dir, "keys", "gateway.pub"))], principalKeys: [loadPublicKey(join(dir, "keys", "principal.pub"))] };
+    return { dir, ledgerFile, factId, packKey, keys, pack };
+  }
+
+  it("skips non-JSON files and damaged bundles in the receipts dir", async () => {
+    const { dir, ledgerFile, factId, pack } = await makePack();
+    const before = Object.keys(pack.receipts).sort();
+    expect(pack.missingReceipts).toEqual([]);
+    writeFileSync(join(dir, "receipts", "notes.txt"), "not a bundle\n");
+    writeFileSync(join(dir, "receipts", "broken.json"), "{not json\n");
+    const again = await buildPack(new Ledger(ledgerFile), join(dir, "receipts"), factId);
+    expect(Object.keys(again.receipts).sort()).toEqual(before);
+    expect(again.missingReceipts).toEqual([]);
+  });
+
+  it("reports a cited receipt whose bundle file is gone as missing", async () => {
+    const { dir, ledgerFile, factId, packKey, keys, pack } = await makePack();
+    // the assert event's receipt is cited by the history itself, so it stays wanted after its file is gone;
+    // a blast-only receipt would drop out of the blast walk once its file is gone and never be reported missing
+    const first = pack.history[0]!;
+    const someId = first.kind === "assert" ? first.fact.source.receiptId : first.source.receiptId;
+    expect(someId).toBeTruthy();
+    unlinkSync(join(dir, "receipts", `${someId}.json`));
+    const again = await buildPack(new Ledger(ledgerFile), join(dir, "receipts"), factId);
+    expect(again.missingReceipts).toContain(someId);
+    const env = signPack(again, generateKeyPairFrom(packKey.keyFile));
+    const res = verifyPack(env, [loadPublicKey(packKey.pubFile)], keys);
+    expect(res.ok).toBe(false);
+    expect(res.checks.find((c) => c.name === "no receipts missing")?.ok).toBe(false);
+  });
+
+  it("fails the pack-type check for a wrongly typed pack", async () => {
+    const { factId, packKey, pack } = await makePack();
+    const wrong = { _type: "https://in-toto.io/Statement/v1", subject: [{ name: `custody-pack:${factId}`, digest: { sha256: digestOf(pack) } }], predicateType: "https://example.invalid/not-a-pack", predicate: pack };
+    const env = dsseSign("application/vnd.in-toto+json", wrong, generateKeyPairFrom(packKey.keyFile));
+    const res = verifyPack(env, [loadPublicKey(packKey.pubFile)]);
+    expect(res.ok).toBe(false);
+    expect(res.pack).toBeNull();
+    expect(res.checks.find((c) => c.name === "pack type")?.ok).toBe(false);
+  });
+
+  it("fails when a receipt inside is filed under another receipt's id", async () => {
+    const { packKey, keys, pack } = await makePack();
+    const touched = structuredClone(pack);
+    const ids = Object.keys(touched.receipts);
+    const first = ids[0]!;
+    touched.receipts[first] = touched.receipts[ids[1]!]!;
+    const bad = verifyPack(signPack(touched, generateKeyPairFrom(packKey.keyFile)), [loadPublicKey(packKey.pubFile)], keys);
+    expect(bad.ok).toBe(false);
+    expect(bad.checks.find((c) => c.name === `receipt ${first.slice(0, 8)} is the receipt it claims to be`)?.ok).toBe(false);
+  });
+
+  it("reports a damaged forget receipt bundle as missing, with no forget verification", async () => {
+    const { dir, ledgerFile, factId, packKey, keys, pack } = await makePack();
+    const forgetId = pack.forget?.receiptId;
+    expect(forgetId).toBeTruthy();
+    writeFileSync(join(dir, "receipts", `${forgetId}.json`), "{damaged\n");
+    const again = await buildPack(new Ledger(ledgerFile), join(dir, "receipts"), factId);
+    expect(again.missingReceipts).toContain(forgetId);
+    expect(again.forget?.verification).toBeNull();
+    const env = signPack(again, generateKeyPairFrom(packKey.keyFile));
+    const res = verifyPack(env, [loadPublicKey(packKey.pubFile)], keys);
+    expect(res.ok).toBe(false);
+    expect(res.checks.find((c) => c.name === "no receipts missing")?.ok).toBe(false);
+  });
+});

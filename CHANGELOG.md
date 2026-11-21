@@ -5,6 +5,8 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 ## Unreleased
 
 - **The site owner's quick start runs the door's container** (part of #263). [docs/door-quickstart.md](packages/receipts/docs/door-quickstart.md) said that the door had no container and pinned the CLI at 0.16.4. It now runs the door, the stand-in site, and every `agent-custody` command from the gateway image at 0.16.10, so a reader needs Docker and `curl` only; a "Without Docker" section keeps the `npx` path. The steps that tripped a clean run are fixed: the config check shows its two expected warnings (the page said `0 warnings`), the verify commands read the receipt ids from the saved answers (the page gave ids from another run), and the passport is encoded without Node. The root README names the quick start in its opening. `.github/scripts/check-deploy-versions.sh` now also checks the two versions that the page pins, so a release cannot leave them behind.
+- **Custody pack negative verification cases** (part of #284). `test/pack.test.ts` now asserts the failing checks for a pack whose receipts are missing, mistyped, or filed under another receipt's id, and for non-JSON and damaged files in the receipts dir. Writing the damaged-bundle case exposed a crash: `loadReceipts` in `src/blast.ts` threw on an unparseable bundle file, so `buildPack` failed outright; it now skips such files, as `loadBundles` already does, and the pack reports the cited receipt as missing.
+
 
 ## 0.16.10 — 2026-11-20
 

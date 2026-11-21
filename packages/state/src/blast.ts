@@ -24,9 +24,15 @@ export function loadReceipts(dir: string, opts: { captureKey?: Buffer } = {}): R
   for (const f of readdirSync(dir)) {
     // the authorization committed before a pre-committed call carries the same call: the receipt is the record
     if (!f.endsWith(".json") || f.endsWith(".authorization.json")) continue;
-    const bundle = JSON.parse(readFileSync(join(dir, f), "utf8")) as { envelope?: { payload?: string } };
-    if (!bundle.envelope?.payload) continue;
-    const st = JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as { predicate?: any };
+    let st: { predicate?: any };
+    try {
+      const bundle = JSON.parse(readFileSync(join(dir, f), "utf8")) as { envelope?: { payload?: string } };
+      if (!bundle.envelope?.payload) continue;
+      st = JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as { predicate?: any };
+    } catch {
+      // not a bundle; skip, as loadBundles in pack.ts does — the pack reports the cited receipt as missing
+      continue;
+    }
     const p = st.predicate;
     if (!p?.receiptId) continue;
     let ids: unknown = p.consumed?.factIds;
