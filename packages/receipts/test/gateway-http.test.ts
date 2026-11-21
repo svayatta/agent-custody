@@ -132,3 +132,105 @@ describe("the gateway over HTTP", () => {
     }
   });
 });
+
+/** The reaper and the requests that arrive before a session exists. Each test serves its own gateway so the idle window can be small without disturbing the shared one. */
+describe("the HTTP gateway session reaper and pre-initialize errors", () => {
+  const connectAt = async (url: string, grant: ReturnType<typeof grantFor>) => {
+    const client = new Client({ name: `agent-${Math.random().toString(36).slice(2, 6)}`, version: "0" });
+    const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${grantHeader(grant)}` } } });
+    await client.connect(transport);
+    return { client, transport };
+  };
+  const waitFor = async (cond: () => boolean, ms = 5000) => {
+    const start = Date.now();
+    while (!cond()) {
+      if (Date.now() - start > ms) throw new Error("timed out waiting for the condition");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+
+  it("the reaper closes a session that goes idle", async () => {
+    const logs: string[] = [];
+    const idle = await serveHttp(host, { port: 0, idleMs: 50, log: (m) => logs.push(m) });
+    try {
+      const { client, transport } = await connectAt(idle.url, grantFor("idle-agent", ["customer.lookup"]));
+      try {
+        expect(idle.sessions().map((s) => s.agent)).toEqual(["idle-agent"]);
+        await waitFor(() => idle.sessions().length === 0);
+        expect(logs.some((m) => m.includes("closed (idle)"))).toBe(true);
+      } finally {
+        await transport.terminateSession().catch(() => {});
+        await client.close().catch(() => {});
+      }
+    } finally {
+      await idle.close();
+    }
+  }, 15_000);
+
+  it("the reaper closes a session whose grant expires, with the reason", async () => {
+    const logs: string[] = [];
+    const gw = await serveHttp(host, { port: 0, idleMs: 1000, log: (m) => logs.push(m) });
+    try {
+      const now = Date.now();
+      const short = createDelegation(principalKey, { version: "0.1", principal: "user_456", agent: "short-agent", scopes: ["customer.lookup"], issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 400).toISOString() });
+      const { client, transport } = await connectAt(gw.url, short);
+      try {
+        expect(gw.sessions().map((s) => s.agent)).toEqual(["short-agent"]);
+        // One call while the grant is still valid refreshes lastSeen, so the idle cutoff cannot win the race:
+        // the reaper then has to close this session for the grant, not for idleness.
+        await new Promise((r) => setTimeout(r, 150));
+        expect((await client.listTools()).tools.map((t) => t.name)).toEqual(["customer.lookup"]);
+        await waitFor(() => gw.sessions().length === 0);
+        expect(logs.some((m) => m.includes("closed (grant has expired)"))).toBe(true);
+      } finally {
+        await transport.terminateSession().catch(() => {});
+        await client.close().catch(() => {});
+      }
+    } finally {
+      await gw.close();
+    }
+  }, 15_000);
+
+  it("a request on a session whose grant has expired is refused with the reason, and the session is gone", async () => {
+    const now = Date.now();
+    const short = createDelegation(principalKey, { version: "0.1", principal: "user_456", agent: "late-agent", scopes: ["customer.lookup"], issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 400).toISOString() });
+    // The shared gateway reaps at most once a minute, so only the per-request check can close this session.
+    const again = await connectAt(running.url, short);
+    try {
+      const [session] = running.sessions().filter((s) => s.agent === "late-agent");
+      expect(session).toBeDefined();
+      await new Promise((r) => setTimeout(r, 600));
+      const res = await fetch(running.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-session-id": session!.id }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000, message: expect.stringMatching(/the grant for this session has expired/) } });
+      expect(running.sessions().map((s) => s.agent)).not.toContain("late-agent");
+    } finally {
+      await again.transport.terminateSession().catch(() => {});
+      await again.client.close().catch(() => {});
+    }
+  }, 15_000);
+
+  it("a non-POST first request and a first request that is not initialize both answer 400", async () => {
+    const get = await fetch(running.url, { method: "GET" });
+    expect(get.status).toBe(400);
+    expect(await get.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000, message: expect.stringMatching(/initialize first/) } });
+    const post = await fetch(running.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+    expect(post.status).toBe(400);
+    expect(await post.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000, message: expect.stringMatching(/the first request of a session must be initialize/) } });
+  });
+
+  it("a request for the wrong path answers 404", async () => {
+    const res = await fetch(new URL("/nope", running.url), { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not found" });
+  });
+
+  it("a body over 4 MB and a body that is not JSON both answer 500", async () => {
+    const big = await fetch(running.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "x".repeat(4_194_305) });
+    expect(big.status).toBe(500);
+    expect(await big.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000, message: expect.stringMatching(/body larger than 4 MB/) } });
+    const bad = await fetch(running.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "not json" });
+    expect(bad.status).toBe(500);
+    expect(await bad.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000 } });
+  });
+});
