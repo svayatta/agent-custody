@@ -12,6 +12,8 @@ Give your agents real power, without losing control of them. Your policy checks 
 
 agent-custody is infrastructure to authorize the actions of AI agents and to account for them. A **gateway** sits between your agents and their tools: MCP servers, REST APIs, and other agents over A2A. A person signs a grant that names the agent, its tools, and how long it may act, and a **Cedar or Rego policy** decides each call before the tool runs, on facts that the gateway looks up itself. Each call, allowed or denied, gets a **signed receipt** in a **Merkle transparency log**, and an auditor verifies it **offline**, with public keys only. A hook brings the same check to Claude Code, and **governed memory** ties each belief of an agent to the receipt that produced it.
 
+**Do you run a website or an API?** The **door** does the same job in front of your own site: [put the door in front of a site](packages/receipts/docs/door-quickstart.md) in about fifteen minutes, with Docker and `curl` only.
+
 Before you rely on any part, read [the threat model](packages/receipts/docs/threat-model.md). It lists what each part defends, and what it does not.
 
 ## Getting started
