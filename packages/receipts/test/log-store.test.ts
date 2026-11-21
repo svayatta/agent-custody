@@ -226,3 +226,118 @@ describe("RateLimiter", () => {
     expect(r.take("other", 5000)).toBe(true);
   });
 });
+
+describe("PostgresLog over a pool", () => {
+  // A pool hands out one connection per transaction; the store must run BEGIN/COMMIT on it, and roll back and
+  // release it when a query throws. PGlite is wrapped, never reached over the network.
+  const pool = (failOn?: RegExp) => {
+    let released = 0;
+    const seen: string[] = [];
+    const run = async (text: string, values?: unknown[]) => {
+      seen.push(text);
+      if (failOn?.test(text)) throw new Error("boom");
+      return db.query(text, values);
+    };
+    const client = {
+      query: run,
+      connect: async () => ({ query: run, release: () => { released++; } }),
+    };
+    return { client, seen, get released() { return released; } };
+  };
+
+  it("runs each append's transaction on one pooled connection and releases it", async () => {
+    const p = pool();
+    const pg = new PostgresLog(p.client, "pooled", { prefix: "pool_" });
+    const file = new MerkleLog(join(mkdtempSync(join(tmpdir(), "pgpool-")), "log.jsonl"));
+    for (const leaf of ["one", "two"]) {
+      const want = file.append(leaf);
+      expect(await pg.append(leaf)).toEqual(want);
+    }
+    expect(await pg.root()).toBe(file.root());
+    expect(p.seen.filter((s) => s === "BEGIN")).toHaveLength(2);
+    expect(p.seen.filter((s) => s === "COMMIT")).toHaveLength(2);
+    expect(p.released).toBe(2);
+  });
+
+  it("a thrown query rolls the pooled transaction back, releases the connection, and lands nothing", async () => {
+    const p = pool(/INSERT INTO/);
+    const pg = new PostgresLog(p.client, "pooled-fail", { prefix: "poolf_" });
+    await expect(pg.append("never")).rejects.toThrow("boom");
+    expect(p.seen).toContain("ROLLBACK");
+    expect(p.released).toBe(1);
+    expect(await pg.size()).toBe(0);
+  });
+
+  it("a thrown query rolls the single-connection transaction back too", async () => {
+    const seen: string[] = [];
+    const failing = {
+      query: async (text: string, values?: unknown[]) => {
+        seen.push(text);
+        if (/INSERT INTO/.test(text)) throw new Error("boom");
+        return db.query(text, values);
+      },
+    };
+    const pg = new PostgresLog(failing, "single-fail", { prefix: "single_" });
+    await expect(pg.append("never")).rejects.toThrow("boom");
+    expect(seen).toContain("ROLLBACK");
+    expect(await pg.size()).toBe(0);
+  });
+});
+
+describe("PostgresLog bounds", () => {
+  it("refuses out-of-range sizes and answers an empty proof for an empty range", async () => {
+    const pg = new PostgresLog(db, "bounds");
+    await pg.append("one");
+    await expect(pg.root(2)).rejects.toThrow(/size out of range/);
+    await expect(pg.root(-1)).rejects.toThrow(/size out of range/);
+    await expect(pg.consistencyProof(2, 1)).rejects.toThrow(/sizes out of range/);
+    expect(await pg.consistencyProof(0, 1)).toEqual([]);
+    expect(await pg.consistencyProof(1, 1)).toEqual([]);
+    expect(await pg.leafHashes(0, 1)).toEqual([leafHash("one").toString("hex")]);
+  });
+});
+
+describe("PostgresTenancy plans, usage, and policies", () => {
+  it("refuses bad tenant ids and moves a tenant between plans", async () => {
+    const t = new PostgresTenancy(db, { prefix: "pu_" });
+    await expect(t.addTenant("bad id!")).rejects.toThrow(/plain identifier/);
+    await expect(t.addTenant("ok", "bad log id!")).rejects.toThrow(/plain identifier/);
+    await t.addTenant("acme");
+    expect((await t.setPlan("acme", "team")).plan).toBe("team");
+    await expect(t.setPlan("acme", "nope" as never)).rejects.toThrow(/unknown plan/);
+    await expect(t.setPlan("nobody", "team")).rejects.toThrow(/unknown tenant/);
+    await expect(t.quota("nobody")).rejects.toThrow(/unknown tenant/);
+  });
+
+  it("reports one month's appends per tenant, with December rolling into January", async () => {
+    const t = new PostgresTenancy(db, { prefix: "us_" });
+    await t.addTenant("acme");
+    const log = await t.log("acme");
+    await log.append("first");
+    const month = new Date().toISOString().slice(0, 7);
+    const row = (await t.usage(month)).tenants.find((x) => x.id === "acme");
+    expect(row?.appends).toBe(1);
+    expect(row?.totalLeaves).toBe(1);
+    expect(row?.liveTokens).toBe(0);
+    await db.query("INSERT INTO us_leaves (tenant_id, seq, leaf_hash, appended_at) VALUES ('acme', 99, $1, '2026-12-15T00:00:00Z')", [Buffer.from("ab".repeat(32), "hex")]);
+    expect((await t.usage("2026-12")).tenants.find((x) => x.id === "acme")).toMatchObject({ appends: 1, totalLeaves: 2 });
+    expect((await t.usage("2027-01")).tenants.find((x) => x.id === "acme")?.appends).toBe(0);
+    await expect(t.usage("2026-13")).rejects.toThrow(/month must be YYYY-MM/);
+  });
+
+  it("publishes policies, refuses the same text twice, and removes them", async () => {
+    const t = new PostgresTenancy(db, { prefix: "pol_" });
+    await t.addTenant("acme");
+    const p = await t.addPolicy("acme", "v1", "allow everything", "alice");
+    expect(p.name).toBe("v1");
+    expect(p.bytes).toBe("allow everything".length);
+    await expect(t.addPolicy("acme", "v2", "allow everything", "alice")).rejects.toThrow(/already published as "v1"/);
+    expect((await t.listPolicies("acme")).map((x) => x.id)).toEqual([p.id]);
+    expect((await t.policy("acme", p.id))?.text).toBe("allow everything");
+    expect(await t.policy("acme", "pol_nope")).toBeNull();
+    expect(await t.policyByDigest("acme", p.digest)).toMatchObject({ id: p.id });
+    expect(await t.removePolicy("acme", p.id)).toBe(true);
+    expect(await t.removePolicy("acme", p.id)).toBe(false);
+    await expect(t.addPolicy("nobody", "v1", "x")).rejects.toThrow(/unknown tenant/);
+  });
+});
