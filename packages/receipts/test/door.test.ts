@@ -22,6 +22,7 @@ import { createDelegation, delegateFrom, grantDigest } from "../src/delegation.t
 import { writeRevokedGrants } from "../src/revocation.ts";
 import { isCommitment } from "../src/capture.ts";
 import { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, RECEIPT_HEADER, cedarArgs, createDoorHost, createRateTracker, matchRoute, RATE_BURST_MS, RATE_MINUTE_MS, normalizePath, queryOf, remoteOf, serveDoor, verifyChallengeToken, MAX_CHALLENGE_TOKEN, type Arrival, type ChallengeCheck, type DoorHost, type RunningDoor } from "../src/door.ts";
+import { DoorNonce, durableNonceStore, type DurableObjectNamespaceLike, type DurableObjectStateLike } from "../src/door-worker.ts";
 import { grantHeader } from "../src/gateway-http.ts";
 import type { LogSink } from "../src/log-sink.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
@@ -1358,6 +1359,55 @@ describe("web bot auth", () => {
     expect(await down.verify(signed("/", AUTHORITY, signHeaders(k.privateKey, k.keyid)))).toMatchObject({ outcome: "unavailable", error: "the door could not reach its nonce store, so it cannot refuse a replay: connection reset", agent: AGENT, keyid: k.keyid });
     const full = createWebBotAuthVerifier(options(), f, undefined, { claim: () => "full" });
     expect(await full.verify(signed("/", AUTHORITY, signHeaders(k.privateKey, k.keyid)))).toMatchObject({ outcome: "unavailable", error: "the door's nonce store is full and cannot record another" });
+  });
+
+  it("keeps a replay out through the Worker's Durable Object when the object's clock runs ahead of the isolate's", async () => {
+    // The isolate decides with its clock; the object forgets with its own. An object 5 s ahead must not forget a nonce
+    // in the last seconds the isolate still accepts its signature, or the replay is a passport at every isolate.
+    const k = freshKey();
+    const { f } = directories({ [AGENT]: jwks(directory(k.x)) });
+    const created = 1_900_000_000;
+    let isolateMs = created * 1000 + 1000;
+    const objectAheadMs = 5000;
+    const objects = new Map<string, { nonce: DoorNonce; alarm?: number }>();
+    const ns: DurableObjectNamespaceLike = {
+      idFromName: (name) => name,
+      get: (id: unknown) => ({
+        async fetch(url: string, init: RequestInit) {
+          let o = objects.get(id as string);
+          if (!o) {
+            const stored = new Map<string, unknown>();
+            const slot: { nonce?: DoorNonce; alarm?: number } = {};
+            const state: DurableObjectStateLike = {
+              storage: { get: async (key) => stored.get(key), put: async (key, v) => void stored.set(key, v), setAlarm: async (at) => void (slot.alarm = at), deleteAll: async () => stored.clear() },
+              blockConcurrencyWhile: (run) => run(),
+            };
+            slot.nonce = new DoorNonce(state);
+            o = slot as { nonce: DoorNonce; alarm?: number };
+            objects.set(id as string, o);
+          }
+          // the alarm fires by the object's clock
+          if (o.alarm !== undefined && o.alarm <= Date.now()) {
+            o.alarm = undefined;
+            await o.nonce.alarm();
+          }
+          return o.nonce.fetch(new Request(url, init));
+        },
+      }),
+    };
+    const objectClock = vi.spyOn(Date, "now").mockImplementation(() => isolateMs + objectAheadMs);
+    try {
+      const v = createWebBotAuthVerifier(options(), f, () => isolateMs, durableNonceStore(ns));
+      const req = signed("/", AUTHORITY, signHeaders(k.privateKey, k.keyid, { created, expires: created + 60 }));
+      expect((await v.verify(req)).outcome).toBe("verified");
+      // one second before the isolate's deadline (expires + clockSkewSeconds): the object is already 4 s past it
+      isolateMs = (created + 60 + 60 - 1) * 1000;
+      expect(await v.verify(req)).toMatchObject({ outcome: "invalid", error: "sig1 repeats a nonce already used" });
+      isolateMs = (created + 60 + 60 + 2) * 1000;
+      expect(await v.verify(req)).toMatchObject({ outcome: "invalid", error: expect.stringContaining("expired") });
+    } finally {
+      objectClock.mockRestore();
+    }
   });
 
   it("refuses a signature with no nonce when one is required, and without the requirement bounds its replay by maxAgeSeconds", async () => {

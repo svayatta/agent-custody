@@ -159,9 +159,15 @@ export function durableNonceStore(ns: DurableObjectNamespaceLike, timeoutMs = NO
 }
 
 /**
+ * how much longer than the isolate's deadline the object holds a nonce: `until` is on the isolate's clock and the object
+ * reads its own, so an object whose clock runs ahead would otherwise forget a nonce the isolate still accepts
+ */
+const NONCE_CLOCK_MARGIN_MS = 60_000;
+
+/**
  * The Durable Object behind `durableNonceStore`: it holds one nonce until the signature it came with could no longer be
- * accepted, then an alarm empties it. Claims are answered one at a time, so of two arrivals with one nonce, one is
- * `claimed` and the other `replayed`.
+ * accepted, and a minute more, then an alarm empties it. Claims are answered one at a time, so of two arrivals with one
+ * nonce, one is `claimed` and the other `replayed`.
  */
 export class DoorNonce {
   state: DurableObjectStateLike;
@@ -174,8 +180,8 @@ export class DoorNonce {
     const claim = await this.state.blockConcurrencyWhile(async () => {
       const held = await this.state.storage.get("until");
       if (typeof held === "number" && held > Date.now()) return "replayed";
-      await this.state.storage.put("until", until);
-      await this.state.storage.setAlarm(until);
+      await this.state.storage.put("until", until + NONCE_CLOCK_MARGIN_MS);
+      await this.state.storage.setAlarm(until + NONCE_CLOCK_MARGIN_MS);
       return "claimed";
     });
     return Response.json({ claim });

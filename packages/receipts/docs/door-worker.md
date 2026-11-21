@@ -45,7 +45,7 @@ There is no lock between isolates. Two flushes at once can each append the same 
 
 ## Web Bot Auth nonces
 
-Cloudflare runs many isolates, in many places, and starts new ones at will. If each isolate remembered nonces in its own memory, a captured signature refused by the isolate that saw it would be accepted once by any other, until `maxAgeSeconds`. So the Worker keeps each nonce in a Durable Object, `DoorNonce`, named by the signature's agent, key id, and nonce. Every isolate that sees that nonce reaches the same object, wherever it runs. The object answers one claim at a time: of two arrivals with one nonce, even at two isolates at once, one is verified and the other is a replay. It holds the nonce until the signature could no longer be accepted (the earlier of `expires` and `created + maxAgeSeconds`, plus `clockSkewSeconds`), and then an alarm empties it.
+Cloudflare runs many isolates, in many places, and starts new ones at will. If each isolate remembered nonces in its own memory, a captured signature refused by the isolate that saw it would be accepted once by any other, until `maxAgeSeconds`. So the Worker keeps each nonce in a Durable Object, `DoorNonce`, named by the signature's agent, key id, and nonce. Every isolate that sees that nonce reaches the same object, wherever it runs. The object answers one claim at a time: of two arrivals with one nonce, even at two isolates at once, one is verified and the other is a replay. It holds the nonce until the signature could no longer be accepted (the earlier of `expires` and `created + maxAgeSeconds`, plus `clockSkewSeconds`), and then 60 seconds more, before an alarm empties it. That deadline is on the isolate's clock, and the object reads its own. Without the extra minute, an object whose clock ran ahead would forget a nonce while the isolate still accepted its signature. The isolate refuses the signature after its own deadline whatever the object holds, so the extra minute refuses nothing that would otherwise verify.
 
 A nonce is claimed only after the signature verifies, so a forged signature cannot spend the nonce of the request it copies. A replay costs a directory lookup (usually cached) and a signature check before it is refused.
 
@@ -75,6 +75,7 @@ The key is a Worker secret: stored by Cloudflare, given to the Worker as a bindi
   - `agent-custody verify` accepts a Worker receipt;
   - a config that names a file is refused with nothing relayed.
 - `test/door-worker-io.test.ts` checks the bucket issuer in Node, where a store can be made to fail: a precommit request whose authorization the bucket cannot store is not relayed. It also checks that a config with `webBotAuth` is refused without `NONCES`, and that a nonce object answering an error or no claim throws rather than answering one.
+- `test/door.test.ts` runs `DoorNonce` with its clock 5 seconds ahead of the verifier's: a replay one second before the verifier's deadline is still refused.
 - [56-door-worker.ts](../examples/56-door-worker.ts) is the same run as a tutorial.
 
 A deployment to Cloudflare itself, with the receipts it produced, is not recorded here yet.
