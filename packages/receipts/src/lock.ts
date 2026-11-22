@@ -41,7 +41,7 @@ function judge(lockFile: string, staleMs: number): Judgment {
 }
 
 /** Moves the lock away only if it is still the file that was judged stale. One breaker at a time holds `<lock>.break`. */
-function breakLock(lockFile: string, judged: { token: string | undefined; ino: number }): void {
+export function breakLock(lockFile: string, judged: { token: string | undefined; ino: number }): void {
   const breaker = `${lockFile}.break`;
   try {
     closeSync(openSync(breaker, "wx", 0o600));
