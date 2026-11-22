@@ -225,12 +225,16 @@ describe("the HTTP gateway session reaper and pre-initialize errors", () => {
     expect(await res.json()).toEqual({ error: "not found" });
   });
 
-  it("a body over 4 MB and a body that is not JSON both answer 500", async () => {
+  it("a body over 4 MB and a body that is not JSON are rejected with their messages, and the server stays up", async () => {
+    // Both are client errors, so no status is pinned here: the catch-all
+    // answers 500 today, but the SDK transport answers unparseable JSON with
+    // 400 / -32700 and an oversized body is conventionally 413. Pinning 500
+    // would make that fix look like a regression.
     const big = await fetch(running.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "x".repeat(4_194_305) });
-    expect(big.status).toBe(500);
     expect(await big.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000, message: expect.stringMatching(/body larger than 4 MB/) } });
     const bad = await fetch(running.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "not json" });
-    expect(bad.status).toBe(500);
-    expect(await bad.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000 } });
+    expect(await bad.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000, message: expect.stringMatching(/Unexpected token|not valid JSON/) } });
+    // The useful property: the server is still up afterwards.
+    expect((await fetch(new URL("/health", running.url))).status).toBe(200);
   });
 });
