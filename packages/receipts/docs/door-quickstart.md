@@ -8,7 +8,7 @@ The door runs from the gateway's container image. The same image runs every othe
 
 ```bash
 mkdir door-quickstart && cd door-quickstart
-IMAGE=ghcr.io/svayatta/agent-custody-gateway:0.16.10
+IMAGE=ghcr.io/svayatta/agent-custody-gateway:0.16.11
 alias agent-custody='docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/work -w /work -e TURNSTILE_SECRET $IMAGE'
 ```
 
@@ -217,7 +217,7 @@ docker rm -f door site && docker network rm door-quickstart
 
 With Node 22 or later, the same page runs the CLI from npm. Four steps change, and every other command stays as it is:
 
-- **The setup.** The alias is `alias agent-custody='npx -y -p @agent-custody/receipts@0.16.10 agent-custody'`, and there is no `IMAGE`.
+- **The setup.** The alias is `alias agent-custody='npx -y -p @agent-custody/receipts@0.16.11 agent-custody'`, and there is no `IMAGE`.
 - **Step 2.** Start the stand-in site with `node -e 'require("http").createServer((q,s)=>{s.setHeader("content-type","text/plain");s.end(q.method==="GET"?"the sign-up page\n":"thanks, you are signed up\n")}).listen(3000,"127.0.0.1")' &`.
 - **Step 4.** In `door.json`, the origin is `"http://127.0.0.1:3000"`. The check then gives one warning, not two.
 - **Step 5.** Start the door with `agent-custody door --config door.json --port 8780 &`.
