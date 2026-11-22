@@ -155,8 +155,37 @@ function decodeDelegationPayload(env: Envelope): any {
 export function delegationHasParent(env: Envelope): boolean {
   return decodeDelegationPayload(env)?.parent !== undefined;
 }
-/** Mirrors verifyDelegation in the package: walks a chain to a grant signed by a trusted principal key. */
-export async function verifyDelegationChain(env: Envelope, trusted: PublicKey[], depth = 1): Promise<{ ok: true; delegation: any; keyid: string; chain: any[] } | { ok: false; error: string }> {
+const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+/** Mirrors didKeyAgentFault in the package: why a did:key agent does not check out, or null. */
+async function didKeyAgentFault(did: string, agentKey: unknown): Promise<string | null> {
+  const text = did.slice(9);
+  const bytes: number[] = [];
+  // a leading "1" is a zero byte, and an Ed25519 did:key starts with 0xed
+  let good = did.length <= 100 && did.startsWith("did:key:z") && text[0] !== "1";
+  for (const ch of good ? text : "") {
+    let carry = BASE58.indexOf(ch);
+    if (carry < 0) { good = false; break; }
+    for (let i = bytes.length - 1; i >= 0; i--) { carry += bytes[i]! * 58; bytes[i] = carry & 0xff; carry >>= 8; }
+    for (; carry; carry >>= 8) bytes.unshift(carry & 0xff);
+  }
+  if (!good || bytes.length !== 34 || bytes[0] !== 0xed || bytes[1] !== 0x01) return "the grant's did:key agent does not decode to an Ed25519 key";
+  if (agentKey === undefined) return null;
+  let raw: Bytes;
+  try { raw = new Uint8Array(await subtle().exportKey("raw", (await publicKeyFromPem(agentKey as string)).key)); } catch { return "the grant's agentKey is not a public key"; }
+  return raw.every((b, i) => b === bytes[i + 2]) ? null : "the grant's agentKey is not the key its did:key agent names";
+}
+/** Mirrors verifyDelegation in the package: walks a chain to a grant signed by a trusted principal key, and checks each did:key agent. */
+export async function verifyDelegationChain(env: Envelope, trusted: PublicKey[]): Promise<{ ok: true; delegation: any; keyid: string; chain: any[] } | { ok: false; error: string }> {
+  const checked = await walkDelegationChain(env, trusted, 1);
+  if (!checked.ok) return checked;
+  for (const [i, link] of checked.chain.entries()) {
+    if (!link.agent.startsWith("did:key:")) continue;
+    const fault = await didKeyAgentFault(link.agent, link.agentKey);
+    if (fault) return { ok: false, error: (i === checked.chain.length - 1 ? "" : `link ${i} (${link.agent}): `) + fault };
+  }
+  return checked;
+}
+async function walkDelegationChain(env: Envelope, trusted: PublicKey[], depth: number): Promise<{ ok: true; delegation: any; keyid: string; chain: any[] } | { ok: false; error: string }> {
   if (env.payloadType !== DELEGATION_TYPE) return { ok: false, error: `unexpected payloadType ${env.payloadType}` };
   if (depth > 4) return { ok: false, error: "delegation chain deeper than 4" };
   const unverified = decodeDelegationPayload(env);
@@ -167,7 +196,7 @@ export async function verifyDelegationChain(env: Envelope, trusted: PublicKey[],
     if (!delegationShape(r.payload)) return { ok: false, error: "malformed delegation" };
     return { ok: true, delegation: r.payload, keyid: r.keyid, chain: [r.payload] };
   }
-  const up = await verifyDelegationChain(unverified.parent, trusted, depth + 1);
+  const up = await walkDelegationChain(unverified.parent, trusted, depth + 1);
   if (!up.ok) return { ok: false, error: `link ${depth}: ${up.error}` };
   const parent = up.delegation;
   if (typeof parent.agentKey !== "string") return { ok: false, error: `link ${depth}: ${parent.agent} holds no agent key and cannot delegate` };

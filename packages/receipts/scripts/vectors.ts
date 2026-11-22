@@ -4,6 +4,7 @@
 import { withhold } from "../src/capture.ts";
 import { APPROVAL_META_KEY, APPROVAL_TYPE, createApproval } from "../src/approval.ts";
 import { createDelegation, delegateFrom, DELEGATION_TYPE, grantDigest } from "../src/delegation.ts";
+import { didKeyOf } from "../src/did-key.ts";
 import { writeRevokedGrants } from "../src/revocation.ts";
 import nodeFs, { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -410,6 +411,11 @@ const dgatewayKey = loadPrivateKey(join(dfx.dir, "keys", "gateway.key"));
   const offsetWindow = dsseSign(DELEGATION_TYPE, { version: "0.1", principal: "user_456", agent: "refunder", scopes: ["stripe.refund"], issuedAt: childStart, expiresAt: new Date(t0 + 7200_000).toISOString(), parent }, planner);
   addCase({ name: "gateway-chain-offset-window-resigned", description: "The chain's leaf re-issued with a start time written in a +02:00 offset: as text it sorts after the parent's start, as an instant it is an hour before it. Both verifiers must compare instants and refuse the link; the re-signed receipt also loses its inclusion.", bundle: resigned(chained, dgatewayKey, (st) => { st.predicate.delegation = { envelope: offsetWindow, provenance: "attested" }; }), ...D, log: dlog });
   addCase({ name: "gateway-chain-escalated-resigned", description: "The same receipt with the chain's leaf replaced by one giving the refunder a scope the planner never held, signed with the planner's real key, then the receipt re-signed with the gateway key. The chain check fails on that link; the re-signed receipt also loses its inclusion.", bundle: resigned(chained, dgatewayKey, (st) => { st.predicate.delegation = { envelope: escalated, provenance: "attested" }; }), ...D, log: dlog });
+  // a did:key agent is its key: the gateway refuses these two grants, so each is pasted into the receipt and re-signed
+  const didGrant = (agent: string, agentKey?: string) => createDelegation(principalKey, { version: "0.1", principal: "user_456", agent, scopes: ["stripe.refund"], issuedAt: new Date(t0 - 3600_000).toISOString(), expiresAt: new Date(t0 + 7200_000).toISOString(), ...(agentKey ? { agentKey } : {}) });
+  const didResigned = (g: Envelope) => resigned(chained, dgatewayKey, (st) => { st.predicate.agent.id = (JSON.parse(Buffer.from(g.payload, "base64").toString()) as { agent: string }).agent; st.predicate.delegation = { envelope: g, provenance: "attested" }; });
+  addCase({ name: "gateway-did-key-garbled-resigned", description: "The receipt's grant replaced by one the principal signed for the agent `did:key:z6Mk0bad`, which does not decode to an Ed25519 key, the receipt's agent set to that identifier, then the receipt re-signed with the gateway key. `delegation signature (principal key)` fails, although the principal's signature on the grant is good; the re-signed receipt also loses its inclusion.", bundle: didResigned(didGrant("did:key:z6Mk0bad")), ...D, log: dlog });
+  addCase({ name: "gateway-did-key-split-agent-key-resigned", description: "The receipt's grant replaced by one the principal signed that names its agent by the did:key of one Ed25519 key and carries another key in `agentKey`, the receipt's agent set to that did:key, then the receipt re-signed with the gateway key. The grant says two things about who the agent is: `delegation signature (principal key)` fails; the re-signed receipt also loses its inclusion.", bundle: didResigned(didGrant(didKeyOf(planner.publicKey), publicKeyToPem(generateKeyPair().publicKey))), ...D, log: dlog });
 }
 
 // ---- observe mode: the decision is recorded, never enforced; the receipt says so and the verifier holds it to that ----

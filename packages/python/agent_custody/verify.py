@@ -708,7 +708,39 @@ def _delegation_chain(env: Any, principal_keys: list[PublicKey]) -> tuple[Option
             return None, f"the grant to {child['agent']} is outside {parent['agent']}'s window", root_signers
         if child["principal"] != parent["principal"]:
             return None, f"the grant to {child['agent']} names another principal", root_signers
+    for link in links:
+        fault = _did_key_fault(link)
+        if fault:
+            return None, f"{link['agent']}: {fault}", root_signers
     return links, "", root_signers
+
+
+_BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _did_key_fault(link: dict) -> str:
+    """Why a grant's did:key agent does not check out: it names no Ed25519 key, or not the key in agentKey."""
+    did = link["agent"]
+    if not did.startswith("did:key:"):
+        return ""
+    text = did[9:]
+    n = 0
+    # a leading "1" is a zero byte, and an Ed25519 did:key starts with 0xed
+    if len(did) <= 100 and did[8:9] == "z" and not text.startswith("1") and all(c in _BASE58 for c in text):
+        for c in text:
+            n = n * 58 + _BASE58.index(c)
+    raw = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    if len(raw) != 34 or raw[:2] != b"\xed\x01":
+        return "the did:key agent does not decode to an Ed25519 key"
+    if "agentKey" not in link:
+        return ""
+    try:
+        key = load_public_key(link["agentKey"]).key
+    except (ValueError, AttributeError, TypeError):
+        return "agentKey is not an Ed25519 public key"
+    if key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw) != raw[2:]:
+        return "agentKey is not the key the did:key agent names"
+    return ""
 
 
 def _delegation_payload_fault(payload: Any) -> str:

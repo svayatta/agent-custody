@@ -2,7 +2,7 @@
 // multicodec prefix for ed25519-pub (0xed 0x01) and the 32-byte public key. The identifier is the key: anyone can
 // derive the key from it, and nothing about it says who holds the key or whether a principal trusts it.
 import { createPublicKey, type KeyObject } from "node:crypto";
-import { keyidOf, type PublicKeyRef } from "./crypto.ts";
+import { keyidOf, publicKeyFromPem, type PublicKeyRef } from "./crypto.ts";
 
 const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const ED25519_PUB = [0xed, 0x01];
@@ -59,4 +59,21 @@ export function publicKeyFromDidKey(did: string): PublicKeyRef {
   if (bytes.length !== 34) throw new Error(`the did:key's Ed25519 key is ${bytes.length - 2} bytes, not 32`);
   const publicKey = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: Buffer.from(bytes.subarray(2)).toString("base64url") }, format: "jwk" });
   return { publicKey, keyid: keyidOf(publicKey) };
+}
+
+/** Why a did:key agent does not check out, or null when it decodes and agrees with the grant's agentKey. */
+export function didKeyAgentFault(did: string, agentKey: string | undefined): string | null {
+  let named: PublicKeyRef;
+  try {
+    named = publicKeyFromDidKey(did);
+  } catch (e) {
+    return `the grant's did:key agent does not decode: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  if (agentKey === undefined) return null;
+  try {
+    if (publicKeyFromPem(agentKey).keyid === named.keyid) return null;
+  } catch {
+    return "the grant's agentKey is not a public key";
+  }
+  return "the grant's agentKey is not the key its did:key agent names";
 }
