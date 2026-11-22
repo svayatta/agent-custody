@@ -267,6 +267,7 @@ If a vendor tells you their receipts prove more than the first five rows, ask th
 ```
 src/config.ts      gateway and SDK config schemas, path resolution
 src/crypto.ts      canonical JSON, sha256, Ed25519 keys, DSSE sign/verify
+src/merkle.ts      RFC 6962 / RFC 9162 Merkle hashing, inclusion and consistency proofs and their checks: pure functions, re-exported by log.ts
 src/log.ts         Merkle log: append, root, inclusion and consistency proofs, verify, JSONL persistence; a lock file makes an append safe when several processes share one log file, and a partial last line from a killed writer is moved to `<file>.torn`
 src/lock.ts        the one lock file design (owner token, liveness check, rename to break a stale lock) that the local log, prune, and the gateway outbox share
 src/log-check.ts   the outside monitor: verifies the head, checkpoints, witness, and anchor of a running log
@@ -283,7 +284,8 @@ src/export.ts      `export`: verified receipt bundles that keep their values pri
 src/signer.ts      the signer: the log's key in its own process, the key document verifiers fetch
 src/checkpoints.ts signed heads published on a schedule, to files and to Postgres
 src/log-store.ts   the log server's backends: the file, and Postgres with tenants, hashed tokens, one writer per tenant, rate limits
-src/log-sink.ts    where leaves go: the local file, or a remote log over HTTP; plus the reference log server
+src/log-http.ts    the sink interface and a remote log over HTTP, every answer checked before it is taken; apart from the file log so a Worker can append
+src/log-sink.ts    where leaves go: the local file, or a remote log over HTTP (log-http.ts); plus the reference log server
 src/policy.ts      Cedar evaluation wrapper, fail-closed
 src/policy-rego.ts Rego: compiled with opa build, evaluated in-process with the OPA WebAssembly SDK, fail-closed
 src/opa-server.ts  an OPA server's Data API as the policy, with bundle revisions as the digest
@@ -294,10 +296,13 @@ src/revocation.ts  the revoked-grants file the gateway and the door share: re-re
 src/approval.ts    exact-action human approvals, distinct trusted signatures, persistent single-use consumption
 src/receipt.ts     receipt and authorization statement types and provenance labels
 src/issue.ts       sign, log, and write a receipt, or commit an authorization first; shared by every producer
+src/receipt-pending.ts what an issuer throws when a receipt's log append is pending, and what a flush of the outbox did
 src/gateway.ts     the MCP proxy: a host (key, policy, upstreams, log) and a session per grant; scope check, facts, policy, forward, receipt
 src/operations.ts  SQLite operation claims and daily budget reservations, retained across retries and process crashes
 src/gateway-http.ts the gateway over Streamable HTTP: one process, a session per connection, each under the grant it presents
-src/door.ts        the door: a reverse proxy in front of your own HTTP surface, or the authz check behind nginx and Envoy; every arrival classified, decided per route, relayed or refused, receipted as issuer kind door; its decision loop is shared with door-app.ts
+src/grant-header.ts how an agent presents a grant over HTTP (`X-Agent-Custody-Grant` or `Authorization: Bearer`), shared by the HTTP gateway and the door
+src/door-core.ts   the door's decision apart from where it runs: classify, decide, relay with fetch, receipt; its key, policy, revocation list, secrets, and issuer come in a `DoorIO`, so the same code runs in Node and at the edge
+src/door.ts        the door in Node: a reverse proxy in front of your own HTTP surface, or the authz check behind nginx and Envoy, over door-core.ts with a `DoorIO` read from the config's files; every arrival classified, decided per route, relayed or refused, receipted as issuer kind door; its decision loop is shared with door-app.ts
 src/door-form.ts   the form protector: the script the door serves at /.well-known/agent-custody-door/form.js, from its challenge config
 src/door-app.ts    the door in-process (`@agent-custody/receipts/door`): Express or Connect middleware and a fetch route-handler wrapper (Next.js), over the same decision loop
 src/web-bot-auth.ts the door's Web Bot Auth check: RFC 9421 signature base, RFC 8941 dictionaries, Ed25519, the signer's key directory fetched and cached, nonces
