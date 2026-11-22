@@ -49,46 +49,50 @@ let mf: Miniflare;
 let logDown = false;
 const reached: string[] = [];
 
+/** the built Worker as Miniflare runs it, with the template's bindings and the local stand-ins */
+const doorWorker = () => ({
+  modules: true,
+  scriptPath: join(dir, "dist", "index.js"),
+  modulesRoot: join(dir, "dist"),
+  modulesRules: [{ type: "CompiledWasm" as const, include: ["**/*.wasm"] }],
+  compatibilityDate: "2025-11-01",
+  compatibilityFlags: ["nodejs_compat"],
+  r2Buckets: ["RECEIPTS"],
+  durableObjects: { NONCES: "DoorNonce" } as Record<string, string | { className: string; scriptName: string }>,
+  bindings: {
+    DOOR_CONFIG: JSON.stringify(CONFIG),
+    DOOR_POLICY: POLICY,
+    ORIGIN_URL: "https://origin.test",
+    LOG_URL: "https://log.test/",
+    LOG_KEYS: publicKeyToPem(logKey.publicKey),
+    TRUSTED_PRINCIPAL_KEYS: publicKeyToPem(principal.publicKey),
+    DOOR_KEY: door.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    LOG_TOKEN: "log-token",
+  },
+  // every subrequest the Worker makes lands here: the hosted log, the origin, and the crawler's directory
+  outboundService: async (request: Request) => {
+    const u = new URL(request.url);
+    if (u.hostname === "log.test") {
+      if (logDown) return new Response("down for maintenance", { status: 503 });
+      const body = request.method === "POST" ? await request.text() : undefined;
+      const headers: Record<string, string> = {};
+      for (const h of ["content-type", "authorization"]) { const v = request.headers.get(h); if (v) headers[h] = v; }
+      return fetch(new URL(u.pathname.slice(1) + u.search, log.url), { method: request.method, headers, ...(body !== undefined ? { body } : {}) });
+    }
+    if (u.hostname === "origin.test") {
+      reached.push(`${request.method} ${u.pathname}`);
+      return new Response(JSON.stringify({ ok: true, path: u.pathname }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (u.origin === CRAWLER && u.pathname === DIRECTORY_PATH) return new Response(directory, { headers: { "content-type": DIRECTORY_MEDIA_TYPE } });
+    return new Response(`not stood in: ${request.url}`, { status: 502 });
+  },
+});
+
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "door-worker-"));
-  const built = await buildDoorWorker(join(dir, "dist"));
+  await buildDoorWorker(join(dir, "dist"));
   log = await serveLog(join(dir, "log.jsonl"), logKey, { port: 0, tokens: ["log-token"] });
-  mf = new Miniflare({
-    modules: true,
-    scriptPath: built.script,
-    modulesRoot: join(dir, "dist"),
-    modulesRules: [{ type: "CompiledWasm", include: ["**/*.wasm"] }],
-    compatibilityDate: "2025-11-01",
-    compatibilityFlags: ["nodejs_compat"],
-    r2Buckets: ["RECEIPTS"],
-    bindings: {
-      DOOR_CONFIG: JSON.stringify(CONFIG),
-      DOOR_POLICY: POLICY,
-      ORIGIN_URL: "https://origin.test",
-      LOG_URL: "https://log.test/",
-      LOG_KEYS: publicKeyToPem(logKey.publicKey),
-      TRUSTED_PRINCIPAL_KEYS: publicKeyToPem(principal.publicKey),
-      DOOR_KEY: door.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
-      LOG_TOKEN: "log-token",
-    },
-    // every subrequest the Worker makes lands here: the hosted log, the origin, and the crawler's directory
-    outboundService: async (request: Request) => {
-      const u = new URL(request.url);
-      if (u.hostname === "log.test") {
-        if (logDown) return new Response("down for maintenance", { status: 503 });
-        const body = request.method === "POST" ? await request.text() : undefined;
-        const headers: Record<string, string> = {};
-        for (const h of ["content-type", "authorization"]) { const v = request.headers.get(h); if (v) headers[h] = v; }
-        return fetch(new URL(u.pathname.slice(1) + u.search, log.url), { method: request.method, headers, ...(body !== undefined ? { body } : {}) });
-      }
-      if (u.hostname === "origin.test") {
-        reached.push(`${request.method} ${u.pathname}`);
-        return new Response(JSON.stringify({ ok: true, path: u.pathname }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (u.origin === CRAWLER && u.pathname === DIRECTORY_PATH) return new Response(directory, { headers: { "content-type": DIRECTORY_MEDIA_TYPE } });
-      return new Response(`not stood in: ${request.url}`, { status: 502 });
-    },
-  });
+  mf = new Miniflare(doorWorker());
 }, 60_000);
 
 afterAll(async () => {
@@ -260,5 +264,59 @@ describe("the door as a Cloudflare Worker", () => {
     } finally {
       await broken.dispose();
     }
+  });
+});
+
+describe("Web Bot Auth nonces in a Durable Object, shared by every isolate of the Worker", () => {
+  // Two copies of the Worker are two isolates with their own memory, as at two Cloudflare locations; both reach one
+  // DoorNonce namespace. A third reaches a nonce object that fails, standing in for one that cannot be reached.
+  let pair: Miniflare;
+  beforeAll(() => {
+    pair = new Miniflare({
+      workers: [
+        { ...doorWorker(), name: "door-east" },
+        { ...doorWorker(), name: "door-west", durableObjects: { NONCES: { className: "DoorNonce", scriptName: "door-east" } } },
+        { ...doorWorker(), name: "door-cut-off", durableObjects: { NONCES: { className: "DoorNonce", scriptName: "nonces-down" } } },
+        { name: "nonces-down", modules: true, compatibilityDate: "2025-11-01", script: 'export class DoorNonce { async fetch() { throw new Error("the nonce object is down"); } }\nexport default { fetch: () => new Response("") };' },
+      ],
+    });
+  });
+  afterAll(async () => {
+    await pair?.dispose();
+  });
+
+  async function sendTo(worker: string, path: string, headers: Record<string, string>) {
+    const res = await (await pair.getWorker(worker)).fetch(`https://${SITE}${path}`, { headers });
+    await res.text();
+    const receipt = res.headers.get("x-agent-custody-receipt");
+    const obj = await (await pair.getR2Bucket("RECEIPTS", worker)).get(`${receipt}.json`);
+    expect(obj, `no bundle for ${receipt}`).not.toBeNull();
+    return { status: res.status, arrival: arrivalOf(JSON.parse(await obj!.text()) as ReceiptBundle) };
+  }
+
+  it("refuses a signature replayed to another isolate, and refuses it on the first one too", async () => {
+    const once = signedHeaders("/api/orders");
+    const first = await sendTo("door-east", "/api/orders", once);
+    expect(first.status).toBe(200);
+    expect(first.arrival.signature).toBe("verified");
+    // door-west has never seen this nonce in its own memory; the shared object has
+    const replayed = await sendTo("door-west", "/api/orders", once);
+    expect(replayed.status).toBe(403);
+    expect(replayed.arrival).toMatchObject({ signature: "invalid", signatureError: "sig1 repeats a nonce already used" });
+    expect((await sendTo("door-east", "/api/orders", once)).arrival.signatureError).toBe("sig1 repeats a nonce already used");
+    // a fresh signature is still a passport at either isolate
+    expect((await sendTo("door-west", "/api/orders", signedHeaders("/api/orders"))).status).toBe(200);
+  });
+
+  it("of the same signature sent to both isolates at once, lets one through", async () => {
+    const once = signedHeaders("/api/orders");
+    const both = await Promise.all([sendTo("door-east", "/api/orders", once), sendTo("door-west", "/api/orders", once)]);
+    expect(both.map((r) => r.status).sort()).toEqual([200, 403]);
+  });
+
+  it("fails closed when the nonce store cannot be reached: the signature is unavailable, not verified", async () => {
+    const r = await sendTo("door-cut-off", "/api/orders", signedHeaders("/api/orders"));
+    expect(r.status).toBe(403);
+    expect(r.arrival).toMatchObject({ signature: "unavailable", signatureError: expect.stringMatching(/^the door could not reach its nonce store, so it cannot refuse a replay: /) });
   });
 });

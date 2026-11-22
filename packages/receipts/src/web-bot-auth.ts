@@ -293,8 +293,48 @@ type Directory = { ok: true; keys: Map<string, DirectoryKey> } | { ok: false; ou
 
 export interface WebBotAuthVerifier {
   verify(req: SignedRequest): Promise<SignatureCheck>;
-  /** nonces held now */
-  nonces(): number;
+  /** nonces held now, or undefined when the nonce store does not count them */
+  nonces(): number | undefined;
+}
+
+/** `free`: not held, and there is room to record it. `replayed`: held, unexpired. `full`: no room to record another. */
+export type NonceState = "free" | "replayed" | "full";
+
+/**
+ * Where the door remembers the nonces of the signatures it verified, keyed `<agent> <keyid> <nonce>`. `claim` records a
+ * key until `until` (milliseconds since the epoch) unless it is held already, and does both as one step: two arrivals
+ * with one nonce get one `claimed`. `check` is asked before the directory is fetched, so a replay or a full store costs
+ * no fetch; `claim` decides. A store that throws or rejects makes the signature `unavailable`, never `verified`.
+ */
+export interface NonceStore {
+  check?(key: string): NonceState | Promise<NonceState>;
+  claim(key: string, until: number): "claimed" | "replayed" | "full" | Promise<"claimed" | "replayed" | "full">;
+  /** keys held now, where the store can count them */
+  size?(): number;
+}
+
+/** The default nonce store: one process's (or one isolate's) memory, at most `maxNonces` keys, an expired key dropped when room is needed. */
+export function createMemoryNonceStore(maxNonces: number, now: () => number = () => Date.now()): NonceStore {
+  const nonces = new Map<string, number>();
+  const held = (key: string) => {
+    const until = nonces.get(key);
+    return until !== undefined && until > now();
+  };
+  const room = (): boolean => {
+    if (nonces.size < maxNonces) return true;
+    const t = now();
+    for (const [k, until] of nonces) if (until <= t) nonces.delete(k);
+    return nonces.size < maxNonces;
+  };
+  return {
+    check: (key) => (held(key) ? "replayed" : room() ? "free" : "full"),
+    claim(key, until) {
+      if (held(key)) return "replayed";
+      nonces.set(key, until);
+      return "claimed";
+    },
+    size: () => nonces.size,
+  };
 }
 
 /** A response body up to `max` bytes; null when it passes that, and the rest is not read. */
@@ -340,14 +380,17 @@ export function agentOrigin(uri: string): string {
  * Checks Web Bot Auth signatures. The directory of each configured agent is fetched from
  * `<origin>/.well-known/http-message-signatures-directory` over https, never following a redirect, within `timeoutMs`
  * and `maxDirectoryBytes`, and kept for `cacheSeconds` (a failure for 30 seconds). A nonce is remembered until the
- * signature it came with could no longer be accepted, so a signature serves one request. `now` is for tests.
+ * signature it came with could no longer be accepted, so a signature serves one request. Nonces are kept in `nonceStore`,
+ * by default this process's memory (`maxNonces` of them); a door that runs as many processes or isolates needs a store
+ * they share, or a signature refused by one is accepted once by another. `now` is for tests.
  */
-export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetch, now: () => number = () => Date.now()): WebBotAuthVerifier {
+export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetch, now: () => number = () => Date.now(), nonceStore?: NonceStore): WebBotAuthVerifier {
   const agents = new Set(opts.agents.map(agentOrigin));
   const authorities = new Set(opts.authorities.map(normalizeAuthority));
   const cache = new Map<string, { at: number; dir: Directory }>();
   const inflight = new Map<string, Promise<Directory>>();
-  const nonces = new Map<string, number>();
+  const nonces = nonceStore ?? createMemoryNonceStore(opts.maxNonces, now);
+  const storeDown = (e: unknown) => `the door could not reach its nonce store, so it cannot refuse a replay: ${e instanceof Error ? e.message : String(e)}`;
 
   const fetchDirectory = async (origin: string): Promise<Directory> => {
     const url = `${origin}${DIRECTORY_PATH}`;
@@ -390,13 +433,6 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
     });
     inflight.set(origin, p);
     return p;
-  };
-
-  const roomForNonce = (): boolean => {
-    if (nonces.size < opts.maxNonces) return true;
-    const t = now();
-    for (const [k, until] of nonces) if (until <= t) nonces.delete(k);
-    return nonces.size < opts.maxNonces;
   };
 
   async function verify(req: SignedRequest): Promise<SignatureCheck> {
@@ -473,10 +509,16 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
     }
     if (opts.requireNonce && !nonceP) return invalid(`${label} has no nonce, and this door requires one`, { agent, keyid });
     const nonceKey = nonceP ? `${agent} ${keyid} ${nonceP.v}` : undefined;
-    if (nonceKey) {
-      const until = nonces.get(nonceKey);
-      if (until !== undefined && until > now()) return invalid(`${label} repeats a nonce already used`, { agent, keyid });
-      if (!roomForNonce()) return { outcome: "unavailable", error: `the door holds ${opts.maxNonces} nonces and cannot record another`, agent, keyid };
+    const full: SignatureCheck = { outcome: "unavailable", error: nonceStore ? "the door's nonce store is full and cannot record another" : `the door holds ${opts.maxNonces} nonces and cannot record another`, agent, keyid };
+    if (nonceKey && nonces.check) {
+      let state: NonceState;
+      try {
+        state = await nonces.check(nonceKey);
+      } catch (e) {
+        return { outcome: "unavailable", error: storeDown(e), agent, keyid };
+      }
+      if (state === "replayed") return invalid(`${label} repeats a nonce already used`, { agent, keyid });
+      if (state === "full") return full;
     }
 
     const dir = await directory(agent);
@@ -486,13 +528,19 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
     if ((k.nbf !== undefined && t + skew < k.nbf) || (k.exp !== undefined && t - skew > k.exp)) return invalid(`keyid ${keyid} is outside the validity its directory gives it`, { agent, keyid });
     if (!cryptoVerify(null, Buffer.from(base, "utf8"), k.key, sig.item.v)) return invalid(`${label} does not verify with ${agent}'s key ${keyid}`, { agent, keyid });
     if (nonceKey) {
-      // checked again: another arrival with this nonce may have verified while the directory was fetched
-      const until = nonces.get(nonceKey);
-      if (until !== undefined && until > now()) return invalid(`${label} repeats a nonce already used`, { agent, keyid });
-      nonces.set(nonceKey, (Math.min(expires, created + opts.maxAgeSeconds) + skew) * 1000 + 1000);
+      // claimed only once the signature verifies, so a forgery cannot spend a nonce; an arrival with this nonce that
+      // verified while the directory was fetched has claimed it, and this one is refused
+      let claim: "claimed" | "replayed" | "full";
+      try {
+        claim = await nonces.claim(nonceKey, (Math.min(expires, created + opts.maxAgeSeconds) + skew) * 1000 + 1000);
+      } catch (e) {
+        return { outcome: "unavailable", error: storeDown(e), agent, keyid };
+      }
+      if (claim === "replayed") return invalid(`${label} repeats a nonce already used`, { agent, keyid });
+      if (claim === "full") return full;
     }
     return { outcome: "verified", agent, keyid, label };
   }
 
-  return { verify, nonces: () => nonces.size };
+  return { verify, nonces: () => nonces.size?.() };
 }

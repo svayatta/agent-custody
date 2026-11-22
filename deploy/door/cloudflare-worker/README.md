@@ -44,7 +44,7 @@ alias agent-custody='npx -y -p @agent-custody/receipts agent-custody'
    - `TRUSTED_PRINCIPAL_KEYS`, if agents will present grants;
    - `DOOR_POLICY` and `DOOR_CONFIG`.
 
-   Uncomment `routes` and set your zone so that the Worker stands in front of the site. `DOOR_CONFIG` takes the door config's fields except those that name files or a Node door's modes (`identity`, `policyFile`, `receiptsDir`, `logFile`, `log`, `trustedPrincipalKeys`, `revokedGrants`, `authz`, `trustProxy`, `partner`, `otel`, `splunk`, and `origin.url`). The Worker refuses a config that has one and says where the value comes from instead.
+   Uncomment `routes` and set your zone so that the Worker stands in front of the site. The `NONCES` Durable Object binding stays as it is: with `webBotAuth` in `DOOR_CONFIG` it keeps each signature's nonce where every isolate can see it, and `wrangler deploy` creates it, with no step of its own. `DOOR_CONFIG` takes the door config's fields except those that name files or a Node door's modes (`identity`, `policyFile`, `receiptsDir`, `logFile`, `log`, `trustedPrincipalKeys`, `revokedGrants`, `authz`, `trustProxy`, `partner`, `otel`, `splunk`, and `origin.url`). The Worker refuses a config that has one and says where the value comes from instead.
 
 4. Deploy.
 

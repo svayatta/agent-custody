@@ -2,4 +2,5 @@
 // Worker's entry, built by packages/receipts/scripts/build-door-worker.ts (the build command in wrangler.toml).
 import { createDoorWorker } from "../../../../packages/receipts/src/door-worker.ts";
 
+export { DoorNonce } from "../../../../packages/receipts/src/door-worker.ts";
 export default createDoorWorker();
