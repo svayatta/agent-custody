@@ -9,7 +9,7 @@ import { dirname, join, resolve } from "node:path";
 import { loadAcsGuardianConfig, loadConfig, loadDoorConfig, loadEgressConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
 import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
 import { DEFAULT_APPROVAL_LIFETIME_SECONDS } from "./approval.ts";
-import { approveApprovalRequest, denyApprovalRequest, listApprovalRequests, readApprovalRequest } from "./approval-requests.ts";
+import { approvalRequestExpiresAt, approveApprovalRequest, denyApprovalRequest, listApprovalRequests, readApprovalRequest } from "./approval-requests.ts";
 import type { Envelope } from "./crypto.ts";
 import { createDelegation, decodeDelegation, delegateFrom, grantDigest } from "./delegation.ts";
 import { didKeyOf } from "./did-key.ts";
@@ -371,8 +371,9 @@ async function main(argv: string[]): Promise<number> {
         const max = cfg.approvals?.maxLifetimeSeconds ?? DEFAULT_APPROVAL_LIFETIME_SECONDS;
         const seconds = durationSeconds(values.expires);
         if (seconds > max) throw new Error(`--expires ${values.expires} is longer than the gateway accepts (approvals.maxLifetimeSeconds ${max})`);
-        const r = approveApprovalRequest(dir, id, loadPrivateKey(values.key), { expiresAt: new Date(Date.now() + seconds * 1000).toISOString() });
-        console.log(r.status === "approved" ? `approved ${id}: ${r.binding.agent} may send ${r.binding.tool} with exactly these arguments, once, within ${values.expires}` : `signed ${id}: it needs a second approver with a different key`);
+        const r = approveApprovalRequest(dir, id, loadPrivateKey(values.key), { expiresAt: new Date(Date.now() + seconds * 1000).toISOString(), trusted: cfg.approvals!.trustedKeys.map(loadPublicKey), maxLifetimeSeconds: max });
+        const until = approvalRequestExpiresAt(r);
+        console.log(r.status === "approved" ? `approved ${id}: ${r.binding.agent} may send ${r.binding.tool} with exactly these arguments, once, until ${until}` : `signed ${id}, valid until ${until}: it needs a second approver with a different key`);
         return 0;
       }
       if (sub === "deny") {

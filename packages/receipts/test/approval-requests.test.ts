@@ -21,6 +21,7 @@ const approver = generateKeyPair();
 const second = generateKeyPair();
 const stranger = generateKeyPair();
 const in10m = () => new Date(Date.now() + 600_000).toISOString();
+const trusted = [approver, second];
 
 let server: Server;
 let url: string;
@@ -92,7 +93,7 @@ describe("human in the loop: approval requests", () => {
   it("forwards the same call once after an approver signs it, with an approval the verifier accepts, and only once", async () => {
     const { send, dir, bundleOf, predicate, fx } = await gateway();
     const requestId = (await send())._meta?.[APPROVAL_REQUEST_META_KEY] as { requestId: string };
-    expect(approveApprovalRequest(dir, requestId.requestId, approver, { expiresAt: in10m() }).status).toBe("approved");
+    expect(approveApprovalRequest(dir, requestId.requestId, approver, { expiresAt: in10m(), trusted }).status).toBe("approved");
     const ok = await send();
     expect(ok.isError, textOf(ok)).toBeFalsy();
     expect(refunds).toEqual([args()]);
@@ -110,7 +111,7 @@ describe("human in the loop: approval requests", () => {
   it("does not use an approval for a call with any other argument, which is its own request", async () => {
     const { send, dir } = await gateway();
     const first = (await send())._meta?.[APPROVAL_REQUEST_META_KEY] as { requestId: string };
-    approveApprovalRequest(dir, first.requestId, approver, { expiresAt: in10m() });
+    approveApprovalRequest(dir, first.requestId, approver, { expiresAt: in10m(), trusted });
     const changed = await send(args(2501));
     expect(changed.isError).toBe(true);
     expect((changed._meta?.[APPROVAL_REQUEST_META_KEY] as { requestId: string }).requestId).not.toBe(first.requestId);
@@ -136,11 +137,11 @@ describe("human in the loop: approval requests", () => {
   it("needs two approvers with distinct keys under a two-person rule", async () => {
     const { send, dir } = await gateway({ minApprovers: 2 });
     const { requestId } = (await send())._meta?.[APPROVAL_REQUEST_META_KEY] as { requestId: string };
-    expect(approveApprovalRequest(dir, requestId, approver, { expiresAt: in10m() }).status).toBe("pending");
-    expect(() => approveApprovalRequest(dir, requestId, approver, { expiresAt: in10m() })).toThrow(/different key/);
+    expect(approveApprovalRequest(dir, requestId, approver, { expiresAt: in10m(), trusted }).status).toBe("pending");
+    expect(() => approveApprovalRequest(dir, requestId, approver, { expiresAt: in10m(), trusted })).toThrow(/different key/);
     expect((await send()).isError).toBe(true);
     expect(refunds).toEqual([]);
-    expect(approveApprovalRequest(dir, requestId, second, { expiresAt: in10m() }).status).toBe("approved");
+    expect(approveApprovalRequest(dir, requestId, second, { expiresAt: in10m(), trusted }).status).toBe("approved");
     expect((await send()).isError).toBeFalsy();
     expect(refunds).toHaveLength(1);
   });
@@ -150,10 +151,46 @@ describe("human in the loop: approval requests", () => {
     const { requestId } = (await send())._meta?.[APPROVAL_REQUEST_META_KEY] as { requestId: string };
     denyApprovalRequest(dir, requestId, { reason: "the customer was refunded by phone" });
     const r = await send();
-    expect(textOf(r)).toContain(`an approver denied request ${requestId}: the customer was refunded by phone`);
+    expect(textOf(r)).toContain(`an approver denied request ${requestId}`);
+    // the reason is the request file's free text: it never reaches the agent or the signed receipt
+    expect(textOf(r)).not.toContain("refunded by phone");
     expect(r._meta?.[APPROVAL_REQUEST_META_KEY]).toEqual({ requestId, status: "denied" });
-    expect(() => approveApprovalRequest(dir, requestId, approver, { expiresAt: in10m() })).toThrow(/already denied/);
+    expect(() => approveApprovalRequest(dir, requestId, approver, { expiresAt: in10m(), trusted })).toThrow(/already denied/);
     expect(refunds).toEqual([]);
+  });
+
+  it("never adds an approver's signature to an envelope planted in the store for a call nobody reviewed", async () => {
+    // one approver: a pending request carries no signature, so a planted one is refused outright
+    const one = await gateway();
+    const a = (await one.send())._meta?.[APPROVAL_REQUEST_META_KEY] as { requestId: string };
+    const fileA = join(one.dir, `${a.requestId}.json`);
+    const planted = createApproval(stranger, { ...binding(args(999_999)), expiresAt: in10m() });
+    writeFileSync(fileA, JSON.stringify({ ...readApprovalRequest(one.dir, a.requestId), envelope: planted }));
+    expect(() => approveApprovalRequest(one.dir, a.requestId, approver, { expiresAt: in10m(), trusted })).toThrow(/needs one approver, yet carries a signature/);
+    expect(readApprovalRequest(one.dir, a.requestId)!.envelope!.signatures.map((s) => s.keyid)).toEqual([stranger.keyid]);
+
+    // two approvers: the envelope already there must pass the gateway's checks for this call before it is countersigned
+    const two = await gateway({ minApprovers: 2 });
+    const b = (await two.send())._meta?.[APPROVAL_REQUEST_META_KEY] as { requestId: string };
+    const fileB = join(two.dir, `${b.requestId}.json`);
+    for (const envelope of [
+      createApproval(stranger, { ...binding(args(999_999)), expiresAt: in10m() }),
+      createApproval(approver, { ...binding(args(999_999)), expiresAt: in10m() }),
+      createApproval(approver, { ...binding(), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() }),
+    ]) {
+      writeFileSync(fileB, JSON.stringify({ ...readApprovalRequest(two.dir, b.requestId), envelope }));
+      expect(() => approveApprovalRequest(two.dir, b.requestId, second, { expiresAt: in10m(), trusted, maxLifetimeSeconds: 900 })).toThrow(/does not stand/);
+      expect(readApprovalRequest(two.dir, b.requestId)!.envelope!.signatures).toHaveLength(1);
+    }
+    expect(refunds).toEqual([]);
+  });
+
+  it("refuses an approver key the gateway does not trust, writing nothing", async () => {
+    const { send, dir } = await gateway();
+    const { requestId } = (await send())._meta?.[APPROVAL_REQUEST_META_KEY] as { requestId: string };
+    expect(() => approveApprovalRequest(dir, requestId, stranger, { expiresAt: in10m(), trusted })).toThrow(/not accepted/);
+    expect(readApprovalRequest(dir, requestId)).toMatchObject({ status: "pending" });
+    expect(readApprovalRequest(dir, requestId)!.envelope).toBeUndefined();
   });
 
   it("leaves no request when approvals.requests is not configured", async () => {

@@ -2,12 +2,12 @@
 // here; an approver reviews it and signs it with their own key (`agent-custody approvals approve`); the same call sent
 // again picks the signed envelope up. The directory is untrusted storage: the gateway verifies every envelope it takes
 // from it exactly as it verifies one an agent sends in `_meta`, so a write to it can do no more than an agent can.
-import { randomUUID } from "node:crypto";
+import { randomUUID, sign } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { APPROVAL_TYPE, approvalConsumed, approvalStatement, createApproval, verifyApproval, type ApprovalBinding } from "./approval.ts";
-import { canonicalize, digestOf, dsseCountersign, pae, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
+import { APPROVAL_TYPE, approvalConsumed, approvalStatement, verifyApproval, type ApprovalBinding } from "./approval.ts";
+import { canonicalize, digestOf, pae, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
 
 /** Where a refusal names the request it opened: `{ requestId, status }` in the result's `_meta`. */
 export const APPROVAL_REQUEST_META_KEY = "agent-custody/approval-request";
@@ -89,7 +89,7 @@ function write(dir: string, request: ApprovalRequest): ApprovalRequest {
 
 export type ApprovalPickup =
   | { envelope: Envelope; requestId: string }
-  | { requestId: string; status: "pending" | "denied"; reason?: string; previous?: string };
+  | { requestId: string; status: "pending" | "denied"; previous?: string };
 
 /**
  * The gateway's side, for a protected call that came without an approval. An approved request whose envelope `usable`
@@ -109,7 +109,8 @@ export function pickupApproval(
   const requestId = approvalRequestId(binding);
   const found = readApprovalRequest(dir, requestId);
   let previous: string | undefined;
-  if (found?.status === "denied") return { requestId, status: "denied", ...(found.reason ? { reason: found.reason } : {}) };
+  // a denial's reason is the file's free text: the gateway reports that the call was denied, not what the file says
+  if (found?.status === "denied") return { requestId, status: "denied" };
   if (found?.status === "pending" && found.requiredApprovers === requiredApprovers) return { requestId, status: "pending" };
   if (found?.status === "approved" && found.envelope) {
     const env = found.envelope as Envelope;
@@ -140,21 +141,26 @@ function pending(dir: string, requestId: string): ApprovalRequest {
 }
 
 /**
- * The approver's side: sign the request's exact call with `key`. The first signature sets the expiry; a second
- * approver countersigns the same payload. The request is approved once it carries `requiredApprovers` distinct keys.
- * The key stays where this runs; only the signed envelope is written.
+ * The approver's side: sign the request's exact call with `key`. The first signature sets the expiry (`expiresAt`); a
+ * second approver countersigns the same payload, whose expiry was set by the first. The request is approved once it
+ * carries `requiredApprovers` distinct keys. The key stays where this runs; only the signed envelope is written, and
+ * only after the checks of `signApprovalRequest`.
  */
-export function approveApprovalRequest(dir: string, requestId: string, key: KeyPair, opts: { expiresAt: string; at?: string }): ApprovalRequest {
-  const request = pending(dir, requestId);
+export function approveApprovalRequest(dir: string, requestId: string, key: KeyPair, opts: { expiresAt: string; trusted: PublicKeyRef[]; at?: string; maxLifetimeSeconds?: number }): ApprovalRequest {
   const at = opts.at ?? new Date().toISOString();
-  let envelope: Envelope;
-  if (request.envelope) {
-    if (request.envelope.signatures.some((s) => s.keyid === key.keyid)) throw new Error(`approval request ${requestId} is already signed with key ${key.keyid}; a second approver must use a different key`);
-    envelope = dsseCountersign(request.envelope as Envelope, key);
-  } else {
-    envelope = createApproval(key, { ...(request.binding as ApprovalBinding), issuedAt: at, expiresAt: opts.expiresAt });
+  const p = approvalRequestPayload(dir, requestId, { expiresAt: opts.expiresAt, at });
+  const sig = sign(null, Buffer.from(p.pae, "base64"), key.privateKey).toString("base64");
+  return signApprovalRequest(dir, requestId, { payload: p.payload, keyid: key.keyid, sig }, opts.trusted, { at, ...(opts.maxLifetimeSeconds !== undefined ? { maxLifetimeSeconds: opts.maxLifetimeSeconds } : {}) });
+}
+
+/** When the approval a request carries stops being valid, read from its signed payload. */
+export function approvalRequestExpiresAt(request: ApprovalRequest): string | undefined {
+  try {
+    const expiresAt = (JSON.parse(Buffer.from(request.envelope?.payload ?? "", "base64").toString("utf8")) as { expiresAt?: unknown }).expiresAt;
+    return typeof expiresAt === "string" ? expiresAt : undefined;
+  } catch {
+    return undefined;
   }
-  return signed(dir, request, envelope, at);
 }
 
 function signed(dir: string, request: ApprovalRequest, envelope: Envelope, at: string): ApprovalRequest {
@@ -174,16 +180,24 @@ export function approvalRequestPayload(dir: string, requestId: string, opts: { e
 }
 
 /**
- * Add a signature made elsewhere. It is kept only if it verifies with a trusted key and its payload binds this request's
- * exact call, inside the lifetime cap: the same checks the gateway makes, so nothing that would be refused is stored.
+ * Add a signature. It is kept only if it verifies with a trusted key and its payload binds this request's exact call,
+ * inside the lifetime cap: the same checks the gateway makes. A countersignature is added only to an envelope whose
+ * signature already passes them: the directory is untrusted, and a payload planted there must never get a second
+ * signature for a call nobody reviewed.
  */
 export function signApprovalRequest(dir: string, requestId: string, sig: { payload: string; keyid: string; sig: string }, trusted: PublicKeyRef[], opts: { at?: string; maxLifetimeSeconds?: number } = {}): ApprovalRequest {
   const request = pending(dir, requestId);
   const at = opts.at ?? new Date().toISOString();
+  const checks = { at, minApprovers: 1 as const, ...(opts.maxLifetimeSeconds !== undefined ? { maxLifetimeSeconds: opts.maxLifetimeSeconds } : {}) };
+  if (request.envelope) {
+    if (request.requiredApprovers < 2) throw new Error(`approval request ${requestId} needs one approver, yet carries a signature; delete it, and the gateway opens it again on the next call`);
+    const first = verifyApproval(request.envelope, trusted, request.binding as ApprovalBinding, checks);
+    if (!first.ok) throw new Error(`approval request ${requestId} carries a signature that does not stand (${first.error}); delete it, and the gateway opens it again on the next call`);
+  }
   if (request.envelope && sig.payload !== request.envelope.payload) throw new Error(`approval request ${requestId} already carries a signed payload, and this signature is over another one`);
   if (request.envelope?.signatures.some((s) => s.keyid === sig.keyid)) throw new Error(`approval request ${requestId} is already signed with key ${sig.keyid}; a second approver must use a different key`);
   const one: Envelope = { payloadType: APPROVAL_TYPE, payload: sig.payload, signatures: [{ keyid: sig.keyid, sig: sig.sig }] };
-  const checked = verifyApproval(one, trusted, request.binding as ApprovalBinding, { at, minApprovers: 1, ...(opts.maxLifetimeSeconds !== undefined ? { maxLifetimeSeconds: opts.maxLifetimeSeconds } : {}) });
+  const checked = verifyApproval(one, trusted, request.binding as ApprovalBinding, checks);
   if (!checked.ok) throw new Error(`the signature was not accepted: ${checked.error}`);
   return signed(dir, request, request.envelope ? { ...(request.envelope as Envelope), signatures: [...request.envelope.signatures, one.signatures[0]!] } : one, at);
 }

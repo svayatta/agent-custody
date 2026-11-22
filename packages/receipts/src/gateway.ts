@@ -503,7 +503,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       };
       const initialApproval = checkApproval(timestamp);
       const approvalProblem = !initialApproval || initialApproval.ok ? undefined
-        : requested?.status === "denied" ? `an approver denied request ${requested.requestId}${requested.reason ? `: ${requested.reason}` : ""}`
+        : requested?.status === "denied" ? `an approver denied request ${requested.requestId}`
         : requested ? `approval required: request ${requested.requestId} is waiting for an approver${requested.previous ? ` (the last approval for this call ${requested.previous})` : ""}; send the same call again once it is approved`
         : initialApproval.error;
       let operation: OperationRecord | undefined;
