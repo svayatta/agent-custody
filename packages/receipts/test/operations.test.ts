@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { GatewayConfigSchema, loadConfig } from "../src/config.ts";
+import { createGatewayHost } from "../src/gateway.ts";
 import { OperationStore, ownerAlive, processStamp, psStamp, type OperationReservation } from "../src/operations.ts";
 import { buildFixture } from "../scripts/fixture.ts";
 
@@ -240,5 +241,13 @@ describe("financial operation configuration", () => {
       mutate(cfg);
       expect(GatewayConfigSchema.safeParse(cfg).success).toBe(false);
     }
+  });
+
+  it("the gateway refuses to start when a fact lookup uses a tool that requires approval", async () => {
+    const { fx, cfg } = config();
+    delete cfg.operations;
+    cfg.approvals = { trustedKeys: ["keys/principal.pub"], usedDir: "used-approvals", tools: [{ tool: "customer.lookup" }] };
+    writeFileSync(fx.configFile, JSON.stringify(cfg));
+    await expect(createGatewayHost(loadConfig(fx.configFile))).rejects.toThrow(/fact "customer" uses tool customer\.lookup, which requires approval/);
   });
 });
