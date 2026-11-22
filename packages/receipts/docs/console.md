@@ -1,8 +1,8 @@
 # Gateway console
 
-A small admin service for the person who runs a gateway. It shows what the gateway is configured to do and what it has done, validates and replays a policy change before it is saved, and revokes a grant. It is a separate process from the gateway, behind a token, so the gateway never serves an admin page next to the agents' credentials.
+A small admin service for the person who runs a gateway. It shows what the gateway is configured to do and what it has done, validates and replays a policy change before it is saved, revokes a grant, and puts the gateway's approval requests in front of a person. It is a separate process from the gateway, behind a token, so the gateway never serves an admin page next to the agents' credentials.
 
-It is deliberately limited. It holds **no principal key and signs nothing**, so it cannot issue a grant or widen anyone's authority; everything it shows is read from the gateway's own config, receipts, and revocation file; and the only things it changes are the policy file and the revocation file, both of which the gateway reads. [Example 32](../examples/32-console.ts) runs it end to end.
+It is deliberately limited. It holds **no principal or approver key and signs nothing**, so it cannot issue a grant, approve a call, or widen anyone's authority. Everything it shows is read from the gateway's own config, receipts, revocation file, and approval requests. The only things it changes are the policy file, the revocation file, and the approval requests, all of which the gateway reads. An approval is signed in the approver's browser, not by the console. [Example 32](../examples/32-console.ts) runs it end to end.
 
 ## Run it
 
@@ -32,8 +32,9 @@ It listens on `127.0.0.1:8795` and prints the URL. Open it and sign in with the 
 | **Check** | the same checks as `agent-custody check`, except that the credential variables are **not** checked: the console deliberately does not hold the gateway's credentials, so it cannot tell whether they are set where the gateway runs. "Connect" starts the upstreams and lists their tools only for a config that names no credentials; otherwise it says to run `agent-custody check --connect` where the gateway runs, for example `docker compose exec gateway agent-custody check --config /config/gateway.json --connect`. A connect check that does not finish in 60 seconds is stopped and the upstreams it started are closed ([configuration.md](configuration.md#check-it-before-you-start-it)) |
 | **Policy** | the policy file in an editor. *Validate* asks Cedar to parse it. *Replay recorded calls* runs it against the verified receipts, using each call's own arguments and facts, and lists the decisions that would change, with their receipts. **A replay only re-decides calls that already happened**: a limit that no recorded call reached, or removing one, can show no change, so it is not a test of what a policy allows. *Save* writes it, keeping the previous version and recording the change |
 | **Grants** | paste a grant to see whether the gateway would accept it (valid, expired, revoked, signed by a key it does not trust) and what it allows; *Revoke* adds its digest to the revocation file, and the gateway refuses it, and every grant delegated from it, on its next call. Lists the revoked digests |
+| **Approvals** | the requests a gateway with `approvals.requests` left for protected calls that came with no approval: who asked, for which tool, and the exact arguments. *Sign and approve* reads the approver's key file in the browser, signs the call there with WebCrypto, and sends only the signature; the console stores it only if it verifies with one of the gateway's trusted approver keys over this exact call, inside `maxLifetimeSeconds`. Under a two-person rule the second approver's *Countersign* needs a different key, and is refused unless the first signature verifies with a trusted key over this call. *Deny* keeps that call refused until the request is deleted; the reason stays in the request and the audit, and is not repeated to the agent. [Approval requests](approvals.md#ask-a-person-approval-requests) |
 | **Receipts** | the newest receipts with their agent, tool, decision, and outcome, each verified against the gateway key, the trusted principals, and the local log; a receipt that does not verify says which checks failed; the id in a row opens a summary of the statement, with the full statement behind *Raw JSON* |
-| **Audit** | every change made through the console: who, when, and what, with the policy's digest before and after |
+| **Audit** | every change made through the console: who, when, and what, with the policy's digest before and after, and each approval signed (with the key id) or denied |
 
 ## Use the page
 
@@ -42,6 +43,7 @@ It listens on `127.0.0.1:8795` and prints the URL. Open it and sign in with the 
 - **Unsaved policy edits are not lost without a warning.** A tab change with unsaved edits opens a dialog that asks you to discard them or to keep editing. Closing or reloading the page shows the browser's own warning.
 - **Save and Revoke ask in the page.** The dialog names the policy file or the grant (the agent and the digest). Escape and *Cancel* do nothing. For *Revoke*, the focus starts on *Cancel*.
 - **A receipt opens from its id.** The id in each row is a button, so the keyboard and a screen reader can open it. The detail shows the tool, the decision, the status, the time, the agent, the principal, whether a grant was presented, the digests, and whether the receipt verifies. The full statement is behind *Raw JSON*. The focus moves to the detail when it opens and returns to the id when you press *Close*.
+- **Signing needs a secure page.** Browsers offer WebCrypto only on `https` or on `localhost`, so the console signs on its default `127.0.0.1` address, or behind TLS. The key file is read by the page and never sent; a browser without Ed25519 in WebCrypto says it cannot sign, and `agent-custody approvals approve` does the same from the command line.
 - **Times show in your local time.** The UTC value shows when you hold the pointer over a time.
 
 ## What a saved policy does
@@ -52,7 +54,7 @@ A running gateway re-reads `policy.cedar` when it changes, so **a saved policy a
 
 - **A token on every API route.** It is compared in constant time. Five wrong tokens from one address lock it out for a minute. A request with no token is refused and does not count towards that.
 - **Loopback by default.** The transport is plain HTTP. Anything beyond one machine needs TLS in front (a proxy or mesh) and a network only administrators can reach. The console has one shared token, not per-user accounts or roles.
-- **No keys.** It never reads a principal's private key. It reads the gateway's key file only to take the public half, so that it can verify receipts.
+- **No keys.** It never reads a principal's or an approver's private key. It reads the gateway's key file only to take the public half, so that it can verify receipts. An approver's key is read by the page in their browser to sign, and only the signature reaches the console, which checks it against the gateway's trusted approver keys before storing it. The console token therefore lets someone deny a request, not approve one. It does let them read each request's arguments in clear, including fields that a `capture` rule withholds from receipts, because the Approvals tab shows the approver the exact call.
 - **The page cannot run what it shows.** Every value is written with `textContent`, never as markup, and the page is served with a content-security-policy that allows exactly its own script and style by hash and nothing else (no inline attributes, no outside requests). The page's own tests check both.
 - **Bounded input.** A request body over a megabyte is refused, and a receipt id must be a UUID, so a path cannot be read through it.
 - **Everything it changes is recorded**, in an append-only file in its state directory, and the policy it replaces is kept.
@@ -63,6 +65,7 @@ A running gateway re-reads `policy.cedar` when it changes, so **a saved policy a
 - It does not edit `gateway.json`: upstreams, facts, and `precommit` are changed in the file, and the gateway restarted. The Overview and Check tabs show them.
 - The credential variables are not checked in the console, and an upstream that needs one is not started there.
 - One token, no per-user accounts, and the audit records the address and not a person.
+- An approval in the audit names the key that signed it. Which person holds that key is the operator's to know, as for `agent-custody approvals approve`.
 - It reads the local receipts directory. With a remote log it verifies receipts against the keys but not the log's inclusion proofs.
 - A shared gateway has one policy and one key for every agent on it, so the console edits one policy.
 
@@ -81,6 +84,10 @@ Every route except `GET /` (the page) and `GET /healthz` needs `Authorization: B
 | `POST /api/grants/inspect` `{ grant }` | status, agent, scopes, window, digest |
 | `POST /api/grants/revoke` `{ grant }` | add its digest to the revocation file |
 | `GET /api/revocations` | the revoked digests |
+| `GET /api/approvals` | `{ configured }`, and when requests are on: the pending requests, then up to 50 decided ones, with their exact arguments; `trustedKeyids` and `maxLifetimeSeconds` |
+| `POST /api/approvals/prepare` `{ requestId, expiresInSeconds }` | the payload to sign and its DSSE bytes (`pae`), base64; the payload already signed once under a two-person rule. Nothing is written |
+| `POST /api/approvals/sign` `{ requestId, payload, keyid, sig }` | stores the signature if it verifies with a trusted approver key and binds this request's call inside `maxLifetimeSeconds`; 409 otherwise |
+| `POST /api/approvals/deny` `{ requestId, reason? }` | marks the request denied |
 | `GET /api/receipts?limit=` | recent receipts with their verdicts; `GET /api/receipts/<id>` is one statement |
 | `GET /api/audit` | the console's audit trail |
 

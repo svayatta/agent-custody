@@ -8,6 +8,8 @@ import { closeSync, constants as fsConstants, existsSync, fchmodSync, mkdtempSyn
 import { dirname, join, resolve } from "node:path";
 import { loadAcsGuardianConfig, loadConfig, loadDoorConfig, loadEgressConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
 import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
+import { DEFAULT_APPROVAL_LIFETIME_SECONDS } from "./approval.ts";
+import { approvalRequestExpiresAt, approveApprovalRequest, denyApprovalRequest, listApprovalRequests, readApprovalRequest } from "./approval-requests.ts";
 import type { Envelope } from "./crypto.ts";
 import { createDelegation, decodeDelegation, delegateFrom, grantDigest } from "./delegation.ts";
 import { didKeyOf } from "./did-key.ts";
@@ -100,6 +102,13 @@ async function doorErrorRatesCommand(args: string[]): Promise<number> {
   return 0;
 }
 
+/** `90s`, `10m`, or `1h`, in seconds. */
+function durationSeconds(text: string): number {
+  const m = /^(\d+)([smh])$/.exec(text.trim());
+  if (!m || Number(m[1]) <= 0) throw new Error(`--expires takes 90s, 10m, or 1h; got "${text}"`);
+  return Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2] as "s" | "m" | "h"];
+}
+
 /** A secret kept in a file that only this process can read, such as a container secret mounted at /run/secrets. The file's path is not a secret; its contents are. */
 function tokenFromFile(path: string): string {
   const v = readFileSync(path, "utf8").trim();
@@ -124,6 +133,10 @@ const USAGE = `agent-custody <command>
                                                    a narrower grant for a sub-agent, signed by the agent the parent names; the parent travels inside
   reveal <bundle> --capture-key-env NAME --issuer-key <pub> [--out <file>] [--include-salts]   the values a receipt withheld (capture mode encrypted), as a disclosure file
                                                    for verify --disclose; needs the customer's capture key
+  approvals list|show <id>|approve <id> --key <file> [--expires 10m]|deny <id> [--reason <text>] --config <gateway.json>
+                                                   human in the loop: the approval requests a gateway with approvals.requests left for
+                                                   calls that came without an approval; approve signs the exact call with your key, and
+                                                   the same call sent again is forwarded once
   revoke --config <gateway.json|door.json> --grant <grant.json>
                                                    revokes a grant: its digest goes into the config's revokedGrants file. At a gateway, every
                                                    session under it or under a grant delegated from it refuses its next call, and no new session opens for them;
@@ -365,6 +378,46 @@ async function main(argv: string[]): Promise<number> {
       const findings = isDoorConfig(values.config) ? checkDoorConfig(values.config) : isEgressConfig(values.config) ? checkEgressConfig(values.config) : await checkConfig(values.config, { connect: values.connect });
       console.log(values.json ? JSON.stringify(findings, null, 2) : formatFindings(findings));
       return findings.some((f) => f.level === "error") ? 1 : 0;
+    }
+    case "approvals": {
+      const sub = rest[0];
+      const listing = sub === "list";
+      const id = listing ? undefined : rest[1];
+      const { values } = parseArgs({ args: rest.slice(listing ? 1 : 2), options: { config: { type: "string" }, key: { type: "string" }, expires: { type: "string", default: "10m" }, reason: { type: "string" }, all: { type: "boolean", default: false }, json: { type: "boolean", default: false } } });
+      if (!values.config) throw new Error("approvals needs --config: the gateway config whose approvals.requests.dir holds the requests");
+      const cfg = loadConfig(values.config);
+      const dir = cfg.approvals?.requests?.dir;
+      if (!dir) throw new Error(`approvals needs approvals.requests.dir in ${values.config}`);
+      if (listing) {
+        const all = listApprovalRequests(dir).filter((r) => values.all || r.status === "pending");
+        if (values.json) console.log(JSON.stringify(all, null, 2));
+        else if (!all.length) console.log("no approval requests waiting");
+        else for (const r of all) console.log(`${r.requestId}  ${r.status.padEnd(8)}  ${r.createdAt}  ${r.binding.agent} → ${r.binding.tool}  for ${r.binding.principal}${r.requiredApprovers === 2 ? `  (two approvers, ${new Set(r.envelope?.signatures.map((x) => x.keyid) ?? []).size} signed)` : ""}`);
+        return 0;
+      }
+      if (!id) throw new Error(`approvals ${sub ?? ""} needs a request id`);
+      if (sub === "show") {
+        const r = readApprovalRequest(dir, id);
+        if (!r) throw new Error(`no approval request ${id} in ${dir}`);
+        console.log(JSON.stringify(values.json ? r : { requestId: r.requestId, status: r.status, createdAt: r.createdAt, principal: r.binding.principal, agent: r.binding.agent, tool: r.binding.tool, arguments: r.binding.args, ...(r.binding.fields ? { fields: r.binding.fields } : {}), requiredApprovers: r.requiredApprovers, signedBy: r.envelope?.signatures.map((x) => x.keyid) ?? [], ...(r.reason ? { reason: r.reason } : {}) }, null, 2));
+        return 0;
+      }
+      if (sub === "approve") {
+        if (!values.key) throw new Error("approvals approve needs --key: the approver's private key");
+        const max = cfg.approvals?.maxLifetimeSeconds ?? DEFAULT_APPROVAL_LIFETIME_SECONDS;
+        const seconds = durationSeconds(values.expires);
+        if (seconds > max) throw new Error(`--expires ${values.expires} is longer than the gateway accepts (approvals.maxLifetimeSeconds ${max})`);
+        const r = approveApprovalRequest(dir, id, loadPrivateKey(values.key), { expiresAt: new Date(Date.now() + seconds * 1000).toISOString(), trusted: cfg.approvals!.trustedKeys.map(loadPublicKey), maxLifetimeSeconds: max });
+        const until = approvalRequestExpiresAt(r);
+        console.log(r.status === "approved" ? `approved ${id}: ${r.binding.agent} may send ${r.binding.tool} with exactly these arguments, once, until ${until}` : `signed ${id}, valid until ${until}: it needs a second approver with a different key`);
+        return 0;
+      }
+      if (sub === "deny") {
+        denyApprovalRequest(dir, id, values.reason ? { reason: values.reason } : {});
+        console.log(`denied ${id}: the gateway refuses that exact call, and says so, until the request is deleted`);
+        return 0;
+      }
+      throw new Error("approvals takes list, show <id>, approve <id> --key <file>, or deny <id> [--reason <text>]");
     }
     case "revoke": {
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, grant: { type: "string" } } });

@@ -67,6 +67,39 @@ The gateway reads `agent-custody/approval` from the call's `_meta` and removes t
 
 After facts and any pre-commit authorization have completed, the gateway checks the approval again and atomically consumes its id immediately before forwarding. An approval that expired during those waits, or lost a concurrent race to use the same id, leaves the call `withheld`. Every refusal gets a signed receipt with its reason.
 
+## Ask a person: approval requests
+
+Signing with `createApproval` in your own review tool works when you already have one. Without one, the gateway can run the loop: it asks, a person signs, and the agent picks the signature up. Add `requests` to `approvals`:
+
+```json
+{ "approvals": { "trustedKeys": ["keys/approver.pub"], "usedDir": "approvals-used", "requests": { "dir": "approval-requests" }, "tools": [{ "tool": "stripe.refund" }] } }
+```
+
+A protected call that arrives with no approval in `_meta`, from an agent whose grant covers the tool, is refused as before. The gateway also writes a request to `requests.dir`: the principal, the agent, the tool, the complete arguments, the field mapping, and the number of approvers the rule requires. The agent's refusal names it:
+
+```
+Denied by policy: approval required: request b41a90c4… is waiting for an approver; send the same call again once it is approved
+```
+
+The same id is in the result's `_meta` under `agent-custody/approval-request`, as `{ requestId, status }`. One exact call has one request: the same principal, agent, tool, mapping, and arguments always name the same id, so an agent that retries does not open a second one.
+
+The approver works in the [console](console.md)'s **Approvals** tab, which signs in their browser, or from the command line with their own key:
+
+```bash
+agent-custody approvals list --config gateway.json
+agent-custody approvals show <id> --config gateway.json
+agent-custody approvals approve <id> --config gateway.json --key keys/approver.key --expires 10m
+agent-custody approvals deny <id> --config gateway.json --reason "refunded by phone"
+```
+
+`show` prints the complete arguments, not a summary: they are what the approver signs. `approve` signs locally, so the private key never leaves that machine, and writes only the signed envelope, after checking it as the gateway will: a key the gateway does not trust is refused. `--expires` takes `90s`, `10m`, or `1h`, and is refused if it is longer than `maxLifetimeSeconds`. The first signature sets the expiry; a countersignature keeps it, and `approve` prints it. Under a two-person rule, the first `approve` signs and the request stays pending. A second approver's `approve`, with a different key, countersigns it. `list` shows pending requests; `--all` shows decided ones too; `--json` prints them whole.
+
+When the agent sends the same call again with no approval in `_meta`, the gateway takes the envelope from the approved request. It checks it exactly as one sent in `_meta`, and consumes it before forwarding. The call after that finds the approval used, opens a new request, and its refusal says so. A call with any argument changed is a different request. A denied request keeps that exact call refused until the request file is deleted. The refusal says that an approver denied it. The reason stays in the request, for `show` and the console: the gateway does not repeat the file's free text to the agent or into the receipt.
+
+The request directory is untrusted storage. It carries requests and signed envelopes, and the gateway uses an envelope from it only if it verifies against `trustedKeys` and binds this exact call. A forged file, an envelope signed by another key, or one for other arguments is not used. The refusal says why, and a new request is opened. The same holds for signing: `approve` and the console sign only the call the request names, and add a second signature only to an envelope whose first signature already verifies with a trusted key, binds that call, and is within `maxLifetimeSeconds`. A planted envelope is refused, never countersigned. A single-approver request that carries a signature while pending is refused too. A write to the directory can do no more than an agent can do by sending `_meta`. It can deny, which an operator who can write there could do anyway by not approving.
+
+A request holds the complete arguments in clear, because the approver must see what they sign. A capture rule withholds arguments from receipts, not from the request directory. Keep it with the gateway's other private state, mode `0700` as the gateway creates it, and delete requests once they are decided. [Tutorial 57](../examples/57-approval-requests.ts) runs the loop end to end.
+
 ## Consumption and failure recovery
 
 `usedDir` is part of the enforcement boundary. Keep it persistent across restarts and share the same directory between all gateway processes that accept the same approvals. The filesystem must support exclusive file creation consistently across those processes, and durable file and directory synchronization. A synchronization failure withholds the call. Separate directories let each gateway consume the same approval once.

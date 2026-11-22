@@ -1,6 +1,6 @@
 // A short-lived human approval signs the exact action, independently of the agent's delegation grant.
 import { randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { digestOf, dsseSign, dsseVerifiers, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
@@ -106,9 +106,13 @@ function actionFor(input: ApprovalBinding): Pick<Approval, "principal" | "agent"
 
 /** Sign the exact arguments and their explicit action fields. A second approver uses dsseCountersign. */
 export function createApproval(key: KeyPair, input: ApprovalBinding & { approvalId?: string; issuedAt?: string; expiresAt: string }): Envelope {
+  return dsseSign(APPROVAL_TYPE, approvalStatement(input), key);
+}
+
+/** The statement `createApproval` signs, for a signer elsewhere (a browser, a hardware key) to sign the same bytes. */
+export function approvalStatement(input: ApprovalBinding & { approvalId?: string; issuedAt?: string; expiresAt: string }): Approval {
   const { approvalId = randomUUID(), issuedAt = new Date().toISOString(), expiresAt, ...binding } = input;
-  const approval = ApprovalSchema.parse({ version: "0.1", approvalId, ...actionFor(binding), issuedAt, expiresAt });
-  return dsseSign(APPROVAL_TYPE, approval, key);
+  return ApprovalSchema.parse({ version: "0.1", approvalId, ...actionFor(binding), issuedAt, expiresAt });
 }
 
 function isBase64(value: string): boolean {
@@ -168,6 +172,11 @@ export function verifyApproval(envelope: unknown, trusted: PublicKeyRef[], bindi
   } catch (error) {
     return { ok: false, error: `invalid approval: ${error instanceof Error ? error.message : "could not verify"}` };
   }
+}
+
+/** Whether `consumeApproval` has burned this approval id in `usedDir`. */
+export function approvalConsumed(usedDir: string, approvalId: string): boolean {
+  return existsSync(join(usedDir, `${sha256Hex(approvalId.toLowerCase())}.json`));
 }
 
 /**
