@@ -1,10 +1,10 @@
 // One lock design for the files that many processes write: the local log, its prune, and the outbox.
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { takeLock } from "../src/lock.ts";
+import { breakLock, takeLock, withLock } from "../src/lock.ts";
 import { leafHash, MerkleLog, rootOf } from "../src/log.ts";
 import { pruneLog } from "../src/retention.ts";
 
@@ -189,4 +189,66 @@ describe("prune", () => {
     expect(await done).toBe(0);
     expect(readFileSync(file, "utf8").trim().split("\n")).toEqual([JSON.stringify("one"), JSON.stringify("two")]);
   }, 30_000);
+});
+
+// Contention, timeouts, and the races between judging a lock stale and breaking it.
+describe("lock contention and break races", () => {
+  it("withLock waits out waitMs under a live holder, then throws its message; free, it runs the work", () => {
+    const lock = join(dir(), "x.lock");
+    const release = takeLock(lock, 60_000)!;
+    const started = Date.now();
+    expect(() => withLock(lock, { staleMs: 60_000, waitMs: 200 }, () => "ran")).toThrow(/is held by another process/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+    release();
+    expect(withLock(lock, { staleMs: 60_000, waitMs: 200 }, () => "ran")).toBe("ran");
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("a lock path under a regular file rethrows the filesystem error instead of waiting", () => {
+    const d = dir();
+    writeFileSync(join(d, "not-a-dir"), "hi");
+    const lock = join(d, "not-a-dir", "x.lock");
+    expect(() => takeLock(lock, 60_000)).toThrow(/ENOTDIR/);
+    expect(() => withLock(lock, { staleMs: 60_000, waitMs: 50 }, () => {})).toThrow(/ENOTDIR/);
+  });
+
+  it("a held .break makes the caller back off, and the lock and the breaker both survive", () => {
+    const lock = join(dir(), "x.lock");
+    writeFileSync(lock, ownerBody({ pid: deadPid() }));
+    writeFileSync(`${lock}.break`, "held by another breaker");
+    expect(takeLock(lock, 60_000)).toBeUndefined();
+    expect(readFileSync(lock, "utf8")).toContain('"other"');
+    expect(existsSync(`${lock}.break`)).toBe(true);
+  });
+
+  it("a stale .break is cleared and the stale lock is then broken", () => {
+    const lock = join(dir(), "x.lock");
+    writeFileSync(lock, ownerBody({ pid: deadPid() }));
+    writeFileSync(`${lock}.break`, "leftover breaker");
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(`${lock}.break`, old, old);
+    const release = takeLock(lock, 60_000);
+    expect(release).toBeTypeOf("function");
+    expect(existsSync(`${lock}.break`)).toBe(false);
+    release!();
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("breakLock never takes a live lock judged stale under another owner", () => {
+    const d = dir();
+    const lock = join(d, "x.lock");
+    // Record a stale owner's judgement, then put a live owner's file at the
+    // lock path: breakLock with the old judgement must leave it alone. This
+    // fails without the inode/token check and passes with it, every time.
+    // (The old swap test could not make the interleaving deterministic: the
+    // breaker kept seeing the same stale owner it had just judged.)
+    writeFileSync(lock, ownerBody({ pid: deadPid(), token: "stale-0" }));
+    const judged = { token: "stale-0", ino: statSync(lock).ino };
+    const live = ownerBody({ pid: process.pid, token: "live-0" });
+    writeFileSync(join(d, "live.json"), live);
+    renameSync(join(d, "live.json"), lock);
+    breakLock(lock, judged);
+    expect(readFileSync(lock, "utf8")).toBe(live);
+    expect(existsSync(`${lock}.break`)).toBe(false);
+  });
 });
