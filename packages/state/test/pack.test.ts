@@ -103,7 +103,7 @@ describe("custody pack negative verification cases", () => {
     return { dir, ledgerFile, factId, packKey, keys, pack };
   }
 
-  it("skips non-JSON files and damaged bundles in the receipts dir", async () => {
+  it("skips non-JSON files and reports a damaged bundle as unreadable", async () => {
     const { dir, ledgerFile, factId, pack } = await makePack();
     const before = Object.keys(pack.receipts).sort();
     expect(pack.missingReceipts).toEqual([]);
@@ -111,7 +111,27 @@ describe("custody pack negative verification cases", () => {
     writeFileSync(join(dir, "receipts", "broken.json"), "{not json\n");
     const again = await buildPack(new Ledger(ledgerFile), join(dir, "receipts"), factId);
     expect(Object.keys(again.receipts).sort()).toEqual(before);
-    expect(again.missingReceipts).toEqual([]);
+    // notes.txt is filtered by the .json check before any parsing, so it is
+    // the only thing skipped; broken.json cannot be parsed, so it is
+    // reported as unreadable and the pack no longer verifies as complete.
+    expect(again.missingReceipts).toEqual(["unreadable:broken.json"]);
+  });
+
+  it("reports a damaged receipt cited only by the blast walk as unreadable, and verification fails", async () => {
+    const { dir, ledgerFile, factId, packKey, keys, pack } = await makePack();
+    // The read receipt is cited only by the blast walk: the history never
+    // cites it, so damaging it used to drop it from the pack silently, with
+    // every check still passing and a signed pack missing an agent's read.
+    const historyIds = new Set(pack.history.map((e) => (e.kind === "assert" ? e.fact.source.receiptId : e.source.receiptId)));
+    const blastOnly = pack.blast.receipts.map((r) => r.receiptId).find((id) => !historyIds.has(id));
+    expect(blastOnly).toBeTruthy();
+    writeFileSync(join(dir, "receipts", `${blastOnly}.json`), "{damaged\n");
+    const again = await buildPack(new Ledger(ledgerFile), join(dir, "receipts"), factId);
+    expect(again.missingReceipts).toContain(`unreadable:${blastOnly}.json`);
+    const env = signPack(again, generateKeyPairFrom(packKey.keyFile));
+    const res = verifyPack(env, [loadPublicKey(packKey.pubFile)], keys);
+    expect(res.ok).toBe(false);
+    expect(res.checks.find((c) => c.name === "no receipts missing")?.ok).toBe(false);
   });
 
   it("reports a cited receipt whose bundle file is gone as missing", async () => {
