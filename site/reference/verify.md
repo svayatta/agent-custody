@@ -44,7 +44,7 @@ An approval record makes its checks mandatory for a forwarded call, even when `a
 | issuer kind is known, issuer keyid matches signer | the receipt says who issued it and the signature agrees |
 | strict mode in force, strict: call precommitted before forwarding | only with `--require-strict`: a gateway receipt that says `issuer.strict: true`, and, for a call that was executed, failed, or errored, an embedded authorization; a reconciliation receipt is a provider read and needs none |
 | gateway receipt carries a delegation, carries a policy decision | gateway receipts embed both |
-| delegation signature (principal key) | the grant was signed by a trusted principal key |
+| delegation signature (principal key) | the grant was signed by a trusted principal key; on every link, an agent named by a did:key decodes to an Ed25519 key, which is the key in `agentKey` when there is one |
 | delegation chain to the principal | only for chained grants: every link signed by the key its parent names, no scope escalation, nested windows, one principal |
 | delegation binds principal and agent, valid at receipt time | the grant is for this principal and agent and the receipt's time is inside its window |
 | executed tool within delegated scope | if the tool ran, the grant covered it |

@@ -279,7 +279,7 @@ describe("a did:key grant at the door", () => {
     });
   });
 
-  it("a revoked did:key grant is revoked, before its did:key is read", () => {
+  it("a revoked did:key grant is revoked", () => {
     const g = grantFrom(fx.principalKey, did);
     expect(classify(g, undefined, (digests) => (digests.includes(grantDigest(g)) ? "the grant has been revoked" : null))).toMatchObject({ class: "claimed", grant: "revoked" });
   });

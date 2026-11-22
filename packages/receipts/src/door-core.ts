@@ -7,8 +7,8 @@ import type { IncomingHttpHeaders } from "node:http";
 import type { CaptureConfig } from "./capture.ts";
 import type { DoorConfig, DoorRouteConfig } from "./config.ts";
 import { captureKeyFrom } from "./capture.ts";
-import { digestOf, publicKeyFromPem, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
-import { DID_KEY_PREFIX, publicKeyFromDidKey } from "./did-key.ts";
+import { digestOf, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
+import { DID_KEY_PREFIX } from "./did-key.ts";
 import { decodeDelegation, delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { parseGrantHeader, GRANT_HEADER } from "./grant-header.ts";
 import type { Issuer } from "./issue.ts";
@@ -427,39 +427,12 @@ export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route
   const grant = checked.delegation;
   const revocation = revoked?.(grantChainDigests(envelope));
   if (revocation) return { arrival: { class: "claimed", subject: grant.agent, grant: "revoked", grantError: revocation, ...base } };
-  // An agent named by a did:key is its key: the identifier must decode to an Ed25519 key, and the grant's agentKey, if
-  // it names one, must be that key, or the grant says two things about who the agent is. Every link of a chain, since a
-  // parent's agentKey is what verified the link below it.
-  for (const [i, link] of checked.chain.entries()) {
-    if (!link.agent.startsWith(DID_KEY_PREFIX)) continue;
-    const named = didKeyAgent(link.agent, link.agentKey);
-    const where = i === checked.chain.length - 1 ? "" : `link ${i} (${link.agent}): `;
-    if (named) return { arrival: { class: "claimed", subject: grant.agent, grant: "invalid", grantError: where + named, ...base } };
-  }
   if (!delegationValidAt(grant, at)) return { arrival: { class: "claimed", subject: grant.agent, grant: "invalid", grantError: "the grant is outside its validity window", ...base } };
   if (!grant.scopes.includes(route)) return { arrival: { class: "claimed", subject: grant.agent, grant: "out-of-scope", grantError: `route "${route}" is not in the grant's scopes`, ...base } };
   // The signature proves who sent the request. A grant for one agent in a request another agent signed was handed on or taken.
   if (signer && signer.agent !== grant.agent) return { arrival: { class: "claimed", subject: grant.agent, grant: "wrong-sender", grantError: `the grant names agent "${grant.agent}", and the request is signed by ${signer.agent}`, ...base } };
   return { arrival: { class: "verified", subject: grant.agent, grant: "verified", ...baseOf(sig) }, delegation: { envelope, grant, principalKeyid: checked.keyid }, ...(signer ? { signer } : {}) };
 }
-
-/** Why a did:key agent does not check out, or null when it decodes and agrees with the grant's agentKey. */
-function didKeyAgent(did: string, agentKey: string | undefined): string | null {
-  let named: PublicKeyRef;
-  try {
-    named = publicKeyFromDidKey(did);
-  } catch (e) {
-    return `the grant's did:key agent does not decode: ${e instanceof Error ? e.message : String(e)}`;
-  }
-  if (agentKey === undefined) return null;
-  try {
-    if (publicKeyFromPem(agentKey).keyid === named.keyid) return null;
-  } catch {
-    return "the grant's agentKey is not a public key";
-  }
-  return "the grant's agentKey is not the key its did:key agent names";
-}
-
 
 /** methods that must not change anything at the origin; every other method is relayed only after its receipt is committed to the log */
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
