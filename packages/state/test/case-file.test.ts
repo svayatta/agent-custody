@@ -287,6 +287,121 @@ describe("offline case files", () => {
     expect((await runBrowser(renderCaseFile(file))).report).toContain("fingerprint mismatch");
   });
 
+  describe("negative verification cases for the case file (#284)", () => {
+    const structure = (result: ReturnType<typeof verifyCaseFile>) => result.checks.find((c) => c.name === "case file structure")!;
+    const named = (result: ReturnType<typeof verifyCaseFile>, name: string) => result.checks.find((c) => c.name === name)!;
+
+    it("rejects a malformed consumed fact", async () => {
+      const { file } = await fixture();
+      const forged = structuredClone(file);
+      forged.pack.consumed.facts.push({ factId: "bad", source: { receiptId: "not-a-uuid" } } as never);
+      const result = verifyCaseFile(forged);
+      expect(result.ok).toBe(false);
+      expect(structure(result).ok).toBe(false);
+      expect(structure(result).detail).toBe("malformed belief snapshot");
+    });
+
+    it("rejects a malformed downstream receipt summary", async () => {
+      const { file } = await fixture();
+      const forged = structuredClone(file);
+      forged.pack.downstream.receipts.push({ receiptId: "not-a-uuid" } as never);
+      const result = verifyCaseFile(forged);
+      expect(result.ok).toBe(false);
+      expect(structure(result).ok).toBe(false);
+      expect(structure(result).detail).toBe("malformed downstream snapshot");
+    });
+
+    it("rejects a malformed downstream derived fact", async () => {
+      const { file } = await fixture();
+      const forged = structuredClone(file);
+      forged.pack.downstream.derivedFacts.push({ factId: "bad", source: { receiptId: "not-a-uuid" } } as never);
+      const result = verifyCaseFile(forged);
+      expect(result.ok).toBe(false);
+      expect(structure(result).ok).toBe(false);
+      expect(structure(result).detail).toBe("malformed downstream snapshot");
+    });
+
+    it("rejects a non-string log id", async () => {
+      const { file } = await fixture();
+      const forged = structuredClone(file);
+      forged.keys.logId = 42 as never;
+      const result = verifyCaseFile(forged);
+      expect(result.ok).toBe(false);
+      expect(structure(result).ok).toBe(false);
+      expect(structure(result).detail).toBe("malformed log id");
+    });
+
+    it("rejects a malformed receipt-map key", async () => {
+      const { file } = await fixture();
+      const forged = structuredClone(file);
+      forged.pack.receipts["not-a-uuid"] = forged.pack.receipt;
+      const result = verifyCaseFile(forged);
+      expect(result.ok).toBe(false);
+      expect(structure(result).ok).toBe(false);
+      expect(structure(result).detail).toBe("malformed receipt map");
+    });
+
+    it("rejects a pack that names another receipt", async () => {
+      const { file } = await fixture();
+      const forged = structuredClone(file);
+      forged.pack.receiptId = "f".repeat(36);
+      const result = verifyCaseFile(forged);
+      expect(result.ok).toBe(false);
+      expect(structure(result).ok).toBe(false);
+      expect(structure(result).detail).toBe("case file and action pack must name the same receipt");
+    });
+
+    it("rejects a public key that is not a PEM", async () => {
+      const { file } = await fixture();
+      const forged = structuredClone(file);
+      forged.keys.issuerKeys[0]!.pem = "not a pem";
+      const result = verifyCaseFile(forged);
+      expect(result.ok).toBe(false);
+      expect(structure(result).ok).toBe(false);
+      expect(structure(result).detail).toBe("malformed public keys (only public SPKI PEM is accepted)");
+    });
+
+    it("fails verification when the own receipt cannot be decoded, and says the answers cannot be read", async () => {
+      const { file } = await fixture();
+      const forged = structuredClone(file);
+      // A signature entry whose keyid is not a string makes dsseVerify throw, so verifyCaseFile takes its
+      // "well-formed receipt bundle" catch instead of crashing. A merely empty bundle only fails the
+      // signature check, it does not reach that catch.
+      forged.pack.receipt = { envelope: { payloadType: "application/vnd.in-toto+json", payload: "e30=", signatures: [{ keyid: 42, sig: "AAAA" }] } } as never;
+      const result = verifyCaseFile(forged);
+      expect(result.ok).toBe(false);
+      expect(named(result, `receipt ${file.receiptId} verifies`).ok).toBe(false);
+      expect(named(result, `receipt ${file.receiptId} verifies`).detail).toContain("well-formed receipt bundle");
+      const answers = named(result, "ten answers match the signed receipt and the unsigned ledger snapshot");
+      expect(answers.ok).toBe(false);
+      expect(answers.detail).toBe("the receipt cannot be read");
+    });
+
+    it("buildCaseFile rejects a mismatched public-key fingerprint", async () => {
+      const { file, keys, dir, id } = await fixture();
+      expect(keys.principalKeys.length).toBeGreaterThan(0);
+      const bad = { ...keys, principalKeys: [{ ...keys.principalKeys[0], keyid: "0".repeat(64) }] };
+      await expect(buildCaseFile({ receiptsDir: dir, keys: bad }, id)).rejects.toThrow("invalid principalKeys public key or fingerprint");
+      expect(file.verification.ok).toBe(true);
+    });
+
+    it("buildCaseFile rejects a cited receipt id that is not a UUID", async () => {
+      const { file, dir, ledger } = await fixture("sdk-executed", true);
+      const source = await fixture("gateway-executed");
+      writeFileSync(join(dir, `${source.id}.json`), JSON.stringify(source.file.pack.receipt));
+      const { fact } = await ledger!.assert({ subject: "acct:42", predicate: "plan", value: "enterprise", space: "org", actor: "test", provenance: "attested", source: { receiptId: "not-a-uuid" } });
+      const issuerKey = generateKeyPair();
+      const issuer = createIssuer(issuerKey, dir, join(dir, "log.jsonl"));
+      const predicate = decodeStatement(file.pack.receipt).predicate;
+      predicate.issuer.keyid = issuerKey.keyid;
+      predicate.consumed = { factIds: [fact.factId], provenance: "observed" };
+      await issuer.issue(predicate);
+      const keys = { issuerKeys: [issuerKey, ...source.keys.issuerKeys], principalKeys: source.keys.principalKeys };
+      await expect(buildCaseFile({ receiptsDir: dir, ledger, keys }, file.receiptId)).rejects.toThrow("invalid cited receipt id");
+      await ledger!.close();
+    });
+  });
+
   it("runs its exact embedded WebCrypto verifier offline, automatically and by button, under a matching CSP hash", async () => {
     const { file } = await fixture();
     file.explanation += '\n</script><img src="https://attacker.invalid" onerror="evil()">';
