@@ -159,6 +159,8 @@ describe("leaves and export on a file-backed log", () => {
     const out = join(mkdtempSync(join(tmpdir(), "export-file-")), "out");
     const r = await exportLog({ logUrl: ctx.server.url, token: "any-token", outDir: out, months: [] });
     expect(r).toMatchObject({ logId: "file-log", treeSize: 7, checkpoints: 1 });
+    // the good checkpoint must verify: no problem may mention a checkpoint
+    expect(r.problems.filter((p) => p.startsWith("checkpoint"))).toEqual([]);
     expect(r.rootHash).toBe(new MerkleLog(ctx.file).root());
     const copy = new MerkleLog(join(out, "log.jsonl"));
     expect(copy.size).toBe(7);
@@ -225,5 +227,7 @@ describe("leaves and export on a file-backed log", () => {
     expect(r.checkpoints).toBe(3);
     expect(r.problems.join("\n")).toMatch(/checkpoint at 3 does not verify/);
     expect(r.problems.join("\n")).toMatch(/checkpoint at 5 has root 000000000000, the leaves give/);
+    // the good checkpoint at size 7 must verify: no problem may mention it
+    expect(r.problems.join("\n")).not.toMatch(/checkpoint at 7/);
   });
 });
