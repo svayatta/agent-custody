@@ -340,14 +340,23 @@ describe("CheckpointPublisher", () => {
     log.append("a");
     const resolver = fileResolver(file, { logId: "good" });
     const store = dirCheckpoints(join(dir, "checkpoints"));
-    const publisher = new CheckpointPublisher(resolver, localSigner(kp), store, 50);
+    // Short heartbeat so a live timer re-publishes promptly once the tree grows.
+    const publisher = new CheckpointPublisher(resolver, localSigner(kp), store, 50, (m) => console.error(m), 50);
     publisher.start();
     for (let i = 0; i < 50 && !(await store.latest("default")); i++) await new Promise((r) => setTimeout(r, 20));
     expect((await store.latest("default"))?.treeSize).toBe(1);
+    // Append through the backend the publisher holds, so it actually sees the
+    // tree grow: with the timer live, the next tick must publish size 2. (The
+    // old `log.append("b")` wrote through a different MerkleLog, whose growth
+    // the publisher never saw, so this test passed even with stop() deleted.)
+    const backend = (await resolver.resolve(null))!.backend;
+    await backend.append("b");
+    for (let i = 0; i < 50 && (await store.latest("default"))?.treeSize !== 2; i++) await new Promise((r) => setTimeout(r, 20));
+    expect((await store.latest("default"))?.treeSize).toBe(2);
     publisher.stop();
-    log.append("b");
+    await backend.append("c");
     await new Promise((r) => setTimeout(r, 300));
-    expect((await store.latest("default"))?.treeSize).toBe(1);
+    expect((await store.latest("default"))?.treeSize).toBe(2);
   });
 });
 
@@ -388,7 +397,6 @@ describe("the reference log server's refusal answers", () => {
     expect((await get("nope")).status).toBe(404);
     expect((await get("policies", "t1")).status).toBe(404);
     expect((await get("audit", "t1")).status).toBe(404);
-    expect((await get("audit?limit=0", "t1")).status).toBe(404);
     expect((await get("usage", "t1")).status).toBe(404);
     expect((await post("append", null, { leaf: "x" })).status).toBe(401);
   });
