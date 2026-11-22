@@ -11,7 +11,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createDelegation, createGateway, formatReport, generateKeyPair, loadConfig, loadPublicKey, RECEIPT_META_KEY, verifyBundle, writeKeyPair, type Gateway } from "@agent-custody/receipts";
 import { Ledger } from "../src/ledger.ts";
-import { createMemoryServer } from "../src/server.ts";
+import { createMemoryServer, durationMs, retentionCutoff } from "../src/server.ts";
 import { blastRadius, loadReceipts } from "../src/blast.ts";
 import { openStore } from "../src/storage.ts";
 import type { Store, StoreEntry } from "../src/stores.ts";
@@ -751,5 +751,113 @@ describe("repair: store entries whose ledger append failed", () => {
     expect(retried.out.repaired).toMatchObject([{ factId: "orphan-x", outcome: "verified", eventId: failed.out.repaired[0].eventId }]);
     expect((await ledger.history("orphan-x")).map((e) => e.kind)).toEqual(["repair"]);
     await client.close();
+  });
+
+  it("leaves the failure standing when the re-check listing itself cannot be read", async () => {
+    const { ledger } = flakyLedger();
+    const vec = memoryStore("vec");
+    vec.rows.set("x", { externalId: "x", factId: "orphan-x", text: "t", storedAt: hourAgo() });
+    vec.delete = async () => Promise.reject(new Error("timeout"));
+    let lists = 0;
+    const list = vec.list!;
+    vec.list = async () => {
+      lists += 1;
+      if (lists > 1) throw new Error("listing lost");
+      return list();
+    };
+    const client = await connect(ledger, [vec]);
+    const r = await repair(client);
+    expect(r.isError).toBe(true);
+    expect(r.out.stillHeld).toEqual(["vec: timeout"]);
+    expect(r.out.repaired).toMatchObject([{ store: "vec", externalId: "x", factId: "orphan-x", outcome: "failed" }]);
+    expect(vec.rows.size).toBe(1);
+    await client.close();
+  });
+
+  it("reports unverified, not failed, when a delete succeeds but the store cannot be asked whether the entry is gone", async () => {
+    const { ledger } = flakyLedger();
+    const vec = memoryStore("vec");
+    vec.rows.set("x", { externalId: "x", factId: "orphan-x", text: "t", storedAt: hourAgo() });
+    vec.verifyDeleted = async () => Promise.reject(new Error("search down"));
+    const client = await connect(ledger, [vec]);
+    const r = await repair(client);
+    expect(r.isError).toBe(false);
+    expect(r.out.repaired).toMatchObject([{ store: "vec", externalId: "x", factId: "orphan-x", outcome: "unverified" }]);
+    expect(vec.rows.size).toBe(0);
+    await client.close();
+  });
+
+  it("forget erases the ledger but reports the store that still holds the value", async () => {
+    const { ledger } = flakyLedger();
+    const vec = memoryStore("vec");
+    const client = await connect(ledger, [vec]);
+    const fact = value((await client.callTool(write("acct:7"))) as CallToolResult).fact;
+    vec.delete = async () => Promise.reject(new Error("503"));
+    const r = (await client.callTool({ name: "memory.forget", arguments: { factId: fact.factId, reason: "request" } })) as CallToolResult;
+    expect(r.isError).toBe(true);
+    expect((r.content[0] as { text: string }).text).toMatch(/erased from the ledger, but still held by vec: 503/);
+    expect(JSON.parse((r.content[1] as { text: string }).text).stillHeld).toEqual(["vec: 503"]);
+    expect((await ledger.get(fact.factId))?.forgotten).toBeDefined();
+    await client.close();
+  });
+
+  it("forget of a fact no store holds skips every store and still erases the ledger", async () => {
+    const { ledger } = flakyLedger();
+    const fact = (await ledger.assert({ subject: "acct:9", predicate: "plan", value: "pro", space: "org", actor: "x" })).fact;
+    const vec = memoryStore("vec");
+    const client = await connect(ledger, [vec]);
+    const out = value((await client.callTool({ name: "memory.forget", arguments: { factId: fact.factId, reason: "request" } })) as CallToolResult);
+    expect(out.removedFrom).toEqual([]);
+    expect(out.stillHeld).toEqual([]);
+    expect(out.verification).toEqual({});
+    expect(vec.rows.size).toBe(0);
+    await client.close();
+  });
+
+  it("sweep without `before` and without retention windows is refused", async () => {
+    const client = await connect(flakyLedger().ledger, []);
+    const r = (await client.callTool({ name: "memory.sweep", arguments: { reason: "x" } })) as CallToolResult;
+    expect(r.isError).toBe(true);
+    expect((r.content[0] as { text: string }).text).toMatch(/sweep needs `before`, or a server started with retention windows/);
+    await client.close();
+  });
+
+  it("sweep reports the stores that still hold a swept value", async () => {
+    const { ledger } = flakyLedger();
+    const vec = memoryStore("vec");
+    const client = await connect(ledger, [vec]);
+    const fact = value((await client.callTool(write("acct:8"))) as CallToolResult).fact;
+    vec.delete = async () => Promise.reject(new Error("503"));
+    const r = (await client.callTool({ name: "memory.sweep", arguments: { reason: "retention", before: new Date(Date.now() + 3600_000).toISOString() } })) as CallToolResult;
+    expect(r.isError).toBe(true);
+    expect((r.content[0] as { text: string }).text).toMatch(/swept the ledger, but some values are still held by stores: vec: 503/);
+    const out = JSON.parse((r.content[1] as { text: string }).text);
+    expect(out.stillHeld).toEqual(["vec: 503"]);
+    expect(out.forgotten.map((f: any) => f.factId)).toEqual([fact.factId]);
+    await client.close();
+  });
+});
+
+describe("retention durations", () => {
+  it("durationMs parses weeks, days, hours and minutes, and refuses durations it cannot parse", () => {
+    expect(durationMs("P1W")).toBe(7 * 24 * 3600_000);
+    expect(durationMs("P90D")).toBe(90 * 24 * 3600_000);
+    expect(durationMs("PT12H")).toBe(12 * 3600_000);
+    expect(durationMs("P1DT2H30M")).toBe(26 * 3600_000 + 30 * 60_000);
+    expect(() => durationMs("P")).toThrow(/retention: cannot parse duration P; use forms like P90D, P2W, PT12H/);
+    expect(() => durationMs("PT")).toThrow(/retention: cannot parse duration PT/);
+    expect(() => durationMs("tomorrow")).toThrow(/retention: cannot parse duration tomorrow/);
+  });
+
+  it("retentionCutoff takes the first matching pattern and returns null when none matches", () => {
+    const now = new Date("2026-11-21T12:00:00.000Z");
+    expect(retentionCutoff({ org: "P30D", "team:*": "P1D" }, "team:support", now)).toBe(new Date(now.getTime() - 86_400_000).toISOString());
+    expect(retentionCutoff({ org: "P30D", "team:*": "P1D" }, "org", now)).toBe(new Date(now.getTime() - 30 * 86_400_000).toISOString());
+    expect(retentionCutoff({ org: "P30D" }, "team:support", now)).toBeNull();
+    // Precedence: the first matching pattern wins, in both orders. A space
+    // matched by a wildcard and by an exact pattern takes whichever comes
+    // first in the config.
+    expect(retentionCutoff({ "team:*": "P1D", "team:support": "P30D" }, "team:support", now)).toBe(new Date(now.getTime() - 86_400_000).toISOString());
+    expect(retentionCutoff({ "team:support": "P30D", "team:*": "P1D" }, "team:support", now)).toBe(new Date(now.getTime() - 30 * 86_400_000).toISOString());
   });
 });

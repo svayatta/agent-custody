@@ -134,6 +134,19 @@ describe("postgres", () => {
     await db.close();
   });
 
+  it("spaces() lists the distinct spaces, sorted, and none on an empty ledger", async () => {
+    const db = new PGlite();
+    const store = new PostgresStore(db, { table: "spaces" });
+    expect(await store.spaces()).toEqual([]);
+    const l = new Ledger(store);
+    await l.assert({ subject: "s", predicate: "p", value: 1, space: "team:x", actor: "x" });
+    await l.assert({ subject: "s", predicate: "p", value: 2, space: "org", actor: "x" });
+    await l.assert({ subject: "t", predicate: "q", value: 3, space: "team:x", actor: "x" });
+    expect(await store.spaces()).toEqual(["org", "team:x"]);
+    expect(await l.spaces()).toEqual(["org", "team:x"]);
+    await db.close();
+  });
+
   it("forget leaves no copy of the value in the database files once the table is vacuumed", async () => {
     const dataDir = join(dir(), "pgdata");
     const db = new PGlite(dataDir);
