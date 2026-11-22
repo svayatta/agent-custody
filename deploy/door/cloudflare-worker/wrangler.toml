@@ -8,6 +8,12 @@ compatibility_flags = ["nodejs_compat"]
 # The bundle is built by the door's own build script, which is also what the tests run: one ES module and the Cedar
 # WebAssembly beside it.
 no_bundle = true
+
+# Put the Worker in front of the site. Uncomment and set your zone; a subrequest from a Worker to its own zone goes to
+# the origin, so ORIGIN_URL may be the site's own hostname. It stays above [build]: TOML puts a key below a table
+# header into that table, and the Worker would then have no route.
+# routes = [{ pattern = "shop.example.com/*", zone_name = "example.com" }]
+
 [build]
 command = "node ../../../packages/receipts/scripts/build-door-worker.ts dist"
 
@@ -15,10 +21,6 @@ command = "node ../../../packages/receipts/scripts/build-door-worker.ts dist"
 type = "CompiledWasm"
 globs = ["**/*.wasm"]
 fallthrough = false
-
-# Put the Worker in front of the site. Uncomment and set your zone; a subrequest from a Worker to its own zone goes to
-# the origin, so ORIGIN_URL may be the site's own hostname.
-# routes = [{ pattern = "shop.example.com/*", zone_name = "example.com" }]
 
 # Every minute, append the receipts whose log append failed and were kept in the bucket's outbox.
 [triggers]

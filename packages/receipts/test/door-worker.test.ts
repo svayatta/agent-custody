@@ -92,7 +92,7 @@ beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "door-worker-"));
   await buildDoorWorker(join(dir, "dist"));
   log = await serveLog(join(dir, "log.jsonl"), logKey, { port: 0, tokens: ["log-token"] });
-  mf = new Miniflare(doorWorker());
+  mf = new Miniflare({ ...doorWorker(), cf: false });
 }, 60_000);
 
 afterAll(async () => {
@@ -247,6 +247,7 @@ describe("the door as a Cloudflare Worker", () => {
     const info = await mf.dispatchFetch(`https://${SITE}/.well-known/agent-custody-door`);
     expect(await info.json()).toMatchObject({ keyid: door.keyid, version: expect.any(String) });
     const broken = new Miniflare({
+      cf: false,
       modules: true,
       scriptPath: join(dir, "dist", "index.js"),
       modulesRoot: join(dir, "dist"),
@@ -273,6 +274,7 @@ describe("Web Bot Auth nonces in a Durable Object, shared by every isolate of th
   let pair: Miniflare;
   beforeAll(() => {
     pair = new Miniflare({
+      cf: false,
       workers: [
         { ...doorWorker(), name: "door-east" },
         { ...doorWorker(), name: "door-west", durableObjects: { NONCES: { className: "DoorNonce", scriptName: "door-east" } } },

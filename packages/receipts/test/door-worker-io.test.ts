@@ -1,7 +1,7 @@
 // What the Worker door builds its I/O from, tested in Node where a store can be made to fail on cue. The bucket is the
 // only place a Worker's receipts live: if it cannot take a precommit's authorization the request must not go on, and a
 // receipt whose log append failed must survive in the outbox until the log takes it.
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -211,5 +211,18 @@ describe("the R2 store", () => {
     const bucket: R2BucketLike = { put: async () => undefined, get: async () => null, delete: async () => undefined, list: async (o) => { seen.push(o.cursor); return pages[seen.length - 1]!; } };
     expect(await r2Store(bucket).list("outbox/")).toEqual(["outbox/a.json", "outbox/b.json"]);
     expect(seen).toEqual([undefined, "c1"]);
+  });
+});
+
+describe("the wrangler.toml template", () => {
+  // The README tells the operator to uncomment `routes`. TOML gives a key to the last [table] header above it, so a
+  // `routes` below one is that table's key, `wrangler deploy` succeeds, and the Worker stands in front of nothing.
+  it("keeps the commented routes line above the first table header, so uncommenting it routes the Worker", () => {
+    const lines = readFileSync(join(import.meta.dirname, "../../../deploy/door/cloudflare-worker/wrangler.toml"), "utf8").split("\n");
+    const routes = lines.findIndex((l) => /^#\s*routes\s*=/.test(l));
+    const firstTable = lines.findIndex((l) => /^\[/.test(l));
+    expect(routes).toBeGreaterThan(-1);
+    expect(firstTable).toBeGreaterThan(-1);
+    expect(routes).toBeLessThan(firstTable);
   });
 });

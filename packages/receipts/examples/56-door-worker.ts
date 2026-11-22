@@ -27,6 +27,8 @@ const logKey = generateKeyPair();
 const log = await serveLog(join(dir, "log.jsonl"), logKey, { port: 0, tokens: ["log-token"] });
 const reached: string[] = [];
 const mf = new Miniflare({
+  // Miniflare's stand-in request.cf, not Cloudflare's cf.json fetched from the network
+  cf: false,
   modules: true,
   scriptPath: built.script,
   modulesRoot: join(dir, "dist"),
