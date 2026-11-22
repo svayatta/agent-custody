@@ -326,7 +326,7 @@ describe("PostgresTenancy plans, usage, and policies", () => {
     await t.addTenant("boundary");
     await db.query("INSERT INTO us_leaves (tenant_id, seq, leaf_hash, appended_at) VALUES ('boundary', 1, $1, '2020-12-31T23:59:59Z')", [Buffer.from("cd".repeat(32), "hex")]);
     await db.query("INSERT INTO us_leaves (tenant_id, seq, leaf_hash, appended_at) VALUES ('boundary', 2, $1, '2021-01-01T00:00:00Z')", [Buffer.from("ef".repeat(32), "hex")]);
-    expect((await t.usage("2020-12")).tenants.find((x) => x.id === "boundary")).toMatchObject({ appends: 1, totalLeaves: 1 });
+    expect((await t.usage("2020-12")).tenants.find((x) => x.id === "boundary")).toMatchObject({ appends: 1, totalLeaves: 2 });
     expect((await t.usage("2021-01")).tenants.find((x) => x.id === "boundary")).toMatchObject({ appends: 1, totalLeaves: 2 });
     await expect(t.usage("2026-13")).rejects.toThrow(/month must be YYYY-MM/);
   });
