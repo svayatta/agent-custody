@@ -13,6 +13,7 @@
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun run --filter '*' test",
     "demo": "bun run --cwd packages/receipts demo",
+    "demo:refund": "bun run --cwd packages/receipts demo:refund",
     "test:python": "bun run build && cd packages/python && uv run --extra test pytest -q",
     "coverage": "bun run --cwd packages/receipts coverage && bun run --cwd packages/state coverage && bun run coverage:python && node .github/scripts/coverage-summary.mts",
     "coverage:python": "bun run build && cd packages/python && uv run --extra test pytest -q --cov=agent_custody --cov-report=term --cov-report=json:coverage/coverage.json",

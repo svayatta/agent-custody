@@ -70,6 +70,7 @@
     "test": "vitest run",
     "coverage": "vitest run --coverage.enabled",
     "demo": "tsx scripts/demo.ts",
+    "demo:refund": "node examples/59-refund-demo.ts",
     "vectors": "tsx scripts/vectors.ts",
     "bench": "node scripts/hot-path-bench.ts"
   },

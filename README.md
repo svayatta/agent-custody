@@ -40,6 +40,8 @@ bun run demo
 
 `bun run build` writes each package's `dist/`; the state package imports receipts from there. The demo sends a support agent's refunds through a real gateway to a stand-in Stripe server. A £500 refund to a verified customer runs; a refund over the limit, a refund to an unverified customer, and a payout outside the grant are refused. An auditor verifies all four receipts with public keys, and a receipt edited afterwards fails. [The refund demo](site/how-it-works.md#the-refund-demo) walks through the output.
 
+`bun run demo:refund` runs Demo 1, the refund, on both halves. A shop has the door in front of its refund API and pays through the gateway. A shopping agent with a passport is paid once, even when it retries. Over the limit, or with a forged passport, it is refused at the door. An agent with no passport waits until a person approves that exact refund. An auditor with public keys and a read-only view of Stripe verifies every receipt and finds a refund made in Stripe directly. It needs no key and no network. [Tutorial 59](packages/receipts/examples/59-refund-demo.ts) is the source.
+
 ### Use the packages
 
 ```bash
