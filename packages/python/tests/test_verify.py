@@ -226,6 +226,238 @@ def test_cross_language_verdicts(cross_language, name):
     assert sorted(report.failing) == sorted(case["tsFailing"]), [(c.name, c.ok, c.detail) for c in report.checks]
 
 
+# Malformed inputs from cross_language.mts: the case, a check of the Python verifier, its verdict, and its detail. The
+# detail is the fault the verifier names, so a rejection for another reason fails here.
+STRUCTURE, HUMANS, GRANT, CHAIN = "structural parts in clear", "approval signatures (human keys)", "delegation signature (principal key)", "delegation chain to the principal"
+PROVIDER, ORIGINAL = "upstream signature (provider secret)", "reconciliation original "
+NO_STATE = "provider state missing maps to None; the gateway observed the read, no provider signature is implied"
+CHECKS = [
+    ("predicate-not-an-object", STRUCTURE, False, "statement has no predicate"),
+    ("subject-empty", STRUCTURE, False, "statement has no single subject"),
+    ("subject-without-digest", STRUCTURE, False, "subject has no name and sha256 digest"),
+    ("wrong-predicate-type", "receipt payload type", False, "not an in-toto statement with the receipt predicate type"),
+    ("capture-note-without-paths", STRUCTURE, False, "capture note has no path list"),
+    ("receipt-id-not-a-string", STRUCTURE, False, "receiptId is not a string"),
+    ("issuer-keyid-not-a-string", STRUCTURE, False, "issuer keyid is not a string"),
+    ("issuer-strict-not-a-boolean", STRUCTURE, False, "issuer.strict is not a boolean"),
+    ("principal-provenance-unknown", STRUCTURE, False, "principal has no provenance"),
+    ("agent-id-not-a-string", STRUCTURE, False, "agent id is not a string"),
+    ("tool-without-name", STRUCTURE, False, "tool name is not a string"),
+    ("delegation-without-envelope", STRUCTURE, False, "delegation has no envelope"),
+    ("request-without-args", STRUCTURE, False, "request has no args and argsDigest"),
+    ("executed-without-result", STRUCTURE, False, "executed call has no result and resultDigest"),
+    ("policy-decision-unknown", STRUCTURE, False, "policy decision is not allow or deny"),
+    ("policy-enforced-not-a-boolean", STRUCTURE, False, "policy.enforced is not a boolean"),
+    ("policy-errors-not-a-list", STRUCTURE, False, "policy errors is not a list"),
+    ("reconciliation-empty", STRUCTURE, False, "reconciliation has no original and lookup"),
+    ("bundle-without-tree-head", STRUCTURE, False, "bundle has no tree head and inclusion proof"),
+    ("operation-not-an-object", STRUCTURE, False, "operation is not an object"),
+    ("operation-id-not-a-uuid", STRUCTURE, False, "operation id is not a UUID"),
+    ("operation-original-not-a-uuid", STRUCTURE, False, "operation originalReceiptId is not a UUID"),
+    ("operation-key-not-a-sha256", STRUCTURE, False, "operation idempotencyKey or lookupDigest is not a sha256"),
+    ("operation-status-unknown", STRUCTURE, False, "operation status or provenance is invalid"),
+    ("operation-budget-currency-lowercase", STRUCTURE, False, "operation budget is invalid"),
+    ("approval-not-a-record", STRUCTURE, False, "approval is not a record"),
+    ("approval-three-approvers", STRUCTURE, False, "approval requiredApprovers is not 1 or 2"),
+    ("approval-keyids-not-a-list", STRUCTURE, False, "approval approverKeyids is not a list of strings"),
+    ("approval-consumed-at-not-a-time", STRUCTURE, False, "approval consumedAt is not a time with an offset"),
+    ("approval-provenance-claimed", STRUCTURE, False, "approval provenance is not observed"),
+    ("approval-fields-empty-name", STRUCTURE, False, "approval fields is not a map of names"),
+    ("approval-payload-not-an-object", HUMANS, False, "approval payload is not an object"),
+    ("approval-payload-version", HUMANS, False, "approval version is not 0.1"),
+    ("approval-payload-id-not-a-uuid", HUMANS, False, "approvalId is not a UUID"),
+    ("approval-payload-agent-not-a-string", HUMANS, False, "approval agent is not a string"),
+    ("approval-payload-args-digest", HUMANS, False, "approval argsDigest is not a sha256"),
+    ("approval-payload-currency-empty", HUMANS, False, "approval currency is not a nonempty string"),
+    ("approval-payload-expires-at-issue", HUMANS, False, "approval expires before it is issued"),
+    ("approval-payload-version", "authorization approval was valid", False, ""),
+    ("grant-version", GRANT, False, "grant is not a version 0.1 delegation"),
+    ("grant-without-agent", GRANT, False, "grant has no principal and agent"),
+    ("grant-scopes-not-a-list", GRANT, False, "grant scopes is not a list of tool names"),
+    ("grant-expiry-not-a-time", GRANT, False, "grant window is not two valid times with offsets"),
+    ("grant-parent-not-an-envelope", CHAIN, False, "a link is not a delegation envelope"),
+    ("chain-verifies", CHAIN, True, "support-agent <- lead"),
+    ("chain-parent-without-key", CHAIN, False, "lead names no key to delegate with"),
+    ("chain-parent-key-not-ed25519", CHAIN, False, "lead's key is not an Ed25519 public key"),
+    ("chain-leaf-signed-by-another-key", CHAIN, False, "the grant to support-agent is not signed by lead's key"),
+    ("chain-leaf-names-another-principal", CHAIN, False, "the grant to support-agent names another principal"),
+    ("chain-of-4-links", CHAIN, False, "chain deeper than 3 delegations"),
+    ("chain-of-5-links", CHAIN, False, "chain deeper than 3 delegations"),
+    ("authorization-tree-head-untrusted", "authorization tree head signature", False, ""),
+    ("github-delivery", PROVIDER, True, "attested (shared secret), bound issue.id"),
+    ("github-delivery-wrong-hmac", PROVIDER, False, "HMAC does not verify"),
+    ("github-delivery-body-not-json", PROVIDER, False, "raw body is not JSON"),
+    ("github-delivery-bind-missing", PROVIDER, False, "issue.number is not a value in the delivery"),
+    ("github-delivery-body-withheld-undeclared", PROVIDER, False, "delivery has no raw body, signature, and binding"),
+    ("github-delivery-body-withheld", "upstream signature not checked", True, "the result or the delivery is withheld"),
+    ("stripe-signature-without-timestamp", PROVIDER, False, "Stripe signature has no timestamp"),
+    ("stripe-timestamp-an-hour-early", PROVIDER, False, "Stripe timestamp outside tolerance of the receipt's"),
+    ("reconciliation-over-authorization", ORIGINAL + "authorization operation is submitted", True, ""),
+    ("reconciliation-over-authorization", "reconciliation original evidence verifies", True, ""),
+    ("reconciliation-over-authorization-private", ORIGINAL + "request args digest", True, ""),
+    ("reconciliation-over-authorization-private", "reconciliation lookup args match request", True, "request arguments committed under the capture rule"),
+    ("reconciliation-over-authorization-private", "reconciliation provider status", True, "provider result withheld; disclose it to recompute the observed status"),
+    ("reconciliation-original-other-predicate-type", ORIGINAL + "authorization signature (issuer key)", False, ""),
+    ("reconciliation-original-tool-without-name", ORIGINAL + STRUCTURE, False, "tool name is not a string"),
+    ("reconciliation-original-without-delegation", ORIGINAL + GRANT, False, "no delegation"),
+    ("reconciliation-original-operation-pending", ORIGINAL + "authorization operation is submitted", False, ""),
+    ("reconciliation-original-without-tree-head", ORIGINAL + STRUCTURE, False, "the authorization has no tree head and inclusion proof"),
+    ("reconciliation-result-without-text", "reconciliation provider status", False, NO_STATE),
+    ("reconciliation-result-not-json", "reconciliation provider status", False, NO_STATE),
+    ("operation-only-in-precommit", "authorization names this operation", False, ""),
+    ("operation-precommit-pending", "authorization names this operation", False, ""),
+]
+
+# Where the TypeScript verifier does not fail the same checks as the Python verifier: the checks it fails instead, or
+# None when it throws. An empty list is an input that TypeScript accepts and Python rejects.
+TS_DIFFERS = {
+    "subject-empty": ["request args digest"],
+    "subject-without-digest": None,
+    "issuer-keyid-not-a-string": ["issuer keyid matches signer"],
+    "issuer-strict-not-a-boolean": [],
+    "principal-provenance-unknown": ["delegation binds principal and agent"],
+    "agent-id-not-a-string": ["delegation binds principal and agent"],
+    "executed-without-result": None,
+    "policy-enforced-not-a-boolean": [],
+    "policy-errors-not-a-list": [],
+    # TypeScript reads the principal's grant and three delegations below it; Python stops one link sooner
+    "chain-of-4-links": [],
+    "bundle-without-tree-head": ["tree head signature"],
+    "reconciliation-original-without-tree-head": ["structural parts in clear"],
+}
+
+
+def cross_language_report(data, name):
+    case, k = data["cases"][name], data["keys"]
+    trust = v.Trust(issuer=[k["issuer"]], principal=[k["principal"]], approval=[k[n] for n in case["trust"]["approval"]], upstream=[k[n] for n in case["trust"]["upstream"]], provider_secrets=case["trust"].get("providerSecrets") or {})
+    return v.verify_bundle(case["bundle"], trust, log=v.read_log(data["log"]))
+
+
+@pytest.mark.parametrize("name,check,ok,detail", CHECKS, ids=lambda x: x if isinstance(x, str) else "")
+def test_cross_language_check(cross_language, name, check, ok, detail):
+    report = cross_language_report(cross_language, name)
+    assert [(c.ok, c.detail) for c in report.checks if c.name == check] == [(ok, detail)], [(c.name, c.ok, c.detail) for c in report.checks]
+    ts = cross_language["cases"][name]["tsFailing"]
+    if name in TS_DIFFERS:
+        assert (ts and sorted(ts)) == TS_DIFFERS[name], "the TypeScript verifier changed its verdict"
+    else:
+        assert sorted(report.failing) == sorted(ts), [(c.name, c.ok, c.detail) for c in report.checks]
+
+
+@pytest.mark.xfail(strict=True, raises=KeyError, reason="verify.py reads predicate.facts before it checks that the receipt has one")
+def test_a_receipt_without_facts_fails_the_structural_check(cross_language):
+    assert cross_language["cases"]["facts-absent"]["tsFailing"] == [STRUCTURE]
+    assert cross_language_report(cross_language, "facts-absent").failing == [STRUCTURE]
+
+
+def test_a_log_line_that_is_not_a_leaf_fails_the_log_copy():
+    case = next(c for c in RECEIPTS["cases"] if c["name"] == "gateway-executed")
+    trust = v.Trust(issuer=keys(case["issuerKeys"]), principal=keys(case["principalKeys"]), log=keys(case["logKeys"]))
+    assert v.verify_bundle(case["bundle"], trust, log=[7] + case["log"][1:]).failing == ["log file root matches tree head"]
+
+
+@pytest.mark.parametrize("value,error", [(float("nan"), ValueError), (float("inf"), ValueError), ({"a": {1, 2}}, TypeError)])
+def test_canonical_json_refuses_what_json_cannot_hold(value, error):
+    with pytest.raises(error):
+        v.canonical_json(value)
+
+
+def test_parse_json_refuses_a_duplicate_key():
+    assert v.parse_json('{"a":1,"b":{"a":2}}') == {"a": 1, "b": {"a": 2}}
+    with pytest.raises(ValueError, match="duplicate key 'a'"):
+        v.parse_json('{"a":1,"a":2}')
+
+
+def b64(data):
+    return base64.b64encode(data).decode()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"payload": "not base64!"}, {"payload": b64(b"not json")}, {"payload": 7}, {"signatures": "none"}, {"payloadType": None}],
+    ids=lambda c: f"{next(iter(c))}-{next(iter(c.values()))}",
+)
+def test_a_malformed_envelope_has_no_signers_and_no_payload(change):
+    d = CANONICAL["dsse"]
+    key = v.load_public_key(d["publicKeyPem"])
+    env = dict(d["envelope"], **change)
+    assert v.dsse_payload(d["envelope"]) == json.loads(d["payloadJson"])
+    assert v.dsse_payload(env) is None
+    assert v.dsse_signers(env, [key]) == []
+
+
+def test_a_signature_that_is_not_base64_is_no_signer():
+    d = CANONICAL["dsse"]
+    env = dict(d["envelope"], signatures=[dict(s, sig="not base64!") for s in d["envelope"]["signatures"]])
+    assert v.dsse_signers(env, [v.load_public_key(d["publicKeyPem"])]) == []
+
+
+@pytest.mark.parametrize(
+    "text,seconds",
+    [
+        ("2026-01-01T00:00:00Z", 1767225600.0),
+        ("2026-01-01T01:30:00.5+01:30", 1767225600.5),
+        ("2025-12-31T23:00:00-01:00", 1767225600.0),
+        ("2026-01-01T24:00:00Z", None),
+        ("2026-01-01T00:60:00Z", None),
+        ("2026-01-01T00:00:00+24:00", None),
+        ("2026-01-01T00:00:00+00:60", None),
+        ("2026-01-01T00:00:00", None),
+        (1767225600, None),
+    ],
+)
+def test_parse_instant(text, seconds):
+    assert v.parse_instant(text) == seconds
+
+
+ENCRYPTED = {"$custody": "encrypted", "alg": "A256GCM", "keyid": "a" * 64, "iv": b64(bytes(12)), "ciphertext": b64(b"x"), "tag": b64(bytes(16)), "sha256": "b" * 64}
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (ENCRYPTED, True),
+        ({"$custody": "withheld", "sha256": "b" * 64}, True),
+        ({**ENCRYPTED, "extra": 1}, False),
+        ({k: x for k, x in ENCRYPTED.items() if k != "tag"}, False),
+        ({**ENCRYPTED, "iv": 7}, False),
+        ({**ENCRYPTED, "iv": "not base64!"}, False),
+        ({**ENCRYPTED, "iv": b64(bytes(11))}, False),
+        ({**ENCRYPTED, "alg": "A128GCM"}, False),
+        ({"$custody": "disclosed", "sha256": "b" * 64}, False),
+        ({"$custody": "withheld", "sha256": "B" * 64}, False),
+        ("withheld", False),
+    ],
+)
+def test_is_commitment(value, expected):
+    assert v.is_commitment(value) is expected
+
+
+def test_a_proof_longer_than_the_tree_is_refused():
+    a, b = v.leaf_hash(b"a"), v.leaf_hash(b"b")
+    root = v.node_hash(a, b)
+    assert v.root_from_inclusion(0, 2, a, [b]) == root
+    assert v.root_from_inclusion(0, 2, a, [b, b]) is None
+    assert v.verify_consistency(1, 2, a, root, [b]) is True
+    assert v.verify_consistency(1, 2, a, root, [b, b]) is False
+
+
+def test_cli_refuses_a_provider_secret_variable_that_is_not_set(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("SECRET_THAT_IS_NOT_SET", raising=False)
+    with pytest.raises(SystemExit) as exit:
+        v.main([str(tmp_path / "bundle.json"), "--issuer-key", str(tmp_path / "gateway.pub"), "--provider-secret-env", "stripe=SECRET_THAT_IS_NOT_SET"])
+    assert exit.value.code == 2
+    assert "--provider-secret-env stripe=SECRET_THAT_IS_NOT_SET: set the variable and pass PROVIDER=VAR" in capsys.readouterr().err
+
+
+def test_cli_reports_a_file_that_is_not_a_bundle(tmp_path, capsys):
+    (tmp_path / "bundle.json").write_text("{}")
+    (tmp_path / "gateway.pub").write_text(RECEIPTS["keys"]["gateway"]["publicKeyPem"])
+    assert v.main([str(tmp_path / "bundle.json"), "--issuer-key", str(tmp_path / "gateway.pub"), "--json"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"ok": False, "checks": [{"name": "receipt signature (issuer key)", "ok": False, "detail": "no trusted issuer key signed this envelope"}], "fields": []}
+
+
 def test_array_index_keys_come_first_in_numeric_order():
     # The producer sorts keys, then JSON.stringify emits array-index keys (canonical integers below 2^32 - 1) first.
     assert v.canonical_json({"a": 1, "10": "ten", "2": "two", "01": 0, "4294967295": 0, "4294967294": 0}) == '{"2":"two","10":"ten","4294967294":0,"01":0,"4294967295":0,"a":1}'
