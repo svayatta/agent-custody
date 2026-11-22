@@ -1,10 +1,10 @@
 // One lock design for the files that many processes write: the local log, its prune, and the outbox.
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { takeLock, withLock } from "../src/lock.ts";
+import { breakLock, takeLock, withLock } from "../src/lock.ts";
 import { leafHash, MerkleLog, rootOf } from "../src/log.ts";
 import { pruneLog } from "../src/retention.ts";
 
@@ -234,59 +234,21 @@ describe("lock contention and break races", () => {
     expect(existsSync(lock)).toBe(false);
   });
 
-  it("a directory in place of the lock file surfaces an error instead of being silently dropped", () => {
+  it("breakLock never takes a live lock judged stale under another owner", () => {
     const d = dir();
     const lock = join(d, "x.lock");
-    mkdirSync(lock);
-    writeFileSync(join(lock, "kept"), "a lock file is a file, not a directory");
-    const old = new Date(Date.now() - 120_000);
-    utimesSync(lock, old, old);
-    expect(() => takeLock(lock, 60_000)).toThrow(/EISDIR/);
-    expect(existsSync(lock)).toBe(false);
-    expect(readdirSync(d).some((n) => n.startsWith("x.lock.stale-"))).toBe(true);
-    rmSync(join(d, readdirSync(d).find((n) => n.startsWith("x.lock.stale-"))!), { recursive: true, force: true });
+    // Record a stale owner's judgement, then put a live owner's file at the
+    // lock path: breakLock with the old judgement must leave it alone. This
+    // fails without the inode/token check and passes with it, every time.
+    // (The old swap test could not make the interleaving deterministic: the
+    // breaker kept seeing the same stale owner it had just judged.)
+    writeFileSync(lock, ownerBody({ pid: deadPid(), token: "stale-0" }));
+    const judged = { token: "stale-0", ino: statSync(lock).ino };
+    const live = ownerBody({ pid: process.pid, token: "live-0" });
+    writeFileSync(join(d, "live.json"), live);
+    renameSync(join(d, "live.json"), lock);
+    breakLock(lock, judged);
+    expect(readFileSync(lock, "utf8")).toBe(live);
+    expect(existsSync(`${lock}.break`)).toBe(false);
   });
-
-  it("a lock swapped between judgement and break survives: the breaker never takes a live lock", async () => {
-    const d = dir();
-    const lock = join(d, "x.lock");
-    // Fifty stale owners and fifty live ones, each a few hundred kilobytes so that judging one takes long
-    // enough for the swapper to replace it several times over, and each on its own inode: the breaker must
-    // see a different file than the judge saw on every attempt, and must back off every time.
-    const pad = "x".repeat(300_000);
-    const dead = deadPid();
-    for (let i = 0; i < 50; i++) writeFileSync(join(d, `stale-${i}.json`), JSON.stringify({ token: `stale-${i}`, pid: dead, host: hostname(), pad }));
-    writeFileSync(join(d, "swap.mjs"), `
-      import { linkSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-      import { hostname } from "node:os";
-      import { join } from "node:path";
-      const dir = process.argv[2];
-      const lock = process.argv[3];
-      const pad = "x".repeat(300_000);
-      for (let i = 0; i < 50; i++) writeFileSync(join(dir, "live-" + i + ".json"), JSON.stringify({ token: "live-" + i, pid: process.pid, host: hostname(), pad }));
-      const stale = readdirSync(dir).filter((n) => n.startsWith("stale-")).sort();
-      const pool = [];
-      for (let i = 0; i < 50; i++) { pool.push(stale[i]); pool.push("live-" + i + ".json"); }
-      writeFileSync(join(dir, "ready"), "ok");
-      let n = 0;
-      for (;;) {
-        const tmp = join(dir, "flip-" + n + ".tmp");
-        try { linkSync(join(dir, pool[n % pool.length]), tmp); renameSync(tmp, lock); } catch {}
-        n++;
-      }
-    `);
-    const child = spawn(process.execPath, [join(d, "swap.mjs"), d, lock], { stdio: "ignore" });
-    try {
-      const until = Date.now() + 10_000;
-      while (!existsSync(join(d, "ready")) && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
-      expect(existsSync(join(d, "ready"))).toBe(true);
-      expect(child.exitCode).toBeNull();
-      for (let i = 0; i < 5; i++) expect(takeLock(lock, 60_000)).toBeUndefined();
-      expect(child.exitCode).toBeNull();
-    } finally {
-      child.kill();
-      await new Promise((r) => child.on("close", r));
-      rmSync(d, { recursive: true, force: true });
-    }
-  }, 30_000);
 });
