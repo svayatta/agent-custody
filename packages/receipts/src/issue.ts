@@ -7,7 +7,10 @@ import { canonicalize, dsseSign, dsseVerify, type Envelope, type KeyPair } from 
 import { fileLog, type LogSink } from "./log-sink.ts";
 import { takeLock } from "./lock.ts";
 import type { ReceiptExporter } from "./otel.ts";
+import { ReceiptPending, type FlushResult } from "./receipt-pending.ts";
 import { buildAuthorizationStatement, buildStatement, RECEIPT_TYPE, type AuthorizationBundle, type AuthorizationPredicate, type ReceiptBundle, type ReceiptPredicate } from "./receipt.ts";
+
+export { ReceiptPending, type FlushResult } from "./receipt-pending.ts";
 
 /** Private recovery data: includes commitment salts. Persist only in an owner-only store, never in a receipt or export. */
 export interface PreparedReceipt {
@@ -17,28 +20,6 @@ export interface PreparedReceipt {
 
 /** The receipts whose log append failed wait here, signed, until `flushOutbox` appends them. */
 export const OUTBOX_DIR = "outbox";
-
-/** What one `flushOutbox` did. `foreign` entries are signed by another key and stay in the outbox. */
-export interface FlushResult {
-  sent: number;
-  pending: number;
-  setAside: number;
-  foreign: number;
-  error?: string;
-}
-
-/**
- * Thrown by `issue` with `deferLog` when the log did not take the receipt. The signed receipt is kept in the outbox and
- * no bundle is written yet: `flushOutbox` appends it later and then writes the bundle.
- */
-export class ReceiptPending extends Error {
-  readonly receiptId: string;
-  constructor(receiptId: string, cause: unknown) {
-    super(`receipt ${receiptId} is kept in the outbox; its log append is pending: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
-    this.name = "ReceiptPending";
-    this.receiptId = receiptId;
-  }
-}
 
 export interface Issuer {
   keyid: string;
