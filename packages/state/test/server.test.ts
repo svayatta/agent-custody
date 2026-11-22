@@ -839,7 +839,7 @@ describe("repair: store entries whose ledger append failed", () => {
 });
 
 describe("retention durations", () => {
-  it("durationMs parses weeks, days, hours and minutes, and refuses an empty or unreadable duration", () => {
+  it("durationMs parses weeks, days, hours and minutes, and refuses durations it cannot parse", () => {
     expect(durationMs("P1W")).toBe(7 * 24 * 3600_000);
     expect(durationMs("P90D")).toBe(90 * 24 * 3600_000);
     expect(durationMs("PT12H")).toBe(12 * 3600_000);
@@ -854,5 +854,10 @@ describe("retention durations", () => {
     expect(retentionCutoff({ org: "P30D", "team:*": "P1D" }, "team:support", now)).toBe(new Date(now.getTime() - 86_400_000).toISOString());
     expect(retentionCutoff({ org: "P30D", "team:*": "P1D" }, "org", now)).toBe(new Date(now.getTime() - 30 * 86_400_000).toISOString());
     expect(retentionCutoff({ org: "P30D" }, "team:support", now)).toBeNull();
+    // Precedence: the first matching pattern wins, in both orders. A space
+    // matched by a wildcard and by an exact pattern takes whichever comes
+    // first in the config.
+    expect(retentionCutoff({ "team:*": "P1D", "team:support": "P30D" }, "team:support", now)).toBe(new Date(now.getTime() - 86_400_000).toISOString());
+    expect(retentionCutoff({ "team:support": "P30D", "team:*": "P1D" }, "team:support", now)).toBe(new Date(now.getTime() - 30 * 86_400_000).toISOString());
   });
 });
