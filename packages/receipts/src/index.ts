@@ -22,6 +22,10 @@ export type { PerathosCheck, PerathosOptions, PerathosReport } from "./perathos.
 export { loadAcsGuardianConfig } from "./config.ts";
 export type { AcsGuardianConfig } from "./config.ts";
 export { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
+export { challengeLabels, DOOR_QUESTIONS, DoorLabelSchema, doorErrorRates, formatErrorRates, LABEL_SOURCES, parseLabels, readDoorArrivals, wilson } from "./door-error-rates.ts";
+export type { DoorArrivals, DoorLabel, DoorQuestion, ErrorRateRow, LabelSource } from "./door-error-rates.ts";
+export { buildDoorTestSet, DOOR_TEST_KINDS, formatTestKinds } from "./door-test-set.ts";
+export type { DoorTestSet, TestKind } from "./door-test-set.ts";
 export type { Arrival, ArrivalChallenge, ArrivalClass, ArrivalRate, ChallengeCheck, Classified, DoorHost, DoorOptions, DoorRequest, DoorServerOptions, RateTracker, RateTrackerLimits, RunningDoor } from "./door.ts";
 export type { NonceState, NonceStore, SignatureCheck, SignedRequest, WebBotAuthOptions, WebBotAuthVerifier } from "./web-bot-auth.ts";
 export * from "./capture.ts";

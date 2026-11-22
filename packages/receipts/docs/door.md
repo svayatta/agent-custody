@@ -59,7 +59,7 @@ The door records one fact for every arrival, `arrival`, observed by the door its
 | `rate` | `{ by, burst, minute }` | arrivals from the same source in the last 10 and 60 seconds, this one included, whatever was decided about them, counted by this door process alone. `by` is `agent` for a verified arrival (counted by the agent's name across addresses) or `remote` (by address). A pace, not a verdict |
 | `method`, `path`, `route` | strings | what arrived, and the route it fell under |
 
-[Door signals](door-signals.md) says, for each field, what it establishes and what it does not, and how a policy should read it.
+[Door signals](door-signals.md) says, for each field, what it establishes and what it does not, and how a policy should read it. [Door error rates](door-error-rates.md) measures how often `class` is wrong for each kind of arrival, with the method, and scores your own receipts against your labels with `agent-custody door error-rates`.
 
 There is no `human` class. The door cannot tell a person from a program that presents nothing, and it does not pretend to. With `challenge` configured, a policy can require a passed challenge on a route instead; without it, a policy that lets `unknown` through on a route is letting everything through on that route, and should say so.
 
@@ -464,4 +464,4 @@ A site that already runs nginx or Envoy need not send its traffic through the do
 - Stream a request body: the body is read whole, up to `maxBodyBytes`, so that the policy can read it and the receipt can commit to it.
 - Relay a response larger than `maxResponseBytes`, or stream one: the body is relayed whole so that its digest can be recorded. A larger one is not held: reading stops at the limit, the client gets 502, and the receipt records that the origin answered.
 
-Tutorials: [40-door.ts](../examples/40-door.ts), the proxy; [48-door-app.ts](../examples/48-door-app.ts), in-process; [49-door-authz.ts](../examples/49-door-authz.ts), behind nginx or Envoy; [examples/languages/door](../examples/languages/door), middleware for Go, Rails, Django, and Spring; [52-door-partner-verdict.ts](../examples/52-door-partner-verdict.ts), a partner engine's signed verdict; [56-door-worker.ts](../examples/56-door-worker.ts), the door as a Cloudflare Worker, in workerd.
+Tutorials: [40-door.ts](../examples/40-door.ts), the proxy; [48-door-app.ts](../examples/48-door-app.ts), in-process; [49-door-authz.ts](../examples/49-door-authz.ts), behind nginx or Envoy; [examples/languages/door](../examples/languages/door), middleware for Go, Rails, Django, and Spring; [52-door-partner-verdict.ts](../examples/52-door-partner-verdict.ts), a partner engine's signed verdict; [56-door-worker.ts](../examples/56-door-worker.ts), the door as a Cloudflare Worker, in workerd; [58-door-error-rates.ts](../examples/58-door-error-rates.ts), the error rates.
