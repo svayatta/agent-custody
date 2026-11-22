@@ -19,7 +19,7 @@ export interface CustodyPack {
   history: LedgerEvent[];
   /** every receipt referenced by the history or the blast radius, by id, as the full verifiable bundle */
   receipts: Record<string, ReceiptBundle>;
-  /** receipt ids the history or blast radius cited but no bundle was found for */
+  /** receipt ids the history or blast radius cited but no bundle was found for, plus `unreadable:<file>` for .json files in the receipts dir that could not be read or parsed */
   missingReceipts: string[];
   blast: BlastRadius;
   /** the forget event and what the forget receipt recorded, when the fact was forgotten */
@@ -61,7 +61,8 @@ function receiptResult(bundle: ReceiptBundle): unknown {
 export async function buildPack(ledger: Ledger, receiptsDir: string, factId: string, opts: { captureKey?: Buffer } = {}): Promise<CustodyPack> {
   const bundles = loadBundles(receiptsDir);
   const history = await ledger.history(factId);
-  const blast = await blastRadius(ledger, loadReceipts(receiptsDir, opts), factId);
+  const unreadable: string[] = [];
+  const blast = await blastRadius(ledger, loadReceipts(receiptsDir, { ...opts, unreadable }), factId);
   const wanted = new Set<string>();
   for (const e of history) {
     const src = e.kind === "assert" ? e.fact.source.receiptId : e.source.receiptId;
@@ -76,6 +77,10 @@ export async function buildPack(ledger: Ledger, receiptsDir: string, factId: str
     if (b) receipts[id] = b;
     else missingReceipts.push(id);
   }
+  // A damaged receipt only the blast walk cites never becomes wanted, so it
+  // would vanish with no failed check. List unreadable files alongside the
+  // missing ids, so `no receipts missing` fails.
+  for (const f of [...unreadable].sort()) missingReceipts.push(`unreadable:${f}`);
   const forgetEvent = history.find((e) => e.kind === "forget");
   let forget: CustodyPack["forget"] = null;
   if (forgetEvent && forgetEvent.kind === "forget") {
