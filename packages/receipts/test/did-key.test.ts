@@ -3,7 +3,10 @@
 // decoded key reproduces that X25519 identifier. At the door, a grant naming its agent by did:key is verified when a
 // trusted principal signed it; claimed when the did:key does not decode, when the grant's agentKey is another key, or
 // when the principal is not trusted; and an arrival with nothing is unknown. Each is a distinct receipt that verifies.
+// A request signature whose keyid is the grant's did:key binds the grant to its sender; one by another key is wrong-sender.
 import { spawnSync } from "node:child_process";
+import { sign as edSign } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +19,7 @@ import { ARRIVAL_FACT, RECEIPT_HEADER, classifyArrival, createDoorHost, serveDoo
 import { grantHeader } from "../src/gateway-http.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { verifyBundle } from "../src/verify.ts";
+import { createWebBotAuthVerifier, parseDictionary, signatureBase, type SfInnerList } from "../src/web-bot-auth.ts";
 import { buildDoorFixture, startOrigin, type DoorFixture, type Origin } from "../scripts/door-fixture.ts";
 
 // from https://w3c-ccg.github.io/did-key-spec/ ("Test Vectors" and "Ed25519 with X25519")
@@ -139,9 +143,120 @@ describe("a did:key grant at the door", () => {
     return classifyArrival(req, [loadPublicKey(fx.principalPub)], "refund", false, new Date().toISOString(), signature, revoked).arrival;
   };
 
-  it("under a Web Bot Auth signature a did:key grant is wrong-sender: the signature names an https origin, never a did:key", () => {
+  it("under a Web Bot Auth signature from an https origin a did:key grant is wrong-sender", () => {
     const a = classify(grantFrom(fx.principalKey, did), { outcome: "verified", agent: "https://crawler.example", keyid: "k1", label: "sig1" });
-    expect(a).toMatchObject({ class: "claimed", grant: "wrong-sender", subject: did });
+    expect(a).toMatchObject({ class: "claimed", grant: "wrong-sender", subject: did, signature: "verified" });
+  });
+
+  describe("under a request signature whose keyid is a did:key", () => {
+    const AUTHORITY = "shop.example";
+    let sfx: DoorFixture;
+    let shost: DoorHost;
+    let sdoor: RunningDoor;
+    let n = 0;
+    /** RFC 9421 headers signed by `key`, with `keyid` as the did:key (that key's own, unless given), over @authority. */
+    const signedBy = (key: KeyPair, o: { keyid?: string; created?: number; nonce?: string; authority?: string } = {}) => {
+      const created = o.created ?? Math.floor(Date.now() / 1000);
+      const input = `sig1=("@authority");created=${created};expires=${created + 60};keyid="${o.keyid ?? didKeyOf(key.publicKey)}";alg="ed25519";nonce="${o.nonce ?? `did-${process.pid}-${++n}`}";tag="web-bot-auth"`;
+      const base = signatureBase({ method: "POST", target: "/refunds", authority: o.authority ?? AUTHORITY, header: () => undefined }, parseDictionary(input).get("sig1") as SfInnerList);
+      return { "signature-input": input, signature: `sig1=:${edSign(null, Buffer.from(base), key.privateKey).toString("base64")}:` };
+    };
+    // node:http, because fetch does not send a Host other than the URL's
+    const send = (headers: Record<string, string>, grant?: Envelope) => new Promise<{ status: number; st: ReceiptStatement; arrival: Arrival; ok: boolean }>((resolve, reject) => {
+      const u = new URL(sdoor.url);
+      const req = httpRequest({ host: u.hostname, port: u.port, method: "POST", path: "/refunds", headers: { host: AUTHORITY, "content-type": "application/json", ...headers, ...(grant ? { authorization: `Bearer ${grantHeader(grant)}` } : {}) } }, (res) => {
+        res.resume();
+        res.on("end", () => {
+          const bundle = JSON.parse(readFileSync(join(sfx.receiptsDir, `${res.headers[RECEIPT_HEADER]}.json`), "utf8")) as ReceiptBundle;
+          const st = decode(bundle);
+          resolve({ status: res.statusCode!, st, arrival: st.predicate.facts[ARRIVAL_FACT]!.value as Arrival, ok: verifyBundle(bundle, { issuerKeys: [loadPublicKey(sfx.doorPub)], principalKeys: [loadPublicKey(sfx.principalPub)], logFile: sfx.logFile }).ok });
+        });
+      });
+      req.on("error", reject);
+      req.end(JSON.stringify({ order: "o_s", amount: 100 }));
+    });
+    const sfxGrant = (agentId: string) => createDelegation(sfx.principalKey, { version: "0.1", principal: "shop-owner", agent: agentId, scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() });
+
+    beforeAll(async () => {
+      sfx = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-did-key-sig-")), origin.url, { webBotAuth: { agents: ["https://crawler.example"], authorities: [AUTHORITY] } });
+      // the did:key carries its key, so the door fetches nothing: a directory fetch fails the test
+      shost = await createDoorHost(loadDoorConfig(sfx.configFile), { fetch: ((input: string | URL | Request, init?: RequestInit) => (String(input instanceof Request ? input.url : input).startsWith("https://") ? Promise.reject(new Error("the door fetched a directory")) : fetch(input, init))) as typeof fetch });
+      sdoor = await serveDoor(shost, { port: 0, log: () => {} });
+    }, 60_000);
+    afterAll(async () => {
+      await sdoor?.close();
+      await shost?.close();
+    });
+
+    it("by its own key, the grant is verified and bound to its sender, and the receipt verifies", async () => {
+      const r = await send(signedBy(agent), sfxGrant(did));
+      expect(r.status).toBe(200);
+      expect(r.arrival).toMatchObject({ class: "verified", subject: did, grant: "verified", signature: "verified", signatureAgent: did, signatureKeyid: did, rate: { by: "agent" } });
+      expect(r.arrival.signatureError).toBeUndefined();
+      expect(r.st.predicate.agent).toEqual({ id: did, provenance: "attested" });
+      expect(r.st.predicate.delegation).toBeDefined();
+      expect(r.ok).toBe(true);
+    });
+
+    it("by another key, the grant is wrong-sender, the signature counts for nothing, and the receipt verifies", async () => {
+      const thief = generateKeyPair();
+      const thiefDid = didKeyOf(thief.publicKey);
+      const r = await send(signedBy(thief), sfxGrant(did));
+      expect(r.status).toBe(403);
+      expect(r.arrival).toMatchObject({ class: "claimed", subject: did, grant: "wrong-sender", signature: "invalid", signatureAgent: thiefDid, grantError: `the grant names agent "${did}", and the request is signed by ${thiefDid}` });
+      expect(r.arrival.signatureError).toContain("no verified grant in the request names that did:key");
+      expect(r.st.predicate.agent).toEqual({ id: did, provenance: "claimed" });
+      expect(r.st.predicate.delegation).toBeUndefined();
+      expect(r.ok).toBe(true);
+      // a grant for a named agent is not bound by a did:key signature either
+      expect((await send(signedBy(thief), sfxGrant("shopping-agent"))).arrival).toMatchObject({ class: "claimed", grant: "wrong-sender", signature: "invalid" });
+    });
+
+    it("a signature that names the grant's did:key and is made with another key does not verify, and the grant stays bearer-grade", async () => {
+      const r = await send(signedBy(generateKeyPair(), { keyid: did }), sfxGrant(did));
+      expect(r.arrival).toMatchObject({ class: "verified", grant: "verified", signature: "invalid", signatureError: `sig1 does not verify with the key that ${did} names` });
+      expect(r.ok).toBe(true);
+      const moved = await send(signedBy(agent, { authority: "other.example" }), sfxGrant(did));
+      expect(moved.arrival).toMatchObject({ signature: "invalid", signatureError: `sig1 does not verify with the key that ${did} names` });
+      const garbled = await send(signedBy(agent, { keyid: "did:key:z6Mk0bad" }), sfxGrant(did));
+      expect(garbled.arrival.signature).toBe("invalid");
+      expect(garbled.arrival.signatureError).toMatch(/^the keyid of sig1 does not decode: /);
+    });
+
+    it("an expired signature and a replayed nonce are invalid", async () => {
+      const old = await send(signedBy(agent, { created: Math.floor(Date.now() / 1000) - 3600 }), sfxGrant(did));
+      expect(old.arrival).toMatchObject({ grant: "verified", signature: "invalid", signatureError: expect.stringMatching(/^sig1 expired at /) });
+      const headers = signedBy(agent);
+      expect((await send(headers, sfxGrant(did))).arrival.signature).toBe("verified");
+      const again = await send(headers, sfxGrant(did));
+      expect(again.arrival).toMatchObject({ signature: "invalid", signatureError: "sig1 repeats a nonce already used" });
+      expect(again.ok).toBe(true);
+    });
+
+    it("a did:key signature keeps its nonce only for the agent of a trusted grant, so a stranger's keys cannot fill the nonce store", async () => {
+      const v = createWebBotAuthVerifier({ agents: [], authorities: [AUTHORITY], requireNonce: true, maxAgeSeconds: 300, clockSkewSeconds: 60, timeoutMs: 1000, maxDirectoryBytes: 1024, cacheSeconds: 300, maxNonces: 1 }, fetch);
+      const req = (h: Record<string, string>) => ({ method: "POST", target: "/refunds", authority: AUTHORITY, header: (name: string) => (Object.hasOwn(h, name) ? [h[name]!] : undefined) });
+      const stranger = generateKeyPair();
+      expect((await v.verify(req(signedBy(stranger)))).outcome).toBe("verified");
+      expect((await v.verify(req(signedBy(stranger)), did)).outcome).toBe("verified");
+      expect(v.nonces()).toBe(0);
+      const headers = signedBy(agent);
+      expect(await v.verify(req(headers), did)).toMatchObject({ outcome: "verified", agent: did, keyid: did });
+      expect(v.nonces()).toBe(1);
+      expect(await v.verify(req(headers), did)).toMatchObject({ outcome: "invalid", error: "sig1 repeats a nonce already used" });
+    });
+
+    it("with no verified grant for it, a did:key signature never makes the arrival verified: anyone can make a key", async () => {
+      const alone = await send(signedBy(agent));
+      expect(alone.status).toBe(403);
+      expect(alone.arrival).toMatchObject({ class: "claimed", subject: "unknown", grant: "absent", signature: "invalid", rate: { by: "remote" } });
+      expect(alone.st.predicate.agent).toEqual({ id: "unknown", provenance: "claimed" });
+      expect(alone.ok).toBe(true);
+      const stranger = await send(signedBy(agent), grantFrom(generateKeyPair(), did));
+      expect(stranger.arrival).toMatchObject({ class: "claimed", grant: "invalid", signature: "invalid" });
+      const expired = createDelegation(sfx.principalKey, { version: "0.1", principal: "shop-owner", agent: did, scopes: ["refund"], issuedAt: new Date(Date.now() - 7200_000).toISOString(), expiresAt: new Date(Date.now() - 3600_000).toISOString() });
+      expect((await send(signedBy(agent), expired)).arrival).toMatchObject({ class: "claimed", grant: "invalid", signature: "invalid" });
+    });
   });
 
   it("a revoked did:key grant is revoked, before its did:key is read", () => {
