@@ -3,12 +3,12 @@
 // the same size, gets an alarm instead of a signature. Everything here runs in-process: a log with published
 // checkpoints, a static server for them, and a witness pointed at both.
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dirCheckpoints } from "../src/checkpoints.ts";
-import { dsseSign, dsseVerifiers, generateKeyPair, loadPublicKey, writeKeyPair, type Envelope } from "../src/crypto.ts";
+import { dsseSign, dsseVerifiers, generateKeyPair, loadPublicKey, writeKeyPair, type Envelope, type KeyPair } from "../src/crypto.ts";
 import { CheckpointPublisher, fileResolver, serveLog, type RunningLog } from "../src/log-sink.ts";
 import { TREEHEAD_TYPE } from "../src/receipt.ts";
 import { localSigner } from "../src/signer.ts";
@@ -139,5 +139,181 @@ describe("the witness", () => {
     await publisher.publishOnce();
     expect(await witness.runOnce()).toEqual([{ tenant: "default", outcome: "countersigned", treeSize: 5 }]);
     expect(readdirSync(join(dir, "witness", "default")).filter((n) => n.startsWith("ALARM-")).length).toBe(3);
+  });
+});
+
+// A witness that signs when it cannot check is worse than no witness. Each failure here must end in an outcome that
+// says so, with no signature on disk, and the next good run must carry on from the last head that was signed.
+describe("the witness, when the log or its hosts fail", () => {
+  let dir: string;
+  let log: RunningLog;
+  let host: { server: Server; url: string };
+  let publisher: CheckpointPublisher;
+  let logKey: KeyPair;
+  const witnessKey = generateKeyPair();
+  /** a part of a request path, and the HTTP status that requests with it get */
+  const failing = new Map<string, number>();
+  const warnings: string[] = [];
+  const faultyFetch: typeof fetch = async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    for (const [part, status] of failing) if (path.includes(part)) return new Response(null, { status });
+    return timedFetch(input, init);
+  };
+  const cpFile = (tenant: string) => join(dir, "checkpoints", tenant, "latest.json");
+  const post = (leaf: string) => fetch(new URL("append", log.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ leaf }) });
+  const make = (name: string, tenants = ["default"]) => new Witness({ logUrl: log.url, checkpointsUrl: host.url, tenants, key: witnessKey, outDir: join(dir, name), fetch: faultyFetch, warn: (m) => warnings.push(m) });
+  const publish = (tenant: string, head: { treeSize: number; rootHash: string; log: string }) => {
+    mkdirSync(join(dir, "checkpoints", tenant), { recursive: true });
+    writeFileSync(cpFile(tenant), JSON.stringify({ tenant, envelope: dsseSign(TREEHEAD_TYPE, { ...head, timestamp: "t" }, logKey) }));
+  };
+  const files = (name: string, tenant = "default") => (existsSync(join(dir, name, tenant)) ? readdirSync(join(dir, name, tenant)).sort() : []);
+  const alarms = (name: string) => files(name).filter((n) => n.startsWith("ALARM-"));
+  const signedSize = (name: string) => (JSON.parse(readFileSync(join(dir, name, "default", "latest.json"), "utf8")) as { treeSize: number }).treeSize;
+  /** runs `body` with a forged checkpoint in place of the log's, then puts the log's back */
+  const withForged = async (head: { treeSize: number; rootHash: string; log: string }, body: () => Promise<void>) => {
+    const honest = readFileSync(cpFile("default"));
+    publish("default", head);
+    try {
+      await body();
+    } finally {
+      writeFileSync(cpFile("default"), honest);
+    }
+  };
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "witness-faults-"));
+    const { loadPrivateKey } = await import("../src/crypto.ts");
+    logKey = loadPrivateKey(writeKeyPair(generateKeyPair(), join(dir, "keys"), "log").keyFile);
+    const signer = localSigner(logKey);
+    const store = dirCheckpoints(join(dir, "checkpoints"));
+    const resolver = fileResolver(join(dir, "log.jsonl"), { logId: "watched-log" });
+    log = await serveLog(resolver, signer, { port: 0, checkpoints: store });
+    publisher = new CheckpointPublisher(resolver, signer, store, 60_000);
+    host = await staticHost(join(dir, "checkpoints"));
+    await post("a");
+    await post("b");
+    await publisher.publishOnce();
+    publish("acme", { treeSize: 9, rootHash: "cd".repeat(32), log: "acme-log" });
+  });
+  afterEach(() => {
+    failing.clear();
+    warnings.length = 0;
+    vi.useRealTimers();
+  });
+  afterAll(async () => {
+    await log.close();
+    host.server.close();
+  });
+
+  it("gives every tenant an unavailable outcome and signs nothing while the log's key document cannot be fetched", async () => {
+    const w = make("no-keys", ["default", "acme"]);
+    failing.set("agent-custody-log.json", 503);
+    expect(await w.runOnce()).toEqual([
+      { tenant: "default", outcome: "unavailable", reason: "log key document: 503" },
+      { tenant: "acme", outcome: "unavailable", reason: "log key document: 503" },
+    ]);
+    expect(files("no-keys")).toEqual([]);
+    expect(files("no-keys", "acme")).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    failing.clear();
+    expect(await w.runOnce()).toEqual([
+      { tenant: "default", outcome: "countersigned", treeSize: 2 },
+      { tenant: "acme", outcome: "countersigned", treeSize: 9 },
+    ]);
+  });
+
+  it("leaves one tenant unavailable when its checkpoint cannot be fetched, and still countersigns the others", async () => {
+    failing.set("/default/latest.json", 500);
+    expect(await make("checkpoint-error", ["default", "acme"]).runOnce()).toEqual([
+      { tenant: "default", outcome: "unavailable", reason: "checkpoint for default: 500" },
+      { tenant: "acme", outcome: "countersigned", treeSize: 9 },
+    ]);
+    expect(files("checkpoint-error")).toEqual([]);
+  });
+
+  it("does not countersign a larger checkpoint while the log gives no consistency proof, and raises no alarm for it", async () => {
+    const w = make("proof-error");
+    const [first] = await w.runOnce();
+    expect(first).toMatchObject({ outcome: "countersigned" });
+    const size = (first as { treeSize: number }).treeSize;
+    await post("c");
+    await publisher.publishOnce();
+    failing.set("/consistency", 500);
+    expect(await w.runOnce()).toEqual([{ tenant: "default", outcome: "unavailable", reason: "consistency proof for default: 500" }]);
+    expect(signedSize("proof-error")).toBe(size);
+    expect(files("proof-error")).not.toContain(`${size + 1}.json`);
+    expect(alarms("proof-error")).toEqual([]);
+    failing.clear();
+    expect(await w.runOnce()).toEqual([{ tenant: "default", outcome: "countersigned", treeSize: size + 1 }]);
+  });
+
+  it("refuses a checkpoint that names another log than the one it signed before, and writes an alarm", async () => {
+    const w = make("log-id");
+    const [first] = await w.runOnce();
+    const size = (first as { treeSize: number }).treeSize;
+    // signed by the log's own key, and larger, so only the log id tells it from an honest checkpoint
+    await withForged({ treeSize: size + 1, rootHash: "ab".repeat(32), log: "another-log" }, async () => {
+      expect(await w.runOnce()).toEqual([{ tenant: "default", outcome: "refused", reason: "checkpoint names log another-log, the last one signed named watched-log" }]);
+    });
+    expect(alarms("log-id")).toHaveLength(1);
+    const alarm = JSON.parse(readFileSync(join(dir, "log-id", "default", alarms("log-id")[0]!), "utf8")) as { reason: string; checkpoint: Envelope };
+    expect(alarm.reason).toMatch(/names log another-log/);
+    expect(alarm.checkpoint.payloadType).toBe(TREEHEAD_TYPE);
+    expect(files("log-id")).toContain("ALARM.json");
+    expect(files("log-id")).not.toContain(`${size + 1}.json`);
+    expect(signedSize("log-id")).toBe(size);
+  });
+
+  it("keeps both alarms when two refusals fall in the same millisecond", async () => {
+    const w = make("same-instant");
+    const [first] = await w.runOnce();
+    const size = (first as { treeSize: number }).treeSize;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-02T03:04:05.006Z"));
+    await withForged({ treeSize: size, rootHash: "ee".repeat(32), log: "watched-log" }, async () => {
+      expect((await w.runOnce())[0]).toMatchObject({ outcome: "refused" });
+      expect((await w.runOnce())[0]).toMatchObject({ outcome: "refused" });
+    });
+    expect(alarms("same-instant")).toEqual(["ALARM-2026-01-02T03-04-05-006Z-2.json", "ALARM-2026-01-02T03-04-05-006Z.json"]);
+  });
+
+  it("start runs at once and then on its interval, a second start adds nothing, and stop ends the runs", async () => {
+    vi.useFakeTimers();
+    let runs = 0;
+    // each run asks for the key document once; this log never answers, so a run is one request
+    const down = (async () => {
+      runs++;
+      return new Response(null, { status: 503 });
+    }) as typeof fetch;
+    const w = new Witness({ logUrl: "http://log.test/", checkpointsUrl: "http://checkpoints.test/", tenants: ["default"], key: witnessKey, outDir: join(dir, "scheduled"), fetch: down, warn: () => {} });
+    w.start(1000);
+    w.start(1000);
+    expect(runs).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(runs).toBe(4);
+    w.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(runs).toBe(4);
+    // a stopped witness can start again
+    w.start(1000);
+    expect(runs).toBe(5);
+    w.stop();
+  });
+
+  it("a verifier gets an error, not an empty key list, from a witness host with no key document or no keys", async () => {
+    const empty = join(dir, "witness-host");
+    mkdirSync(join(empty, ".well-known"), { recursive: true });
+    const wHost = await staticHost(empty);
+    try {
+      await expect(fetchWitnessKeys(wHost.url, timedFetch)).rejects.toThrow(/serves no key document: 404/);
+      for (const doc of [{ keys: [] }, {}]) {
+        writeFileSync(join(empty, ".well-known", "agent-custody-witness.json"), JSON.stringify(doc));
+        await expect(fetchWitnessKeys(wHost.url, timedFetch)).rejects.toThrow(/lists no keys/);
+      }
+    } finally {
+      wHost.server.close();
+    }
   });
 });
