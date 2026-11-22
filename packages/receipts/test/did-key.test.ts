@@ -19,7 +19,7 @@ import { ARRIVAL_FACT, RECEIPT_HEADER, classifyArrival, createDoorHost, serveDoo
 import { grantHeader } from "../src/gateway-http.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { verifyBundle } from "../src/verify.ts";
-import { createWebBotAuthVerifier, parseDictionary, signatureBase, type SfInnerList } from "../src/web-bot-auth.ts";
+import { createWebBotAuthVerifier, parseDictionary, signatureBase, type NonceStore, type SfInnerList } from "../src/web-bot-auth.ts";
 import { buildDoorFixture, startOrigin, type DoorFixture, type Origin } from "../scripts/door-fixture.ts";
 
 // from https://w3c-ccg.github.io/did-key-spec/ ("Test Vectors" and "Ed25519 with X25519")
@@ -243,6 +243,26 @@ describe("a did:key grant at the door", () => {
       const headers = signedBy(agent);
       expect(await v.verify(req(headers), did)).toMatchObject({ outcome: "verified", agent: did, keyid: did });
       expect(v.nonces()).toBe(1);
+      expect(await v.verify(req(headers), did)).toMatchObject({ outcome: "invalid", error: "sig1 repeats a nonce already used" });
+    });
+
+    it("a stranger's did:key signature never reaches a shared nonce store, so it cannot make Durable Objects or fill one", async () => {
+      // The Worker's store is a Durable Object per nonce: each claim is an object, a write and an alarm. Only a did:key a
+      // trusted grant names may be asked about or claimed; the store is not consulted for anyone else's key.
+      const asked: string[] = [];
+      const held = new Set<string>();
+      const store: NonceStore = {
+        check: (k) => (asked.push(`check ${k}`), held.has(k) ? "replayed" : "free"),
+        claim: (k) => (asked.push(`claim ${k}`), held.has(k) ? "replayed" : (held.add(k), "claimed")),
+      };
+      const v = createWebBotAuthVerifier({ agents: [], authorities: [AUTHORITY], requireNonce: true, maxAgeSeconds: 300, clockSkewSeconds: 60, timeoutMs: 1000, maxDirectoryBytes: 1024, cacheSeconds: 300, maxNonces: 1 }, fetch, undefined, store);
+      const req = (h: Record<string, string>) => ({ method: "POST", target: "/refunds", authority: AUTHORITY, header: (name: string) => (Object.hasOwn(h, name) ? [h[name]!] : undefined) });
+      const stranger = generateKeyPair();
+      expect((await v.verify(req(signedBy(stranger)), did)).outcome).toBe("verified");
+      expect(asked).toEqual([]);
+      const headers = signedBy(agent);
+      expect((await v.verify(req(headers), did)).outcome).toBe("verified");
+      expect(asked.map((a) => a.split(" ")[0])).toEqual(["check", "claim"]);
       expect(await v.verify(req(headers), did)).toMatchObject({ outcome: "invalid", error: "sig1 repeats a nonce already used" });
     });
 
