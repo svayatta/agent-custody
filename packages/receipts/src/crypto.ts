@@ -92,7 +92,8 @@ export interface Envelope {
   signatures: { keyid: string; sig: string }[]; // sig base64
 }
 
-function pae(payloadType: string, payload: Buffer): Buffer {
+/** The DSSE pre-authentication encoding: the bytes a DSSE signature is made over. */
+export function pae(payloadType: string, payload: Buffer): Buffer {
   const header = `DSSEv1 ${Buffer.byteLength(payloadType)} ${payloadType} ${payload.length} `;
   return Buffer.concat([Buffer.from(header), payload]);
 }

@@ -86,6 +86,11 @@ const ApprovalsSchema = z.object({
   usedDir: z.string().min(1),
   /** The longest lifetime (expiresAt minus issuedAt) that the gateway accepts. The signer chooses the expiry, and this caps it. Default: 3600. */
   maxLifetimeSeconds: z.number().int().positive().optional(),
+  /**
+   * Human in the loop: a protected call that arrives without an approval also leaves a request in `dir`, which an approver
+   * signs with `agent-custody approvals approve`; the same call sent again then takes the signed envelope from it.
+   */
+  requests: z.object({ dir: z.string().min(1) }).optional(),
   tools: z.array(z.object({
     tool: z.string().min(1),
     minApprovers: z.union([z.literal(1), z.literal(2)]).default(1),
@@ -233,7 +238,7 @@ export function loadConfig(path: string): GatewayConfig {
     ...(cfg.logFile ? { logFile: r(cfg.logFile) } : {}),
     ...(cfg.log?.keys ? { log: { ...cfg.log, keys: cfg.log.keys.map(r) } } : {}),
     ...(cfg.revokedGrants ? { revokedGrants: r(cfg.revokedGrants) } : {}),
-    ...(cfg.approvals ? { approvals: { ...cfg.approvals, trustedKeys: cfg.approvals.trustedKeys.map(r), usedDir: r(cfg.approvals.usedDir) } } : {}),
+    ...(cfg.approvals ? { approvals: { ...cfg.approvals, trustedKeys: cfg.approvals.trustedKeys.map(r), usedDir: r(cfg.approvals.usedDir), ...(cfg.approvals.requests ? { requests: { dir: r(cfg.approvals.requests.dir) } } : {}) } } : {}),
     ...(cfg.operations ? { operations: { ...cfg.operations, database: r(cfg.operations.database) } } : {}),
   };
 }

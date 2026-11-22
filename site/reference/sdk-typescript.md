@@ -170,9 +170,19 @@ type ApprovalVerifyResult =
 | `verifyApprovalStatement` | `(envelope: unknown, trusted: PublicKeyRef[], minApprovers: 1 \| 2 = 1): ApprovalVerifyResult` | checks only the schema and distinct trusted signatures. Does not establish action binding or time validity; use `verifyApproval` at an enforcement boundary |
 | `consumeApproval` | `(usedDir: string, approvalId: string, receiptId: string, at: string): void` | exclusively creates a persistent consumption marker before a side effect; throws on replay or storage failure; does not undo a marker after later failures |
 | `ApprovalSchema` | Zod schema | strict payload schema for `Approval`, with `version: "0.1"`, UUID `approvalId`, principal, agent, tool, `argsDigest`, optional action fields, `issuedAt`, `expiresAt` |
+| `approvalConsumed` | `(usedDir: string, approvalId: string): boolean` | whether `consumeApproval` has burned that id in `usedDir` |
+| `approvalRequestId` | `(binding: ApprovalBinding): string` | the [approval request](./gateway#approval-requests) id of an exact call: 32 hex characters, the same for the same principal, agent, tool, field mapping, and arguments |
+| `readApprovalRequest`, `listApprovalRequests` | `(dir: string, requestId: string): ApprovalRequest \| undefined`, `(dir: string): ApprovalRequest[]` | one request, or every request oldest first; a file that is not a request is skipped |
+| `approveApprovalRequest` | `(dir: string, requestId: string, key: KeyPair, { expiresAt: string, trusted: PublicKeyRef[], at?: string, maxLifetimeSeconds?: number }): ApprovalRequest` | signs a pending request's exact call, or countersigns its envelope with a different key, through `signApprovalRequest`'s checks; `status` becomes `"approved"` at the rule's number of distinct keys. Throws for a request that is not pending, a key that is not trusted or already signed, or an envelope already there that does not verify and bind the call |
+| `approvalRequestPayload`, `signApprovalRequest` | `(dir, requestId, { expiresAt, at? }): { payloadType, payload, pae, signedBy }`, `(dir, requestId, { payload, keyid, sig }, trusted: PublicKeyRef[], { at?, maxLifetimeSeconds? }?): ApprovalRequest` | for a signer elsewhere, as the console's browser signing is: the payload and the DSSE bytes to sign, then a signature that is stored only if it verifies with a trusted key over this exact call; a countersignature only beside a first signature that passes the same checks |
+| `approvalRequestExpiresAt` | `(request: ApprovalRequest): string \| undefined` | the expiry in the signed payload a request carries |
+| `approvalStatement` | `(input: ApprovalBinding & { approvalId?, issuedAt?, expiresAt }): Approval` | the statement `createApproval` signs |
+| `denyApprovalRequest` | `(dir: string, requestId: string, { reason?: string, at?: string }?): ApprovalRequest` | marks a pending request `"denied"` |
+| `pickupApproval` | `(dir, usedDir, binding, requiredApprovers, receiptId, at, usable: (envelope) => { ok: true } \| { ok: false; error: string }): ApprovalPickup` | the gateway's side: an approved, unconsumed envelope that `usable` accepts, or the pending or denied request, opening a new one when there is none usable |
 | `APPROVAL_TYPE`, `APPROVAL_META_KEY` | `"application/vnd.agent-custody.approval+json"`, `"agent-custody/approval"` | signed payload type and caller `_meta` key |
+| `APPROVAL_REQUEST_META_KEY` | `"agent-custody/approval-request"` | where a refusal names the request it opened |
 
-Types: `Approval`, `ApprovalBinding`, `ApprovalRecord`, `ApprovalVerifyResult`. `ApprovalRecord` is the gateway's observed check, embedded in receipts and pre-commit authorizations; it carries the envelope when its statement has a trusted signature and valid schema, threshold, optional field mapping, times, status, optional reason and signer keyids.
+Types: `Approval`, `ApprovalBinding`, `ApprovalRecord`, `ApprovalVerifyResult`, `ApprovalRequest`, `ApprovalPickup`. `ApprovalRecord` is the gateway's observed check, embedded in receipts and pre-commit authorizations; it carries the envelope when its statement has a trusted signature and valid schema, threshold, optional field mapping, times, status, optional reason and signer keyids.
 
 For two approvers, `dsseCountersign(createApproval(firstKey, action), secondKey)` adds a signature to the same payload. Distinct trusted keyids count once each; distinct human identities are an operational assumption. Keep private keys with the people reviewing the complete action. [Tutorial 28](/receipts/tutorials) runs the gateway, refusals, two signatures, consumption and offline verification.
 
@@ -214,7 +224,7 @@ Every option and check is on the [verify](./verify) page.
 
 ## Keys
 
-`generateKeyPair(): KeyPair`, `writeKeyPair(kp, dir, name)` → `{ keyFile, pubFile }`, `loadPrivateKey(path)`, `loadPublicKey(path): PublicKeyRef` (`{ publicKey, keyid }`), `publicKeyFromPem(pem)`, `publicKeyToPem(publicKey)`. Keys are Ed25519; a keyid is the SHA-256 of the SPKI DER. `dsseSign(payloadType, payload, keyPair): Envelope`, `dsseCountersign(envelope, keyPair): Envelope`, and `dsseVerify(envelope, trustedKeys)` are the primitives every signed artefact uses.
+`generateKeyPair(): KeyPair`, `writeKeyPair(kp, dir, name)` → `{ keyFile, pubFile }`, `loadPrivateKey(path)`, `loadPublicKey(path): PublicKeyRef` (`{ publicKey, keyid }`), `publicKeyFromPem(pem)`, `publicKeyToPem(publicKey)`. Keys are Ed25519; a keyid is the SHA-256 of the SPKI DER. `dsseSign(payloadType, payload, keyPair): Envelope`, `dsseCountersign(envelope, keyPair): Envelope`, and `dsseVerify(envelope, trustedKeys)` are the primitives every signed artefact uses. `pae(payloadType, payload): Buffer` returns the DSSE pre-authentication encoding that a signature covers, for a signer that holds its key elsewhere, such as the console page signing in the browser.
 
 ## Design tokens
 
