@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { hostname, userInfo } from "node:os";
+import { hostname, tmpdir, userInfo } from "node:os";
 import { captureKeyFrom, getAt, pathText, restorePaths, setAt } from "./capture.ts";
 import { saltsFileFor } from "./retention.ts";
 import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
-import { closeSync, constants as fsConstants, existsSync, fchmodSync, openSync, readFileSync, readdirSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fchmodSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { loadAcsGuardianConfig, loadConfig, loadDoorConfig, loadEgressConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
 import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
@@ -23,6 +23,8 @@ import { checkCompleteness, formatCompleteness, githubSource, stripeSource, type
 import { evmChain } from "./anchor-evm.ts";
 import { serveHttp } from "./gateway-http.ts";
 import { createDoorHost, serveDoor } from "./door.ts";
+import { challengeLabels, doorErrorRates, formatErrorRates, parseLabels, readDoorArrivals, type DoorArrivals, type DoorLabel } from "./door-error-rates.ts";
+import { buildDoorTestSet } from "./door-test-set.ts";
 import { createEgressHost, serveEgress } from "./egress.ts";
 import { draftEgressPolicy } from "./egress-draft.ts";
 import { createAcsGuardian } from "./acs.ts";
@@ -68,7 +70,35 @@ function untilStopped(): Promise<void> {
 }
 const SERVICES = new Set(["serve", "witness", "signer", "portal", "log", "console", "door", "egress"]);
 /** a command that waits for untilStopped(); a stdio gateway runs until its input closes and keeps the default signal behaviour */
-const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && ((SERVICES.has(cmd) && !(cmd === "egress" && args[0] === "draft-policy")) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
+const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && ((SERVICES.has(cmd) && !(cmd === "egress" && args[0] === "draft-policy") && !(cmd === "door" && args[0] === "error-rates")) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
+
+async function doorErrorRatesCommand(args: string[]): Promise<number> {
+  const { values } = parseArgs({ args, options: { receipts: { type: "string" }, labels: { type: "string" }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, log: { type: "string" }, "log-key": { type: "string", multiple: true }, "challenge-labels": { type: "boolean", default: false }, "test-set": { type: "boolean", default: false }, "per-kind": { type: "string", default: "200" }, json: { type: "boolean", default: false } } });
+  let read: DoorArrivals;
+  let labels: DoorLabel[];
+  if (values["test-set"]) {
+    const perKind = Number(values["per-kind"]);
+    if (!Number.isInteger(perKind) || perKind < 1 || perKind > 10_000) throw new Error("--per-kind takes a whole number from 1 to 10000");
+    const dir = mkdtempSync(join(tmpdir(), "agent-custody-door-test-set-"));
+    try {
+      const set = await buildDoorTestSet(dir, { perKind });
+      read = readDoorArrivals(set.receiptsDir, { issuerKeys: [set.doorKey], principalKeys: [set.principalKey] });
+      labels = set.labels;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } else {
+    if (!values.receipts || !values.labels || !values["issuer-key"]?.length) throw new Error("door error-rates needs --receipts <dir> --labels <labels.jsonl> --issuer-key <door.pub>, or --test-set");
+    read = readDoorArrivals(values.receipts, { issuerKeys: values["issuer-key"].map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), logKeys: (values["log-key"] ?? []).map(loadPublicKey), ...(values.log ? { logFile: values.log } : {}) });
+    labels = parseLabels(readFileSync(values.labels, "utf8"));
+    if (values["challenge-labels"]) labels = [...labels, ...challengeLabels(read.arrivals, labels.map((l) => l.receiptId))];
+  }
+  const { rows, unmatched } = doorErrorRates(read.arrivals, labels);
+  for (const s of read.skipped) console.error(`skipped ${s.file}: ${s.reason}`);
+  if (unmatched.length) console.error(`${unmatched.length} label(s) name a receipt that was not read or did not verify, and are not scored`);
+  process.stdout.write(values.json ? JSON.stringify({ rows, skipped: read.skipped, unmatched }, null, 2) + "\n" : formatErrorRates(rows));
+  return 0;
+}
 
 /** A secret kept in a file that only this process can read, such as a container secret mounted at /run/secrets. The file's path is not a secret; its contents are. */
 function tokenFromFile(path: string): string {
@@ -116,6 +146,12 @@ const USAGE = `agent-custody <command>
                                                    origin or refused with 403, and receipted either way; GET /.well-known/agent-custody-door.
                                                    With "authz": true in the config it relays nothing and answers nginx auth_request and
                                                    Envoy ext_authz checks instead: 200 with the receipt headers, or 403
+  door error-rates --receipts <dir> --labels <labels.jsonl> --issuer-key <door.pub>... [--principal-key <pub>]...
+                   [--log <log.jsonl>] [--log-key <pub>]... [--challenge-labels] [--json]
+  door error-rates --test-set [--per-kind 200] [--json]
+                                                   how often the door's class is wrong for each kind of arrival, from labelled receipts, with a 95%
+                                                   interval; never pooled across kinds. --test-set builds the published labelled set in memory and
+                                                   scores it. Receipts that do not verify are skipped (door-error-rates.md)
   egress  --config <egress.json> [--port 8791] [--host 127.0.0.1]
                                                    the egress witness: a forward proxy (CONNECT and plain HTTP, no TLS interception) for a
                                                    locked-down agent's calls that do not go to the gateway. Each agent proves itself with its own
@@ -380,6 +416,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "door": {
+      if (rest[0] === "error-rates") return doorErrorRatesCommand(rest.slice(1));
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, port: { type: "string", default: "8780" }, host: { type: "string", default: "127.0.0.1" } } });
       if (!values.config) throw new Error("door needs --config");
       const cfg = loadDoorConfig(values.config);
