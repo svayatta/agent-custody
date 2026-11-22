@@ -12,28 +12,10 @@ import type { AddressInfo } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, isInitializeRequest, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { Envelope } from "./crypto.ts";
 import { GATEWAY_VERSION, type CallParams, type Gateway, type GatewayHost } from "./gateway.ts";
+import { GRANT_HEADER, parseGrantHeader } from "./grant-header.ts";
 
-export const GRANT_HEADER = "x-agent-custody-grant";
-
-/** The header value that presents a grant: the DSSE envelope as base64url JSON. Send it as `Authorization: Bearer <value>` or as `X-Agent-Custody-Grant`. */
-export function grantHeader(envelope: Envelope): string {
-  return Buffer.from(JSON.stringify(envelope)).toString("base64url");
-}
-
-export function parseGrantHeader(req: Pick<IncomingMessage, "headers">): Envelope | null {
-  const explicit = req.headers[GRANT_HEADER];
-  const auth = req.headers.authorization ?? "";
-  const raw = typeof explicit === "string" && explicit ? explicit : auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Envelope;
-    return parsed && typeof parsed === "object" && typeof parsed.payload === "string" && Array.isArray(parsed.signatures) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
+export { GRANT_HEADER, grantHeader, parseGrantHeader } from "./grant-header.ts";
 
 export interface HttpGatewayOptions {
   port: number;
