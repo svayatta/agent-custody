@@ -18,15 +18,23 @@ export interface ReceiptSummary {
   consumedWithheld: boolean;
 }
 
-/** Reads every bundle in a receipts directory. Order is by timestamp. With the capture key, withheld consumed ids are decrypted; otherwise a receipt that withholds them is marked, not treated as having consumed nothing. */
-export function loadReceipts(dir: string, opts: { captureKey?: Buffer } = {}): ReceiptSummary[] {
+/** Reads every bundle in a receipts directory. Order is by timestamp. With the capture key, withheld consumed ids are decrypted; otherwise a receipt that withholds them is marked, not treated as having consumed nothing. A .json file that cannot be read or parsed is reported in `opts.unreadable` (when given) instead of being silently skipped: a damaged receipt only the blast walk cites would otherwise vanish from every pack with no failed check. A read error (EACCES, EISDIR) is not the same as "not a bundle". */
+export function loadReceipts(dir: string, opts: { captureKey?: Buffer; unreadable?: string[] } = {}): ReceiptSummary[] {
   const out: ReceiptSummary[] = [];
   for (const f of readdirSync(dir)) {
     // the authorization committed before a pre-committed call carries the same call: the receipt is the record
     if (!f.endsWith(".json") || f.endsWith(".authorization.json")) continue;
-    const bundle = JSON.parse(readFileSync(join(dir, f), "utf8")) as { envelope?: { payload?: string } };
-    if (!bundle.envelope?.payload) continue;
-    const st = JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as { predicate?: any };
+    let st: { predicate?: any };
+    try {
+      const bundle = JSON.parse(readFileSync(join(dir, f), "utf8")) as { envelope?: { payload?: string } };
+      if (!bundle.envelope?.payload) continue;
+      st = JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString()) as { predicate?: any };
+    } catch {
+      // not readable, or not a bundle: report it so the caller can fail on it
+      // rather than silently dropping a receipt the blast walk would cite
+      opts.unreadable?.push(f);
+      continue;
+    }
     const p = st.predicate;
     if (!p?.receiptId) continue;
     let ids: unknown = p.consumed?.factIds;
