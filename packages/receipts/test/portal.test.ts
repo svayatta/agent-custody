@@ -65,9 +65,9 @@ afterAll(async () => {
   await db?.close();
 });
 
-/** a browser: keeps the cookie, sends JSON */
-function browser() {
-  let cookie = "";
+/** a browser: keeps the cookie, sends JSON; pass a session cookie to start signed in */
+function browser(initialCookie = "") {
+  let cookie = initialCookie;
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await fetch(new URL(path, portal.url), { method, headers: { ...(cookie ? { cookie } : {}), ...(body !== undefined ? { "content-type": "application/json" } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
     const set = res.headers.get("set-cookie");
@@ -520,23 +520,29 @@ describe("provider sign-in rejections (issue #282)", () => {
   });
 
   it("linking GitHub verifies the owner's address when the emails match", async () => {
-    const b = browser();
-    expect((await b.call("POST", "/api/login", { email: "two@example.com", password: "a-long-enough-password" })).status).toBe(200);
-    gh = { id: 999, email: "Two@Example.com" };
+    // Own account + signed session cookie: /api/login charges the shared
+    // per-address limiter on every attempt, so earlier tests in this file
+    // spend the 127.0.0.1 bucket and this login gets 429.
+    const u = await new PortalStore(db).createUser("link-gh@example.com", "a-long-enough-password");
+    const b = browser(`custody_session=${signSession(SECRET, u.id)}`);
+    gh = { id: 999, email: "Link-Gh@Example.com" };
     try {
       const start = await fetch(new URL("auth/github?link=1", portal.url), { redirect: "manual", headers: { cookie: b.cookieValue() } });
       expect(start.status).toBe(302);
       const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
       const cb = await fetch(new URL(`auth/github/callback?code=gh-code&state=${state}`, portal.url), { headers: { cookie: `custody_oauth=${state}` } });
       expect(cb.status).toBe(200);
-      expect(await cb.text()).toContain("GitHub is linked to two@example.com");
+      expect(await cb.text()).toContain("GitHub is linked to link-gh@example.com");
       expect((await b.call("GET", "/api/me")).json).toMatchObject({ emailVerified: true, identities: ["github"] });
     } finally { gh = { id: 4242, email: "Octo@Example.com" }; }
   });
 
   it("a link started before a password change is refused: the account that started it is gone", async () => {
-    const b = browser();
-    expect((await b.call("POST", "/api/login", { email: "two@example.com", password: "a-long-enough-password" })).status).toBe(200);
+    // Own account + signed session cookie (see the test above): no /api/login,
+    // so no 429 from the shared limiter, and the password change below cannot
+    // break a later test that logs in as another describe's account.
+    const u = await new PortalStore(db).createUser("link-pw@example.com", "a-long-enough-password");
+    const b = browser(`custody_session=${signSession(SECRET, u.id)}`);
     const start = await fetch(new URL("auth/github?link=1", portal.url), { redirect: "manual", headers: { cookie: b.cookieValue() } });
     expect(start.status).toBe(302);
     const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
