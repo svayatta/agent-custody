@@ -6,6 +6,7 @@
 // parent's, and the principal is the same throughout. The receipt then names the sub-agent as the agent and the
 // principal as the principal, exactly as with a direct grant, and the whole chain travels inside the receipt.
 import { z } from "zod";
+import { DID_KEY_PREFIX, didKeyAgentFault } from "./did-key.ts";
 import { dsseSign, dsseVerify, publicKeyFromPem, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
 
 export const DELEGATION_TYPE = "application/vnd.agent-custody.delegation+json";
@@ -91,7 +92,21 @@ export type DelegationVerifyResult =
   | { ok: false; error: string };
 
 /** Verifies a grant, walking its chain to a grant signed by one of the trusted principal keys. */
-export function verifyDelegation(env: Envelope, trustedPrincipals: PublicKeyRef[], depth = 1): DelegationVerifyResult {
+export function verifyDelegation(env: Envelope, trustedPrincipals: PublicKeyRef[]): DelegationVerifyResult {
+  const checked = verifyChain(env, trustedPrincipals, 1);
+  if (!checked.ok) return checked;
+  // An agent named by a did:key is its key: the identifier must decode to an Ed25519 key, and the grant's agentKey, if
+  // it names one, must be that key, or the grant says two things about who the agent is. Every link of a chain, since a
+  // parent's agentKey is what verified the link below it.
+  for (const [i, link] of checked.chain.entries()) {
+    if (!link.agent.startsWith(DID_KEY_PREFIX)) continue;
+    const fault = didKeyAgentFault(link.agent, link.agentKey);
+    if (fault) return { ok: false, error: (i === checked.chain.length - 1 ? "" : `link ${i} (${link.agent}): `) + fault };
+  }
+  return checked;
+}
+
+function verifyChain(env: Envelope, trustedPrincipals: PublicKeyRef[], depth: number): DelegationVerifyResult {
   if (env.payloadType !== DELEGATION_TYPE) return { ok: false, error: `unexpected payloadType ${env.payloadType}` };
   if (depth > MAX_DELEGATION_DEPTH) return { ok: false, error: `delegation chain deeper than ${MAX_DELEGATION_DEPTH}` };
   const unverified = decodeDelegation(env);
@@ -103,7 +118,7 @@ export function verifyDelegation(env: Envelope, trustedPrincipals: PublicKeyRef[
     if (!parsed.success) return { ok: false, error: `invalid delegation: ${parsed.error.message}` };
     return { ok: true, delegation: parsed.data, keyid: r.keyid, chain: [parsed.data] };
   }
-  const up = verifyDelegation(unverified.parent, trustedPrincipals, depth + 1);
+  const up = verifyChain(unverified.parent, trustedPrincipals, depth + 1);
   if (!up.ok) return { ok: false, error: `link ${depth}: ${up.error}` };
   const parent = up.delegation;
   if (!parent.agentKey) return { ok: false, error: `link ${depth}: ${parent.agent} holds no agent key and cannot delegate` };

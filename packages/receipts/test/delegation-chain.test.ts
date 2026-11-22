@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.ts";
 import { generateKeyPair, loadPrivateKey, loadPublicKey, publicKeyToPem } from "../src/crypto.ts";
 import { createDelegation, delegateFrom, describeChain, verifyDelegation } from "../src/delegation.ts";
+import { didKeyOf } from "../src/did-key.ts";
 import { createGatewayHost, RECEIPT_META_KEY } from "../src/gateway.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
 import { formatReport, verifyBundle } from "../src/verify.ts";
@@ -92,6 +93,27 @@ describe("delegation chains", () => {
       expect(formatReport(report)).toContain("delegation chain to the principal");
       // a stranger's chain gets no session
       expect(() => host.open(createDelegation(generateKeyPair(), { version: "0.1", principal: "user_456", agent: "z", scopes: ["stripe.refund"], issuedAt: iso(now), expiresAt: iso(now + hour), parent }))).toThrow(/not signed by planner's key/);
+    } finally {
+      await host.close();
+    }
+  });
+
+  it("a gateway opens no session for a grant whose did:key agent does not decode, or is not the key in agentKey, on any link", async () => {
+    const fx = buildFixture(mkdtempSync(join(tmpdir(), "chain-did-")));
+    const principalKey = loadPrivateKey(join(fx.dir, "keys", "principal.key"));
+    const agent = generateKeyPair();
+    const other = generateKeyPair();
+    const did = didKeyOf(agent.publicKey);
+    const grant = (agentId: string, agentKey?: string) => createDelegation(principalKey, { version: "0.1", principal: "user_456", agent: agentId, scopes: ["stripe.refund"], issuedAt: iso(now - hour), expiresAt: iso(now + hour), ...(agentKey ? { agentKey } : {}) });
+    const host = await createGatewayHost(loadConfig(fx.configFile));
+    try {
+      expect(host.open(grant(did)).agentId).toBe(did);
+      expect(host.open(grant(did, publicKeyToPem(agent.publicKey))).agentId).toBe(did);
+      expect(() => host.open(grant("did:key:z6Mk0bad"))).toThrow(/^delegation grant rejected: the grant's did:key agent does not decode: /);
+      expect(() => host.open(grant(did, publicKeyToPem(other.publicKey)))).toThrow("delegation grant rejected: the grant's agentKey is not the key its did:key agent names");
+      // the parent's agentKey signs the sub-grant, so the chain verifies; the parent's did:key names another key
+      const sub = delegateFrom(grant(did, publicKeyToPem(other.publicKey)), other, { agent: "refunder", scopes: ["stripe.refund"] });
+      expect(() => host.open(sub)).toThrow(`delegation grant rejected: link 0 (${did}): the grant's agentKey is not the key its did:key agent names`);
     } finally {
       await host.close();
     }
