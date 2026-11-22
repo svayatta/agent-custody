@@ -195,17 +195,15 @@ describe("negative verification cases for the explanation (#284)", () => {
     const ledger = new Ledger(join(dir, "ledger.jsonl"));
     const base = Date.now();
     const written = await issueCall(dir, [], undefined, new Date(base).toISOString());
-    const f = await ledger.assert({ subject: "acct:42", predicate: "plan", value: "pro", space: "team", actor: "crm", source: { receiptId: written } });
-    const ids: string[] = [];
-    for (let i = 0; i < 3; i++) {
-      const r = await issueCall(dir, [f.fact.factId], undefined, new Date(base + (i + 1) * 1000).toISOString());
-      await ledger.assert({ subject: "acct:42", predicate: `derived${i}`, value: i, space: "team", actor: "support-agent", source: { receiptId: r } });
-      ids.push(r);
-    }
-    const pack = await buildActionPack(join(dir, "receipts"), written, ledger);
-    expect(pack.downstream.receipts.map((r) => r.receiptId)).toEqual(ids);
-    expect(pack.downstream.derivedFacts).toHaveLength(3);
-    expect(pack.downstream.stillBelieved).toHaveLength(3);
+    // Two facts whose consumers interleave in time: the fact-by-fact merge
+    // in `explain` must still come out in timestamp order. With one fact the
+    // receipts arrive pre-sorted, so the sort under test is never exercised.
+    const a = await ledger.assert({ subject: "acct:42", predicate: "plan", value: "pro", space: "team", actor: "crm", source: { receiptId: written } });
+    const b = await ledger.assert({ subject: "acct:42", predicate: "seats", value: 5, space: "team", actor: "crm", source: { receiptId: written } });
+    const r1 = await issueCall(dir, [b.fact.factId], undefined, new Date(base + 1000).toISOString());
+    const r2 = await issueCall(dir, [a.fact.factId], undefined, new Date(base + 2000).toISOString());
+    const r3 = await issueCall(dir, [b.fact.factId], undefined, new Date(base + 3000).toISOString());
+    expect((await buildActionPack(join(dir, "receipts"), written, ledger)).downstream.receipts.map((r) => r.receiptId)).toEqual([r1, r2, r3]);
     await ledger.close();
   });
 
