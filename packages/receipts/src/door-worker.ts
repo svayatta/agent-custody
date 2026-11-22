@@ -7,6 +7,7 @@ import { DoorConfigSchema, type DoorConfig } from "./config.ts";
 import { keyidOf, publicKeyFromPem, type KeyPair, type PublicKeyRef } from "./crypto.ts";
 import { createDoorCoreWith, DOOR_VERSION, jsonAnswer, readStream, RECEIPT_HEADER, relayedAnswer, relayToOrigin, type DoorAnswer, type DoorCore, type DoorIO, type DoorRequest, type ObservedFact, type OriginTarget } from "./door-core.ts";
 import { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
+import type { TlsObservation } from "./door-signals.ts";
 import { httpLog } from "./log-http.ts";
 import { createObjectIssuer, type ObjectStore } from "./object-issuer.ts";
 import type { NonceStore } from "./web-bot-auth.ts";
@@ -67,9 +68,13 @@ export interface DoorWorkerEnv {
   [binding: string]: unknown;
 }
 
-/** What a request's `cf` object may carry; only Bot Management is read, and only where the zone has it. */
+/** What a request's `cf` object may carry: Bot Management, only where the zone has it, and what Cloudflare saw of the TLS handshake. */
 interface CfProperties {
-  botManagement?: { score?: unknown; verifiedBot?: unknown };
+  botManagement?: { score?: unknown; verifiedBot?: unknown; ja4?: unknown };
+  tlsVersion?: unknown;
+  tlsCipher?: unknown;
+  tlsClientExtensionsSha1?: unknown;
+  tlsClientHelloLength?: unknown;
 }
 
 /** the fact the Worker records when Cloudflare Bot Management scored the request */
@@ -108,6 +113,7 @@ export function workerDoorConfig(env: DoorWorkerEnv): DoorConfig {
   for (const [field, why] of Object.entries(NOT_IN_A_WORKER)) if (Object.hasOwn(raw, field)) throw new Error(`DOOR_CONFIG has ${field}, which a Worker does not take: ${why}`);
   const origin = (raw.origin ?? {}) as Record<string, unknown>;
   if (Object.hasOwn(origin, "url")) throw new Error("DOOR_CONFIG has origin.url: the origin is the ORIGIN_URL variable");
+  if (raw.behaviour && typeof raw.behaviour === "object" && Object.hasOwn(raw.behaviour, "tlsHeader")) throw new Error("DOOR_CONFIG has behaviour.tlsHeader, which a Worker does not take: the Worker reads the TLS fingerprint from Cloudflare (request.cf)");
   if (raw.webBotAuth && !env.NONCES) throw new Error("DOOR_CONFIG has webBotAuth, which needs the NONCES Durable Object binding: one isolate's memory cannot refuse a signature replayed to another");
   return DoorConfigSchema.parse({
     ...raw,
@@ -228,7 +234,25 @@ export function doorRequestOf(request: Request): DoorRequest {
   const headers: Record<string, string> = {};
   request.headers.forEach((v, k) => { if (!k.startsWith("cf-") && k !== "cdn-loop") headers[k] = v; });
   headers.host = url.host;
-  return { method: request.method, url: url.pathname + url.search, headers, socket: { remoteAddress: request.headers.get("cf-connecting-ip") ?? undefined } };
+  const tls = cloudflareTls((request as { cf?: CfProperties }).cf);
+  return { method: request.method, url: url.pathname + url.search, headers, transport: { secure: url.protocol === "https:", ...(tls ? { tls } : {}) }, socket: { remoteAddress: request.headers.get("cf-connecting-ip") ?? undefined } };
+}
+
+/**
+ * What Cloudflare saw of the client's TLS handshake, for the door's TLS fingerprint: the JA4 where the zone has Bot
+ * Management, and the version, the cipher, the extensions hash, and the ClientHello length that every zone gets. Only
+ * strings of a bounded length are taken; the door's signal code checks their shape.
+ */
+export function cloudflareTls(cf: CfProperties | undefined): TlsObservation | undefined {
+  if (!cf || typeof cf !== "object") return undefined;
+  const text = (v: unknown) => (typeof v === "string" && v !== "" && v.length <= 64 ? v : undefined);
+  const ja4 = text(cf.botManagement?.ja4);
+  const negotiated = text(cf.tlsVersion);
+  const cipher = text(cf.tlsCipher);
+  const extensionsSha1 = text(cf.tlsClientExtensionsSha1);
+  const length = typeof cf.tlsClientHelloLength === "number" ? cf.tlsClientHelloLength : /^\d{1,5}$/.test(text(cf.tlsClientHelloLength) ?? "") ? Number(cf.tlsClientHelloLength) : undefined;
+  const out: TlsObservation = { ...(ja4 ? { ja4 } : {}), ...(negotiated ? { negotiated } : {}), ...(cipher ? { cipher } : {}), ...(extensionsSha1 ? { extensionsSha1 } : {}), ...(length !== undefined ? { helloLength: length } : {}) };
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** Cloudflare Bot Management's score and verified-bot flag, when the zone has it and they are what Cloudflare documents; nothing otherwise. Cloudflare does not sign them: they enter as observed. */
@@ -296,7 +320,7 @@ export function createDoorWorker(options: DoorWorkerOptions = {}) {
       if (request.method === "GET" && url.pathname === "/.well-known/agent-custody-door") return answer(jsonAnswer(200, {}, { keyid: core.keyid, policyDigest: core.policyDigest(), version: DOOR_VERSION, pendingReceipts: core.pendingReceipts() }));
       if (request.method === "GET" && url.pathname === FORM_SCRIPT_PATH) {
         if (!cfg.challenge) return answer(jsonAnswer(404, {}, { error: "this door has no challenge configured, so it has no form protector" }));
-        return new Response(formScript(cfg.challenge), { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" } });
+        return new Response(formScript(cfg.challenge, !!cfg.behaviour), { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" } });
       }
       if (!core.admit()) return answer(core.busy());
       const receiptId = crypto.randomUUID();

@@ -194,6 +194,14 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
       add("error", "partner", `${p.keyFile}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+  if (cfg.behaviour) {
+    const b = cfg.behaviour;
+    add("ok", "behaviour", `the door's own signals are context.facts.arrival.fingerprint and context.facts.arrival.behaviour; they are signals, the door refuses nothing because of them, and the history behind them is this process's memory`);
+    if (b.tlsHeader) add("warn", "behaviour", `the TLS fingerprint is read from the ${b.tlsHeader} header: make sure that the proxy in front of the door overwrites it on every request, or a client can send its own`);
+    else add("ok", "behaviour", "no behaviour.tlsHeader: the arrival fact has no TLS fingerprint");
+    if (!cfg.challenge) add("ok", "behaviour", "no challenge: the door serves no form protector script, so no arrival carries a form report");
+    if (cfg.authz) add("ok", "behaviour", "authz mode: the proxy selects the headers of a check, so the header fingerprint has no order and no mismatch flag; forward referer, accept, sec-fetch-*, and the form report header for the other signals");
+  }
   const dir = writableAncestor(cfg.receiptsDir);
   if (!dir) add("error", "paths", `${cfg.receiptsDir} cannot be created: no writable directory above it`);
   else add("ok", "paths", `receipts go to ${cfg.receiptsDir}`);

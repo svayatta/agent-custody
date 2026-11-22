@@ -1,0 +1,23 @@
+{
+  "participants": 99,
+  "sessions": 198,
+  "sessionsForEachParticipant": 2,
+  "repetitions": 19772,
+  "keysInARepetition": 10,
+  "fastBelowMs": 200,
+  "fastRepetitions": 96,
+  "fastSessions": [
+    {
+      "session": "p004-2",
+      "repetitions": 95,
+      "withATimeBelowZero": 0,
+      "shortestFillMs": 28,
+      "longestFillMs": 83
+    },
+    {
+      "session": "p020-2",
+      "repetitions": 1,
+      "withATimeBelowZero": 1
+    }
+  ]
+}

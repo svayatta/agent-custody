@@ -4,7 +4,8 @@ import { captureKeyFrom, getAt, pathText, restorePaths, setAt } from "./capture.
 import { saltsFileFor } from "./retention.ts";
 import { isProviderAttestation } from "./upstream.ts";
 import { parseArgs } from "node:util";
-import { closeSync, constants as fsConstants, existsSync, fchmodSync, openSync, readFileSync, readdirSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, createReadStream, existsSync, fchmodSync, openSync, readFileSync, readdirSync, writeFileSync, writeSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { dirname, join, resolve } from "node:path";
 import { loadAcsGuardianConfig, loadConfig, loadDoorConfig, loadEgressConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
 import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
@@ -25,6 +26,7 @@ import { checkCompleteness, formatCompleteness, githubSource, stripeSource, type
 import { evmChain } from "./anchor-evm.ts";
 import { serveHttp } from "./gateway-http.ts";
 import { createDoorHost, serveDoor } from "./door.ts";
+import { createMeasure, formatMeasure, labelsFromReceipts, parseLabelledRecord } from "./door-measure.ts";
 import { createEgressHost, serveEgress } from "./egress.ts";
 import { draftEgressPolicy } from "./egress-draft.ts";
 import { createAcsGuardian } from "./acs.ts";
@@ -70,7 +72,7 @@ function untilStopped(): Promise<void> {
 }
 const SERVICES = new Set(["serve", "witness", "signer", "portal", "log", "console", "door", "egress"]);
 /** a command that waits for untilStopped(); a stdio gateway runs until its input closes and keeps the default signal behaviour */
-const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && ((SERVICES.has(cmd) && !(cmd === "egress" && args[0] === "draft-policy")) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
+const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && ((SERVICES.has(cmd) && !(cmd === "egress" && args[0] === "draft-policy") && !(cmd === "door" && (args[0] === "measure" || args[0] === "labels"))) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
 
 /** `90s`, `10m`, or `1h`, in seconds. */
 function durationSeconds(text: string): number {
@@ -129,6 +131,15 @@ const USAGE = `agent-custody <command>
                                                    origin or refused with 403, and receipted either way; GET /.well-known/agent-custody-door.
                                                    With "authz": true in the config it relays nothing and answers nginx auth_request and
                                                    Envoy ext_authz checks instead: 200 with the receipt headers, or 403
+  door measure <labelled.jsonl>... [--json]
+                                                   how often each flag of the door's signals is wrong on labelled arrivals: for each set and flag, the
+                                                   false-positive rate on humans and the detection rate on automated clients, per session and per
+                                                   arrival, each with a 95% Wilson interval. Replays each recorded session through the door's own functions
+  door labels --receipts <dir> --issuer-key <door.pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--set own-door] [--out <file>]
+                                                   a labelled set from your own door's verified receipts: an arrival that passed the challenge is human,
+                                                   a verified agent's arrival is automated, the rest are left out. Each line holds the label and the
+                                                   flags only: no path, address, agent name, header, or time. It uploads nothing. A verified agent's
+                                                   receipt verifies only with the key of the principal that signed its grant
   egress  --config <egress.json> [--port 8791] [--host 127.0.0.1]
                                                    the egress witness: a forward proxy (CONNECT and plain HTTP, no TLS interception) for a
                                                    locked-down agent's calls that do not go to the gateway. Each agent proves itself with its own
@@ -433,6 +444,49 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "door": {
+      if (rest[0] === "measure") {
+        const { values, positionals } = parseArgs({ args: rest.slice(1), allowPositionals: true, options: { json: { type: "boolean", default: false } } });
+        if (!positionals.length) throw new Error("door measure needs at least one labelled set: door measure <labelled.jsonl>... [--json]");
+        const m = createMeasure();
+        for (const file of positionals) {
+          let line = 0;
+          for await (const text of createInterface({ input: createReadStream(file), crlfDelay: Infinity })) {
+            line++;
+            if (!text.trim()) continue;
+            try {
+              m.add(parseLabelledRecord(text));
+            } catch (e) {
+              throw new Error(`${file}:${line}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+        }
+        const result = m.result();
+        console.log(values.json ? JSON.stringify(result, null, 2) : formatMeasure(result));
+        return result.sets.length ? 0 : 1;
+      }
+      if (rest[0] === "labels") {
+        const { values } = parseArgs({ args: rest.slice(1), options: { receipts: { type: "string" }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, "log-key": { type: "string", multiple: true }, log: { type: "string" }, set: { type: "string", default: "own-door" }, out: { type: "string" } } });
+        if (!values.receipts || !values["issuer-key"]?.length) throw new Error("door labels needs --receipts <dir> --issuer-key <door.pub>");
+        const keys = { issuerKeys: values["issuer-key"].map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), logKeys: (values["log-key"] ?? []).map(loadPublicKey), ...(values.log ? { logFile: values.log } : {}) };
+        const predicates: ReceiptStatement["predicate"][] = [];
+        let unverified = 0;
+        for (const file of receiptFiles(values.receipts)) {
+          try {
+            const checked = verifyBundle(JSON.parse(readFileSync(file, "utf8")) as ReceiptBundle, keys);
+            if (checked.ok && checked.statement) predicates.push(checked.statement.predicate);
+            else unverified++;
+          } catch {
+            unverified++;
+          }
+        }
+        const labels = labelsFromReceipts(predicates, values.set);
+        const text = labels.records.map((r) => JSON.stringify(r)).join("\n") + (labels.records.length ? "\n" : "");
+        if (values.out) writeFileSync(values.out, text);
+        else process.stdout.write(text);
+        const count = (label: string) => labels.records.filter((r) => r.label === label).length;
+        console.error(`door labels: ${labels.read} door receipt(s) read, ${unverified} file(s) skipped (not a receipt that verifies with these keys${unverified && !values["principal-key"]?.length ? "; a verified agent's receipt needs --principal-key" : ""}); ${count("human")} human (challenge passed), ${count("automated")} automated (verified agent), ${labels.unlabelled} without a label, ${labels.noSignals} without signals (the door had no "behaviour" config). Nothing was uploaded: the output is yours to inspect and to send or not`);
+        return labels.records.length ? 0 : 1;
+      }
       const { values } = parseArgs({ args: rest, options: { config: { type: "string" }, port: { type: "string", default: "8780" }, host: { type: "string", default: "127.0.0.1" } } });
       if (!values.config) throw new Error("door needs --config");
       const cfg = loadDoorConfig(values.config);

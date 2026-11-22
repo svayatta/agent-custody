@@ -141,7 +141,7 @@ export function door(config: string | DoorConfig, options: DoorAppOptions = {}):
   if (cfg.authz) throw new Error("the in-process door passes an allowed request to the app it runs in; authz is for the door answering nginx or Envoy checks (`agent-custody door`)");
   const core = createDoorCore(cfg, { ...options, autoFlush: options.autoFlush ?? true }, MIDDLEWARE_FRAMEWORK);
 
-  const script = cfg.challenge ? formScript(cfg.challenge) : null;
+  const script = cfg.challenge ? formScript(cfg.challenge, !!cfg.behaviour) : null;
 
   const middleware = (req: IncomingMessage, res: ServerResponse, next: (err?: unknown) => void): void => {
     // the script is public and the same for every arrival: served, not decided or receipted

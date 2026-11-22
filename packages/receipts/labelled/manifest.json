@@ -1,0 +1,326 @@
+{
+  "format": "agent-custody/door-labelled-manifest/v1",
+  "method": "docs/door-error-rates.md",
+  "sets": [
+    {
+      "set": "capture-real-browsers",
+      "file": "capture.jsonl",
+      "committed": true,
+      "source": "Recorded on one machine by scripts/door-capture.ts: Chrome and Safari, each started as a person starts it, on a page of a local server. capture.meta.json has the versions.",
+      "licence": "Apache-2.0, as this repository",
+      "files": [
+        {
+          "name": "capture.jsonl",
+          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+        }
+      ],
+      "counts": {
+        "human": {
+          "sessions": 4,
+          "arrivals": 28
+        },
+        "automated": {
+          "sessions": 0,
+          "arrivals": 0
+        }
+      },
+      "labelSource": "real-browser",
+      "labels": {
+        "human": "a real browser, which a script started; the label names the client software and not who used it"
+      },
+      "validFor": [
+        "fingerprint.headers.mismatch",
+        "fingerprint.tls.mismatch"
+      ],
+      "command": "node scripts/door-capture.ts --out labelled/capture.jsonl --meta labelled/capture.meta.json --hellos labelled/capture.hellos.json",
+      "validForNote": "The label is good for the two mismatch flags only. It is not good for fingerprint.tls.knownTool: the known-tool table was filled from this capture, so no browser of the capture is in it, by construction."
+    },
+    {
+      "set": "capture-tools",
+      "file": "capture.jsonl",
+      "committed": true,
+      "source": "The same capture: curl, Python urllib, Go net/http, Node fetch, and Bun fetch, each with its own User-Agent. One session gets the page and posts the form; one session only posts.",
+      "licence": "Apache-2.0, as this repository",
+      "files": [
+        {
+          "name": "capture.jsonl",
+          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+        }
+      ],
+      "counts": {
+        "human": {
+          "sessions": 0,
+          "arrivals": 0
+        },
+        "automated": {
+          "sessions": 10,
+          "arrivals": 15
+        }
+      },
+      "labelSource": "scripted-client",
+      "labels": {
+        "automated": "an HTTP tool with its own User-Agent, run by the capture script"
+      },
+      "validFor": [
+        "behaviour.navigation.directWrite",
+        "behaviour.form.fast",
+        "behaviour.form.noInput"
+      ],
+      "command": "node scripts/door-capture.ts --out labelled/capture.jsonl --meta labelled/capture.meta.json --hellos labelled/capture.hellos.json",
+      "validForNote": "These tools state no browser in the User-Agent. A mismatch flag compares the request with the browser that the User-Agent states, so it is false for these sessions by construction, and they do not count for it."
+    },
+    {
+      "set": "capture-tools-browser-ua",
+      "file": "capture.jsonl",
+      "committed": true,
+      "source": "The same capture: the same five tools, each with the User-Agent that Chrome sent in the capture. Each session gets the page and posts the form.",
+      "licence": "Apache-2.0, as this repository",
+      "files": [
+        {
+          "name": "capture.jsonl",
+          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+        }
+      ],
+      "counts": {
+        "human": {
+          "sessions": 0,
+          "arrivals": 0
+        },
+        "automated": {
+          "sessions": 5,
+          "arrivals": 10
+        }
+      },
+      "labelSource": "scripted-client",
+      "labels": {
+        "automated": "an HTTP tool that sends the User-Agent of Chrome, run by the capture script"
+      },
+      "validFor": [
+        "fingerprint.headers.mismatch",
+        "fingerprint.tls.mismatch",
+        "behaviour.navigation.directWrite",
+        "behaviour.form.fast",
+        "behaviour.form.noInput"
+      ],
+      "command": "node scripts/door-capture.ts --out labelled/capture.jsonl --meta labelled/capture.meta.json --hellos labelled/capture.hellos.json"
+    },
+    {
+      "set": "capture-headless-chrome",
+      "file": "capture.jsonl",
+      "committed": true,
+      "source": "The same capture: headless Chrome driven through its DevTools protocol, with its own User-Agent (HeadlessChrome). One session loads the page; four sessions load the page and fill the form, each in another way.",
+      "licence": "Apache-2.0, as this repository",
+      "files": [
+        {
+          "name": "capture.jsonl",
+          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+        }
+      ],
+      "counts": {
+        "human": {
+          "sessions": 0,
+          "arrivals": 0
+        },
+        "automated": {
+          "sessions": 5,
+          "arrivals": 45
+        }
+      },
+      "labelSource": "scripted-client",
+      "labels": {
+        "automated": "headless Chrome with its own User-Agent, driven by the capture script"
+      },
+      "validFor": [
+        "behaviour.navigation.directWrite",
+        "behaviour.form.fast",
+        "behaviour.form.noInput"
+      ],
+      "command": "node scripts/door-capture.ts --out labelled/capture.jsonl --meta labelled/capture.meta.json --hellos labelled/capture.hellos.json",
+      "validForNote": "HeadlessChrome in the User-Agent states no browser. A mismatch flag is false for these sessions by construction, and they do not count for it."
+    },
+    {
+      "set": "capture-headless-chrome-browser-ua",
+      "file": "capture.jsonl",
+      "committed": true,
+      "source": "The same capture: headless Chrome driven through its DevTools protocol, with the User-Agent that Chrome sent in the capture. One session loads the page; four sessions load the page and fill the form, each in another way.",
+      "licence": "Apache-2.0, as this repository",
+      "files": [
+        {
+          "name": "capture.jsonl",
+          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+        }
+      ],
+      "counts": {
+        "human": {
+          "sessions": 0,
+          "arrivals": 0
+        },
+        "automated": {
+          "sessions": 5,
+          "arrivals": 45
+        }
+      },
+      "labelSource": "scripted-client",
+      "labels": {
+        "automated": "headless Chrome that sends the User-Agent of Chrome, driven by the capture script"
+      },
+      "validFor": [
+        "fingerprint.headers.mismatch",
+        "fingerprint.tls.mismatch",
+        "behaviour.navigation.directWrite",
+        "behaviour.form.fast",
+        "behaviour.form.noInput"
+      ],
+      "command": "node scripts/door-capture.ts --out labelled/capture.jsonl --meta labelled/capture.meta.json --hellos labelled/capture.hellos.json"
+    },
+    {
+      "set": "keyrecs-fixed-text",
+      "committed": false,
+      "source": "KeyRecs: Keystroke Dynamics Dataset, fixed-text.csv. Recruited participants type the same characters. keyrecs-stats.json has the counts.",
+      "url": "https://zenodo.org/records/7886743",
+      "doi": "10.5281/zenodo.7886743",
+      "licence": "CC-BY-4.0",
+      "files": [
+        {
+          "name": "fixed-text.csv",
+          "md5": "f3c2ef3a42625f4df7183ea36d4543db",
+          "sha256": "d4943e94c6c05ec871bd1d1e9fb424ea36c9063058a36930e3700d0683bd89e9"
+        }
+      ],
+      "derived": {
+        "name": "keyrecs.jsonl",
+        "records": 19772,
+        "sha256": "6a22369f63b60573e0c255f421fbd7b9501f1adde8249de6c8b17550c437578c"
+      },
+      "counts": {
+        "human": {
+          "sessions": 198,
+          "arrivals": 19772
+        },
+        "automated": {
+          "sessions": 0,
+          "arrivals": 0
+        }
+      },
+      "labelSource": "recruited-participant",
+      "labels": {
+        "human": "a recruited participant who types the same fixed characters; one arrival is one repetition, and one session is one participant in one sitting"
+      },
+      "labelAssignment": "Every row is human. The fill time is the sum of the nine DD columns, from the first key press to the last key press.",
+      "validFor": [
+        "behaviour.form.fast"
+      ],
+      "command": "node scripts/door-labels-keyrecs.ts <fixed-text.csv> --stats labelled/keyrecs-stats.json > keyrecs.jsonl",
+      "stats": "keyrecs-stats.json"
+    },
+    {
+      "set": "lagopoulos-2018",
+      "committed": false,
+      "source": "Lagopoulos and Tsoumakas, Web robot detection - Server logs: the access log of search.lib.auth.gr for March 2018, and the session features with the ROBOT label.",
+      "url": "https://zenodo.org/records/3477932",
+      "doi": "10.5281/zenodo.3477932",
+      "licence": "CC-BY-4.0",
+      "files": [
+        {
+          "name": "public_v2.json",
+          "bytes": 3218672736,
+          "md5": "2f126f1f33a8cb7851c2863094998788",
+          "sha256": "fdcbfe513f6b15f6263b0ee0b2779b69070d1a29ac7c9ab3bf22ef9ae18970bd"
+        },
+        {
+          "name": "simple_features.csv",
+          "md5": "08c9b2efeddd5c15e1e4f66d127408f8",
+          "sha256": "72977977ba3bda0ad35f7443aac0e5e374eded523eecf95384921d8d63fb8394"
+        }
+      ],
+      "derived": {
+        "name": "lagopoulos.jsonl",
+        "records": 4050173,
+        "sha256": "362b5e9213c58c14d3ba2fa772ba2433b93a9eb1df028524220fdd61c14820f8"
+      },
+      "counts": {
+        "human": {
+          "sessions": 50724,
+          "arrivals": 3640733
+        },
+        "automated": {
+          "sessions": 9720,
+          "arrivals": 409440
+        }
+      },
+      "labelSource": "user-agent-lists",
+      "labels": {
+        "human": "ROBOT=0: the dataset's authors did not identify the session as a robot. A robot that hides is on this side, so the rate is biased upward",
+        "automated": "ROBOT=1: the dataset's authors identified the session as a robot, in most cases by its User-Agent. A robot that says what it is"
+      },
+      "labelAssignment": "The ids of simple_features.csv are not the ids of the raw records. The adapter builds the sessions again (the same masked address and User-Agent, a new session after 30 minutes of silence, records without a request left out). A rebuilt session gets the ROBOT label of the feature rows that have the same number of requests, duration, bytes, counts of 2xx, 3xx, 4xx, and 5xx answers, and counts of GET, POST, and HEAD, when those rows agree on the label and are as many as the rebuilt sessions with these values.",
+      "validFor": [
+        "behaviour.timing.regular",
+        "behaviour.navigation.directWrite"
+      ],
+      "command": "node scripts/door-labels-lagopoulos.ts <public_v2.json> <simple_features.csv> --out lagopoulos.jsonl --stats labelled/lagopoulos-join.json",
+      "stats": "lagopoulos-join.json"
+    }
+  ],
+  "notMeasured": {
+    "fingerprint.headers.mismatch": {},
+    "fingerprint.tls.mismatch": {},
+    "fingerprint.tls.knownTool": {
+      "human": "The known-tool table was filled from the capture: no browser of the capture is in the table, by construction, so a rate of zero on the same capture says nothing. No other set has a TLS fingerprint of a real browser",
+      "automated": "The known-tool table was filled from the capture: every tool of the capture is in the table, by construction, so a detection rate on the same capture says nothing. No other set has a TLS fingerprint of a tool"
+    },
+    "behaviour.timing.regular": {},
+    "behaviour.navigation.directWrite": {},
+    "behaviour.form.fast": {},
+    "behaviour.form.noInput": {
+      "human": "No set has a person who sends a form through the form protector script. KeyRecs records key presses only, with no pointer press and no submit"
+    }
+  },
+  "ruleChecks": [
+    {
+      "name": "apify-header-generator",
+      "source": "The header model of Apify's header-generator (fingerprint-suite): header-network/network.json and headers-order.json. Not labelled traffic.",
+      "url": "https://github.com/apify/fingerprint-suite",
+      "licence": "Apache-2.0",
+      "files": [
+        {
+          "name": "header-network/network.json",
+          "sha256": "cc10043a06b668f93847cafded92d605e88a50a9bac2ca9d4d5df889679e419b"
+        },
+        {
+          "name": "headers-order.json",
+          "sha256": "c076d21408b6b3d70f06519cc80c5612a8a567a70d0d5b954145114b9ba1a774"
+        }
+      ],
+      "result": "rule-check.json",
+      "command": "node scripts/door-rule-check.ts <header-network/network.json> <headers-order.json> > labelled/rule-check.json"
+    },
+    {
+      "name": "foxio-ja4-mapping",
+      "source": "FoxIO ja4plus-mapping.csv: known JA4 values, used to check scripts/ja4.ts.",
+      "url": "https://github.com/FoxIO-LLC/ja4",
+      "licence": "BSD-3-Clause for the JA4 TLS client algorithm",
+      "files": [
+        {
+          "name": "ja4plus-mapping.csv",
+          "sha256": "e21b11ea9f7c630ae798377b346a055af4e6797fb60712356b46ecc5e1606551"
+        }
+      ],
+      "result": "test/ja4.test.ts"
+    }
+  ],
+  "consideredAndNotUsed": [
+    {
+      "name": "Iliou et al., Web bot detection dataset",
+      "reason": "Its licence permits non-commercial use only."
+    },
+    {
+      "name": "Aalto University 136M keystrokes dataset",
+      "reason": "Its licence permits non-commercial use only."
+    },
+    {
+      "name": "Nanglae et al. form keystroke files",
+      "reason": "The files do not say how the data was collected or whether the people agreed, and they hold personal data."
+    }
+  ]
+}

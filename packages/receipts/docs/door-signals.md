@@ -34,6 +34,50 @@ Three labels run through the table:
 | `partner.outcome` | checked, against the engine's key | Only when `partner` is configured and the route is in `partner.routes`. `verified`: the partner engine answered with a verdict whose signature verified under `partner.keyFile` and binds this receipt and route; the verdict is then the `partner` fact (below). `rejected`: the engine answered, and it was not a verdict signed for this arrival: a signature by another key, one for another receipt or route, a verdict of another engine, a malformed verdict, or an envelope carrying more than the attestation (`error` says which). `unavailable`: no answer within `timeoutMs`, an error status, a redirect, or `maxInFlight` questions already waiting | Anything about the arrival when it is not `verified`. Under `onFailure: "deny"` (the default) an arrival without a verified verdict is refused with 503 whatever the policy says; under `"absent"` the policy decides without the `partner` fact |
 | `method`, `path`, `route` | observed | What arrived, the path percent-decoded once, and the route it fell under | |
 
+## The behaviour and fingerprint signals
+
+The door adds two fields to the arrival fact when its config has a `behaviour` object: `fingerprint` (what the request and its connection look like) and `behaviour` (how the source acts over time). Without `behaviour` in the config, the arrival fact has neither field, and the door reads no TLS header and no form report. The config is in [the door](door.md#behaviour-and-fingerprint-signals).
+
+Seven of the values are flags: booleans that mark an arrival. A flag is not a verdict. The door never refuses an arrival because of a signal. Only your policy reads the signals, and the receipt records each one that the policy read.
+
+Each flag is wrong for some people and for some programs. The method that measures how often, and the measured rates, are in [door error rates](door-error-rates.md). `agent-custody door measure` replays a labelled set through the same signal functions, and `agent-custody door labels` exports a labelled set from the receipts of your own door. Measure a flag on your own traffic before a rule reads it.
+
+The flags:
+
+| signal | label | what it means | what it does not mean |
+| --- | --- | --- | --- |
+| `fingerprint.headers.mismatch` | observed, against a claim | The `User-Agent` states a browser, and the request that the door received lacks a header that this browser sends on every request. The rule always reads `accept-language`. When the door knows that the client used https, the rule also reads `sec-fetch-site`, `sec-fetch-mode`, and `sec-fetch-dest` (Chromium from 80, Firefox from 90, Safari from 17) and `sec-ch-ua` (Chromium from 100; not an Android WebView, a WebView browser with `Version/` before `Chrome/`, Electron, a browser that says `like Chrome/`, or an application that names itself before `Chrome/`). An OPTIONS request and an upgrade are checked for `accept-language` only. `missing` names the headers | That the client is a program. The flag is true for a person behind a privacy browser, an extension, or a company proxy that removes one of these headers, for a person whose extension changes the `User-Agent`, and for a Chromium browser that sends no client hints. A proxy in front of the door that drops one of these headers makes every browser a mismatch. It does not mean that an arrival without the flag is a browser: a program that sends the headers of a browser has no mismatch, and a program that states its own name is never a mismatch |
+| `fingerprint.tls.mismatch` | observed, against a claim | The `User-Agent` states a browser of a version that offers TLS 1.3 (Chromium from 70, Firefox from 63, Safari from 13), and the JA4 of a TCP ClientHello shows no TLS 1.3 or no ALPN | That the client is a program. A proxy that inspects TLS between the person and the site (a company network, some antivirus products) sends its own ClientHello, so a person behind one can be a mismatch. So can a person whose organisation turns TLS 1.3 off. It does not mean that an arrival without the flag is a browser: the rule reads two properties of the ClientHello, and a program can have both. A QUIC ClientHello is not checked |
+| `fingerprint.tls.knownTool` | observed | The JA4 is in the door's table of fingerprints of known tools, `KNOWN_TOOL_JA4` | That the tool is hostile, or that a tool not in the table is absent. The table holds six fingerprints, recorded from one build each of curl, Python, Go, Node, and Bun; another build of the same tool can have another fingerprint. A person behind a proxy that uses the same TLS library has the same fingerprint |
+| `behaviour.timing.regular` | checked | The source arrived at a steady pace: at least 5 gaps between its remembered arrivals, a median gap of at least 100 ms, and a difference between the longest gap and the shortest gap of at most 10 % of the median | That the source is a program that you do not want. The flag is true for a page that polls or refreshes on a timer in the browser of a person (a dashboard, a status page), and for the monitoring tool or the health check that you run yourself. It does not mean that an arrival without the flag is a person: a program that varies its pace is not regular, and one more source at the same address breaks the pace |
+| `behaviour.navigation.directWrite` | observed | A POST, PUT, PATCH, or DELETE arrived, the source loaded no HTML document through this door in the last 30 minutes, the `Referer` is absent or names another host, and the request has no `Sec-Fetch-Site: same-origin` | That the arrival is a program. The flag is true for every API client that loads no page, a verified agent and a webhook included. It is true for a person whose address changed after the page load, who kept the form open for more than 30 minutes, whose page came from a cache in front of the door, or whose page load went to another door process, when the browser also sends no same-origin `Referer` and no `Sec-Fetch-Site: same-origin` (an old browser or a privacy browser on a site whose `Referrer-Policy` removes the `Referer`, or a site that is not https). It does not mean that an arrival without the flag is a person. The `Referer` and `Sec-Fetch-Site` are the client's word: a program that sends a GET for the page first, a `Referer` that names the host, or `Sec-Fetch-Site: same-origin` has no flag |
+| `behaviour.form.fast` | a claim | The form report states at least 8 key presses, and a fill time of less than 20 ms for each key press | That a program filled the form. A device or a tool that types for a person is fast too: a barcode scanner, a security key, a text expander, a password manager that types. The form report is the word of the client's script: a program can send a report that is not fast |
+| `behaviour.form.noInput` | a claim | The form report states a submit with no key press and no pointer press | That a program sent the form. The flag is true for a person whose browser or password manager fills the form and submits it, and for an assistive tool that submits without a key press or a click. A program can send a report that states input |
+
+The fields beside the flags:
+
+| signal | label | what it means | what it does not mean |
+| --- | --- | --- | --- |
+| `fingerprint.headers.client`, `family`, `version` | a claim | What the `User-Agent` states: `browser` (`chromium`, `firefox`, `safari`), `tool` (the name of the tool, or `crawler`), `other`, or `unstated`, and the major version of a browser | What the client is. Any client can send any `User-Agent`. A `User-Agent` with a product name that ends in `bot/`, `crawler/`, or `spider/`, or with a `+http` address, is a `tool` with the family `crawler` |
+| `fingerprint.headers.order`, `count` | observed | A hash of the lowercase header names in the order that the door received them, and how many there were, without the door's own headers. No header value is in the hash | The identity of a client. Two clients of the same kind have the same order. A proxy in front of the door can reorder, add, or drop headers, and the door records what it received |
+| `fingerprint.tls.ja4` and the fields from it (`protocol`, `version`, `sni`, `ciphers`, `extensions`, `alpn`) | observed, through your proxy or Cloudflare | The JA4 of the ClientHello, as your proxy wrote it in `behaviour.tlsHeader` or as Cloudflare gives it to a Worker. `malformed` is true when a value arrived that is not a JA4; the door then reads nothing from it | The identity of a client: every copy of one browser version has the same JA4. The door does not see the handshake. When the proxy does not overwrite the header, the value is the client's own |
+| `fingerprint.tls.negotiated`, `cipher`, `extensionsSha1`, `helloLength` | observed, through Cloudflare | In a Worker only: the negotiated TLS version and cipher, Cloudflare's hash of the extensions, and the length of the ClientHello | |
+| `behaviour.timing.gaps`, `medianGapMs` | checked | How many gaps the door remembers between the arrivals of this source (at most 16), and their median in milliseconds. The source is the source of `rate`: the name of a verified agent, else the address | The pace of one person. One address serves many people |
+| `behaviour.navigation.pageLoaded` | observed | The source sent a GET for an HTML document in the last 30 minutes (`Sec-Fetch-Dest: document`, or without that header an `Accept` that names `text/html`) | That a browser showed the page, or that the same person sends this arrival |
+| `behaviour.navigation.referer` | observed | `same-origin` when the host of the `Referer` is the `Host` of the request (with `trustProxy`, the `X-Forwarded-Host`); a default port, `:443` or `:80`, on one side only does not change the result. Else `cross-origin`, or `absent`. The `Referer` itself is not recorded | Where the arrival came from. The client writes the `Referer` |
+| `behaviour.navigation.site`, `mode`, `dest` | observed | `sec-fetch-site`, `sec-fetch-mode`, and `sec-fetch-dest` as sent, lowercase; `other` for a value that is not a token | That a browser sent them. A program can send the same values |
+| `behaviour.form.report` and its counts (`fillMs`, `keys`, `pointers`, `pasted`, `trusted`) | a claim | The form protector script counted the events in the form and sent the counts in `X-Agent-Custody-Form`. `claimed`: the report is well formed. `malformed`: a value arrived that is not exactly a report; the door then reads nothing from it and sets no flag. The script reads no field value and no key | What happened in a browser. Any client can send the header with any counts. The flags catch only a client that runs the script and does not act as a person does |
+
+Limits of these signals:
+
+- **The history is one process's memory.** The timing and navigation signals read what this door process remembers: at most 10,000 sources, 17 arrival times for each source, and 30 minutes. The history starts empty when the door starts, and two door processes do not share it. In a Worker, each isolate has its own. A client that sends from many new addresses can make the door forget another source early.
+- **One address is one source.** People behind one address share a history: a page load by one of them is a page load for all, and their arrivals share one pace.
+- **The door must know that the client used https.** A browser sends `sec-fetch-*` and `sec-ch-ua` to an https site only. The door knows https from the URL of a Worker request, or from `X-Forwarded-Proto: https` with `trustProxy`. Without that, `fingerprint.headers.mismatch` reads `accept-language` only.
+- **Authz mode records no header order.** The proxy selects the headers of a check, so `order` and `count` are absent and `fingerprint.headers.mismatch` is always false. The other signals need the proxy to forward `Referer`, `Accept`, `Sec-Fetch-*`, and `X-Agent-Custody-Form`.
+- **A proxy in front of the door changes what the door receives.** It can reorder or drop headers. The order hash is then the proxy's order, and a dropped header is a mismatch for every browser.
+- **The TLS fingerprint comes from your proxy or from Cloudflare.** `behaviour.tlsHeader` needs `trustProxy`, and your proxy must overwrite the header on every request. In a Worker the data comes from `request.cf`, and a config with `behaviour.tlsHeader` is refused. `ja4` needs Cloudflare Bot Management on the zone. Without it, `tls` has the Cloudflare fields only and `tls.mismatch` is always false.
+- **The form report is a claim.** The script runs in the client's browser, and a program can send the header without the script. The door serves the script only when `challenge` is configured.
+
 ## The partner verdict
 
 A second fact, `partner`, is present only when a partner detection engine (Cloudflare Bot Management, HUMAN, DataDome, behind an adapter that holds an Ed25519 key) signed a verdict for this arrival. The policy reads it as `context.facts.partner`; the receipt records it with provenance `attested` and the engine's signature beside it.
@@ -90,6 +134,52 @@ when { context.facts.arrival.class == "verified" };
 
 Decide what `unavailable` means for each route before the provider has its first outage: a forbid on `outcome != "passed"` closes the route then, and the receipts show that the provider, not the arrivals, was the reason.
 
+The behaviour and fingerprint signals are reasons to ask for more, never reasons to decide what the arrival is. Each flag is wrong for some people ([door error rates](door-error-rates.md)), so a rule that reads a flag gives the arrival a way through: a challenge for a person, a grant for an agent. The next rule asks an arrival for the challenge when a write follows no page load. A verified agent and an arrival that passed the challenge go on:
+
+```cedar
+forbid(principal, action == Action::"refund", resource)
+when {
+  context.facts.arrival.behaviour.navigation.directWrite &&
+  context.facts.arrival.class != "verified" &&
+  context.facts.arrival.challenge.outcome != "passed"
+};
+```
+
+The door answers a refused arrival with 403, the rule's id, and how to pass the challenge. This rule needs `challenge` in the config.
+
+`fingerprint.tls` and `behaviour.form` are present only on some arrivals: `tls` when a TLS fingerprint arrived, `form` when the arrival sent a form report. Test for each with `has` before a rule reads it. A rule that reads an absent field is an error, and the door denies an arrival when a rule errors. So a rule without the test refuses every arrival that has no TLS fingerprint or no form report:
+
+```cedar
+forbid(principal, action, resource)
+when {
+  (context.facts.arrival.fingerprint.headers.mismatch ||
+   (context.facts.arrival.fingerprint has tls && context.facts.arrival.fingerprint.tls.mismatch)) &&
+  context.facts.arrival.class != "verified" &&
+  context.facts.arrival.challenge.outcome != "passed"
+};
+
+forbid(principal, action == Action::"contact", resource)
+when {
+  context.facts.arrival.behaviour has form &&
+  (context.facts.arrival.behaviour.form.fast || context.facts.arrival.behaviour.form.noInput) &&
+  context.facts.arrival.challenge.outcome != "passed"
+};
+```
+
+An arrival with no form report passes the second rule. The report is a claim, so do not write a permit that depends on a report that looks like a person: a program can send one.
+
+A steady pace on an API route is a reason to ask the program for a grant. A verified agent is counted by its name, and this rule lets it through:
+
+```cedar
+forbid(principal, action == Action::"api", resource)
+when {
+  context.facts.arrival.behaviour.timing.regular &&
+  context.facts.arrival.class != "verified"
+};
+```
+
+`fingerprint` and `behaviour` exist only when the config has `behaviour`. A policy that must also work on a door without it tests `context.facts.arrival has behaviour` first. Use observe mode to see what a new rule refuses before you enforce it: the receipts record each flag and each decision. Tutorial: [58-door-behaviour-signals.ts](../examples/58-door-behaviour-signals.ts).
+
 A partner verdict is read through the `partner` fact, which exists only when the engine's signature verified. Test for it before reading it, so a missing verdict denies rather than errors:
 
 ```cedar
@@ -99,6 +189,6 @@ when { context.facts has partner && context.facts.partner.verdict == "human" };
 
 With `onFailure: "absent"`, the arrival still reaches this rule when the engine is down or its signature is bad, and the rule denies it, because the fact is not there. A rule that does not mention `partner` admits it whatever the engine said, so set `partner.routes` to the routes whose rules read it, or keep the default `onFailure: "deny"`, which refuses the arrival before the policy's answer counts. No setting lets an engine outage become an allow on a route whose rule needs the verdict.
 
-## What is not a signal yet
+## What no signal says
 
-Nothing in the arrival fact says whether an arrival that presents nothing is a program. A Web Bot Auth signature identifies an agent that chooses to sign; it says nothing about the ones that do not. A partner engine's verdict is that engine's judgement, signed, and carries the engine's own error rate. The door's own behavioural and fingerprint signals are not built; when they are, each will arrive with a measured error rate beside it, and this page will say what it means. Until then a policy has the grant, the signature, the claims, the address, and the pace, and the receipt records which of them it used.
+Nothing in the arrival fact says whether an arrival that presents nothing is a program or a person. A Web Bot Auth signature identifies an agent that signs; it says nothing about the agents that do not. A partner engine's verdict is the judgement of that engine, signed, with the error rate of that engine. The behaviour and fingerprint signals of the door mark an arrival that does not look or act as its `User-Agent` states. Each flag is wrong for some people and misses some programs, and [door error rates](door-error-rates.md) gives the method and the measured rates. There is no `human` class and no `bot` class. A policy has the grant, the signature, the challenge, the claims, the address, the pace, and the flags, and the receipt records which of them the policy read.

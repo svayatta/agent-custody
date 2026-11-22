@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { digestOf, generateKeyPair, publicKeyToPem } from "../src/crypto.ts";
 import { createDelegation } from "../src/delegation.ts";
 import { createDoorCoreWith, relayToOrigin, type DoorIO, type DoorRequest } from "../src/door-core.ts";
-import { CLOUDFLARE_FACT, cloudflareFacts, durableNonceStore, pemKeys, r2Store, workerDoorConfig, type DoorWorkerEnv, type DurableObjectNamespaceLike, type R2BucketLike } from "../src/door-worker.ts";
+import { CLOUDFLARE_FACT, cloudflareFacts, cloudflareTls, doorRequestOf, durableNonceStore, pemKeys, r2Store, workerDoorConfig, type DoorWorkerEnv, type DurableObjectNamespaceLike, type R2BucketLike } from "../src/door-worker.ts";
 import { grantHeader } from "../src/grant-header.ts";
 import { fileLog, type LogSink } from "../src/log-sink.ts";
 import { createObjectIssuer, type ObjectStore } from "../src/object-issuer.ts";
@@ -201,6 +201,28 @@ describe("Cloudflare Bot Management", () => {
     expect(cloudflareFacts({ botManagement: { score: "99", verifiedBot: false } })).toEqual({});
     expect(cloudflareFacts({ botManagement: { score: 9.5, verifiedBot: false } })).toEqual({});
     expect(cloudflareFacts({ botManagement: { score: 12, verifiedBot: true } })).toEqual({ [CLOUDFLARE_FACT]: { tool: "cloudflare.botManagement", value: { score: 12, verifiedBot: true } } });
+  });
+});
+
+describe("what Cloudflare saw of the TLS handshake", () => {
+  const cf = { tlsVersion: "TLSv1.3", tlsCipher: "AEAD-AES128-GCM-SHA256", tlsClientExtensionsSha1: "2jmj7l5rSw0yVb/vlWAYkK/YBwk=", tlsClientHelloLength: "508", botManagement: { score: 30, verifiedBot: false, ja4: "t13d1516h2_000000000000_111111111111" } };
+
+  it("is taken from request.cf, never from a header, with the scheme the client used", () => {
+    const request = Object.assign(new Request("https://shop.test/products/tea", { headers: { "user-agent": "curl/8.7.1", "x-ja4": "t12d1516h2_000000000000_111111111111" } }), { cf });
+    expect(doorRequestOf(request).transport).toEqual({ secure: true, tls: { ja4: "t13d1516h2_000000000000_111111111111", negotiated: "TLSv1.3", cipher: "AEAD-AES128-GCM-SHA256", extensionsSha1: "2jmj7l5rSw0yVb/vlWAYkK/YBwk=", helloLength: 508 } });
+    expect(doorRequestOf(new Request("http://shop.test/")).transport).toEqual({ secure: false });
+  });
+
+  it("takes only short strings and a length that is a number, and nothing from a cf without them", () => {
+    expect(cloudflareTls(undefined)).toBeUndefined();
+    expect(cloudflareTls({})).toBeUndefined();
+    expect(cloudflareTls({ tlsVersion: "", tlsCipher: 7, tlsClientExtensionsSha1: null, tlsClientHelloLength: "12 bytes", botManagement: { ja4: "j".repeat(65) } })).toBeUndefined();
+    expect(cloudflareTls({ tlsVersion: { toString: () => "TLSv1.3" }, tlsClientHelloLength: 512 })).toEqual({ helloLength: 512 });
+  });
+
+  it("the config refuses a TLS header, since the Worker has Cloudflare's own view", () => {
+    expect(() => workerDoorConfig(baseEnv({ DOOR_CONFIG: JSON.stringify({ routes: [], behaviour: { tlsHeader: "x-ja4" } }) }))).toThrow(/behaviour\.tlsHeader.*request\.cf/);
+    expect(workerDoorConfig(baseEnv({ DOOR_CONFIG: JSON.stringify({ routes: [], behaviour: {} }) })).behaviour).toEqual({});
   });
 });
 

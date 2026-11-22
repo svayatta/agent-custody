@@ -157,7 +157,7 @@ export async function createDoorHost(cfg: DoorConfig, options: DoorOptions = {})
     handle,
     flushOutbox: core.flushOutbox,
     pendingReceipts: core.pendingReceipts,
-    formScript: () => (cfg.challenge ? formScript(cfg.challenge) : null),
+    formScript: () => (cfg.challenge ? formScript(cfg.challenge, !!cfg.behaviour) : null),
     async close() {
       core.close();
     },
@@ -201,7 +201,7 @@ function createAuthzHost(cfg: DoorConfig, options: DoorOptions): DoorHost {
     handle,
     flushOutbox: core.flushOutbox,
     pendingReceipts: core.pendingReceipts,
-    formScript: () => (cfg.challenge ? formScript(cfg.challenge) : null),
+    formScript: () => (cfg.challenge ? formScript(cfg.challenge, !!cfg.behaviour) : null),
     async close() {
       core.close();
     },

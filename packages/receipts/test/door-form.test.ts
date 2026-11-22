@@ -47,6 +47,8 @@ interface FakeForm {
   hidden?: { name: string; disabled: boolean }[];
   fields: [string, string][];
   handlers: ((e: unknown) => Promise<void>)[];
+  /** the form element that the script got, which an event's target names as its form */
+  element?: object;
   inserted: { className: string; textContent: string }[];
 }
 const formOf = (attrs: Record<string, string>, fields: [string, string][] = []): FakeForm => ({ attrs, fields, handlers: [], inserted: [] });
@@ -55,9 +57,10 @@ const formOf = (attrs: Record<string, string>, fields: [string, string][] = []):
  * Runs the script in a DOM stand-in: forms that report their attributes and fields, a provider whose token is
  * `token()`, and `fetch` passed through. Returns what the script did to the page.
  */
-function runScript(script: string, o: { origin: string; forms: FakeForm[]; token: () => string; fetch: typeof fetch; dataForms?: string; provider?: "turnstile" | "hcaptcha" }) {
+function runScript(script: string, o: { origin: string; forms: FakeForm[]; token: () => string; fetch: typeof fetch; dataForms?: string; provider?: "turnstile" | "hcaptcha"; now?: () => number }) {
   const widget = { rendered: [] as Record<string, unknown>[], reset: 0 };
-  const page = { assigned: [] as string[], written: [] as string[], selector: "" };
+  // listeners: what the script put on the document, by type; the form report counts key presses, pointer presses, clicks, and pastes there
+  const page = { assigned: [] as string[], written: [] as string[], selector: "", listeners: {} as Record<string, ((e: unknown) => void)[]> };
   let loader: { src?: string; onload?: () => void } = {};
   const element = (tag: string) => ({ tag, className: "", textContent: "", setAttribute() {} });
   const document = {
@@ -67,7 +70,7 @@ function runScript(script: string, o: { origin: string; forms: FakeForm[]; token
     createElement: element,
     querySelectorAll: (selector: string) => {
       page.selector = selector;
-      return o.forms.map((f) => ({
+      return o.forms.map((f) => (f.element = {
         getAttribute: (n: string) => f.attrs[n] ?? null,
         querySelector: () => (f.noButton ? null : { before: (...els: FakeForm["inserted"]) => f.inserted.push(...els) }),
         querySelectorAll: (sel: string) => (f.hidden ?? []).filter((el) => sel === `[name="${el.name}"]`),
@@ -76,7 +79,7 @@ function runScript(script: string, o: { origin: string; forms: FakeForm[]; token
         fields: f.fields,
       }));
     },
-    addEventListener() {},
+    addEventListener: (type: string, fn: (e: unknown) => void) => { (page.listeners[type] ??= []).push(fn); },
     open() {},
     write: (html: string) => page.written.push(html),
     close() {},
@@ -93,14 +96,14 @@ function runScript(script: string, o: { origin: string; forms: FakeForm[]; token
     reset: () => { widget.reset += 1; },
   };
   const location = { href: `${o.origin}/contact`, origin: o.origin, assign: (u: string) => page.assigned.push(u) };
-  runInNewContext(script, { document, location, window: { [o.provider ?? "turnstile"]: widgetApi }, fetch: o.fetch, URL, URLSearchParams, FormData: FormDataStandIn, AbortSignal, console });
+  runInNewContext(script, { document, location, window: { [o.provider ?? "turnstile"]: widgetApi }, fetch: o.fetch, URL, URLSearchParams, FormData: FormDataStandIn, AbortSignal, console, performance: { now: () => o.now?.() ?? 0 } });
   return { widget, page, loader: () => loader };
 }
 /** Fires the form's submit handlers, from a button with these attributes when given; reports whether the native post was stopped. */
-const submit = async (f: FakeForm, button?: Record<string, string>) => {
+const submit = async (f: FakeForm, button?: Record<string, string>, isTrusted = true) => {
   let stopped = false;
   const submitter = button ? { hasAttribute: (n: string) => Object.hasOwn(button, n), getAttribute: (n: string) => button[n] ?? null } : null;
-  await Promise.all(f.handlers.map((h) => h({ preventDefault: () => { stopped = true; }, submitter })));
+  await Promise.all(f.handlers.map((h) => h({ preventDefault: () => { stopped = true; }, submitter, isTrusted })));
   return stopped;
 };
 const noteOf = (f: FakeForm) => f.inserted.find((e) => e.className === "agent-custody-challenge-note")?.textContent;
@@ -294,6 +297,81 @@ describe("the form protector", () => {
     const run = runScript(script, { origin: "https://shop.example", forms: [form], token: () => "", fetch });
     run.loader().onload!();
     expect(run.widget.rendered).toEqual([{ sitekey: siteKey, "response-field": false }]);
+  });
+
+  it("with behaviour configured, the script reports how the form was filled, in counts only, and the door records the report as a claim and keeps it from the site", async () => {
+    const fxB = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-door-form-report-")), shop.url, { challenge, behaviour: {}, routes: [{ name: "contact", methods: ["POST"], path: "/contact" }] });
+    writeFileSync(join(fxB.dir, "policy.cedar"), 'permit(principal, action == Action::"contact", resource) when { context.facts.arrival.behaviour has form && !context.facts.arrival.behaviour.form.noInput };\n');
+    const provider: typeof fetch = async (input, init) => (String(input).startsWith("https://challenges.cloudflare.com/") ? new Response(JSON.stringify({ success: true, hostname: "shop.example", action: "contact" }), { headers: { "content-type": "application/json" } }) : fetch(input, init));
+    const h = await createDoorHost(loadDoorConfig(fxB.configFile), { fetch: provider });
+    const d = await serveDoor(h, { port: 0, log: () => {} });
+    try {
+      const script = await (await fetch(`${d.url}${FORM_SCRIPT_PATH}`)).text();
+      expect(() => new Script(script)).not.toThrow();
+      // the script without the report is the one a door without behaviour serves
+      expect(script).not.toBe((await served()).script);
+      expect((await served()).script).not.toContain("x-agent-custody-form");
+      const sent: Record<string, string>[] = [];
+      const recording: typeof fetch = (input, init) => { sent.push(init!.headers as Record<string, string>); return fetch(input, init); };
+      let now = 1000;
+      const contact = formOf({ method: "post", action: "/contact" }, [["name", "Ada"], ["card", "4111 1111 1111 1111"]]);
+      const other = formOf({ method: "post", action: "/contact" });
+      const run = runScript(script, { origin: d.url, forms: [contact, other], token: () => "good", fetch: recording, now: () => now });
+      run.loader().onload!();
+      // an event reaches the document with its target: a control names its form, wherever it is on the page
+      const fire = (type: string, event: Record<string, unknown> = {}) => run.page.listeners[type]!.forEach((l) => l({ isTrusted: true, key: "4", target: { form: contact.element }, ...event }));
+      const arrivalFor = (id: string) => (decode(JSON.parse(readFileSync(join(fxB.receiptsDir, `${id}.json`), "utf8")) as ReceiptBundle).predicate.facts[ARRIVAL_FACT]!.value as Arrival);
+
+      // a person: a press on a field, three keys (one held down, which repeats), a paste, then a press and click on the button, 4.2 s after the first
+      fire("pointerdown");
+      fire("click");
+      for (let i = 0; i < 3; i++) fire("keydown");
+      fire("keydown", { repeat: true });
+      fire("paste");
+      fire("pointerdown");
+      fire("click");
+      now += 4200;
+      const before = shop.seen.length;
+      await submit(contact);
+      expect(sent[0]!["x-agent-custody-form"]).toBe("v=1;ms=4200;k=3;p=2;paste=1;trusted=1");
+      // counts only: no key and no field value is in what the script sends beside the form itself
+      expect(JSON.stringify(sent[0])).not.toMatch(/4111|Ada/);
+      expect(shop.seen.length).toBe(before + 1);
+      expect(shop.seen.at(-1)!.headers).not.toHaveProperty("x-agent-custody-form");
+      expect(arrivalFor(shop.seen.at(-1)!.headers[RECEIPT_HEADER] as string).behaviour!.form).toEqual({ report: "claimed", fillMs: 4200, keys: 3, pointers: 2, pasted: true, trusted: true, fast: false, noInput: false });
+
+      // the counts start again for the next send. A script that submits the form itself sends no input, an untrusted submit, and the policy's rule refuses it
+      await submit(contact, undefined, false);
+      expect(sent[1]!["x-agent-custody-form"]).toBe("v=1;ms=0;k=0;p=0;paste=0;trusted=0");
+      expect(shop.seen.length).toBe(before + 1);
+      expect(noteOf(contact)).toMatch(/^This form was refused \(receipt [0-9a-f-]{36}\)\.$/);
+
+      // a submit button outside the form element that names the form (form="id") is the form's input; an element inside the form
+      // that is no control counts by the form around it; another form's control and the page outside every form do not count
+      fire("pointerdown", { target: { form: contact.element } });
+      fire("click", { target: { form: contact.element } });
+      fire("keydown", { target: { closest: (selector: string) => (selector === "form" ? contact.element : null) } });
+      fire("keydown", { target: { form: other.element } });
+      fire("pointerdown", { target: { form: null, closest: () => null } });
+      fire("paste", { target: null });
+      now += 900;
+      const outside = shop.seen.length;
+      await submit(contact);
+      expect(sent[2]!["x-agent-custody-form"]).toBe("v=1;ms=900;k=1;p=1;paste=0;trusted=1");
+      expect(shop.seen.length).toBe(outside + 1);
+      sent.splice(2, 1);
+
+      // a button pressed without a pointer (a keyboard, an assistive tool) is a click alone, and counts as input; a made-up event is not trusted
+      fire("click");
+      fire("keydown", { isTrusted: false });
+      now += 50;
+      await submit(contact);
+      expect(sent[2]!["x-agent-custody-form"]).toBe("v=1;ms=50;k=1;p=1;paste=0;trusted=0");
+      expect(shop.seen.length).toBe(before + 3);
+    } finally {
+      await d.close();
+      await h.close();
+    }
   });
 
   it("a door with no challenge has no form protector: 404, and the in-process door has none either", async () => {

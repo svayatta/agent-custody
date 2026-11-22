@@ -357,6 +357,18 @@ export const DoorConfigSchema = z.object({
     /** the largest answer the door reads. Default 16 KiB */
     maxResponseBytes: z.number().int().positive().default(16 * 1024),
   }).optional(),
+  /**
+   * The door's own behavioural and fingerprint signals (door-signals.ts): the header fingerprint, the TLS fingerprint,
+   * the pace, the navigation, and the form report. Present, even empty, it adds `fingerprint` and `behaviour` to the
+   * arrival fact. They are signals for the policy to read; the door refuses nothing because of them.
+   */
+  behaviour: z.strictObject({
+    /**
+     * The request header in which your proxy puts the client's JA4 TLS fingerprint. The proxy must overwrite the
+     * header on every request, or a client can send its own. Needs `trustProxy`
+     */
+    tlsHeader: z.string().regex(/^[A-Za-z0-9-]{1,64}$/, "a header name has letters, digits, and hyphens").transform((h) => h.toLowerCase()).optional(),
+  }).optional(),
   receiptsDir: z.string(),
   logFile: z.string().optional(),
   log: LogSchema.optional(),
@@ -365,6 +377,7 @@ export const DoorConfigSchema = z.object({
   capture: CaptureSchema.optional(),
   captureKeyEnv: z.string().min(1).optional(),
 }).refine(hasOneLog, oneLog).refine((c) => new Set(c.routes.map((r) => r.name)).size === c.routes.length, { message: "route names must be unique" })
+  .refine((c) => !c.behaviour?.tlsHeader || c.trustProxy, { path: ["behaviour", "tlsHeader"], message: "behaviour.tlsHeader needs trustProxy: true, since only a proxy in front of the door sees the TLS handshake; without one the header is the client's" })
   .refine((c) => !c.partner || c.partner.routes.every((r) => r === "*" || r === c.unmatchedRoute || c.routes.some((x) => x.name === r)), { message: "partner.routes names a route the door does not have" })
   .refine((c) => !c.authz || c.trustProxy, { message: "authz needs trustProxy: true, since every check comes from the proxy and the arrival's address is the last in its X-Forwarded-For" })
   .refine((c) => !c.log || !!c.log.keys?.length, { message: "a remote log needs log.keys: the log's public key files, pinned, to check its answer before a request is relayed" });

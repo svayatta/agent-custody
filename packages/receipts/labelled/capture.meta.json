@@ -1,0 +1,140 @@
+{
+  "sets": [
+    "capture-real-browsers",
+    "capture-tools",
+    "capture-tools-browser-ua",
+    "capture-headless-chrome",
+    "capture-headless-chrome-browser-ua"
+  ],
+  "date": "2026-11-22",
+  "machine": {
+    "os": "macOS 15.7.4",
+    "arch": "arm64"
+  },
+  "clients": {
+    "chrome": "Google Chrome 157.0.8103.79",
+    "safari": "26.3",
+    "curl": "curl 8.7.1 libcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0",
+    "python": "Python 3.15.2 with OpenSSL 4.1.0 23 Oct 2026",
+    "go": "go version go1.25.6 darwin/arm64",
+    "node": "v24.13.0",
+    "bun": "1.4.3"
+  },
+  "skipped": [],
+  "records": 143,
+  "sessions": 29,
+  "ja4BySession": {
+    "chrome-tls": [
+      "t13d1517h2_8daaf6152771_cb7bf5808d99",
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "safari-tls": [
+      "t13d2014h2_a09f3c656075_e42f34c56612"
+    ],
+    "curl-get-post": [
+      "t13d4907h2_0d8feac7bc37_7395dae3b2f3"
+    ],
+    "curl-post": [
+      "t13d4907h2_0d8feac7bc37_7395dae3b2f3"
+    ],
+    "curl-browser-ua-get-post": [
+      "t13d4907h2_0d8feac7bc37_7395dae3b2f3"
+    ],
+    "python-urllib-get-post": [
+      "t13d171100_ab0a1bf427ad_e44827223d20"
+    ],
+    "python-urllib-post": [
+      "t13d171100_ab0a1bf427ad_e44827223d20"
+    ],
+    "python-urllib-browser-ua-get-post": [
+      "t13d171100_ab0a1bf427ad_e44827223d20"
+    ],
+    "go-get-post": [
+      "t13d1912h2_9dc949149365_e5728521abd4"
+    ],
+    "go-post": [
+      "t13d1912h2_9dc949149365_e5728521abd4"
+    ],
+    "go-browser-ua-get-post": [
+      "t13d1912h2_9dc949149365_e5728521abd4"
+    ],
+    "node-get-post": [
+      "t13d5212h1_b262b3658495_8e6e362c5eac",
+      "t13d5213h1_b262b3658495_66863fb0a24c"
+    ],
+    "node-post": [
+      "t13d5212h1_b262b3658495_8e6e362c5eac"
+    ],
+    "node-browser-ua-get-post": [
+      "t13d5212h1_b262b3658495_8e6e362c5eac",
+      "t13d5213h1_b262b3658495_66863fb0a24c"
+    ],
+    "bun-get-post": [
+      "t13d1713h1_5b57614c22b0_6a3d802a7139"
+    ],
+    "bun-post": [
+      "t13d1713h1_5b57614c22b0_6a3d802a7139"
+    ],
+    "bun-browser-ua-get-post": [
+      "t13d1713h1_5b57614c22b0_6a3d802a7139"
+    ],
+    "chrome-headless-load": [
+      "t13d1517h2_8daaf6152771_cb7bf5808d99",
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "chrome-headless-form-set-value": [
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "chrome-headless-form-insert-text-click": [
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "chrome-headless-form-keys-no-pause": [
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "chrome-headless-form-keys-paced": [
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "chrome-headless-browser-ua-load": [
+      "t13d1517h2_8daaf6152771_cb7bf5808d99",
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "chrome-headless-browser-ua-form-set-value": [
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "chrome-headless-browser-ua-form-insert-text-click": [
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "chrome-headless-browser-ua-form-keys-no-pause": [
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ],
+    "chrome-headless-browser-ua-form-keys-paced": [
+      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+    ]
+  },
+  "chromeHeaderNamesTlsAgainstPlain": {
+    "GET /": {
+      "tlsOnly": [],
+      "plainOnly": []
+    },
+    "GET /style.css": {
+      "tlsOnly": [],
+      "plainOnly": []
+    },
+    "GET /app.js": {
+      "tlsOnly": [],
+      "plainOnly": []
+    },
+    "GET /pixel.png": {
+      "tlsOnly": [],
+      "plainOnly": []
+    },
+    "GET /api/data": {
+      "tlsOnly": [],
+      "plainOnly": []
+    },
+    "POST /api/echo": {
+      "tlsOnly": [],
+      "plainOnly": []
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "raw": {
+    "records": 4091155,
+    "withoutARequest": 30763,
+    "idsThatAreFeatureRowIds": 0
+  },
+  "requests": 4060392,
+  "rebuiltSessions": 67561,
+  "join": {
+    "rows": 67352,
+    "rowsWithASession": 67352,
+    "labelled": 60444,
+    "noRow": 70,
+    "rowsDisagree": 6579,
+    "countsDiffer": 468
+  },
+  "userAgents": {
+    "inLabelledSessions": 3262,
+    "withBothLabels": 12
+  },
+  "half": "all",
+  "written": {
+    "human": {
+      "sessions": 50724,
+      "arrivals": 3640733
+    },
+    "automated": {
+      "sessions": 9720,
+      "arrivals": 409440
+    }
+  }
+}

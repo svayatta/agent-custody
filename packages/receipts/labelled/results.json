@@ -1,0 +1,1906 @@
+{
+  "date": "2026-11-22",
+  "format": "agent-custody/door-measure/v1",
+  "per": 10000,
+  "confidencePercent": 95,
+  "thresholds": {
+    "HISTORY_WINDOW_MS": 1800000,
+    "HISTORY_MAX_ARRIVALS": 17,
+    "TIMING_MIN_GAPS": 5,
+    "TIMING_REGULAR_SPREAD_PERCENT": 10,
+    "TIMING_REGULAR_MIN_MEDIAN_MS": 100,
+    "FORM_FAST_MIN_KEYS": 8,
+    "FORM_FAST_MS_PER_KEY": 20,
+    "MAX_FORM_REPORT": 64,
+    "MAX_FORM_FILL_MS": 86400000,
+    "MAX_HEADER_NAMES": 128,
+    "MAX_HEADER_NAME_LENGTH": 64,
+    "MAX_USER_AGENT": 512,
+    "MAX_TLS_VALUE": 64,
+    "STATE_CHANGING": [
+      "DELETE",
+      "PATCH",
+      "POST",
+      "PUT"
+    ],
+    "BROWSER_HEADERS": [
+      "accept-language"
+    ],
+    "SEC_FETCH_HEADERS": [
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest"
+    ],
+    "SEC_FETCH_SINCE": {
+      "chromium": 80,
+      "firefox": 90,
+      "safari": 17
+    },
+    "SEC_CH_UA_SINCE": 100,
+    "TLS13_SINCE": {
+      "chromium": 70,
+      "firefox": 63,
+      "safari": 13
+    },
+    "KNOWN_TOOL_JA4": {
+      "t13d171100_ab0a1bf427ad_e44827223d20": "python",
+      "t13d1713h1_5b57614c22b0_6a3d802a7139": "bun",
+      "t13d1912h2_9dc949149365_e5728521abd4": "go",
+      "t13d4907h2_0d8feac7bc37_7395dae3b2f3": "curl",
+      "t13d5212h1_b262b3658495_8e6e362c5eac": "node",
+      "t13d5213h1_b262b3658495_66863fb0a24c": "node"
+    }
+  },
+  "sets": [
+    {
+      "set": "capture-headless-chrome",
+      "arrivals": {
+        "human": 0,
+        "automated": 45
+      },
+      "sessions": {
+        "human": 0,
+        "automated": 5
+      },
+      "labelSources": {
+        "human": {},
+        "automated": {
+          "scripted-client": 45
+        }
+      },
+      "flags": [
+        {
+          "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.knownTool",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.timing.regular",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.navigation.directWrite",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 45,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 787
+            },
+            "sessions": {
+              "n": 5,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 4345
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.fast",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 4,
+              "flagged": 1,
+              "rate": 2500,
+              "low": 455,
+              "high": 6994
+            },
+            "sessions": {
+              "n": 4,
+              "flagged": 1,
+              "rate": 2500,
+              "low": 455,
+              "high": 6994
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.noInput",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 4,
+              "flagged": 1,
+              "rate": 2500,
+              "low": 455,
+              "high": 6994
+            },
+            "sessions": {
+              "n": 4,
+              "flagged": 1,
+              "rate": 2500,
+              "low": 455,
+              "high": 6994
+            }
+          }
+        }
+      ]
+    },
+    {
+      "set": "capture-headless-chrome-browser-ua",
+      "arrivals": {
+        "human": 0,
+        "automated": 45
+      },
+      "sessions": {
+        "human": 0,
+        "automated": 5
+      },
+      "labelSources": {
+        "human": {},
+        "automated": {
+          "scripted-client": 45
+        }
+      },
+      "flags": [
+        {
+          "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 45,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 787
+            },
+            "sessions": {
+              "n": 5,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 4345
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 45,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 787
+            },
+            "sessions": {
+              "n": 5,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 4345
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.knownTool",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.timing.regular",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.navigation.directWrite",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 45,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 787
+            },
+            "sessions": {
+              "n": 5,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 4345
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.fast",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 4,
+              "flagged": 1,
+              "rate": 2500,
+              "low": 455,
+              "high": 6994
+            },
+            "sessions": {
+              "n": 4,
+              "flagged": 1,
+              "rate": 2500,
+              "low": 455,
+              "high": 6994
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.noInput",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 4,
+              "flagged": 1,
+              "rate": 2500,
+              "low": 455,
+              "high": 6994
+            },
+            "sessions": {
+              "n": 4,
+              "flagged": 1,
+              "rate": 2500,
+              "low": 455,
+              "high": 6994
+            }
+          }
+        }
+      ]
+    },
+    {
+      "set": "capture-real-browsers",
+      "arrivals": {
+        "human": 28,
+        "automated": 0
+      },
+      "sessions": {
+        "human": 4,
+        "automated": 0
+      },
+      "labelSources": {
+        "human": {
+          "real-browser": 28
+        },
+        "automated": {}
+      },
+      "flags": [
+        {
+          "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 27,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 1246
+            },
+            "sessions": {
+              "n": 3,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 5615
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 10,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 2776
+            },
+            "sessions": {
+              "n": 2,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 6577
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.knownTool",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.timing.regular",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.navigation.directWrite",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.fast",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.noInput",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "set": "capture-tools",
+      "arrivals": {
+        "human": 0,
+        "automated": 15
+      },
+      "sessions": {
+        "human": 0,
+        "automated": 10
+      },
+      "labelSources": {
+        "human": {},
+        "automated": {
+          "scripted-client": 15
+        }
+      },
+      "flags": [
+        {
+          "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.knownTool",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.timing.regular",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.navigation.directWrite",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 15,
+              "flagged": 10,
+              "rate": 6667,
+              "low": 4171,
+              "high": 8483
+            },
+            "sessions": {
+              "n": 10,
+              "flagged": 10,
+              "rate": 10000,
+              "low": 7224,
+              "high": 10000
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.fast",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.noInput",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "set": "capture-tools-browser-ua",
+      "arrivals": {
+        "human": 0,
+        "automated": 10
+      },
+      "sessions": {
+        "human": 0,
+        "automated": 5
+      },
+      "labelSources": {
+        "human": {},
+        "automated": {
+          "scripted-client": 10
+        }
+      },
+      "flags": [
+        {
+          "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 10,
+              "flagged": 10,
+              "rate": 10000,
+              "low": 7224,
+              "high": 10000
+            },
+            "sessions": {
+              "n": 5,
+              "flagged": 5,
+              "rate": 10000,
+              "low": 5655,
+              "high": 10000
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 10,
+              "flagged": 2,
+              "rate": 2000,
+              "low": 566,
+              "high": 5099
+            },
+            "sessions": {
+              "n": 5,
+              "flagged": 1,
+              "rate": 2000,
+              "low": 362,
+              "high": 6245
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.knownTool",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.timing.regular",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.navigation.directWrite",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 10,
+              "flagged": 5,
+              "rate": 5000,
+              "low": 2365,
+              "high": 7635
+            },
+            "sessions": {
+              "n": 5,
+              "flagged": 5,
+              "rate": 10000,
+              "low": 5655,
+              "high": 10000
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.fast",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.noInput",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "set": "keyrecs-fixed-text",
+      "arrivals": {
+        "human": 19772,
+        "automated": 0
+      },
+      "sessions": {
+        "human": 198,
+        "automated": 0
+      },
+      "labelSources": {
+        "human": {
+          "recruited-participant": 19772
+        },
+        "automated": {}
+      },
+      "flags": [
+        {
+          "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.knownTool",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.timing.regular",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.navigation.directWrite",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.fast",
+          "human": {
+            "arrivals": {
+              "n": 19772,
+              "flagged": 96,
+              "rate": 49,
+              "low": 39,
+              "high": 60
+            },
+            "sessions": {
+              "n": 198,
+              "flagged": 2,
+              "rate": 101,
+              "low": 27,
+              "high": 361
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.noInput",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "set": "lagopoulos-2018",
+      "arrivals": {
+        "human": 3640733,
+        "automated": 409440
+      },
+      "sessions": {
+        "human": 50724,
+        "automated": 9720
+      },
+      "labelSources": {
+        "human": {
+          "user-agent-lists": 3640733
+        },
+        "automated": {
+          "user-agent-lists": 409440
+        }
+      },
+      "flags": [
+        {
+          "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.tls.knownTool",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.timing.regular",
+          "human": {
+            "arrivals": {
+              "n": 3640733,
+              "flagged": 25,
+              "rate": 0,
+              "low": 0,
+              "high": 1
+            },
+            "sessions": {
+              "n": 50724,
+              "flagged": 9,
+              "rate": 2,
+              "low": 0,
+              "high": 4
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 409440,
+              "flagged": 7778,
+              "rate": 190,
+              "low": 185,
+              "high": 195
+            },
+            "sessions": {
+              "n": 9720,
+              "flagged": 72,
+              "rate": 74,
+              "low": 58,
+              "high": 94
+            }
+          }
+        },
+        {
+          "flag": "behaviour.navigation.directWrite",
+          "human": {
+            "arrivals": {
+              "n": 3640733,
+              "flagged": 12,
+              "rate": 0,
+              "low": 0,
+              "high": 1
+            },
+            "sessions": {
+              "n": 50724,
+              "flagged": 8,
+              "rate": 2,
+              "low": 0,
+              "high": 4
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 409440,
+              "flagged": 17,
+              "rate": 0,
+              "low": 0,
+              "high": 1
+            },
+            "sessions": {
+              "n": 9720,
+              "flagged": 13,
+              "rate": 13,
+              "low": 7,
+              "high": 23
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.fast",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "behaviour.form.noInput",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
