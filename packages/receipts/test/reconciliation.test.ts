@@ -85,6 +85,14 @@ describe("financial outcome reconciliation evidence", () => {
     expect(verifyBundle(f.bundle, f.opts).checks.some((c) => c.name === "reconciliation original authorization operation is submitted")).toBe(true);
   });
 
+  it("verifies an original authorization whose request arguments are withheld", async () => {
+    const f = await fixture({ crash: true, private: true });
+    const r = await f.check(f.bundle);
+    expect(r.checks.find((c) => c.name === "reconciliation original request args digest")?.ok).toBe(true);
+    const original = JSON.parse(Buffer.from(decode(f.bundle).predicate.reconciliation!.original.envelope.payload, "base64").toString());
+    expect(original.predicate.capture.withheld).toContainEqual(["request", "args", "$rest"]);
+  });
+
   it("records failed settlement as a successful provider read", async () => {
     const f = await fixture();
     const b = await f.changed((p) => {
