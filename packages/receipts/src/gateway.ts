@@ -13,6 +13,7 @@ import { strictRefusals, type FactConfig, type GatewayConfig, type UpstreamConfi
 import { digestOf, dsseVerifiers, dsseVerify, loadPrivateKey, loadPublicKey, type Envelope } from "./crypto.ts";
 import { delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { APPROVAL_META_KEY, DEFAULT_APPROVAL_LIFETIME_SECONDS, consumeApproval, verifyApproval, verifyApprovalStatement } from "./approval.ts";
+import { APPROVAL_REQUEST_META_KEY, pickupApproval, type ApprovalPickup } from "./approval-requests.ts";
 import { createIssuer, ReceiptPending, type FlushResult, type PreparedReceipt } from "./issue.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
@@ -471,6 +472,20 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       let approvedWindow: { issuedAt: number; expiresAt: number } | undefined;
       const rule = approvalRule(tool);
       const approvalBinding = { principal: delegation.principal, agent: delegation.agent, tool, args, ...(rule?.fields ? { fields: rule.fields } : {}) };
+      // Human in the loop: a protected call without an approval either takes the envelope an approver signed for
+      // this exact call, or leaves a request for one. The envelope is then checked below like one sent in `_meta`.
+      let requested: Exclude<ApprovalPickup, { envelope: unknown }> | undefined;
+      // Only for a call the grant allows: nobody is asked to approve a call that would be refused regardless.
+      if (rule && cfg.approvals?.requests && approvalEnvelope === undefined && !grantProblem(timestamp) && delegation.scopes.includes(tool)) {
+        try {
+          const maxLifetimeSeconds = cfg.approvals.maxLifetimeSeconds ?? DEFAULT_APPROVAL_LIFETIME_SECONDS;
+          const pickup = pickupApproval(cfg.approvals.requests.dir, cfg.approvals.usedDir, approvalBinding, rule.minApprovers, receiptId, timestamp, (env) => verifyApproval(env, approvalKeys, approvalBinding, { at: timestamp, minApprovers: rule.minApprovers, maxLifetimeSeconds }));
+          if ("envelope" in pickup) approvalEnvelope = pickup.envelope;
+          else requested = pickup;
+        } catch (e) {
+          console.error(`agent-custody gateway: approval request not recorded: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       // Only an authenticated statement is embedded in the approval record. Untrusted or malformed metadata is never
       // copied there: it could carry arbitrary text from withheld arguments. Under a private rule the issuer then
       // withholds the embedded envelope as a commitment (see CLEAR_IN.approval in capture.ts), because even an
@@ -487,7 +502,10 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
         return checked;
       };
       const initialApproval = checkApproval(timestamp);
-      const approvalProblem = initialApproval && !initialApproval.ok ? initialApproval.error : undefined;
+      const approvalProblem = !initialApproval || initialApproval.ok ? undefined
+        : requested?.status === "denied" ? `an approver denied request ${requested.requestId}${requested.reason ? `: ${requested.reason}` : ""}`
+        : requested ? `approval required: request ${requested.requestId} is waiting for an approver${requested.previous ? ` (the last approval for this call ${requested.previous})` : ""}; send the same call again once it is approved`
+        : initialApproval.error;
       let operation: OperationRecord | undefined;
       let createdOperation = false;
       let attemptedOperation = false;
@@ -501,7 +519,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       } else if (!inScope) {
         policy = { decision: "deny", reasons: [], errors: [`tool "${tool}" is not in the delegation scopes`], policyDigest: pDigest };
       } else if (approvalProblem) {
-        policy = { decision: "deny", reasons: [], errors: [`approval rejected: ${approvalProblem}`], policyDigest: pDigest };
+        policy = { decision: "deny", reasons: [], errors: [requested ? approvalProblem : `approval rejected: ${approvalProblem}`], policyDigest: pDigest };
       } else {
         try {
           ({ facts, templates: factTemplates, results: factResults } = await gatherFacts(tool, args, upstreamMeta));
@@ -684,7 +702,7 @@ export async function createGatewayHost(cfg: GatewayConfig, options: GatewayOpti
       }
       if (operation && createdOperation && attemptedOperation) operations!.update(operation.id, { original: issued! });
 
-      const meta = { [RECEIPT_META_KEY]: receiptId, ...(head.operation ? { [OPERATION_META_KEY]: head.operation } : {}), ...(logPending ? { [LOG_PENDING_META_KEY]: true } : {}) };
+      const meta = { [RECEIPT_META_KEY]: receiptId, ...(head.operation ? { [OPERATION_META_KEY]: head.operation } : {}), ...(logPending ? { [LOG_PENDING_META_KEY]: true } : {}), ...(requested ? { [APPROVAL_REQUEST_META_KEY]: { requestId: requested.requestId, status: requested.status } } : {}) };
       const refuse = (text: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: `${text} (receipt ${receiptId})` }], _meta: meta });
       switch (execution.status) {
         // the agent gets the real result, the real reason, and the real error: what is withheld is withheld from the receipt

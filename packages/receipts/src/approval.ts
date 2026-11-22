@@ -1,6 +1,6 @@
 // A short-lived human approval signs the exact action, independently of the agent's delegation grant.
 import { randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { digestOf, dsseSign, dsseVerifiers, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
@@ -168,6 +168,11 @@ export function verifyApproval(envelope: unknown, trusted: PublicKeyRef[], bindi
   } catch (error) {
     return { ok: false, error: `invalid approval: ${error instanceof Error ? error.message : "could not verify"}` };
   }
+}
+
+/** Whether `consumeApproval` has burned this approval id in `usedDir`. */
+export function approvalConsumed(usedDir: string, approvalId: string): boolean {
+  return existsSync(join(usedDir, `${sha256Hex(approvalId.toLowerCase())}.json`));
 }
 
 /**
