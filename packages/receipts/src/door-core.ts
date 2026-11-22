@@ -43,16 +43,16 @@ export interface Arrival {
   /**
    * What became of the grant header: a trusted grant in scope for this route, one out of scope, one that did not verify,
    * one revoked (`revoked`: it, or a grant above it in its chain, is in `revokedGrants`, or that file cannot be read),
-   * one presented by another agent (`wrong-sender`: the request is signed by a signature agent the grant does not name),
+   * one presented by another agent (`wrong-sender`: the request is signed by a signature agent, or a did:key, the grant does not name),
    * or none.
    */
   grant: "verified" | "out-of-scope" | "invalid" | "revoked" | "wrong-sender" | "absent";
   grantError?: string;
   /** What became of an RFC 9421 signature tagged `web-bot-auth`: see `SignatureCheck`. `unchecked` when the door has no `webBotAuth` config */
   signature: SignatureCheck["outcome"];
-  /** the `Signature-Agent` origin; checked only when `signature` is `verified` */
+  /** the `Signature-Agent` origin, or the did:key that is the signature's keyid; checked only when `signature` is `verified` */
   signatureAgent?: string;
-  /** the signature's keyid, the RFC 7638 thumbprint of the agent's key; checked only when `signature` is `verified` */
+  /** the signature's keyid, the RFC 7638 thumbprint of the agent's key, or a did:key; checked only when `signature` is `verified` */
   signatureKeyid?: string;
   signatureError?: string;
   /** the agent name from the `x-agent-custody-agent` header, when sent; a claim */
@@ -385,6 +385,7 @@ export function signedRequestOf(req: DoorRequest): SignedRequest {
  * Without a grant, a Web Bot Auth signature the door verified (`signature`, from `createWebBotAuthVerifier`) makes the
  * arrival `verified` as its signature agent. With both, the signature binds the grant to its sender when the grant names
  * that signature agent; a grant presented under another agent's signature is `wrong-sender` and the arrival `claimed`.
+ * A signature by a did:key's own key binds a grant that names that did:key in the same way, and counts for nothing else.
  * An `x-agent-custody-agent` header or a signature that did not verify alone is `claimed`. Nothing at all is `unknown`.
  * Without `signature`, a `Signature-Input` header is recorded as `unchecked`. `revoked`, when given, says why a grant
  * that verified is revoked (from its chain's digests, leaf first), or null when it is not; a revoked grant is `claimed`.
@@ -396,17 +397,26 @@ export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route
   const declared = typeof declaredRaw === "string" && declaredRaw.trim() ? declaredRaw.trim().slice(0, 200) : undefined;
   const sig: SignatureCheck = signature ?? (req.headers["signature-input"] !== undefined ? { outcome: "unchecked" } : { outcome: "absent" });
   const signer = sig.outcome === "verified" ? { agent: sig.agent, keyid: sig.keyid } : undefined;
-  const sigFields = {
-    signature: sig.outcome,
-    ...("agent" in sig && sig.agent ? { signatureAgent: sig.agent } : {}),
-    ...("keyid" in sig && sig.keyid ? { signatureKeyid: sig.keyid } : {}),
-    ...("error" in sig ? { signatureError: sig.error } : {}),
-  };
+  // A did:key signature proves only that the signer holds a key, and anyone can make a key. It is recorded as verified
+  // only on the last line, with a verified grant for that did:key. Everywhere else it is invalid, so that no policy
+  // takes it for a checked identity.
+  const didSigner = signer?.agent.startsWith(DID_KEY_PREFIX) ? signer : undefined;
   const norm = normalizePath(url.pathname);
-  const base = { ...sigFields, ...(declared ? { declared } : {}), remote: remoteOf(req, trustProxy), method, path: "path" in norm ? norm.path : url.pathname, route };
+  const baseOf = (s: SignatureCheck) => ({
+    signature: s.outcome,
+    ...("agent" in s && s.agent ? { signatureAgent: s.agent } : {}),
+    ...("keyid" in s && s.keyid ? { signatureKeyid: s.keyid } : {}),
+    ...("error" in s ? { signatureError: s.error } : {}),
+    ...(declared ? { declared } : {}),
+    remote: remoteOf(req, trustProxy),
+    method,
+    path: "path" in norm ? norm.path : url.pathname,
+    route,
+  });
+  const base = baseOf(didSigner ? { outcome: "invalid", error: `the request is signed by the key of ${didSigner.agent}, and no verified grant in the request names that did:key`, ...didSigner } : sig);
   const envelope = parseGrantHeader(req);
   if (!envelope) {
-    if (signer) return { arrival: { class: "verified", subject: signer.agent, grant: "absent", ...base }, signer };
+    if (signer && !didSigner) return { arrival: { class: "verified", subject: signer.agent, grant: "absent", ...base }, signer };
     const claimed = !!declared || sig.outcome !== "absent";
     return { arrival: { class: claimed ? "claimed" : "unknown", subject: declared ?? "unknown", grant: "absent", ...base } };
   }
@@ -430,7 +440,7 @@ export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route
   if (!grant.scopes.includes(route)) return { arrival: { class: "claimed", subject: grant.agent, grant: "out-of-scope", grantError: `route "${route}" is not in the grant's scopes`, ...base } };
   // The signature proves who sent the request. A grant for one agent in a request another agent signed was handed on or taken.
   if (signer && signer.agent !== grant.agent) return { arrival: { class: "claimed", subject: grant.agent, grant: "wrong-sender", grantError: `the grant names agent "${grant.agent}", and the request is signed by ${signer.agent}`, ...base } };
-  return { arrival: { class: "verified", subject: grant.agent, grant: "verified", ...base }, delegation: { envelope, grant, principalKeyid: checked.keyid }, ...(signer ? { signer } : {}) };
+  return { arrival: { class: "verified", subject: grant.agent, grant: "verified", ...baseOf(sig) }, delegation: { envelope, grant, principalKeyid: checked.keyid }, ...(signer ? { signer } : {}) };
 }
 
 /** Why a did:key agent does not check out, or null when it decodes and agrees with the grant's agentKey. */
@@ -631,7 +641,9 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     const norm = normalizePath(url.pathname);
     const path = "path" in norm ? norm.path : url.pathname;
     const route = "path" in norm ? matchRoute(cfg.routes, cfg.unmatchedRoute, method, path) : cfg.unmatchedRoute;
-    const signature = webBotAuth ? await webBotAuth.verify(signedRequestOf(req)) : undefined;
+    const presented = webBotAuth && req.headers["signature-input"] !== undefined ? parseGrantHeader(req) : null;
+    const trustedGrant = presented ? verifyDelegation(presented, trusted) : undefined;
+    const signature = webBotAuth ? await webBotAuth.verify(signedRequestOf(req), trustedGrant?.ok ? trustedGrant.delegation.agent : undefined) : undefined;
     const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature, revoked);
     const checkedAgent = arrival.class === "verified";
     const by = checkedAgent ? "agent" : "remote";
