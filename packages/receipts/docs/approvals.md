@@ -83,7 +83,7 @@ Denied by policy: approval required: request b41a90c4… is waiting for an appro
 
 The same id is in the result's `_meta` under `agent-custody/approval-request`, as `{ requestId, status }`. One exact call has one request: the same principal, agent, tool, mapping, and arguments always name the same id, so an agent that retries does not open a second one.
 
-The approver works from the command line with their own key:
+The approver works in the [console](console.md)'s **Approvals** tab, which signs in their browser, or from the command line with their own key:
 
 ```bash
 agent-custody approvals list --config gateway.json

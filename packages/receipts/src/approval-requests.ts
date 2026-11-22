@@ -6,8 +6,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { approvalConsumed, createApproval, type ApprovalBinding } from "./approval.ts";
-import { digestOf, dsseCountersign, sha256Hex, type Envelope, type KeyPair } from "./crypto.ts";
+import { APPROVAL_TYPE, approvalConsumed, approvalStatement, createApproval, verifyApproval, type ApprovalBinding } from "./approval.ts";
+import { canonicalize, digestOf, dsseCountersign, pae, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } from "./crypto.ts";
 
 /** Where a refusal names the request it opened: `{ requestId, status }` in the result's `_meta`. */
 export const APPROVAL_REQUEST_META_KEY = "agent-custody/approval-request";
@@ -154,9 +154,38 @@ export function approveApprovalRequest(dir: string, requestId: string, key: KeyP
   } else {
     envelope = createApproval(key, { ...(request.binding as ApprovalBinding), issuedAt: at, expiresAt: opts.expiresAt });
   }
-  const signers = new Set(envelope.signatures.map((s) => s.keyid)).size;
-  const done = signers >= request.requiredApprovers;
+  return signed(dir, request, envelope, at);
+}
+
+function signed(dir: string, request: ApprovalRequest, envelope: Envelope, at: string): ApprovalRequest {
+  const done = new Set(envelope.signatures.map((s) => s.keyid)).size >= request.requiredApprovers;
   return write(dir, { ...request, envelope, ...(done ? { status: "approved" as const, decidedAt: at } : {}) });
+}
+
+/**
+ * What an approver signs for a pending request, when the signing happens elsewhere (the console signs in the browser):
+ * the payload already signed once under a two-person rule, or a new statement expiring at `expiresAt`, and the DSSE
+ * bytes a signature is made over. Nothing is written until `signApprovalRequest` gets a signature that verifies.
+ */
+export function approvalRequestPayload(dir: string, requestId: string, opts: { expiresAt: string; at?: string }): { payloadType: string; payload: string; pae: string; signedBy: string[] } {
+  const request = pending(dir, requestId);
+  const payload = request.envelope?.payload ?? Buffer.from(canonicalize(approvalStatement({ ...(request.binding as ApprovalBinding), issuedAt: opts.at ?? new Date().toISOString(), expiresAt: opts.expiresAt }))).toString("base64");
+  return { payloadType: APPROVAL_TYPE, payload, pae: pae(APPROVAL_TYPE, Buffer.from(payload, "base64")).toString("base64"), signedBy: request.envelope?.signatures.map((s) => s.keyid) ?? [] };
+}
+
+/**
+ * Add a signature made elsewhere. It is kept only if it verifies with a trusted key and its payload binds this request's
+ * exact call, inside the lifetime cap: the same checks the gateway makes, so nothing that would be refused is stored.
+ */
+export function signApprovalRequest(dir: string, requestId: string, sig: { payload: string; keyid: string; sig: string }, trusted: PublicKeyRef[], opts: { at?: string; maxLifetimeSeconds?: number } = {}): ApprovalRequest {
+  const request = pending(dir, requestId);
+  const at = opts.at ?? new Date().toISOString();
+  if (request.envelope && sig.payload !== request.envelope.payload) throw new Error(`approval request ${requestId} already carries a signed payload, and this signature is over another one`);
+  if (request.envelope?.signatures.some((s) => s.keyid === sig.keyid)) throw new Error(`approval request ${requestId} is already signed with key ${sig.keyid}; a second approver must use a different key`);
+  const one: Envelope = { payloadType: APPROVAL_TYPE, payload: sig.payload, signatures: [{ keyid: sig.keyid, sig: sig.sig }] };
+  const checked = verifyApproval(one, trusted, request.binding as ApprovalBinding, { at, minApprovers: 1, ...(opts.maxLifetimeSeconds !== undefined ? { maxLifetimeSeconds: opts.maxLifetimeSeconds } : {}) });
+  if (!checked.ok) throw new Error(`the signature was not accepted: ${checked.error}`);
+  return signed(dir, request, request.envelope ? { ...(request.envelope as Envelope), signatures: [...request.envelope.signatures, one.signatures[0]!] } : one, at);
 }
 
 /** The approver's side: refuse the request. The gateway keeps refusing that exact call, and says so, until the request is deleted. */

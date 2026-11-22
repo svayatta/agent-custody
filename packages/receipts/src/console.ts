@@ -8,6 +8,8 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
+import { DEFAULT_APPROVAL_LIFETIME_SECONDS } from "./approval.ts";
+import { approvalRequestPayload, denyApprovalRequest, listApprovalRequests, signApprovalRequest } from "./approval-requests.ts";
 import { checkConfig } from "./check.ts";
 import { loadConfig, type GatewayConfig } from "./config.ts";
 import { loadPrivateKey, loadPublicKey, type Envelope, type PublicKeyRef } from "./crypto.ts";
@@ -429,6 +431,54 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
       return { digest, agent: decoded.agent, note: "the gateway refuses this grant, and every grant delegated from it, on its next call" };
     },
 
+    "GET /api/approvals": async () => {
+      const cfg = loadConfig(options.configFile);
+      const dir = cfg.approvals?.requests?.dir;
+      if (!dir) return { configured: false };
+      const all = listApprovalRequests(dir);
+      const shown = [...all.filter((r) => r.status === "pending"), ...all.filter((r) => r.status !== "pending").reverse().slice(0, 50)];
+      return {
+        configured: true,
+        maxLifetimeSeconds: cfg.approvals!.maxLifetimeSeconds ?? DEFAULT_APPROVAL_LIFETIME_SECONDS,
+        trustedKeyids: approverKeys(cfg).map((k) => k.keyid),
+        requests: shown.map((r) => ({
+          requestId: r.requestId, status: r.status, createdAt: r.createdAt, decidedAt: r.decidedAt ?? null, receiptId: r.receiptId,
+          principal: r.binding.principal, agent: r.binding.agent, tool: r.binding.tool, arguments: r.binding.args, fields: r.binding.fields ?? null,
+          requiredApprovers: r.requiredApprovers, signedBy: r.envelope?.signatures.map((s) => s.keyid) ?? [], reason: r.reason ?? null,
+        })),
+      };
+    },
+
+    // The console signs nothing: the browser signs these bytes with the approver's key, which never reaches the server.
+    "POST /api/approvals/prepare": async (req) => {
+      const body = object(await readBody(req));
+      const { dir, cfg } = requestsDir();
+      const max = cfg.approvals!.maxLifetimeSeconds ?? DEFAULT_APPROVAL_LIFETIME_SECONDS;
+      const seconds = body.expiresInSeconds;
+      if (typeof seconds !== "number" || !Number.isInteger(seconds) || seconds <= 0 || seconds > max) throw new HttpError(400, `expiresInSeconds is a whole number of seconds from 1 to ${max}, the gateway's approvals.maxLifetimeSeconds`);
+      return decided(() => approvalRequestPayload(dir, requestIdOf(body), { expiresAt: new Date(Date.now() + seconds * 1000).toISOString() }));
+    },
+
+    "POST /api/approvals/sign": async (req, _url, by) => {
+      const body = object(await readBody(req));
+      const { dir, cfg } = requestsDir();
+      const requestId = requestIdOf(body);
+      for (const f of ["payload", "keyid", "sig"] as const) if (typeof body[f] !== "string" || !body[f]) throw new HttpError(400, `send ${f} as a string`);
+      const r = decided(() => signApprovalRequest(dir, requestId, { payload: body.payload as string, keyid: body.keyid as string, sig: body.sig as string }, approverKeys(cfg), { maxLifetimeSeconds: cfg.approvals!.maxLifetimeSeconds ?? DEFAULT_APPROVAL_LIFETIME_SECONDS }));
+      audit("approval.sign", { requestId, agent: r.binding.agent, tool: r.binding.tool, keyid: body.keyid, status: r.status }, by);
+      return { status: r.status, note: r.status === "approved" ? `Approved. ${r.binding.agent} may send ${r.binding.tool} with exactly these arguments, once.` : "Signed. It needs a second approver with a different key." };
+    },
+
+    "POST /api/approvals/deny": async (req, _url, by) => {
+      const body = object(await readBody(req));
+      const { dir } = requestsDir();
+      const requestId = requestIdOf(body);
+      const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : undefined;
+      const r = decided(() => denyApprovalRequest(dir, requestId, reason ? { reason } : {}));
+      audit("approval.deny", { requestId, agent: r.binding.agent, tool: r.binding.tool, ...(reason ? { reason } : {}) }, by);
+      return { status: r.status, note: "Denied. The gateway refuses that exact call, and tells the agent so, until the request is deleted." };
+    },
+
     "GET /api/revocations": async () => ({ digests: revokedList(loadConfig(options.configFile)) }),
 
     "GET /api/receipts": async (_req, url) => {
@@ -442,6 +492,26 @@ export async function serveConsole(options: ConsoleOptions): Promise<RunningCons
     "GET /api/audit": async () => ({
       entries: existsSync(auditFile) ? readFileSync(auditFile, "utf8").trim().split("\n").filter(Boolean).slice(-200).reverse().map((l) => JSON.parse(l) as unknown) : [],
     }),
+  };
+
+  const approverKeys = (cfg: GatewayConfig): PublicKeyRef[] => (cfg.approvals?.trustedKeys ?? []).map(loadPublicKey);
+  const requestsDir = () => {
+    const cfg = loadConfig(options.configFile);
+    const dir = cfg.approvals?.requests?.dir;
+    if (!dir) throw new HttpError(409, "the config has no approvals.requests.dir, which is where the gateway leaves approval requests");
+    return { dir, cfg };
+  };
+  const requestIdOf = (body: Record<string, unknown>): string => {
+    if (typeof body.requestId !== "string" || !/^[0-9a-f]{32}$/.test(body.requestId)) throw new HttpError(400, "a request id is 32 hex characters");
+    return body.requestId;
+  };
+  // a request that is gone, already decided, or a signature that does not verify is the caller's conflict, not a crash
+  const decided = <T>(f: () => T): T => {
+    try {
+      return f();
+    } catch (e) {
+      throw new HttpError(409, e instanceof Error ? e.message : String(e));
+    }
   };
 
   const safeJson = (s: string): unknown => {

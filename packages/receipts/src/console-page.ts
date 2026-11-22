@@ -35,6 +35,7 @@ textarea { width: 100%; min-height: 280px; background: var(--code); color: var(-
 [hidden] { display: none !important; }
 .mt { margin-top: 16px; }
 textarea.short { min-height: 140px; }
+pre.args { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
 dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 16px; max-width: min(480px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(0, 0, 0, .5); }
 dialog h3 { margin: 0 0 8px; }
@@ -58,7 +59,7 @@ const SCRIPT = String.raw`
   var token = '';
   try { token = sessionStorage.getItem(KEY) || ''; } catch (e) {}
   var view = document.getElementById('view');
-  var tabs = ['Overview', 'Check', 'Policy', 'Grants', 'Receipts', 'Audit'];
+  var tabs = ['Overview', 'Check', 'Policy', 'Grants', 'Approvals', 'Receipts', 'Audit'];
   var current = 'Overview';
   var policyDigest = '';
   var dirty = false;
@@ -97,6 +98,29 @@ const SCRIPT = String.raw`
       });
   }
   function fail(e) { say(e.message || String(e), true); }
+  function b64bytes(s) { var bin = atob(s); var u = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
+  function bytes64(buf) { var u = new Uint8Array(buf); var s = ''; for (var i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); }
+  function hexOf(buf) { return Array.prototype.map.call(new Uint8Array(buf), function (b) { return ('0' + b.toString(16)).slice(-2); }).join(''); }
+  // Sign the DSSE bytes with an Ed25519 PKCS8 key from a file the approver picks. The key stays in this page; the keyid is
+  // the gateway's own: sha256 of the public key's SPKI DER.
+  function signWith(file, paeB64) {
+    var key;
+    return file.text().then(function (pem) {
+      var m = /-----BEGIN PRIVATE KEY-----([\s\S]+?)-----END PRIVATE KEY-----/.exec(pem);
+      if (!m) throw new Error('That is not a private key. Choose the .key file agent-custody keygen wrote for you.');
+      return crypto.subtle.importKey('pkcs8', b64bytes(m[1].replace(/\s+/g, '')), { name: 'Ed25519' }, true, ['sign']);
+    }).then(function (k) {
+      key = k;
+      return crypto.subtle.exportKey('jwk', k);
+    }).then(function (jwk) {
+      var x = jwk.x.replace(/-/g, '+').replace(/_/g, '/');
+      while (x.length % 4) x += '=';
+      var spki = new Uint8Array(44);
+      spki.set([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]);
+      spki.set(b64bytes(x), 12);
+      return Promise.all([crypto.subtle.digest('SHA-256', spki), crypto.subtle.sign({ name: 'Ed25519' }, key, b64bytes(paeB64))]);
+    }).then(function (r) { return { keyid: hexOf(r[0]), sig: bytes64(r[1]) }; });
+  }
   function signOut() {
     token = '';
     try { sessionStorage.removeItem(KEY); } catch (e) {}
@@ -156,7 +180,7 @@ const SCRIPT = String.raw`
     });
   }
 
-  var ACTIONS = { 'policy.save': 'Policy saved', 'grant.revoke': 'Grant revoked' };
+  var ACTIONS = { 'policy.save': 'Policy saved', 'grant.revoke': 'Grant revoked', 'approval.sign': 'Approval signed', 'approval.deny': 'Approval denied' };
   function historyTable(files) {
     var t = h('table', null, h('tr', null, h('th', { text: 'saved' }), h('th', { text: 'digest' })));
     files.forEach(function (f) {
@@ -349,6 +373,67 @@ const SCRIPT = String.raw`
           h('p', { class: 'muted', text: r.total + ' receipts on disk, the newest ' + r.receipts.length + ' shown. Each is verified against the gateway key, the trusted principals, and the local log.' }),
           r.problems.length ? h('div', { class: 'banner bad' }, r.problems.join('. ')) : null,
           h('div', { class: 'row' }, h('label', null, 'Outcome ', filter)), h('div', { class: 'card scroll' }, body), detail);
+      });
+    },
+
+    Approvals: function () {
+      return api('GET', '/api/approvals').then(function (a) {
+        var title = h('h2', { text: 'Approvals' });
+        if (!a.configured) return h('div', null, title, h('p', { class: 'muted', text: 'Approval requests are off. With approvals.requests.dir in the gateway config, a protected call that arrives with no approval leaves a request here for a person to read and sign.' }));
+        var detail = h('div');
+        var pending = a.requests.filter(function (r) { return r.status === 'pending'; });
+        var t = h('table', null, h('tr', null, h('th', { text: 'asked' }), h('th', { text: 'agent' }), h('th', { text: 'tool' }), h('th', { text: 'for' }), h('th', { text: 'status' }), h('th', { text: '' })));
+        a.requests.forEach(function (r) {
+          var st = r.status === 'pending' && r.requiredApprovers === 2 ? 'pending, ' + r.signedBy.length + ' of 2 signed' : r.status;
+          t.appendChild(h('tr', null, h('td', null, when(r.createdAt)), h('td', { text: r.agent }), h('td', null, h('code', { text: r.tool })), h('td', { text: r.principal }),
+            h('td', null, h('span', { class: 'pill', text: st })), h('td', null, h('button', { type: 'button', class: 'link', onclick: function () { open(r); } }, r.status === 'pending' ? 'Review' : 'View'))));
+        });
+        function open(r) {
+          var head = h('h3', { tabindex: '-1', text: (r.status === 'pending' ? 'Review ' : 'Request ') + r.requestId });
+          var rows = [['agent', r.agent], ['tool', h('code', { text: r.tool })], ['principal', r.principal], ['asked', when(r.createdAt)], ['refused call', h('code', { text: r.receiptId })],
+            ['approvers needed', String(r.requiredApprovers)], ['signed by', r.signedBy.length ? r.signedBy.map(short).join(', ') : 'nobody yet'], ['status', r.status + (r.reason ? ': ' + r.reason : '')]];
+          var card = h('div', { class: 'card detail' }, head, kv(rows), h('p', { text: 'The exact arguments. An approval covers these and nothing else: a changed value is a new request.' }),
+            h('pre', { class: 'args', text: JSON.stringify(r.arguments, null, 2) }));
+          if (r.status === 'pending') {
+            var choices = [[300, '5 minutes'], [600, '10 minutes'], [900, '15 minutes'], [1800, '30 minutes'], [3600, '1 hour']].filter(function (c) { return c[0] <= a.maxLifetimeSeconds; });
+            if (!choices.length) choices = [[a.maxLifetimeSeconds, a.maxLifetimeSeconds + ' seconds']];
+            var expires = h('select', { 'aria-label': 'Valid for' });
+            choices.forEach(function (c, i) { expires.appendChild(h('option', { value: String(c[0]), selected: i === Math.min(1, choices.length - 1) }, c[1])); });
+            var file = h('input', { type: 'file', accept: '.key,.pem', 'aria-label': 'Approver key file' });
+            var reason = h('input', { type: 'text', 'aria-label': 'Reason for denying', placeholder: 'Reason (optional)', maxlength: '1000' });
+            var status = h('span', { role: 'status', class: 'inline' });
+            var note = function (text, bad) { status.textContent = text; status.className = bad ? 'bad inline' : 'inline'; };
+            var approve = function () {
+              var f = file.files && file.files[0];
+              if (!f) return note('Choose your approver key file first. It is read in this browser to sign, and never sent.', true);
+              if (!window.crypto || !crypto.subtle) return note('This page cannot sign: the browser only offers signing on https or on localhost.', true);
+              note('Signing…');
+              var prepared;
+              api('POST', '/api/approvals/prepare', { requestId: r.requestId, expiresInSeconds: Number(expires.value) })
+                .then(function (p) { prepared = p; return signWith(f, p.pae); })
+                .then(function (s) { return api('POST', '/api/approvals/sign', { requestId: r.requestId, payload: prepared.payload, keyid: s.keyid, sig: s.sig }); })
+                .then(function (res) { file.value = ''; show('Approvals'); say(res.note); })
+                .catch(function (e) { note(e.message || String(e), true); });
+            };
+            var deny = function () {
+              ask('Deny this request?', ['The gateway will keep refusing this exact call, and tell the agent so, until the request is deleted.'], 'Deny', true).then(function (yes) {
+                if (!yes) return;
+                api('POST', '/api/approvals/deny', { requestId: r.requestId, reason: reason.value }).then(function (res) { show('Approvals'); say(res.note); }).catch(fail);
+              });
+            };
+            card.appendChild(h('div', { class: 'card' }, h('h3', { text: r.signedBy.length ? 'Countersign' : 'Approve' }),
+              h('p', { class: 'muted', text: 'Your key is read by this browser to sign the call, and only the signature is sent. The key must be one of the gateway\'s trusted approver keys' + (r.signedBy.length ? ', and not the one that already signed.' : '.') }),
+              h('div', { class: 'row' }, h('label', null, 'Key file ', file), h('label', null, 'Valid for ', expires),
+                h('button', { type: 'button', class: 'primary', onclick: approve }, r.signedBy.length ? 'Countersign' : 'Sign and approve'), status),
+              h('div', { class: 'row mt' }, reason, h('button', { type: 'button', class: 'secondary', onclick: deny }, 'Deny'))));
+          }
+          card.appendChild(h('div', { class: 'row' }, h('button', { type: 'button', class: 'secondary', onclick: function () { clear(detail); } }, 'Close')));
+          clear(detail).appendChild(card);
+          head.focus();
+        }
+        return h('div', null, title,
+          h('p', { class: 'muted', text: pending.length + ' waiting for a person. A protected call that came with no approval waits here; once it is approved, the agent sends the same call again and it goes through once.' }),
+          h('div', { class: 'card scroll' }, a.requests.length ? t : h('p', { class: 'muted', text: 'No requests yet.' })), detail);
       });
     },
 
