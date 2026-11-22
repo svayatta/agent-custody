@@ -72,7 +72,6 @@ const SERVICES = new Set(["serve", "witness", "signer", "portal", "log", "consol
 /** a command that waits for untilStopped(); a stdio gateway runs until its input closes and keeps the default signal behaviour */
 const runsUntilStopped = (cmd: string | undefined, args: string[]) => !!cmd && ((SERVICES.has(cmd) && !(cmd === "egress" && args[0] === "draft-policy")) || (cmd === "gateway" && (args.includes("--http") || args.includes("--a2a"))));
 
-/** A secret kept in a file that only this process can read, such as a container secret mounted at /run/secrets. The file's path is not a secret; its contents are. */
 /** `90s`, `10m`, or `1h`, in seconds. */
 function durationSeconds(text: string): number {
   const m = /^(\d+)([smh])$/.exec(text.trim());
@@ -80,6 +79,7 @@ function durationSeconds(text: string): number {
   return Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2] as "s" | "m" | "h"];
 }
 
+/** A secret kept in a file that only this process can read, such as a container secret mounted at /run/secrets. The file's path is not a secret; its contents are. */
 function tokenFromFile(path: string): string {
   const v = readFileSync(path, "utf8").trim();
   if (!v) throw new Error(`${path} is empty`);

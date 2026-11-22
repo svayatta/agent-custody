@@ -224,7 +224,7 @@ Every option and check is on the [verify](./verify) page.
 
 ## Keys
 
-`generateKeyPair(): KeyPair`, `writeKeyPair(kp, dir, name)` → `{ keyFile, pubFile }`, `loadPrivateKey(path)`, `loadPublicKey(path): PublicKeyRef` (`{ publicKey, keyid }`), `publicKeyFromPem(pem)`, `publicKeyToPem(publicKey)`. Keys are Ed25519; a keyid is the SHA-256 of the SPKI DER. `dsseSign(payloadType, payload, keyPair): Envelope`, `dsseCountersign(envelope, keyPair): Envelope`, and `dsseVerify(envelope, trustedKeys)` are the primitives every signed artefact uses.
+`generateKeyPair(): KeyPair`, `writeKeyPair(kp, dir, name)` → `{ keyFile, pubFile }`, `loadPrivateKey(path)`, `loadPublicKey(path): PublicKeyRef` (`{ publicKey, keyid }`), `publicKeyFromPem(pem)`, `publicKeyToPem(publicKey)`. Keys are Ed25519; a keyid is the SHA-256 of the SPKI DER. `dsseSign(payloadType, payload, keyPair): Envelope`, `dsseCountersign(envelope, keyPair): Envelope`, and `dsseVerify(envelope, trustedKeys)` are the primitives every signed artefact uses. `pae(payloadType, payload): Buffer` returns the DSSE pre-authentication encoding that a signature covers, for a signer that holds its key elsewhere, such as the console page signing in the browser.
 
 ## Design tokens
 

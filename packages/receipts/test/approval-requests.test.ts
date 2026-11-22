@@ -34,7 +34,7 @@ beforeAll(async () => {
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       if (req.method === "POST") refunds.push(JSON.parse(body));
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, { "content-type": "application/json", connection: "close" });
       res.end(JSON.stringify(req.method === "GET" ? { id: "cust_123", verified: true } : { refund_id: "re_1" }));
     });
   });
@@ -216,6 +216,7 @@ describe("human in the loop: approval requests", () => {
     const ok = cli("approve", requestId, "--config", fx.configFile, "--key", join(fx.dir, "keys/approver.key"), "--expires", "5m");
     expect(ok.status, ok.stderr).toBe(0);
     expect(readApprovalRequest(dir, requestId)!.status).toBe("approved");
-    expect((await send()).isError).toBeFalsy();
+    const last = await send();
+    expect(last.isError, textOf(last)).toBeFalsy();
   });
 });

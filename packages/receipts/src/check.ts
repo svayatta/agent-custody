@@ -407,6 +407,7 @@ export async function checkConfig(configPath: string, options: CheckOptions = {}
   const writes: [string, string][] = [["receiptsDir", cfg.receiptsDir]];
   if (cfg.operations) writes.push(["operations.database", cfg.operations.database]);
   if (cfg.approvals) writes.push(["approvals.usedDir", cfg.approvals.usedDir]);
+  if (cfg.approvals?.requests) writes.push(["approvals.requests.dir", cfg.approvals.requests.dir]);
   if (cfg.logFile) writes.push(["logFile", cfg.logFile]);
   if (cfg.revokedGrants) writes.push(["revokedGrants", cfg.revokedGrants]);
   let writable = true;

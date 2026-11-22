@@ -252,15 +252,17 @@ describe("agent-custody check", () => {
     expect(r.map((f) => f.message).join("\n")).toContain("CHECK_TEST_OTEL_UNSET");
   });
 
-  it("an operations database or an approvals directory that cannot be written is an error, as the revocation file is", async () => {
+  it("an operations database or an approvals or approval-requests directory that cannot be written is an error, as the revocation file is", async () => {
     const fx = fresh();
     edit(fx.configFile, (c) => {
       c.operations = { database: "/proc/no-such-dir/operations.sqlite", budgets: [{ id: "refunds", currency: "GBP", limit: 100000 }], tools: [{ tool: "stripe.refund", budget: "refunds", reconcile: { tool: "customer.lookup", args: { key: "$operation.idempotencyKey" }, statusPath: "status", confirmed: ["succeeded"], failed: ["failed"] } }] };
-      c.approvals = { trustedKeys: ["keys/principal.pub"], usedDir: "/proc/no-such-dir/used", tools: [{ tool: "stripe.refund" }] };
+      c.approvals = { trustedKeys: ["keys/principal.pub"], usedDir: "/proc/no-such-dir/used", requests: { dir: "/proc/no-such-dir/requests" }, tools: [{ tool: "stripe.refund" }] };
     });
     const r = errors(await checkConfig(fx.configFile)).filter((f) => f.check === "paths").map((f) => f.message).join("\n");
     expect(r).toContain("operations.database");
     expect(r).toContain("approvals.usedDir");
+    // without it a request directory the gateway cannot write leaves every protected call refused with no request
+    expect(r).toContain("approvals.requests.dir");
   });
 
   it("a regular file in a configured path's ancestor is reported as a paths error", async () => {
