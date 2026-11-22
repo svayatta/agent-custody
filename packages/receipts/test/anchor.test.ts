@@ -5,16 +5,16 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { keccak256, parseTransaction, recoverTransactionAddress, toHex } from "viem";
 import { generatePrivateKey } from "viem/accounts";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Anchor, ANCHOR_CHAINS, anchorCalldata, checkAnchorRecord, resolveAnchorChain, type AnchorChain, type AnchorRecord } from "../src/anchor.ts";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { Anchor, ANCHOR_CHAINS, anchorCalldata, checkAnchorRecord, resolveAnchorChain, type AnchorChain, type AnchorOptions, type AnchorRecord } from "../src/anchor.ts";
 import { evmChain } from "../src/anchor-evm.ts";
 import { dirCheckpoints } from "../src/checkpoints.ts";
-import { dsseSign, generateKeyPair, loadPrivateKey, writeKeyPair, type PublicKeyRef } from "../src/crypto.ts";
+import { dsseSign, generateKeyPair, loadPrivateKey, writeKeyPair, type Envelope, type KeyPair, type PublicKeyRef } from "../src/crypto.ts";
 import { checkLog } from "../src/log-check.ts";
 import { CheckpointPublisher, fileResolver, serveLog, type RunningLog } from "../src/log-sink.ts";
 import { TREEHEAD_TYPE } from "../src/receipt.ts";
@@ -160,6 +160,16 @@ function notFinalized(net: Devnet): Endpoint {
     async request(args) {
       if (args.method === "eth_getBlockByNumber" && (args.params as unknown[])[0] === "finalized") return net.request({ method: "eth_getBlockByNumber", params: ["0x0", false] });
       return net.request(args);
+    },
+  };
+}
+
+/** The same chain seen through an endpoint that changes its answers to one method. */
+function answering(net: Devnet, method: string, answer: (result: unknown, params: unknown[]) => unknown): Endpoint {
+  return {
+    async request(args) {
+      const r = await net.request(args);
+      return args.method === method ? answer(r, (args.params ?? []) as unknown[]) : r;
     },
   };
 }
@@ -409,6 +419,34 @@ describe("anchoring the log's checkpoints on a chain", () => {
     expect(((await check(other)) as { newer: number }).newer).toBeGreaterThan(0);
   });
 
+  it("a verifier refuses a record it cannot check, and a record whose transaction the chain does not confirm", async () => {
+    const good = record();
+    const a = good.anchor;
+    const logKey = loadPrivateKey(logKp.keyFile);
+    expect(await check({ ...good, anchor: undefined as never })).toEqual({ ok: false, error: "not an anchor record" });
+    expect(await check({ ...good, anchor: { ...a, proof: undefined as never } })).toEqual({ ok: false, error: "not an anchor record" });
+    expect(await check(good, { logKeys: [generateKeyPair()] })).toMatchObject({ ok: false, error: expect.stringMatching(/does not verify against the log's keys/) });
+    // signed by the log, but not a tree head
+    expect(await check({ ...good, checkpoint: dsseSign("application/vnd.example+json", { treeSize: good.treeSize, rootHash: good.rootHash, log: good.logId }, logKey) })).toEqual({ ok: false, error: "checkpoint does not verify against the log's keys: not a tree head" });
+    expect(await check(good, { rpcUrls: [] })).toEqual({ ok: false, error: "no JSON-RPC endpoint to check the chain with" });
+    // an endpoint URL can carry a provider's key: an error names the host and the method, and nothing else of the URL
+    const KEYED = "http://rpc.devnet.test/v2/provider-key";
+    expect(await check(good, { rpcUrls: [KEYED], fetch: (async () => new Response(null, { status: 500 })) as typeof fetch })).toEqual({ ok: false, error: "rpc.devnet.test eth_chainId: HTTP 500" });
+    const via = (endpoint: Endpoint) => ({ rpcUrls: [KEYED], fetch: rpcFetch({ [KEYED]: endpoint }) });
+    const erroring = { request: (args: { method: string; params?: unknown }) => (args.method === "eth_getTransactionByHash" ? Promise.reject(new Error("rate limited")) : net.request(args)) };
+    expect(await check(good, via(erroring))).toEqual({ ok: false, error: "rpc.devnet.test eth_getTransactionByHash: rate limited" });
+    expect(await check({ ...good, anchor: { ...a, txHash: keccak256(toHex("never sent")) } })).toMatchObject({ ok: false, error: expect.stringMatching(/has no transaction/) });
+    expect(await check({ ...good, anchor: { ...a, blockNumber: a.blockNumber + 1 } })).toMatchObject({ ok: false, error: expect.stringMatching(new RegExp(`is not in block ${a.blockNumber + 1}`)) });
+    // still in the mempool: no block yet
+    expect(await check(good, via(answering(net, "eth_getTransactionByHash", (tx) => ({ ...(tx as object), blockNumber: null }))))).toMatchObject({ ok: false, error: expect.stringMatching(/is not in block/) });
+    expect(await check(good, via(answering(net, "eth_getTransactionReceipt", (r) => ({ ...(r as object), status: "0x0" }))))).toMatchObject({ ok: false, error: expect.stringMatching(/did not succeed/) });
+    expect(await check(good, via(answering(net, "eth_getTransactionReceipt", () => null)))).toMatchObject({ ok: false, error: expect.stringMatching(/did not succeed/) });
+    // the block at that height is another one than the block the receipt names
+    const otherBlock = answering(net, "eth_getBlockByNumber", (b, p) => (p[0] === "finalized" ? b : { ...(b as object), hash: keccak256(toHex("another block")) }));
+    expect(await check(good, via(otherBlock))).toMatchObject({ ok: false, error: expect.stringMatching(/is not the one the transaction is in/) });
+    expect((await check(good, via(net))).ok).toBe(true);
+  });
+
   it("log-check catches a rewritten tree from the chain alone, with the log's checkpoints host out of the picture", async () => {
     const honest = await watch();
     expect(honest.ok).toBe(true);
@@ -559,6 +597,262 @@ describe("anchoring the log's checkpoints on a chain", () => {
     const r = await checkLog({ logUrl: log.url, anchorUrl: anchorHost.url });
     expect(r.ok).toBe(false);
     expect(r.checks.find((c) => c.name === "anchor verifies on chain")).toMatchObject({ ok: false, detail: expect.stringMatching(/pinned anchor address/) });
+  });
+});
+
+// An anchor that sends a root when it cannot check the log spends money on a claim nobody proved, and one that loses
+// track of a sent transaction leaves the log unanchored. Each failure here must end in an outcome that says so, with
+// nothing sent, and the next good run must carry on.
+describe("the anchor, when the log, its hosts, or the chain fail", () => {
+  let dir: string;
+  let log: RunningLog;
+  let host: { server: Server; url: string };
+  let publisher: CheckpointPublisher;
+  let logKey: KeyPair;
+  let net: Devnet;
+  let chain: AnchorChain;
+  /** a part of a request path, and the HTTP status that requests with it get */
+  const failing = new Map<string, number>();
+  const warnings: string[] = [];
+  const faultyFetch: typeof fetch = async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    for (const [part, status] of failing) if (path.includes(part)) return new Response(null, { status });
+    return fetch(input, init);
+  };
+  const cpFile = (tenant: string) => join(dir, "checkpoints", tenant, "latest.json");
+  const post = (leaf: string) => fetch(new URL("append", log.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ leaf }) });
+  const make = (name: string, extra: Partial<AnchorOptions> = {}) => new Anchor({ logUrl: log.url, checkpointsUrl: host.url, tenants: ["default"], chain, outDir: join(dir, name), waitMs: 0, fetch: faultyFetch, warn: (m) => warnings.push(m), ...extra });
+  const publish = (tenant: string, head: { treeSize: number; rootHash: string; log: string }) => {
+    mkdirSync(join(dir, "checkpoints", tenant), { recursive: true });
+    writeFileSync(cpFile(tenant), JSON.stringify({ tenant, envelope: dsseSign(TREEHEAD_TYPE, { ...head, timestamp: "t" }, logKey) }));
+  };
+  const files = (name: string, tenant = "default") => (existsSync(join(dir, name, tenant)) ? readdirSync(join(dir, name, tenant)).sort() : []);
+  const alarms = (name: string) => files(name).filter((n) => n.startsWith("ALARM-"));
+  const anchoredSize = (name: string) => (JSON.parse(readFileSync(join(dir, name, "default", "latest.json"), "utf8")) as AnchorRecord).treeSize;
+  /** anchors the log's current checkpoint in a finalized block, and gives its size */
+  const anchorNow = async (a: Anchor) => {
+    const [first] = (await a.runOnce()).tenants;
+    net.mine();
+    expect((await a.runOnce()).tx.outcome).toBe("anchored");
+    return (first as { treeSize: number }).treeSize;
+  };
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "anchor-faults-"));
+    logKey = loadPrivateKey(writeKeyPair(generateKeyPair(), join(dir, "keys"), "log").keyFile);
+    const signer = localSigner(logKey);
+    const store = dirCheckpoints(join(dir, "checkpoints"));
+    const resolver = fileResolver(join(dir, "log.jsonl"), { logId: "anchored-log" });
+    log = await serveLog(resolver, signer, { port: 0, checkpoints: store });
+    publisher = new CheckpointPublisher(resolver, signer, store, 60_000);
+    host = await staticHost(join(dir, "checkpoints"));
+    net = devnet();
+    chain = await evmChain({ rpcUrl: "http://rpc.devnet.test/", privateKey: generatePrivateKey(), maxFeeGwei: 20, provider: net });
+    await post("a");
+    await post("b");
+    await publisher.publishOnce();
+    publish("acme", { treeSize: 9, rootHash: "cd".repeat(32), log: "acme-log" });
+  });
+  afterEach(() => {
+    failing.clear();
+    warnings.length = 0;
+    net.baseFeeGwei = 2n;
+    net.finalizedLag = 0;
+    vi.useRealTimers();
+  });
+  afterAll(async () => {
+    await log.close();
+    host.server.close();
+  });
+
+  it("gives every tenant an unavailable outcome and sends nothing while the log's key document cannot be fetched", async () => {
+    const a = make("no-keys", { tenants: ["default", "acme"] });
+    failing.set("agent-custody-log.json", 503);
+    const run = await a.runOnce();
+    expect(run.tx).toEqual({ outcome: "none" });
+    expect(run.tenants).toEqual([
+      { tenant: "default", outcome: "unavailable", reason: expect.stringMatching(/serves no key document: 503/) },
+      { tenant: "acme", outcome: "unavailable", reason: expect.stringMatching(/serves no key document: 503/) },
+    ]);
+    expect(net.sent).toHaveLength(0);
+    expect(a.pending).toBe(false);
+    expect(warnings).toHaveLength(1);
+    failing.clear();
+    expect((await a.runOnce()).tenants.map((t) => t.outcome)).toEqual(["moved", "moved"]);
+    net.mine();
+    expect((await a.runOnce()).tx).toMatchObject({ outcome: "anchored", tenants: ["default", "acme"] });
+  });
+
+  it("leaves one tenant unavailable when its checkpoint cannot be fetched, and still anchors the others", async () => {
+    const a = make("checkpoint-error", { tenants: ["default", "acme"] });
+    failing.set("/default/latest.json", 500);
+    const run = await a.runOnce();
+    expect(run.tenants).toEqual([
+      { tenant: "default", outcome: "unavailable", reason: "checkpoint for default: 500" },
+      { tenant: "acme", outcome: "moved", treeSize: 9 },
+    ]);
+    expect(run.tx.outcome).toBe("pending");
+    net.mine();
+    expect((await a.runOnce()).tx).toMatchObject({ outcome: "anchored", tenants: ["acme"] });
+    expect(files("checkpoint-error")).toEqual([]);
+  });
+
+  it("sends nothing for a larger checkpoint while the log gives no consistency proof, and raises no alarm for it", async () => {
+    const a = make("proof-error");
+    const size = await anchorNow(a);
+    await post("c");
+    await publisher.publishOnce();
+    failing.set("/consistency", 500);
+    const before = net.sent.length;
+    expect(await a.runOnce()).toEqual({ tenants: [{ tenant: "default", outcome: "unavailable", reason: "consistency proof for default: 500" }], tx: { outcome: "none" } });
+    expect(net.sent.length).toBe(before);
+    expect(anchoredSize("proof-error")).toBe(size);
+    expect(alarms("proof-error")).toEqual([]);
+    failing.clear();
+    expect((await a.runOnce()).tenants).toEqual([{ tenant: "default", outcome: "moved", treeSize: size + 1 }]);
+    net.mine();
+    expect((await a.runOnce()).tx.outcome).toBe("anchored");
+  });
+
+  it("refuses a checkpoint that names another log than the one it anchored before, writes an alarm, and sends nothing", async () => {
+    const a = make("log-id");
+    const size = await anchorNow(a);
+    const honest = readFileSync(cpFile("default"));
+    const before = net.sent.length;
+    // signed by the log's own key, and larger, so only the log id tells it from an honest checkpoint
+    publish("default", { treeSize: size + 1, rootHash: "ab".repeat(32), log: "another-log" });
+    try {
+      expect(await a.runOnce()).toEqual({ tenants: [{ tenant: "default", outcome: "refused", reason: "checkpoint names log another-log, the last one anchored named anchored-log" }], tx: { outcome: "none" } });
+    } finally {
+      writeFileSync(cpFile("default"), honest);
+    }
+    expect(net.sent.length).toBe(before);
+    expect(alarms("log-id")).toHaveLength(1);
+    const alarm = JSON.parse(readFileSync(join(dir, "log-id", "default", alarms("log-id")[0]!), "utf8")) as { reason: string; checkpoint: Envelope };
+    expect(alarm.reason).toMatch(/names log another-log/);
+    expect(alarm.checkpoint.payloadType).toBe(TREEHEAD_TYPE);
+    expect(files("log-id")).toContain("ALARM.json");
+    expect(anchoredSize("log-id")).toBe(size);
+  });
+
+  it("keeps a sent transaction pending while the chain cannot be asked about it, and settles it when the chain answers", async () => {
+    let down = false;
+    const flaky: AnchorChain = { ...chain, included: (txHash) => (down ? Promise.reject(new Error("rpc is down")) : chain.included(txHash)) };
+    const a = make("lookup-error", { chain: flaky });
+    const sent = await a.runOnce();
+    expect(sent.tx.outcome).toBe("pending");
+    const txHash = (sent.tx as { txHash: string }).txHash;
+    net.mine();
+    down = true;
+    expect((await a.runOnce()).tx).toMatchObject({ outcome: "pending", txHash });
+    expect(warnings.some((w) => /looking up .*rpc is down/.test(w))).toBe(true);
+    expect(a.pending).toBe(true);
+    expect(files("lookup-error")).toEqual([]);
+    down = false;
+    expect((await a.runOnce()).tx).toMatchObject({ outcome: "anchored", txHash });
+  });
+
+  it("keeps the root of a transaction that a reorg dropped when the resend fails, and sends it on a later run", async () => {
+    const a = make("resend-error", { resendAfterMs: 0 });
+    net.finalizedLag = 3;
+    await a.runOnce();
+    const lost = net.sent[net.sent.length - 1]!;
+    const n = net.mine();
+    expect((await a.runOnce()).tx.outcome).toBe("included");
+    net.reorg(n, true);
+    expect((await a.runOnce()).tx.outcome).toBe("pending");
+    // the fee is above the cap at the time of the resend
+    net.baseFeeGwei = 50n;
+    const before = net.sent.length;
+    expect((await a.runOnce()).tx.outcome).toBe("pending");
+    expect(net.sent.length).toBe(before);
+    expect(warnings.some((w) => /resending after a reorg: .*above the cap/.test(w))).toBe(true);
+    expect(a.pending).toBe(true);
+    net.baseFeeGwei = 2n;
+    expect((await a.runOnce()).tx.outcome).toBe("pending");
+    expect(net.sent.length).toBe(before + 1);
+    const resent = net.sent[net.sent.length - 1]!;
+    expect(resent.input).toBe(lost.input);
+    net.finalizedLag = 0;
+    net.mine();
+    expect((await a.runOnce()).tx).toMatchObject({ outcome: "anchored", txHash: resent.hash });
+  });
+
+  it("one run that is given time to wait looks its transaction up again until the block is finalized", async () => {
+    let lookups = 0;
+    // the block arrives while the run waits: the third lookup is the first that finds the transaction
+    const slow: AnchorChain = {
+      ...chain,
+      included: (txHash) => {
+        if (++lookups === 3) net.mine();
+        return chain.included(txHash);
+      },
+    };
+    const a = make("poll", { chain: slow, waitMs: undefined, pollMs: 1 });
+    expect((await a.runOnce()).tx.outcome).toBe("anchored");
+    expect(lookups).toBe(3);
+    expect(a.pending).toBe(false);
+  });
+
+  it("start runs at once and then on its timers, a second start adds nothing, and stop ends the runs", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const tick = () => new Promise((r) => setImmediate(r));
+    const until = async (done: () => boolean) => {
+      while (!done()) await tick();
+      await tick();
+    };
+    // a log and a chain that count what the anchor asks of them: a run with nothing pending asks for the key
+    // document, and a run with a transaction pending asks the chain about it
+    let keysDown = true;
+    let keyFetches = 0;
+    let sends = 0;
+    let lookups = 0;
+    const keyDoc = { keys: [{ keyid: logKey.keyid, alg: "ed25519", publicKeyPem: logKey.publicKey.export({ type: "spki", format: "pem" }), validFrom: "2026-01-01T00:00:00.000Z" }] };
+    const envelope = dsseSign(TREEHEAD_TYPE, { treeSize: 1, rootHash: "ab".repeat(32), timestamp: "t", log: "timed-log" }, logKey);
+    const counting = (async (input: string | URL | Request) => {
+      if (!String(input).endsWith("agent-custody-log.json")) return Response.json({ envelope });
+      keyFetches++;
+      return keysDown ? new Response(null, { status: 503 }) : Response.json(keyDoc);
+    }) as typeof fetch;
+    const never: AnchorChain = {
+      chainId: 1,
+      address: `0x${"11".repeat(20)}`,
+      send: async () => {
+        sends++;
+        return `0x${"ab".repeat(32)}`;
+      },
+      included: async () => {
+        lookups++;
+        return null;
+      },
+    };
+    const a = make("scheduled", { logUrl: "http://log.test/", checkpointsUrl: "http://checkpoints.test/", chain: never, fetch: counting, warn: () => {} });
+    a.start(1000, 100);
+    a.start(1000, 100);
+    expect(vi.getTimerCount()).toBe(2);
+    await until(() => keyFetches === 1);
+    // nothing is pending, so the settle timer starts no run
+    vi.advanceTimersByTime(900);
+    await tick();
+    expect(keyFetches).toBe(1);
+    keysDown = false;
+    vi.advanceTimersByTime(100);
+    await until(() => lookups === 1);
+    expect([keyFetches, sends]).toEqual([2, 1]);
+    // a transaction is pending, so the settle timer looks it up, and no run sends a second one
+    vi.advanceTimersByTime(100);
+    await until(() => lookups === 2);
+    expect([keyFetches, sends]).toEqual([2, 1]);
+    await a.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(5000);
+    await tick();
+    expect([keyFetches, sends, lookups]).toEqual([2, 1, 2]);
+  });
+
+  it("gives no calldata for a root that is not 32 bytes of lowercase hex", () => {
+    expect(() => anchorCalldata("AB".repeat(32))).toThrow(/32 bytes of lowercase hex/);
+    expect(() => anchorCalldata("ab".repeat(31))).toThrow(/32 bytes of lowercase hex/);
   });
 });
 

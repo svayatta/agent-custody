@@ -3,7 +3,12 @@
 // draft-meunier-http-message-signatures-directory-05). A signature that checks proves the request was signed by a key
 // published at the `Signature-Agent` origin, for this door's authority, inside a short window. It proves nothing about
 // the body, the path, or the method unless the signature covers them.
+//
+// A signature whose `keyid` is a did:key is checked against the key that the did:key names, with no directory. It
+// proves that the signer holds that key, and nothing else. Anyone can make such a key, so the door (`classifyArrival`)
+// accepts it only with a grant for that did:key.
 import { createHash, createPublicKey, verify as cryptoVerify, type KeyObject } from "node:crypto";
+import { DID_KEY_PREFIX, publicKeyFromDidKey } from "./did-key.ts";
 
 export const DIRECTORY_PATH = "/.well-known/http-message-signatures-directory";
 export const DIRECTORY_MEDIA_TYPE = "application/http-message-signatures-directory+json";
@@ -279,7 +284,8 @@ export interface WebBotAuthOptions {
 
 /**
  * What the door made of a request's signature. `verified`: a signature tagged `web-bot-auth` checked against a key
- * that `agent`'s directory publishes. `invalid`: the signature, its parameters, its agent, or the directory was wrong.
+ * that `agent`'s directory publishes, or against the key that its did:key `keyid` names (`agent` is then that did:key).
+ * `invalid`: the signature, its parameters, its agent, or the directory was wrong.
  * `unavailable`: the directory could not be fetched, or the door could not record the nonce. `unchecked`: a signature
  * arrived and the door has no `webBotAuth` config. `absent`: no `Signature-Input`.
  */
@@ -292,7 +298,8 @@ interface DirectoryKey { key: KeyObject; nbf?: number; exp?: number }
 type Directory = { ok: true; keys: Map<string, DirectoryKey> } | { ok: false; outcome: "invalid" | "unavailable"; error: string };
 
 export interface WebBotAuthVerifier {
-  verify(req: SignedRequest): Promise<SignatureCheck>;
+  /** `grantAgent`: the agent of the request's grant, when a trusted principal signed it; a did:key signature keeps its nonce only for that agent */
+  verify(req: SignedRequest, grantAgent?: string): Promise<SignatureCheck>;
   /** nonces held now, or undefined when the nonce store does not count them */
   nonces(): number | undefined;
 }
@@ -435,7 +442,7 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
     return p;
   };
 
-  async function verify(req: SignedRequest): Promise<SignatureCheck> {
+  async function verify(req: SignedRequest, grantAgent?: string): Promise<SignatureCheck> {
     const inputText = req.header("signature-input");
     const sigText = req.header("signature");
     if (!inputText && !sigText) return { outcome: "absent" };
@@ -467,28 +474,39 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
     if (algP && !(algP.t === "string" && algP.v === "ed25519")) return invalid(`${label} uses alg ${serializeBare(algP)}; this door checks ed25519 only`, { keyid });
     if (nonceP && nonceP.t !== "string") return invalid(`${label} has a nonce that is not a string`, { keyid });
 
-    // the covered components: @authority, and the Signature-Agent member that names the directory
+    // the covered components: @authority, and the Signature-Agent member that names the directory (none for a did:key)
     const covered = input.list;
     if (!covered.some((c) => c.item.t === "string" && c.item.v === "@authority" && c.params.length === 0)) return invalid(`${label} does not cover @authority`, { keyid });
-    const agentComponent = covered.find((c) => c.item.t === "string" && c.item.v === "signature-agent");
-    const agentText = req.header("signature-agent");
-    if (!agentComponent || !agentText) return invalid(agentText ? `${label} does not cover signature-agent` : "no Signature-Agent field names the signer's directory", { keyid });
-    let agentUri: string;
-    try {
-      const key = param(agentComponent.params, "key");
-      const named = key?.t === "string" ? parseDictionary(agentText.join(", ")).get(key.v) : parseItem(agentText.join(", "));
-      if (!named || "list" in named || named.item.t !== "string") return invalid(`the Signature-Agent ${key?.t === "string" ? `member ${key.v} ` : ""}is not a string`, { keyid });
-      agentUri = named.item.v;
-    } catch (e) {
-      return invalid(`the Signature-Agent field does not parse: ${e instanceof Error ? e.message : String(e)}`, { keyid });
-    }
     let agent: string;
-    try {
-      agent = agentOrigin(agentUri);
-    } catch (e) {
-      return invalid(e instanceof Error ? e.message : String(e), { keyid });
+    let didKey: KeyObject | undefined;
+    if (keyid.startsWith(DID_KEY_PREFIX)) {
+      // a did:key keyid carries its key: the signer is the did:key, and no Signature-Agent or directory is necessary
+      try {
+        didKey = publicKeyFromDidKey(keyid).publicKey;
+      } catch (e) {
+        return invalid(`the keyid of ${label} does not decode: ${e instanceof Error ? e.message : String(e)}`, { keyid });
+      }
+      agent = keyid;
+    } else {
+      const agentComponent = covered.find((c) => c.item.t === "string" && c.item.v === "signature-agent");
+      const agentText = req.header("signature-agent");
+      if (!agentComponent || !agentText) return invalid(agentText ? `${label} does not cover signature-agent` : "no Signature-Agent field names the signer's directory", { keyid });
+      let agentUri: string;
+      try {
+        const key = param(agentComponent.params, "key");
+        const named = key?.t === "string" ? parseDictionary(agentText.join(", ")).get(key.v) : parseItem(agentText.join(", "));
+        if (!named || "list" in named || named.item.t !== "string") return invalid(`the Signature-Agent ${key?.t === "string" ? `member ${key.v} ` : ""}is not a string`, { keyid });
+        agentUri = named.item.v;
+      } catch (e) {
+        return invalid(`the Signature-Agent field does not parse: ${e instanceof Error ? e.message : String(e)}`, { keyid });
+      }
+      try {
+        agent = agentOrigin(agentUri);
+      } catch (e) {
+        return invalid(e instanceof Error ? e.message : String(e), { keyid });
+      }
+      if (!agents.has(agent)) return invalid(`${agent} is not a signature agent this door is configured to check`, { agent, keyid });
     }
-    if (!agents.has(agent)) return invalid(`${agent} is not a signature agent this door is configured to check`, { agent, keyid });
 
     // the window: created is not in the future, the signature has not expired, and it is no older than maxAgeSeconds
     const t = now() / 1000;
@@ -508,7 +526,9 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
       return invalid(e instanceof Error ? e.message : String(e), { agent, keyid });
     }
     if (opts.requireNonce && !nonceP) return invalid(`${label} has no nonce, and this door requires one`, { agent, keyid });
-    const nonceKey = nonceP ? `${agent} ${keyid} ${nonceP.v}` : undefined;
+    // Anyone can make a did:key, so a stranger's signatures must not fill the nonce store. A did:key signature that no
+    // trusted grant names is never accepted by the door, and its nonce is not kept.
+    const nonceKey = nonceP && (!didKey || keyid === grantAgent) ? `${agent} ${keyid} ${nonceP.v}` : undefined;
     const full: SignatureCheck = { outcome: "unavailable", error: nonceStore ? "the door's nonce store is full and cannot record another" : `the door holds ${opts.maxNonces} nonces and cannot record another`, agent, keyid };
     if (nonceKey && nonces.check) {
       let state: NonceState;
@@ -521,12 +541,16 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
       if (state === "full") return full;
     }
 
-    const dir = await directory(agent);
-    if (!dir.ok) return { outcome: dir.outcome, error: dir.error, agent, keyid };
-    const k = dir.keys.get(keyid);
-    if (!k) return invalid(`keyid ${keyid} is not an Ed25519 key in ${agent}'s directory`, { agent, keyid });
-    if ((k.nbf !== undefined && t + skew < k.nbf) || (k.exp !== undefined && t - skew > k.exp)) return invalid(`keyid ${keyid} is outside the validity its directory gives it`, { agent, keyid });
-    if (!cryptoVerify(null, Buffer.from(base, "utf8"), k.key, sig.item.v)) return invalid(`${label} does not verify with ${agent}'s key ${keyid}`, { agent, keyid });
+    let key = didKey;
+    if (!key) {
+      const dir = await directory(agent);
+      if (!dir.ok) return { outcome: dir.outcome, error: dir.error, agent, keyid };
+      const k = dir.keys.get(keyid);
+      if (!k) return invalid(`keyid ${keyid} is not an Ed25519 key in ${agent}'s directory`, { agent, keyid });
+      if ((k.nbf !== undefined && t + skew < k.nbf) || (k.exp !== undefined && t - skew > k.exp)) return invalid(`keyid ${keyid} is outside the validity its directory gives it`, { agent, keyid });
+      key = k.key;
+    }
+    if (!cryptoVerify(null, Buffer.from(base, "utf8"), key, sig.item.v)) return invalid(didKey ? `${label} does not verify with the key that ${keyid} names` : `${label} does not verify with ${agent}'s key ${keyid}`, { agent, keyid });
     if (nonceKey) {
       // claimed only once the signature verifies, so a forgery cannot spend a nonce; an arrival with this nonce that
       // verified while the directory was fetched has claimed it, and this one is refused
