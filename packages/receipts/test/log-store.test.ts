@@ -319,9 +319,15 @@ describe("PostgresTenancy plans, usage, and policies", () => {
     expect(row?.appends).toBe(1);
     expect(row?.totalLeaves).toBe(1);
     expect(row?.liveTokens).toBe(0);
-    await db.query("INSERT INTO us_leaves (tenant_id, seq, leaf_hash, appended_at) VALUES ('acme', 99, $1, '2026-12-15T00:00:00Z')", [Buffer.from("ab".repeat(32), "hex")]);
-    expect((await t.usage("2026-12")).tenants.find((x) => x.id === "acme")).toMatchObject({ appends: 1, totalLeaves: 2 });
-    expect((await t.usage("2027-01")).tenants.find((x) => x.id === "acme")?.appends).toBe(0);
+    // The December/January boundary check runs on a second tenant whose rows
+    // all carry explicit appended_at values in fixed months far from now, so
+    // the live append above (stamped by the real clock) can never land in
+    // them. It also pins the boundary itself, which a mid-month row does not.
+    await t.addTenant("boundary");
+    await db.query("INSERT INTO us_leaves (tenant_id, seq, leaf_hash, appended_at) VALUES ('boundary', 1, $1, '2020-12-31T23:59:59Z')", [Buffer.from("cd".repeat(32), "hex")]);
+    await db.query("INSERT INTO us_leaves (tenant_id, seq, leaf_hash, appended_at) VALUES ('boundary', 2, $1, '2021-01-01T00:00:00Z')", [Buffer.from("ef".repeat(32), "hex")]);
+    expect((await t.usage("2020-12")).tenants.find((x) => x.id === "boundary")).toMatchObject({ appends: 1, totalLeaves: 1 });
+    expect((await t.usage("2021-01")).tenants.find((x) => x.id === "boundary")).toMatchObject({ appends: 1, totalLeaves: 2 });
     await expect(t.usage("2026-13")).rejects.toThrow(/month must be YYYY-MM/);
   });
 
