@@ -322,8 +322,10 @@ async function main(argv: string[]): Promise<number> {
       if (!values.ledger || !values.receipts || !values.fact) throw new Error("blast needs --ledger, --receipts, and --fact [--capture-key-env NAME]");
       const blastLedger = new Ledger(values.ledger);
       // receipts under a capture rule withhold what the agent had been shown; the key brings it back, else the query says it is incomplete
-      const b = await blastRadius(blastLedger, loadReceipts(values.receipts, { captureKey: keyFromEnv(values["capture-key-env"]) }), values.fact);
+      const unreadable: string[] = [];
+      const b = await blastRadius(blastLedger, loadReceipts(values.receipts, { captureKey: keyFromEnv(values["capture-key-env"]), unreadable }), values.fact);
       await blastLedger.close();
+      if (unreadable.length) console.error(`warning: ${unreadable.length} receipt file(s) could not be read, so the blast radius may be incomplete: ${unreadable.join(", ")}`);
       console.log(values.json ? JSON.stringify(b, null, 2) : formatBlastRadius(b, values.fact));
       return b.fact ? 0 : 1;
     }
