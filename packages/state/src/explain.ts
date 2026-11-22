@@ -63,7 +63,8 @@ export async function buildActionPack(receiptsDir: string, receiptId: string, le
       else consumed.unknown.push(id);
     }
     for (const f of await ledger.facts()) if (f.source.receiptId === receiptId) written.push(f);
-    const summaries = loadReceipts(receiptsDir, opts);
+    const unreadable: string[] = [];
+    const summaries = loadReceipts(receiptsDir, { ...opts, unreadable });
     const seenReceipts = new Map<string, ReceiptSummary>();
     const seenWithheld = new Map<string, ReceiptSummary>();
     const seenFacts = new Map<string, Fact>();
@@ -89,6 +90,9 @@ export async function buildActionPack(receiptsDir: string, receiptId: string, le
         missingReceipts.push(id);
       }
     }
+    // As in buildPack: a damaged receipt only the blast walk cites never
+    // becomes wanted, so list unreadable files alongside the missing ids.
+    for (const f of [...unreadable].sort()) missingReceipts.push(`unreadable:${f}`);
   } else {
     consumed.unknown.push(...consumedIds);
   }
