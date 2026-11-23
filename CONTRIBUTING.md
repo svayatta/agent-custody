@@ -11,6 +11,7 @@ bun run build                       # dist/ for every package, what consumers in
 bun run test:python                 # the Python package, with uv; needs node for the sidecar
 bun run ci                          # everything the GitHub workflow runs; the pre-push hook runs it before any push to main
 bun run demo                        # the receipts demo: keys, grant, policy, tool calls, verification, a tampering attempt
+bun run demo:refund                 # Demo 1, the refund (API leg): the door, a passport, two payment lanes, an approval, and the auditor
 ```
 
 The source runs on plain Node 22 or later with no build step. `bun run build` makes the `dist/` that consumers install. Package-level commands, such as the CLI and the tutorials, run from inside that package's directory; each package README says how. The rest of this file has the rules for a change, a release, and a publish.

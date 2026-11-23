@@ -123,7 +123,7 @@ export default withMermaid(
             { text: "The door in your Node app", link: "/receipts/door-middleware" },
             { text: "The door in Go, Rails, Django, and Spring", link: "/receipts/door-languages" },
             { text: "Door signals", link: "/receipts/door-signals" },
-            { text: "Door signal error rates", link: "/receipts/door-error-rates" },
+            { text: "Door error rates", link: "/receipts/door-error-rates" },
             { text: "Safe financial operations", link: "/receipts/financial-operations" },
             { text: "Completeness", link: "/receipts/completeness" },
             { text: "Anchoring the log on a chain", link: "/receipts/anchoring" },

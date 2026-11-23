@@ -11,7 +11,10 @@ import { createGateway, LOG_PENDING_META_KEY, RECEIPT_META_KEY } from "../src/ga
 import { loadConfig } from "../src/config.ts";
 import { buildFixture } from "../scripts/fixture.ts";
 import { TREEHEAD_TYPE } from "../src/receipt.ts";
-import { httpLog, serveLog, type RunningLog } from "../src/log-sink.ts";
+import { httpLog, serveLog, CheckpointPublisher, fileResolver, openLog, type RunningLog } from "../src/log-sink.ts";
+import { fileBackend } from "../src/log-store.ts";
+import { dirCheckpoints } from "../src/checkpoints.ts";
+import { localSigner } from "../src/signer.ts";
 import { createSdkIssuer } from "../src/sdk/index.ts";
 import { auditExtends, verifyBundle } from "../src/verify.ts";
 
@@ -238,5 +241,236 @@ describe("a log run for someone else: hash-only leaves, tenants, and log ids", (
     expect(failingAudit(auditExtends(older.treeHead, newer.treeHead, proof.hashes, keys, "globex-eu"))).toEqual(["both tree heads name the expected log"]);
     const globexHead = ((await (await fetch(new URL("t/globex/head", log.url))).json()) as { treeHead: import("../src/crypto.ts").Envelope }).treeHead;
     expect(failingAudit(auditExtends(older.treeHead, globexHead, [], keys))).toContain("both tree heads name the same log");
+  });
+});
+
+describe("HTTP log sink retries", () => {
+  // A stand-in log that appends exactly the leaf the sink sent, and signs a head for it.
+  const answer = (mlog: MerkleLog, key: ReturnType<typeof generateKeyPair>, leaf: string) => {
+    const e = mlog.append(leaf);
+    const head = { treeSize: e.treeSize, rootHash: e.rootHash, timestamp: new Date().toISOString(), log: "the-log" };
+    return new Response(JSON.stringify({ inclusion: { leafIndex: e.leafIndex, treeSize: e.treeSize, hashes: e.hashes }, treeHead: dsseSign(TREEHEAD_TYPE, head, key) }), { status: 200 });
+  };
+
+  it("retries a 429 and an unreachable log, then takes the good answer; gives up after the last failure", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "log-retry-"));
+    const honest = generateKeyPair();
+    const mlog = new MerkleLog(join(dir, "retry.jsonl"));
+    let calls = 0;
+    const flaky: typeof fetch = async (_url, init) => {
+      calls++;
+      if (calls === 1) return new Response("slow down", { status: 429, headers: { "retry-after": "0" } });
+      return answer(mlog, honest, (JSON.parse(String((init as { body?: unknown }).body)) as { leaf: string }).leaf);
+    };
+    const entry = await httpLog("http://retry.invalid/", { fetch: flaky, keys: [honest], logId: "the-log" }).append("leaf-0");
+    expect(entry.inclusion.leafIndex).toBe(0);
+    expect(calls).toBe(2);
+    let tries = 0;
+    const down: typeof fetch = async (_url, init) => {
+      tries++;
+      if (tries <= 2) throw new Error("connection refused");
+      return answer(mlog, honest, (JSON.parse(String((init as { body?: unknown }).body)) as { leaf: string }).leaf);
+    };
+    const second = await httpLog("http://down.invalid/", { fetch: down, keys: [honest], logId: "the-log" }).append("leaf-0");
+    expect(second.inclusion.leafIndex).toBe(1);
+    expect(tries).toBe(3);
+    let dead = 0;
+    const deadFetch: typeof fetch = async () => {
+      dead++;
+      throw new Error("down");
+    };
+    await expect(httpLog("http://dead.invalid/", { fetch: deadFetch, keys: [honest] }).append("leaf")).rejects.toThrow(/unreachable/);
+    expect(dead).toBe(3);
+  });
+
+  it("refuses a log whose keys cannot be fetched, and a head whose size does not match its proof", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "log-keys-"));
+    const honest = generateKeyPair();
+    const mlog = new MerkleLog(join(dir, "keys.jsonl"));
+    const noKeys: typeof fetch = async (url, init) => {
+      if (String(url).endsWith("/.well-known/agent-custody-log.json")) return new Response("no keys here", { status: 500 });
+      return answer(mlog, honest, (JSON.parse(String((init as { body?: unknown }).body)) as { leaf: string }).leaf);
+    };
+    await expect(httpLog("http://nokeys.invalid/", { fetch: noKeys }).append("leaf-0")).rejects.toThrow(/could not be fetched/);
+    const wrongSize: typeof fetch = async (_url, init) => {
+      const leaf = (JSON.parse(String((init as { body?: unknown }).body)) as { leaf: string }).leaf;
+      const e = mlog.append(leaf);
+      const head = { treeSize: e.treeSize + 1, rootHash: e.rootHash, timestamp: new Date().toISOString() };
+      return new Response(JSON.stringify({ inclusion: { leafIndex: e.leafIndex, treeSize: e.treeSize, hashes: e.hashes }, treeHead: dsseSign(TREEHEAD_TYPE, head, honest) }), { status: 200 });
+    };
+    await expect(httpLog("http://wrongsize.invalid/", { fetch: wrongSize, keys: [honest] }).append("leaf-1")).rejects.toThrow(/tree head of size/);
+  });
+});
+
+describe("openLog", () => {
+  it("refuses a config with neither logFile nor log.url", () => {
+    expect(() => openLog({}, generateKeyPair())).toThrow(/config needs logFile or log\.url/);
+  });
+});
+
+describe("CheckpointPublisher", () => {
+  it("warns and keeps running when one log fails, and still publishes the healthy one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "log-publisher-"));
+    const kp = generateKeyPair();
+    const goodFile = join(dir, "good.jsonl");
+    new MerkleLog(goodFile).append("a");
+    const badBackend = { ...fileBackend(join(dir, "bad.jsonl")), size: async () => { throw new Error("disk gone"); } };
+    const resolver = {
+      resolve: async (tenant: string | null) =>
+        tenant === "bad"
+          ? { backend: badBackend, logId: "bad", authorize: async () => true }
+          : { backend: fileBackend(goodFile), logId: "good", authorize: async () => true },
+      tenants: async () => ["bad", null] as (string | null)[],
+    };
+    const store = dirCheckpoints(join(dir, "checkpoints"));
+    const warnings: string[] = [];
+    const publisher = new CheckpointPublisher(resolver, localSigner(kp), store, 60_000, (m) => warnings.push(m));
+    const out = await publisher.publishOnce();
+    expect(out).toHaveLength(1);
+    expect(out[0]!.tenant).toBe("default");
+    expect(warnings).toEqual(["agent-custody log: checkpoint for bad failed: disk gone"]);
+    expect((await store.latest("default"))?.treeSize).toBe(1);
+  });
+
+  it("start publishes once immediately and stop keeps it from publishing again", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "log-publisher-start-"));
+    const kp = generateKeyPair();
+    const file = join(dir, "log.jsonl");
+    const log = new MerkleLog(file);
+    log.append("a");
+    const resolver = fileResolver(file, { logId: "good" });
+    const store = dirCheckpoints(join(dir, "checkpoints"));
+    // Short heartbeat so a live timer re-publishes promptly once the tree grows.
+    const publisher = new CheckpointPublisher(resolver, localSigner(kp), store, 50, (m) => console.error(m), 50);
+    publisher.start();
+    for (let i = 0; i < 50 && !(await store.latest("default")); i++) await new Promise((r) => setTimeout(r, 20));
+    expect((await store.latest("default"))?.treeSize).toBe(1);
+    // Append through the backend the publisher holds, so it actually sees the
+    // tree grow: with the timer live, the next tick must publish size 2. (The
+    // old `log.append("b")` wrote through a different MerkleLog, whose growth
+    // the publisher never saw, so this test passed even with stop() deleted.)
+    const backend = (await resolver.resolve(null))!.backend;
+    await backend.append("b");
+    for (let i = 0; i < 50 && (await store.latest("default"))?.treeSize !== 2; i++) await new Promise((r) => setTimeout(r, 20));
+    expect((await store.latest("default"))?.treeSize).toBe(2);
+    publisher.stop();
+    await backend.append("c");
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await store.latest("default"))?.treeSize).toBe(2);
+  });
+});
+
+describe("the reference log server's refusal answers", () => {
+  let log: RunningLog;
+  let dir: string;
+  const post = (path: string, token: string | null, body: unknown) => fetch(new URL(path, log.url), { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+  const get = (path: string, token?: string) => fetch(new URL(path, log.url), { headers: token ? { authorization: `Bearer ${token}` } : {} });
+  const errOf = async (r: Response) => ((await r.json()) as { error: string }).error;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "log-refusals-"));
+    const kp = writeKeyPair(generateKeyPair(), join(dir, "keys"), "log");
+    log = await serveLog(join(dir, "log.jsonl"), loadPrivateKey(kp.keyFile), { port: 0, tokens: ["t1"] });
+    expect((await post("append", "t1", { leafHash: "ab".repeat(32) })).status).toBe(200);
+  });
+  afterAll(() => log.close());
+
+  it("answers 400 for a bad body, a bad leaf, and out-of-range sizes", async () => {
+    const badJson = await fetch(new URL("append", log.url), { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer t1" }, body: "{not json" });
+    expect(badJson.status).toBe(400);
+    expect(await errOf(badJson)).toMatch(/body must be JSON/);
+    const emptyLeaf = await post("append", "t1", { leaf: "" });
+    expect(emptyLeaf.status).toBe(400);
+    expect(await errOf(emptyLeaf)).toMatch(/leaf must be a non-empty string/);
+    const badHash = await post("append", "t1", { leafHash: "zz" });
+    expect(badHash.status).toBe(400);
+    expect(await errOf(badHash)).toMatch(/leafHash must be 64 lowercase/);
+    expect((await get("root?size=99")).status).toBe(400);
+    expect((await get("root?size=-1")).status).toBe(400);
+    expect((await get("consistency?old=1&new=0")).status).toBe(400);
+    expect((await get("leaves?since=99", "t1")).status).toBe(400);
+    expect((await get("leaves?limit=0", "t1")).status).toBe(400);
+    expect((await get("checkpoints?since=abc")).status).toBe(400);
+  });
+
+  it("answers 404 where a file log keeps nothing, and 401 without a token", async () => {
+    expect((await get("nope")).status).toBe(404);
+    expect((await get("policies", "t1")).status).toBe(404);
+    expect((await get("audit", "t1")).status).toBe(404);
+    expect((await get("usage", "t1")).status).toBe(404);
+    expect((await post("append", null, { leaf: "x" })).status).toBe(401);
+  });
+
+  it("a hash-only log refuses a leaf with 400", async () => {
+    const d = mkdtempSync(join(tmpdir(), "log-hashonly-"));
+    const kp = writeKeyPair(generateKeyPair(), join(d, "keys"), "log");
+    const server = await serveLog(join(d, "log.jsonl"), loadPrivateKey(kp.keyFile), { port: 0, hashOnly: true });
+    try {
+      const r = await fetch(new URL("append", server.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ leaf: "plain receipt" }) });
+      expect(r.status).toBe(400);
+      expect(await errOf(r)).toMatch(/leaf hashes only/);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("answers 503 when the log cannot be reached, and 500 when the log fails", async () => {
+    const kp = generateKeyPair();
+    const throwingResolver = {
+      resolve: async (): Promise<null> => { throw new Error("pg is down"); },
+      tenants: async () => [] as (string | null)[],
+    };
+    const down = await serveLog(throwingResolver, localSigner(kp), { port: 0 });
+    try {
+      const r = await fetch(new URL("root", down.url));
+      expect(r.status).toBe(503);
+      expect(await errOf(r)).toMatch(/log unavailable/);
+    } finally {
+      await down.close();
+    }
+    const brokenBackend = { ...fileBackend(join(dir, "broken.jsonl")), root: async () => { throw new Error("tree gone"); } };
+    const brokenResolver = {
+      resolve: async () => ({ backend: brokenBackend, logId: undefined, authorize: async () => true }),
+      tenants: async () => [null] as (string | null)[],
+    };
+    const broken = await serveLog(brokenResolver, localSigner(kp), { port: 0 });
+    try {
+      const r = await fetch(new URL("head", broken.url));
+      expect(r.status).toBe(500);
+      expect(await errOf(r)).toMatch(/tree gone/);
+    } finally {
+      await broken.close();
+    }
+  });
+
+  it("answers 429 when the plan's monthly quota is spent", async () => {
+    const kp = generateKeyPair();
+    const resolver = {
+      resolve: async () => ({ backend: fileBackend(join(dir, "quota.jsonl")), logId: "q", authorize: async () => true, quota: async () => ({ plan: "free" as const, used: 10, quota: 10 }) }),
+      tenants: async () => [null] as (string | null)[],
+    };
+    const server = await serveLog(resolver, localSigner(kp), { port: 0 });
+    try {
+      const r = await fetch(new URL("append", server.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ leaf: "x" }) });
+      expect(r.status).toBe(429);
+      expect(await errOf(r)).toMatch(/monthly quota reached: 10 of 10/);
+      expect(r.headers.get("retry-after")).not.toBeNull();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("the health and key endpoints answer 503 when the signer cannot answer", async () => {
+    const kp = generateKeyPair();
+    const brokenSigner = { keyid: kp.keyid, sign: async () => localSigner(kp).sign("x", {}), keys: async () => { throw new Error("signer down"); } };
+    const server = await serveLog(join(dir, "nosigner.jsonl"), brokenSigner, { port: 0 });
+    try {
+      expect((await fetch(new URL("health", server.url))).status).toBe(503);
+      const keys = await fetch(new URL(".well-known/agent-custody-log.json", server.url));
+      expect(keys.status).toBe(503);
+      expect(await errOf(keys)).toMatch(/keys unavailable/);
+    } finally {
+      await server.close();
+    }
   });
 });

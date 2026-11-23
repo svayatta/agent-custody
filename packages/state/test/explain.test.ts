@@ -1,11 +1,12 @@
 // "Prove this action" is what a security owner asks first. From one receipt id they must get the ten answers, and
 // the same answers as one signed artefact that fails as a whole when a receipt inside it is touched.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createDelegation, createGateway, generateKeyPair, loadPrivateKey, loadPublicKey, RECEIPT_META_KEY, verifyBundle, writeKeyPair, loadConfig } from "@agent-custody/receipts";
+import { captureKeyFrom, createDelegation, createGateway, createIssuer, digestOf, dsseSign, generateKeyPair, loadPrivateKey, loadPublicKey, RECEIPT_META_KEY, verifyBundle, writeKeyPair, loadConfig, type ReceiptPredicate } from "@agent-custody/receipts";
 import { Ledger } from "../src/ledger.ts";
 import { buildActionPack, formatExplain, signActionPack, verifyActionPack } from "../src/explain.ts";
 import { listReceipts } from "../src/review.ts";
@@ -121,5 +122,148 @@ describe("explain a receipt", () => {
     expect(text).toMatch(/WHY\s+no policy was evaluated/);
     expect(text).not.toMatch(/decided allow|the policy permitted it|-> executed/);
     expect(listReceipts({ receiptsDir: join(dir, "receipts"), ledger: new Ledger(join(dir, "ledger.jsonl")) })[0]!.status).toBe("reconciled");
+  });
+});
+
+describe("negative verification cases for the explanation (#284)", () => {
+  const KEY_HEX = randomBytes(32).toString("hex");
+
+  /** a gateway-shaped receipt for a call that consumed `consumed`, issued under `rules` (none: in clear) */
+  async function issueCall(dir: string, consumed: string[], rules?: Record<string, unknown>, timestamp?: string): Promise<string> {
+    mkdirSync(join(dir, "receipts"), { recursive: true });
+    const key = generateKeyPair();
+    const issuer = createIssuer(key, join(dir, "receipts"), join(dir, "log.jsonl"), { capture: { rules: rules as never, key: captureKeyFrom(KEY_HEX) } });
+    const receiptId = randomUUID();
+    const p: ReceiptPredicate = {
+      receiptId,
+      timestamp: timestamp ?? new Date().toISOString(),
+      issuer: { kind: "gateway", keyid: key.keyid, version: "0" },
+      principal: { id: "user_456", provenance: "claimed" },
+      agent: { id: "support-agent", provenance: "claimed" },
+      session: { id: null, toolUseId: null, provenance: "claimed" },
+      model: { id: null, provenance: "claimed" },
+      tool: { name: "memory.write", provenance: "observed" },
+      request: { args: { subject: "acct:42", predicate: "tier", value: "gold" }, argsDigest: "x", provenance: "claimed" },
+      facts: {},
+      consumed: { factIds: consumed, provenance: "observed" },
+      policy: { decision: "allow", reasons: ["policy0"], errors: [], policyDigest: "d", provenance: "observed" },
+      execution: { status: "executed", result: { content: [{ type: "text", text: "ok" }] }, resultDigest: "y", provenance: "observed" },
+    };
+    await issuer.issue(p);
+    return receiptId;
+  }
+
+  /** a real gateway that writes one belief and reads it back, with the keys to verify its receipts */
+  async function gatewayFixture() {
+    const dir = mkdtempSync(join(tmpdir(), "explain-negative-"));
+    writeKeyPair(generateKeyPair(), join(dir, "keys"), "gateway");
+    const principalKp = generateKeyPair();
+    writeKeyPair(principalKp, join(dir, "keys"), "principal");
+    const packKey = writeKeyPair(generateKeyPair(), join(dir, "keys"), "pack");
+    const otherKey = writeKeyPair(generateKeyPair(), join(dir, "keys"), "other");
+    const now = Date.now();
+    writeFileSync(join(dir, "grant.json"), JSON.stringify(createDelegation(principalKp, { version: "0.1", principal: "user_456", agent: "support-agent", scopes: ["memory.write", "memory.read", "memory.retract"], issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 3600_000).toISOString() })));
+    writeFileSync(join(dir, "policy.cedar"), `permit(principal, action, resource);\n`);
+    const ledgerFile = join(dir, "ledger.jsonl");
+    writeFileSync(join(dir, "gateway.json"), JSON.stringify({ identity: { keyFile: "keys/gateway.key" }, upstream: { command: process.execPath, args: [cli, "serve", "--ledger", ledgerFile] }, grantFile: "grant.json", trustedPrincipalKeys: ["keys/principal.pub"], policyFile: "policy.cedar", precommit: ["memory.write"], receiptsDir: "receipts", logFile: "log.jsonl" }));
+    const gw = await createGateway(loadConfig(join(dir, "gateway.json")));
+    const w = await gw.handleCall({ name: "memory.write", arguments: { subject: "acct:42", predicate: "plan", value: "enterprise", space: "org" } });
+    const writeId = String(w._meta?.[RECEIPT_META_KEY]);
+    const factId = value(w).fact.factId;
+    const r = await gw.handleCall({ name: "memory.read", arguments: { subject: "acct:42" } });
+    const readId = String(r._meta?.[RECEIPT_META_KEY]);
+    await gw.close();
+    const ledger = new Ledger(ledgerFile);
+    const keys = { issuerKeys: [loadPublicKey(join(dir, "keys", "gateway.pub"))], principalKeys: [loadPublicKey(join(dir, "keys", "principal.pub"))] };
+    return { dir, ledgerFile, ledger, keys, packKey, otherKey, writeId, readId, factId };
+  }
+
+  it("lists a consumed fact the ledger never held as unknown, and the answers say so", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "explain-unknown-"));
+    const ledger = new Ledger(join(dir, "ledger.jsonl"));
+    const held = await ledger.assert({ subject: "acct:42", predicate: "plan", value: "pro", space: "team", actor: "crm" });
+    const receiptId = await issueCall(dir, [held.fact.factId, "00000000-0000-0000-0000-000000000000"]);
+    const pack = await buildActionPack(join(dir, "receipts"), receiptId, ledger);
+    expect(pack.consumed.facts.map((f) => f.factId)).toEqual([held.fact.factId]);
+    expect(pack.consumed.unknown).toEqual(["00000000-0000-0000-0000-000000000000"]);
+    expect(formatExplain(pack, null, true)).toMatch(/00000000 \(not in this ledger\)/);
+    await ledger.close();
+  });
+
+  it("lists several downstream receipts in timestamp order", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "explain-sorted-"));
+    const ledger = new Ledger(join(dir, "ledger.jsonl"));
+    const base = Date.now();
+    const written = await issueCall(dir, [], undefined, new Date(base).toISOString());
+    // Two facts whose consumers interleave in time: the fact-by-fact merge
+    // in `explain` must still come out in timestamp order. With one fact the
+    // receipts arrive pre-sorted, so the sort under test is never exercised.
+    const a = await ledger.assert({ subject: "acct:42", predicate: "plan", value: "pro", space: "team", actor: "crm", source: { receiptId: written } });
+    const b = await ledger.assert({ subject: "acct:42", predicate: "seats", value: 5, space: "team", actor: "crm", source: { receiptId: written } });
+    const r1 = await issueCall(dir, [b.fact.factId], undefined, new Date(base + 1000).toISOString());
+    const r2 = await issueCall(dir, [a.fact.factId], undefined, new Date(base + 2000).toISOString());
+    const r3 = await issueCall(dir, [b.fact.factId], undefined, new Date(base + 3000).toISOString());
+    expect((await buildActionPack(join(dir, "receipts"), written, ledger)).downstream.receipts.map((r) => r.receiptId)).toEqual([r1, r2, r3]);
+    await ledger.close();
+  });
+
+  it("reports a later call that withholds what it was shown as incomplete, in the pack and the answers", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "explain-withheld-"));
+    const ledger = new Ledger(join(dir, "ledger.jsonl"));
+    const written = await issueCall(dir, []);
+    const f = await ledger.assert({ subject: "acct:42", predicate: "plan", value: "pro", space: "team", actor: "crm", source: { receiptId: written } });
+    const later = await issueCall(dir, [f.fact.factId], { "*": { args: { mode: "digest" } } });
+    const pack = await buildActionPack(join(dir, "receipts"), written, ledger);
+    expect(pack.downstream.receipts).toEqual([]);
+    expect(pack.downstream.withheld.map((r) => r.receiptId)).toEqual([later]);
+    expect(formatExplain(pack, null, true)).toMatch(/INCOMPLETE: 1 later call\(s\) withhold what the agent had been shown/);
+    await ledger.close();
+  });
+
+  it("fails verification when the pack was signed under another key", async () => {
+    const { dir, ledger, keys, packKey, otherKey, writeId } = await gatewayFixture();
+    const pack = await buildActionPack(join(dir, "receipts"), writeId, ledger);
+    const env = signActionPack(pack, loadPrivateKey(otherKey.keyFile));
+    const result = verifyActionPack(env, [loadPublicKey(packKey.pubFile)], keys);
+    expect(result.ok).toBe(false);
+    expect(result.pack).toBeNull();
+    expect(result.checks.find((c) => c.name === "pack signature")?.ok).toBe(false);
+    await ledger.close();
+  });
+
+  it("fails verification when the pack names another type", async () => {
+    const { dir, ledger, keys, packKey, writeId } = await gatewayFixture();
+    const pack = await buildActionPack(join(dir, "receipts"), writeId, ledger);
+    const statement = { _type: "https://in-toto.io/Statement/v1", subject: [{ name: `action-pack:${pack.receiptId}`, digest: { sha256: digestOf(pack) } }], predicateType: "https://example.invalid/other-pack/v0.1", predicate: pack };
+    const env = dsseSign("application/vnd.in-toto+json", statement, loadPrivateKey(packKey.keyFile));
+    const result = verifyActionPack(env, [loadPublicKey(packKey.pubFile)], keys);
+    expect(result.ok).toBe(false);
+    expect(result.pack).toBeNull();
+    expect(result.checks.find((c) => c.name === "pack signature")?.ok).toBe(true);
+    expect(result.checks.find((c) => c.name === "pack type")?.ok).toBe(false);
+    await ledger.close();
+  });
+
+  it("fails verification when a written belief cites another receipt", async () => {
+    const { dir, ledger, keys, packKey, writeId } = await gatewayFixture();
+    const pack = await buildActionPack(join(dir, "receipts"), writeId, ledger);
+    const tampered = structuredClone(pack);
+    tampered.written[0]!.source.receiptId = "00000000-0000-0000-0000-000000000000";
+    const result = verifyActionPack(signActionPack(tampered, loadPrivateKey(packKey.keyFile)), [loadPublicKey(packKey.pubFile)], keys);
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((c) => c.name === "written beliefs cite this receipt")?.ok).toBe(false);
+    expect(result.checks.find((c) => c.name === "pack signature")?.ok).toBe(true);
+    expect(result.checks.find((c) => c.name === "pack digest")?.ok).toBe(true);
+    await ledger.close();
+  });
+
+  it("answers that a call which wrote nothing has nothing to reverse, with a ledger", async () => {
+    const { dir, ledger, readId } = await gatewayFixture();
+    const pack = await buildActionPack(join(dir, "receipts"), readId, ledger);
+    expect(pack.written).toEqual([]);
+    const text = formatExplain(pack, null, true);
+    expect(text).toMatch(/DID ANYTHING DEPEND ON THIS\s+this call wrote no beliefs; nothing in the ledger descends from it/);
+    expect(text).toMatch(/WHAT NEEDS REVERSAL\s+nothing/);
+    await ledger.close();
   });
 });

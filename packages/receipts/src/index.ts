@@ -26,6 +26,10 @@ export { FLAG_SIGNALS, FORM_REPORT_HEADER, createHistoryTracker, flagOf, observa
 export type { ArrivalBehaviour, ArrivalFingerprint, FlagSignal, FormSignals, HeaderFingerprint, HistoryTracker, NavigationSignals, Observation, Signals, SourceHistory, TimingSignals, TlsFingerprint, TlsObservation } from "./door-signals.ts";
 export { LABELS, createMeasure, flagValues, formatMeasure, formatRate, intervalText, isName, labelsFromReceipts, measure, parseLabelledRecord, percent, rateOf, ratePercent, thresholds } from "./door-measure.ts";
 export type { FlagMeasure, FlagValues, Label, LabelExport, LabelledRecord, Measure, MeasureResult, Rate, SetMeasure, SideMeasure } from "./door-measure.ts";
+export { challengeLabels, DOOR_QUESTIONS, DoorLabelSchema, doorErrorRates, formatErrorRates, LABEL_SOURCES, parseLabels, readDoorArrivals, wilson } from "./door-error-rates.ts";
+export type { DoorArrivals, DoorLabel, DoorQuestion, ErrorRateRow, LabelSource } from "./door-error-rates.ts";
+export { buildDoorTestSet, DOOR_TEST_KINDS, formatTestKinds } from "./door-test-set.ts";
+export type { DoorTestSet, TestKind } from "./door-test-set.ts";
 export type { Arrival, ArrivalChallenge, ArrivalClass, ArrivalRate, ChallengeCheck, Classified, DoorHost, DoorOptions, DoorRequest, DoorServerOptions, RateTracker, RateTrackerLimits, RunningDoor } from "./door.ts";
 export type { NonceState, NonceStore, SignatureCheck, SignedRequest, WebBotAuthOptions, WebBotAuthVerifier } from "./web-bot-auth.ts";
 export * from "./capture.ts";

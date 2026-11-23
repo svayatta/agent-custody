@@ -6,12 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { generateKeyPair } from "../src/crypto.ts";
+import { dsseSign, generateKeyPair } from "../src/crypto.ts";
 import { dirCheckpoints } from "../src/checkpoints.ts";
 import { MerkleLog } from "../src/log.ts";
 import { exportLog, formatExport } from "../src/log-export.ts";
-import { httpLog, postgresResolver, serveLog, type RunningLog } from "../src/log-sink.ts";
-import { PostgresTenancy } from "../src/log-store.ts";
+import { CheckpointPublisher, fileResolver, httpLog, postgresResolver, serveLog, type RunningLog } from "../src/log-sink.ts";
+import { fileBackend, PostgresTenancy } from "../src/log-store.ts";
+import { TREEHEAD_TYPE } from "../src/receipt.ts";
+import { localSigner } from "../src/signer.ts";
 
 let db: PGlite;
 let log: RunningLog;
@@ -92,5 +94,140 @@ describe("a tenant's export", () => {
     expect(page).toMatchObject({ since: 5, size: 7 });
     expect(page.leaves).toHaveLength(2);
     expect((await fetch(`${log.url}t/acme/usage?month=2026-13`, { headers: h })).status).toBe(400);
+  });
+});
+
+// The same leaves and export, on a file-backed log: the reference server as it was, one JSONL file per log.
+describe("leaves and export on a file-backed log", () => {
+  const fileServers: RunningLog[] = [];
+  const leaves = (n: number) => Array.from({ length: n }, (_, i) => `leaf ${i}`);
+
+  async function startFileLog(n: number) {
+    const d = mkdtempSync(join(tmpdir(), "export-file-"));
+    const file = join(d, "log.jsonl");
+    const log = new MerkleLog(file);
+    for (const leaf of leaves(n)) log.append(leaf);
+    log.close();
+    const kp = generateKeyPair();
+    const store = dirCheckpoints(mkdtempSync(join(tmpdir(), "export-file-cp-")));
+    const resolver = fileResolver(file, { logId: "file-log" });
+    const server = await serveLog(resolver, kp, { port: 0, checkpoints: store });
+    fileServers.push(server);
+    return { dir: d, file, kp, store, resolver, server };
+  }
+
+  afterAll(async () => {
+    for (const s of fileServers) await s.close();
+  });
+
+  it("/leaves on a file log equals the MerkleLog hashes, in pages and in full", async () => {
+    const { file, server } = await startFileLog(7);
+    const want = new MerkleLog(file).leafHashes(0);
+    const got: string[] = [];
+    let since = 0;
+    while (since < want.length) {
+      const page = (await (await fetch(`${server.url}leaves?since=${since}&limit=2`)).json()) as { since: number; size: number; leaves: string[] };
+      expect(page).toMatchObject({ since, size: 7 });
+      expect(page.leaves).toEqual(want.slice(since, since + 2));
+      got.push(...page.leaves);
+      since += page.leaves.length;
+    }
+    expect(got).toEqual(want);
+    const full = (await (await fetch(`${server.url}leaves`)).json()) as { leaves: string[] };
+    expect(full.leaves).toEqual(want);
+    const root = (await (await fetch(`${server.url}root`)).json()) as { treeSize: number; rootHash: string };
+    expect(root).toEqual({ treeSize: 7, rootHash: new MerkleLog(file).root() });
+  });
+
+  it("out-of-range leaf-hash bounds clamp instead of throwing", async () => {
+    const { file } = await startFileLog(7);
+    const log = new MerkleLog(file);
+    const all = log.leafHashes(0);
+    expect(log.leafHashes(-3, 999)).toEqual(all);
+    expect(log.leafHashes(2, 5)).toEqual(all.slice(2, 5));
+    expect(log.leafHashes(5, 3)).toEqual([]);
+    expect(log.leafHashes(99, 200)).toEqual([]);
+    const backend = fileBackend(file);
+    expect(await backend.leafHashes(-1, 999)).toEqual(all);
+    expect(await backend.leafHashes(6, 99)).toEqual(all.slice(6));
+    expect(await backend.leafHashes(7, 9)).toEqual([]);
+  });
+
+  it("an export of a file log rebuilds the same log, names what the file server does not keep, and counts a good checkpoint", async () => {
+    const ctx = await startFileLog(7);
+    await new CheckpointPublisher(ctx.resolver, localSigner(ctx.kp), ctx.store, 60_000).publishOnce();
+    const out = join(mkdtempSync(join(tmpdir(), "export-file-")), "out");
+    const r = await exportLog({ logUrl: ctx.server.url, token: "any-token", outDir: out, months: [] });
+    expect(r).toMatchObject({ logId: "file-log", treeSize: 7, checkpoints: 1 });
+    // the good checkpoint must verify: no problem may mention a checkpoint
+    expect(r.problems.filter((p) => p.startsWith("checkpoint"))).toEqual([]);
+    expect(r.rootHash).toBe(new MerkleLog(ctx.file).root());
+    const copy = new MerkleLog(join(out, "log.jsonl"));
+    expect(copy.size).toBe(7);
+    expect(copy.root()).toBe(r.rootHash);
+    expect(copy.leafHashes(0)).toEqual(new MerkleLog(ctx.file).leafHashes(0));
+    // a file log keeps no usage, audit trail, or policies: the export says so rather than hiding it
+    expect(r.problems).toContain("audit trail: 404 from /audit");
+    expect(r.problems).toContain("policies: 404 from /policies");
+    expect(formatExport(r)).toMatch(/EXPORT DOES NOT ADD UP/);
+  });
+
+  it("with no months given, the export asks for the current month and the previous one", async () => {
+    const ctx = await startFileLog(3);
+    const out = join(mkdtempSync(join(tmpdir(), "export-file-")), "out");
+    const r = await exportLog({ logUrl: ctx.server.url, token: "any-token", outDir: out });
+    const now = new Date();
+    const thisMonth = now.toISOString().slice(0, 7);
+    const prevMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+    expect(r.usage).toEqual([]);
+    expect(r.problems.join("\n")).toContain(`usage for ${thisMonth}: 404 from /usage`);
+    expect(r.problems.join("\n")).toContain(`usage for ${prevMonth}: 404 from /usage`);
+  });
+
+  it("a failing usage, audit, or policies endpoint is reported as a problem, not hidden", async () => {
+    const ctx = await startFileLog(5);
+    const failing = (part: string): typeof fetch => async (url, init) => (String(url).includes(part) ? new Response("boom", { status: 500 }) : fetch(url, init));
+    const month = new Date().toISOString().slice(0, 7);
+    const outU = join(mkdtempSync(join(tmpdir(), "export-file-")), "u");
+    const outA = join(mkdtempSync(join(tmpdir(), "export-file-")), "a");
+    const outP = join(mkdtempSync(join(tmpdir(), "export-file-")), "p");
+    const ru = await exportLog({ logUrl: ctx.server.url, token: "t", outDir: outU, fetch: failing("/usage"), months: [month] });
+    expect(ru.problems).toContain(`usage for ${month}: 500 from /usage`);
+    const ra = await exportLog({ logUrl: ctx.server.url, token: "t", outDir: outA, fetch: failing("/audit"), months: [] });
+    expect(ra.problems).toContain("audit trail: 500 from /audit");
+    const rp = await exportLog({ logUrl: ctx.server.url, token: "t", outDir: outP, fetch: failing("/policies"), months: [] });
+    expect(rp.problems).toContain("policies: 500 from /policies");
+    expect(existsSync(join(outU, "log.jsonl"))).toBe(true);
+  });
+
+  it("a 401, a non-OK answer, or an empty page from /leaves rejects instead of exporting", async () => {
+    const ctx = await startFileLog(7);
+    const out = join(mkdtempSync(join(tmpdir(), "export-file-")), "out");
+    const base = { logUrl: ctx.server.url, token: "t", outDir: out, months: [] as string[] };
+    const refused: typeof fetch = async (url, init) => (String(url).includes("/leaves") ? new Response("no", { status: 401 }) : fetch(url, init));
+    await expect(exportLog({ ...base, fetch: refused })).rejects.toThrow(/refused the token for \/leaves/);
+    const broken: typeof fetch = async (url, init) => (String(url).includes("/leaves") ? new Response("boom", { status: 500 }) : fetch(url, init));
+    await expect(exportLog({ ...base, fetch: broken })).rejects.toThrow(/500 from \/leaves/);
+    const empty: typeof fetch = async (url, init) => {
+      if (!String(url).includes("/leaves")) return fetch(url, init);
+      return new Response(JSON.stringify({ since: 0, size: 7, leaves: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    await expect(exportLog({ ...base, fetch: empty })).rejects.toThrow(/returned no leaves past 0 of 7/);
+  });
+
+  it("a checkpoint that does not verify, and one whose root the leaves belie, are both reported", async () => {
+    const ctx = await startFileLog(7);
+    const log = new MerkleLog(ctx.file);
+    await new CheckpointPublisher(ctx.resolver, localSigner(ctx.kp), ctx.store, 60_000).publishOnce();
+    const other = generateKeyPair();
+    await ctx.store.save({ tenant: "default", logId: "file-log", treeSize: 3, rootHash: log.root(3), signedAt: new Date().toISOString(), envelope: dsseSign(TREEHEAD_TYPE, { treeSize: 3, rootHash: log.root(3), timestamp: new Date().toISOString(), log: "file-log" }, other) });
+    await ctx.store.save({ tenant: "default", logId: "file-log", treeSize: 5, rootHash: "00".repeat(32), signedAt: new Date().toISOString(), envelope: dsseSign(TREEHEAD_TYPE, { treeSize: 5, rootHash: "00".repeat(32), timestamp: new Date().toISOString(), log: "file-log" }, ctx.kp) });
+    const out = join(mkdtempSync(join(tmpdir(), "export-file-")), "out");
+    const r = await exportLog({ logUrl: ctx.server.url, token: "t", outDir: out, months: [] });
+    expect(r.checkpoints).toBe(3);
+    expect(r.problems.join("\n")).toMatch(/checkpoint at 3 does not verify/);
+    expect(r.problems.join("\n")).toMatch(/checkpoint at 5 has root 000000000000, the leaves give/);
+    // the good checkpoint at size 7 must verify: no problem may mention it
+    expect(r.problems.join("\n")).not.toMatch(/checkpoint at 7/);
   });
 });
