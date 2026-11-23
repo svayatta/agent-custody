@@ -274,7 +274,7 @@ export const DoorConfigSchema = z.object({
   /** principal keys whose grants the door accepts as a passport: an arrival carrying one of their grants, in scope for its route, is `verified` */
   trustedPrincipalKeys: z.array(z.string()).default([]),
   /** agent registry keys (the key document at the registry's /.well-known/agent-custody-registry.json): an arrival that presents a passport one of them signed, and signs the request with the did:key the passport names, is `verified`. Needs `webBotAuth`, which checks the signature */
-  trustedRegistryKeys: z.array(z.union([z.string(), z.object({ key: z.string(), registry: z.string().url() }).strict()])).default([]),
+  trustedRegistryKeys: z.array(z.union([z.string().min(1), z.object({ key: z.string().min(1), registry: z.string().url().refine((u) => /^https?:\/\//.test(u), { message: "registry is an http(s) URL" }) }).strict()])).default([]),
   /** a JSON file listing digests of revoked grant envelopes, the same file and format as the gateway's (`agent-custody revoke --config door.json` appends to it); re-read whenever it changes, checked on every arrival. A grant it lists, or one whose chain it lists, is `revoked` */
   revokedGrants: z.string().min(1).optional(),
   /** a JSON file of the site's named admission lists (`{ "lists": { "partners": [ { "registry", "agentId" } | { "erc8004": { "agentRegistry", "agentId" } } | { "agent" } ] } }`); re-read whenever it changes. The names of the lists a verified arrival's agent is on are `arrival.admission.lists` */

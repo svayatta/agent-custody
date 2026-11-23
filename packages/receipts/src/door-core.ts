@@ -280,6 +280,12 @@ export interface ArrivalAdmission {
 
 /** Trusted registry keys for the door's IO: the keys, and the URL that each bound key's passports may name, by keyid. */
 export function registryKeysOf(keys: { ref: PublicKeyRef; registry?: string }[]): { trustedRegistryKeys: PublicKeyRef[]; registryUrls: Record<string, string> } {
+  // one key listed twice must say one thing: two registries, or bound and also bare, cannot both hold
+  const seen = new Map<string, string | undefined>();
+  for (const k of keys) {
+    if (seen.has(k.ref.keyid) && seen.get(k.ref.keyid) !== k.registry) throw new Error(`the registry key ${k.ref.keyid} is listed twice, for ${seen.get(k.ref.keyid) ?? "any registry"} and for ${k.registry ?? "any registry"}; list it once, bound to its one registry`);
+    seen.set(k.ref.keyid, k.registry);
+  }
   return { trustedRegistryKeys: keys.map((k) => k.ref), registryUrls: Object.fromEntries(keys.filter((k) => k.registry !== undefined).map((k) => [k.ref.keyid, k.registry!])) };
 }
 

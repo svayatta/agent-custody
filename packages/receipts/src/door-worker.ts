@@ -111,19 +111,29 @@ export function pemKeys(text: string | undefined): PublicKeyRef[] {
   return [...(text ?? "").matchAll(/-----BEGIN PUBLIC KEY-----[\s\S]+?-----END PUBLIC KEY-----/g)].map((m) => publicKeyFromPem(m[0]));
 }
 
-const BoundRegistryKeysSchema = z.array(z.object({ publicKeyPem: z.string(), registry: z.string().url().optional() }).passthrough());
+// `registry` is required: with the key document's other fields allowed through, a misspelt or missing one would
+// otherwise leave the key trusted for any registry, and a Worker has no check to warn of it
+const BoundRegistryKeysSchema = z.array(z.object({ publicKeyPem: z.string().min(1), registry: z.string().url().refine((u) => /^https?:\/\//.test(u), { message: "registry is an http(s) URL" }) }).passthrough()).min(1);
 
 /**
  * The trusted registry keys: PEM public keys, each trusted for any registry URL, or a JSON list of
  * `{ publicKeyPem, registry }`, the shape of the `keys` in a registry's key document, that binds each key to the one
- * registry URL its passports may name.
+ * registry URL its passports may name. A JSON object, such as a whole key document, is refused: its PEM would
+ * otherwise be read as a bare key and bound to nothing.
  */
 export function registryKeys(text: string | undefined): { trustedRegistryKeys: PublicKeyRef[]; registryUrls: Record<string, string> } {
   const t = (text ?? "").trim();
+  if (t.startsWith("{")) throw new Error("TRUSTED_REGISTRY_KEYS is a JSON object; give PEM keys, or a JSON list of { publicKeyPem, registry } (the key document's keys, each with the registry's URL)");
   if (!t.startsWith("[")) return registryKeysOf(pemKeys(t).map((ref) => ({ ref })));
-  const parsed = BoundRegistryKeysSchema.safeParse(JSON.parse(t));
+  let raw: unknown;
+  try {
+    raw = JSON.parse(t);
+  } catch (e) {
+    throw new Error(`TRUSTED_REGISTRY_KEYS starts with [ and is not JSON: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const parsed = BoundRegistryKeysSchema.safeParse(raw);
   if (!parsed.success) throw new Error(`TRUSTED_REGISTRY_KEYS is not a list of { publicKeyPem, registry }: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`);
-  return registryKeysOf(parsed.data.map((e) => ({ ref: publicKeyFromPem(e.publicKeyPem), ...(e.registry ? { registry: e.registry } : {}) })));
+  return registryKeysOf(parsed.data.map((e) => ({ ref: publicKeyFromPem(e.publicKeyPem), registry: e.registry })));
 }
 
 /**
