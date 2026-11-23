@@ -64,7 +64,7 @@ In code, `didKeyOf(publicKey)` gives a key's did:key.
 
 ### Versions and declared endpoints
 
-A registration, and a change to one, may carry `version` (`MAJOR.MINOR.PATCH`, or `null` for none) and `endpoints` (the tool endpoints the agent says it calls). The entry keeps the agent's history: each change of version, and each key rotation, closes the stretch the agent was in, and the entry records it, newest first, as `{ version, agent, from, to }`. `replaces` is the version the current one replaced. A change of name, contact, capabilities, or expiry leaves the history alone. The entry keeps the last 100 stretches.
+A registration, and a change to one, may carry `version` (`MAJOR.MINOR.PATCH`, or `null` for none) and `endpoints` (the tool endpoints the agent says it calls: at most 32, and at most 1,024 characters together, so that a passport with the largest of every other field still fits the 8,192 characters a door reads; a URL is stored as its `href`, and white space and control characters are refused). The entry keeps the agent's history: each change of version, and each key rotation, closes the stretch the agent was in, and the entry records it, newest first, as `{ version, agent, from, to }`. `replaces` is the version the current one replaced. A change of name, contact, capabilities, or expiry leaves the history alone. The entry keeps the last 100 stretches. Two changes made at once to one agent do not both land: the one that reads a version or key that another has just replaced is refused with "read the entry again and retry".
 
 ```bash
 curl -b session.txt -H 'content-type: application/json' https://app.example/api/agents/agt_5325ae63b111bdcb -d '{ "version": "1.5.0" }'

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { compileAdmissionLists, type ArrivalIdentity } from "../src/admission.ts";
+import { compareVersions } from "../src/passport.ts";
 import { checkDoorConfig } from "../src/check.ts";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey, type Envelope, type KeyPair } from "../src/crypto.ts";
@@ -79,6 +80,9 @@ describe("admission lists", () => {
     expect(at("2.0.0")).toEqual(["any"]);
     expect(at("0.9.9")).toEqual(["any", "old"]);
     expect(at()).toEqual(["any"]);
+    // not a version: in no range, never admitted by one (the door's passport check refuses these first; the export must not admit them either)
+    for (const v of ["1.4", "garbage", "1.4.0.1"]) expect(at(v), v).toEqual(["any"]);
+    expect(() => compareVersions("garbage", "1.0.0")).toThrow("not a version");
     for (const [bad, why] of [
       [{ version: "1.4" }, "MAJOR.MINOR.PATCH"],
       [{ versions: {} }, "versions needs from, below, or both"],
@@ -198,7 +202,7 @@ when { context.facts.arrival has admission && context.facts.arrival.admission.li
   });
 
   it("admits an agent at the version its list names, and at the next version records the version and that no list named it", async () => {
-    // svayatta/pm#79's done-when: the site admits version 1.4.0; the agent's owner ships 1.5.0
+    // the site admits version 1.4.0; the agent's owner ships 1.5.0
     const key = generateKeyPair();
     const entry: AgentEntry = { id: "agt_00000000000000d4", owner: "carted", name: "versioned agent", contact: "agents@carted.example", capabilities: ["refunds"], agent: didKeyOf(key.publicKey), createdAt: new Date().toISOString(), expiresAt: inDays(30), revokedAt: null, endpoints: ["api.stripe.com", "https://mcp.carted.example/mcp"] };
     const before = readFileSync(listsFile(), "utf8");
@@ -279,6 +283,8 @@ describe("the registry's search by capability", () => {
     expect(all.json.registry).toBe(REGISTRY);
     // a search is not a directory of contacts: the contact is on the agent's own entry, and in its passport
     expect(all.json.agents.every((e: object) => !("contact" in e))).toBe(true);
+    // nor of histories, which are each agent's own and can be long
+    expect(all.json.agents.every((e: object) => !("history" in e))).toBe(true);
     expect((await get(`/registry/agents/${a}`)).json.contact).toBe("a@carted.example");
     const first = await get("/registry/agents?capability=refunds&limit=1");
     expect(first.json.agents).toHaveLength(1);

@@ -24,6 +24,8 @@ export const AGENT_VERSION = /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9
 
 /** Orders two versions that match AGENT_VERSION: negative, zero, or positive. */
 export function compareVersions(a: string, b: string): number {
+  // anything else would compare as NaN, which is neither below nor above, and a range check would let it through
+  if (!AGENT_VERSION.test(a) || !AGENT_VERSION.test(b)) throw new Error(`not a version, MAJOR.MINOR.PATCH: ${!AGENT_VERSION.test(a) ? a : b}`.slice(0, 120));
   const x = a.split(".").map(Number);
   const y = b.split(".").map(Number);
   for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i]! - y[i]!;
@@ -33,15 +35,25 @@ export function compareVersions(a: string, b: string): number {
 const HOSTNAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
 
 /** A tool endpoint an agent says it calls: a host name, or an https or wss URL (an MCP server). A claim, never checked by the registry. */
-export const EndpointSchema = z.string().max(200).refine((v) => {
-  if (HOSTNAME.test(v)) return true;
-  try {
-    const u = new URL(v);
-    return (u.protocol === "https:" || u.protocol === "wss:") && !u.username && !u.password && HOSTNAME.test(u.hostname);
-  } catch {
-    return false;
-  }
-}, { message: "an endpoint is a lowercase host name, or an https or wss URL without credentials" });
+export const EndpointSchema = z.string().max(200)
+  .refine((v) => !/[\s\u0000-\u001f\u007f]/.test(v), { message: "an endpoint has no white space or control characters" })
+  .refine((v) => {
+    if (HOSTNAME.test(v)) return true;
+    try {
+      const u = new URL(v);
+      return (u.protocol === "https:" || u.protocol === "wss:") && !u.username && !u.password && HOSTNAME.test(u.hostname);
+    } catch {
+      return false;
+    }
+  }, { message: "an endpoint is a lowercase host name, or an https or wss URL without credentials" })
+  // one spelling: a URL is kept as its href, so what the passport carries is what the URL means
+  .transform((v) => (HOSTNAME.test(v) ? v : new URL(v).href));
+
+/**
+ * The most characters the declared endpoints of one agent may take, together. With the largest of every other field, a
+ * passport stays within MAX_PASSPORT_HEADER, so a door can always read it.
+ */
+export const MAX_ENDPOINT_CHARS = 1024;
 
 export const text = (max: number) => z.string().trim().min(1).max(max).refine((s) => !/[\u0000-\u001f\u007f]/.test(s), { message: "control characters are not allowed" });
 

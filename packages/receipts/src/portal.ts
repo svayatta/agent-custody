@@ -1044,8 +1044,8 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         if (limit !== undefined && !(/^[1-9][0-9]{0,2}$/.test(limit) && Number(limit) <= 100)) return json(400, { error: "limit is 1 to 100" });
         try {
           const page = await agents.search({ ...(q("capability") !== undefined ? { capability: q("capability")! } : {}), ...(q("owner") !== undefined ? { owner: q("owner")! } : {}), ...(q("after") !== undefined ? { after: q("after")! } : {}), ...(limit !== undefined ? { limit: Number(limit) } : {}) });
-          // a search finds agents; it is not a directory of contacts, which each agent's own entry and passport carry
-          return json(200, { registry: portalBase, agents: page.agents.map((e) => { const { contact: _contact, ...listed } = publicEntry(e); return listed; }), next: page.next });
+          // a search finds agents; it is not a directory of contacts, nor of each agent's history, which each agent's own entry carries
+          return json(200, { registry: portalBase, agents: page.agents.map((e) => { const { contact: _contact, history: _history, ...listed } = publicEntry(e); return listed; }), next: page.next });
         } catch (e) {
           if (e instanceof RegistryInputError) return json(400, { error: e.message });
           throw e;

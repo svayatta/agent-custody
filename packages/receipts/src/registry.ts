@@ -12,7 +12,7 @@ import { z } from "zod";
 import type { Envelope, KeyPair } from "./crypto.ts";
 import { DID_KEY_PREFIX, didKeyOf, publicKeyFromDidKey } from "./did-key.ts";
 import { transaction, type PostgresLike } from "./log-store.ts";
-import { AGENT_ID, AGENT_VERSION, CAPABILITY, DEFAULT_PASSPORT_SECONDS, DID_KEY, EndpointSchema, PASSPORT_HEADER, PASSPORT_TYPE, PassportSchema, text, type Passport } from "./passport.ts";
+import { AGENT_ID, AGENT_VERSION, CAPABILITY, DEFAULT_PASSPORT_SECONDS, DID_KEY, EndpointSchema, MAX_ENDPOINT_CHARS, MAX_PASSPORT_HEADER, PASSPORT_HEADER, PASSPORT_TYPE, passportHeader, PassportSchema, text, type Passport } from "./passport.ts";
 import type { Signer } from "./signer.ts";
 import { Erc8004LinkSchema, type Erc8004Check, type Erc8004Checked, type Erc8004Link } from "./erc8004-link.ts";
 
@@ -118,7 +118,7 @@ export const AgentInputSchema = z.object({
   /** the agent's version, MAJOR.MINOR.PATCH, or null for none; a change is recorded in the entry's history */
   version: z.string().regex(AGENT_VERSION, { message: "version is MAJOR.MINOR.PATCH, numbers only" }).nullable().optional(),
   /** the tool endpoints the agent says it calls: host names or https/wss URLs, shown to sites as a claim */
-  endpoints: z.array(EndpointSchema).max(32).optional(),
+  endpoints: z.array(EndpointSchema).max(32).refine((l) => l.reduce((n, e) => n + e.length, 0) <= MAX_ENDPOINT_CHARS, { message: `the endpoints take at most ${MAX_ENDPOINT_CHARS} characters together, so that a door can read the passport` }).optional(),
   /** link an ERC-8004 identity (checked against the chain before it is stored), or null to unlink */
   erc8004: Erc8004LinkSchema.nullable().optional(),
 });
@@ -230,7 +230,7 @@ export class RegistryStore {
     const { rows } = await this.client.query(`SELECT * FROM ${this.t} WHERE owner = $1 ORDER BY created_at, id`, [owner]);
     return rows.map((r) => RegistryStore.row(r as Record<string, unknown>));
   }
-  /** Changes an active agent of this owner: any of name, contact, capabilities, key, expiry. Null when the owner has no such active agent. */
+  /** Changes an active agent of this owner: any of name, contact, capabilities, key, expiry, version, endpoints, ERC-8004 link. Null when the owner has no such active agent. */
   async update(owner: string, id: string, raw: unknown, now = Date.now(), erc8004?: Erc8004Checker): Promise<AgentEntry | null> {
     await this.init();
     const v = checkInput(raw, true, now);
@@ -250,9 +250,12 @@ export class RegistryStore {
     const link = target === undefined ? current.erc8004 : target === null ? null : await checkedLink(erc8004, target, next.agent);
     try {
       // the version and key read above must still be the row's, so two changes at once cannot both write one stretch of history
-      const { rows } = await this.client.query(`UPDATE ${this.t} SET name = $3, contact = $4, capabilities = $5, agent = $6, expires_at = $7, erc8004 = $8, agent_version = $9, version_since = $10, endpoints = $11, history = $12 WHERE id = $1 AND owner = $2 AND revoked_at IS NULL AND agent = $13 AND agent_version IS NOT DISTINCT FROM $14 RETURNING *`, [id, owner, next.name, next.contact, next.capabilities, next.agent, next.expiresAt, link ? JSON.stringify(link) : null, next.version ?? null, since, next.endpoints ?? [], JSON.stringify(history), current.agent, current.version ?? null]);
-      if (!rows[0] && moved) throw new RegistryInputError("the agent's version or key changed while this change was made; read the entry again and retry");
-      return rows[0] ? RegistryStore.row(rows[0] as Record<string, unknown>) : null;
+      const { rows } = await this.client.query(`UPDATE ${this.t} SET name = $3, contact = $4, capabilities = $5, agent = $6, expires_at = $7, erc8004 = $8, agent_version = $9, version_since = $10, endpoints = $11, history = $12 WHERE id = $1 AND owner = $2 AND revoked_at IS NULL AND agent = $13 AND agent_version IS NOT DISTINCT FROM $14 AND version_since IS NOT DISTINCT FROM $15 RETURNING *`, [id, owner, next.name, next.contact, next.capabilities, next.agent, next.expiresAt, link ? JSON.stringify(link) : null, next.version ?? null, since, next.endpoints ?? [], JSON.stringify(history), current.agent, current.version ?? null, current.versionSince ?? null]);
+      if (rows[0]) return RegistryStore.row(rows[0] as Record<string, unknown>);
+      // the row was there when read: if it still is, another change moved its version or key in between, and this one, which read the old ones, is not written
+      const after = await this.get(id);
+      if (after && after.owner === owner && agentStatus(after, now) !== "revoked") throw new RegistryInputError("the agent's version or key changed while this change was made; read the entry again and retry");
+      return null;
     } catch (e) {
       if (keyTaken(e)) throw new RegistryInputError(TAKEN);
       throw e;
@@ -327,7 +330,10 @@ export async function issuePassport(signer: Signer, registryUrl: string, e: Agen
     issuedAt: new Date(now).toISOString(),
     expiresAt: new Date(expires).toISOString(),
   });
-  return signer.sign(PASSPORT_TYPE, passport);
+  const env = await signer.sign(PASSPORT_TYPE, passport);
+  const size = passportHeader(env).length;
+  if (size > MAX_PASSPORT_HEADER) throw new RegistryInputError(`the passport would be ${size} characters, more than the ${MAX_PASSPORT_HEADER} a door reads; declare fewer or shorter endpoints or capabilities`);
+  return env;
 }
 
 /** The registry's key document, served at REGISTRY_DOCUMENT_PATH. */

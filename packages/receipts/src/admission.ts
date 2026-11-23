@@ -91,7 +91,8 @@ type VersionRange = { from?: string; upTo?: string; below?: string } | undefined
 const rangeOf = (e: AdmissionEntry): VersionRange => ("registry" in e ? (e.version !== undefined ? { from: e.version, upTo: e.version } : e.versions) : undefined);
 function inRange(r: VersionRange, version: string | undefined): boolean {
   if (!r) return true;
-  if (version === undefined) return false;
+  // a version that is not one is in no range: compareVersions would refuse it, and a list must not admit it
+  if (version === undefined || !AGENT_VERSION.test(version)) return false;
   if (r.from !== undefined && compareVersions(version, r.from) < 0) return false;
   if (r.upTo !== undefined && compareVersions(version, r.upTo) > 0) return false;
   return r.below === undefined || compareVersions(version, r.below) < 0;

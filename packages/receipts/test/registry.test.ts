@@ -21,7 +21,7 @@ import { grantHeader } from "../src/gateway-http.ts";
 import { PostgresTenancy } from "../src/log-store.ts";
 import { PortalStore, servePortal, signSession, type RunningPortal } from "../src/portal.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
-import { issuePassport, passportHeader, PASSPORT_HEADER, PASSPORT_TYPE, REGISTRY_DOCUMENT_PATH, registrationProof, RegistryStore, verifyPassport, type AgentEntry } from "../src/registry.ts";
+import { issuePassport, MAX_AGENT_HISTORY, MAX_ENDPOINT_CHARS, MAX_PASSPORT_HEADER, parsePassportHeader, passportHeader, PASSPORT_HEADER, PASSPORT_TYPE, REGISTRY_DOCUMENT_PATH, registrationProof, RegistryInputError, RegistryStore, verifyPassport, type AgentEntry } from "../src/registry.ts";
 import { localSigner } from "../src/signer.ts";
 import { verifyBundle } from "../src/verify.ts";
 import { parseDictionary, signatureBase, type SfInnerList } from "../src/web-bot-auth.ts";
@@ -35,9 +35,33 @@ const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString(
 const registryKey = generateKeyPair();
 const signer = localSigner(registryKey);
 
+/** a valid endpoint of 181 characters: three long host labels under 63 each */
+const longEndpoint = (i: number) => `https://${"m".repeat(60)}.${"n".repeat(60)}.${"o".repeat(40)}${String(i).padStart(2, "0")}.example/`;
+
 describe("a passport", () => {
   const agent = generateKeyPair();
   const entry = (o: Partial<AgentEntry> = {}): AgentEntry => ({ id: "agt_0123456789abcdef", owner: "acme", name: "Acme shopper", contact: "agents@acme.example", capabilities: ["refunds"], agent: didKeyOf(agent.publicKey), createdAt: new Date().toISOString(), expiresAt: inDays(30), revokedAt: null, ...o });
+
+  it("stays small enough for a door to read with the largest of every field the registry accepts, and is refused beyond it", async () => {
+    // a passport the door cannot read puts its agent on no list, and the owner would not know why: the limits must hold together
+    const host = (i: number) => `e${String(i).padStart(2, "0")}.${"a".repeat(24)}.com`; // 32 characters each
+    const endpoints = Array.from({ length: 32 }, (_, i) => host(i));
+    expect(endpoints.join("").length).toBe(MAX_ENDPOINT_CHARS);
+    const largest = entry({
+      owner: "o".repeat(40),
+      name: "n".repeat(100),
+      contact: "c".repeat(200),
+      capabilities: Array.from({ length: 32 }, (_, i) => `cap${String(i).padStart(2, "0")}${"x".repeat(59)}`),
+      version: "999999999.999999999.999999999",
+      endpoints,
+    });
+    const erc8004 = { agentRegistry: `eip155:999999999999:0x${"f".repeat(40)}`, agentId: "9".repeat(77), owner: `0x${"e".repeat(40)}`, block: Number.MAX_SAFE_INTEGER, fileDigest: "d".repeat(64), checkedAt: new Date().toISOString() };
+    const env = await issuePassport(signer, `https://${"r".repeat(180)}.example/`, largest, 3600, Date.now(), erc8004);
+    expect(passportHeader(env).length).toBeLessThanOrEqual(MAX_PASSPORT_HEADER);
+    expect(parsePassportHeader({ [PASSPORT_HEADER]: passportHeader(env) })).not.toBeNull();
+    // past the endpoints' budget the registry refuses to sign rather than hand out a passport no door reads
+    await expect(issuePassport(signer, PORTAL_URL, entry({ endpoints: Array.from({ length: 32 }, (_, i) => longEndpoint(i)) }), 3600)).rejects.toThrow(RegistryInputError);
+  });
 
   it("verifies under the registry's key while it lives, and names the agent's key, owner, contact, and capabilities", async () => {
     const env = await issuePassport(signer, PORTAL_URL, entry(), 3600);
@@ -271,6 +295,8 @@ describe("the agent registry on the portal", () => {
     expect(rotated.json.agent.history.map((h: { version: string; agent: string }) => [h.version, h.agent])).toEqual([["1.5.0", didKeyOf(first.publicKey)], ["1.4.0", didKeyOf(first.publicKey)]]);
     // the public entry shows it all
     expect((await open(`/registry/agents/${id}`)).json).toMatchObject({ version: "1.5.0", replaces: "1.5.0", agent: didKeyOf(second.publicKey), history: [{ version: "1.5.0" }, { version: "1.4.0" }] });
+    // a URL is kept in one spelling, its href
+    expect((await call("POST", `/api/agents/${id}`, { endpoints: ["HTTPS://MCP.lima.example/x", "https:mcp.lima.example", "api.stripe.com"] })).json.agent.endpoints).toEqual(["https://mcp.lima.example/x", "https://mcp.lima.example/", "api.stripe.com"]);
     // no version: the passport carries none, and the history records the version it had
     const none = await call("POST", `/api/agents/${id}`, { version: null, endpoints: [] });
     expect(none.json.agent).toMatchObject({ version: null, endpoints: [], replaces: "1.5.0" });
@@ -284,11 +310,38 @@ describe("the agent registry on the portal", () => {
       [{ endpoints: ["http://plain.example"] }, "an endpoint is"],
       [{ endpoints: ["https://user:pw@mcp.example"] }, "an endpoint is"],
       [{ endpoints: ["API.STRIPE.COM"] }, "an endpoint is"],
+      [{ endpoints: [" https://mcp.lima.example/ "] }, "no white space or control characters"],
+      [{ endpoints: ["https://mcp\n.lima.example/"] }, "no white space or control characters"],
+      [{ endpoints: ["https://mcp.lima.example/\u0000x"] }, "no white space or control characters"],
+      [{ endpoints: Array.from({ length: 6 }, (_, i) => longEndpoint(i)) }, `at most ${MAX_ENDPOINT_CHARS} characters together`],
     ] as const) {
       const res = await call("POST", `/api/agents/${id}`, bad);
       expect(res.status, JSON.stringify(bad)).toBe(400);
       expect(res.json.error, JSON.stringify(bad)).toContain(why);
     }
+  });
+
+  it("writes one change of two that race on an agent's version, and tells the other to retry, as it does a change that read the old version", async () => {
+    const store = new RegistryStore(db, PORTAL_URL, "lineage_");
+    const key = generateKeyPair();
+    const e = await store.register("mike", { name: "Mike agent", contact: "m@mike.example", ...registrationProof(key, PORTAL_URL, "mike"), expiresAt: inDays(30), version: "3.0.0" });
+    // each reads the row, then writes: the first write moves the version, and the others read the version it replaced
+    const results = await Promise.allSettled([store.update("mike", e.id, { version: "4.0.0" }), store.update("mike", e.id, { version: "5.0.0" }), store.update("mike", e.id, { name: "racer" })]);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected", "rejected"]);
+    for (const r of results.slice(1)) expect((r as PromiseRejectedResult).reason).toMatchObject({ message: expect.stringContaining("read the entry again and retry") });
+    const after = (await store.get(e.id))!;
+    expect(after).toMatchObject({ version: "4.0.0", name: "Mike agent", history: [{ version: "3.0.0" }] });
+    expect(after.history).toHaveLength(1);
+  });
+
+  it("keeps the last hundred stretches of an agent's history, dropping the oldest", async () => {
+    const store = new RegistryStore(db, PORTAL_URL, "lineage_");
+    const e = await store.register("november", { name: "November agent", contact: "n@november.example", ...registrationProof(generateKeyPair(), PORTAL_URL, "november"), expiresAt: inDays(30), version: "1.0.0" });
+    for (let i = 1; i <= MAX_AGENT_HISTORY + 1; i++) await store.update("november", e.id, { version: `1.0.${i}` });
+    const h = (await store.get(e.id))!.history!;
+    expect(h).toHaveLength(MAX_AGENT_HISTORY);
+    expect(h[0]!.version).toBe(`1.0.${MAX_AGENT_HISTORY}`);
+    expect(h.at(-1)!.version).toBe("1.0.1"); // 1.0.0, the oldest, is gone
   });
 
   describe("and a door that holds only the registry's key", () => {
