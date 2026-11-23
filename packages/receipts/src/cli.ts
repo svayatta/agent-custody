@@ -164,18 +164,24 @@ const USAGE = `agent-custody <command>
   door error-rates --receipts <dir> --labels <labels.jsonl> --issuer-key <door.pub>... [--principal-key <pub>]...
                    [--log <log.jsonl>] [--log-key <pub>]... [--challenge-labels] [--json]
   door error-rates --test-set [--per-kind 200] [--json]
-                                                   how often the door's class is wrong for each kind of arrival, from labelled receipts, with a 95%
-                                                   interval; never pooled across kinds. --test-set builds the published labelled set in memory and
-                                                   scores it. Receipts that do not verify are skipped (door-error-rates.md)
+                                                   the credential signals: how often the door's class is wrong for each kind of arrival, from
+                                                   labelled receipts, with a 95% interval; never pooled across kinds. --test-set builds the published
+                                                   labelled set in memory and scores it. Receipts that do not verify are skipped (door-error-rates.md).
+                                                   Use it when you have receipts and know what each arrival was
   door measure <labelled.jsonl>... [--json]
-                                                   how often each flag of the door's signals is wrong on labelled arrivals: for each set and flag, the
-                                                   false-positive rate on humans and the detection rate on automated clients, per session and per
-                                                   arrival, each with a 95% Wilson interval. Replays each recorded session through the door's own functions
-  door labels --receipts <dir> --issuer-key <door.pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--set own-door] [--out <file>]
-                                                   a labelled set from your own door's verified receipts: an arrival that passed the challenge is human,
-                                                   a verified agent's arrival is automated, the rest are left out. Each line holds the label and the
-                                                   flags only: no path, address, agent name, header, or time. It uploads nothing. A verified agent's
-                                                   receipt verifies only with the key of the principal that signed its grant
+                                                   the behaviour and fingerprint flags: how often each flag is wrong on labelled arrivals. For each set
+                                                   and flag, the false-positive rate on humans and the detection rate on automated clients, per session
+                                                   and per arrival, each with a 95% Wilson interval. Replays each recorded session through the door's
+                                                   own functions. Use it when you have a labelled set: a recording, a public dataset, or the output of
+                                                   door labels
+  door labels --receipts <dir> --issuer-key <door.pub>... [--principal-key <pub>]... [--log-key <pub>]... [--log <log.jsonl>] [--set own-door]
+              [--receipt-ids] [--out <file>]
+                                                   a labelled set from your own door's verified receipts, for door measure: an arrival that passed the
+                                                   challenge is human, a verified agent's arrival is automated, the rest are left out. Each line holds
+                                                   the label and the flags only: no path, address, agent name, header, or time. It uploads nothing. A
+                                                   verified agent's receipt verifies only with the key of the principal that signed its grant.
+                                                   --receipt-ids adds each receipt's id, and the file is then also a labels file for door error-rates.
+                                                   Use it when you have receipts and no labels of your own
   egress  --config <egress.json> [--port 8791] [--host 127.0.0.1]
                                                    the egress witness: a forward proxy (CONNECT and plain HTTP, no TLS interception) for a
                                                    locked-down agent's calls that do not go to the gateway. Each agent proves itself with its own
@@ -502,7 +508,7 @@ async function main(argv: string[]): Promise<number> {
         return result.sets.length ? 0 : 1;
       }
       if (rest[0] === "labels") {
-        const { values } = parseArgs({ args: rest.slice(1), options: { receipts: { type: "string" }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, "log-key": { type: "string", multiple: true }, log: { type: "string" }, set: { type: "string", default: "own-door" }, out: { type: "string" } } });
+        const { values } = parseArgs({ args: rest.slice(1), options: { receipts: { type: "string" }, "issuer-key": { type: "string", multiple: true }, "principal-key": { type: "string", multiple: true }, "log-key": { type: "string", multiple: true }, log: { type: "string" }, set: { type: "string", default: "own-door" }, "receipt-ids": { type: "boolean", default: false }, out: { type: "string" } } });
         if (!values.receipts || !values["issuer-key"]?.length) throw new Error("door labels needs --receipts <dir> --issuer-key <door.pub>");
         const keys = { issuerKeys: values["issuer-key"].map(loadPublicKey), principalKeys: (values["principal-key"] ?? []).map(loadPublicKey), logKeys: (values["log-key"] ?? []).map(loadPublicKey), ...(values.log ? { logFile: values.log } : {}) };
         const predicates: ReceiptStatement["predicate"][] = [];
@@ -516,7 +522,7 @@ async function main(argv: string[]): Promise<number> {
             unverified++;
           }
         }
-        const labels = labelsFromReceipts(predicates, values.set);
+        const labels = labelsFromReceipts(predicates, values.set, { receiptIds: values["receipt-ids"] });
         const text = labels.records.map((r) => JSON.stringify(r)).join("\n") + (labels.records.length ? "\n" : "");
         if (values.out) writeFileSync(values.out, text);
         else process.stdout.write(text);

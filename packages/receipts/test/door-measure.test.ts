@@ -12,11 +12,12 @@ import { createDelegation } from "../src/delegation.ts";
 import { RECEIPT_HEADER, createDoorHost, serveDoor } from "../src/door.ts";
 import { createMeasure, flagValues, formatMeasure, formatRate, intervalText, labelsFromReceipts, measure, parseLabelledRecord, percent, rateOf, ratePercent, thresholds, type LabelledRecord, type MeasureResult, type SetMeasure } from "../src/door-measure.ts";
 import * as signals from "../src/door-signals.ts";
+import { parseLabels } from "../src/door-error-rates.ts";
 import { FLAG_SIGNALS, KNOWN_TOOL_JA4, TIMING_MIN_GAPS, type FlagSignal, type Observation } from "../src/door-signals.ts";
 import { grantHeader } from "../src/grant-header.ts";
 import type { ReceiptPredicate } from "../src/receipt.ts";
 import { buildDoorFixture, startOrigin } from "../scripts/door-fixture.ts";
-import { MANIFEST_FILE, PAGE_FILE, REGION, RESULTS_FILE, pageWith, tablesOf, type Manifest, type Results } from "../scripts/door-error-rates.ts";
+import { MANIFEST_FILE, PAGE_FILE, REGION, RESULTS_FILE, pageWith, tablesOf, type Manifest, type Results } from "../scripts/door-flag-rates-page.ts";
 
 const labelled = join(import.meta.dirname, "..", "labelled");
 const cli = join(import.meta.dirname, "..", "src", "cli.ts");
@@ -188,13 +189,17 @@ describe("the labels from a door's own receipts", () => {
     expect(out).toMatchObject({ read: 7, noSignals: 1, unlabelled: 3 });
     const flags = { "fingerprint.headers.mismatch": false, "behaviour.timing.regular": false, "behaviour.navigation.directWrite": true };
     expect(out.records).toEqual([
-      { set: "own-door", session: "s1", label: "human", labelSource: "challenge-passed", flags },
-      { set: "own-door", session: "s2", label: "automated", labelSource: "verified-agent", flags },
-      { set: "own-door", session: "s3", label: "human", labelSource: "challenge-passed", flags },
+      { set: "own-door", session: "s1", label: "human", labelSource: "challenge-passed", kind: "challenge-passed", automated: false, genuine: null, source: "challenge", flags },
+      { set: "own-door", session: "s2", label: "automated", labelSource: "verified-agent", kind: "verified-agent", automated: true, genuine: null, source: "door", validFor: [...FLAG_SIGNALS], flags },
+      { set: "own-door", session: "s3", label: "human", labelSource: "challenge-passed", kind: "challenge-passed", automated: false, genuine: null, source: "challenge", flags },
     ]);
     const text = JSON.stringify(out.records);
     for (const secret of ["203.0.113.9", "shopping-agent", "/private/path", "2026"]) expect(text).not.toContain(secret);
     for (const r of out.records) expect(parseLabelledRecord(JSON.stringify(r))).toEqual(r);
+    // with receiptIds a record names its receipt, and is then also a label of door error-rates
+    const named = labelsFromReceipts([{ ...predicate(0, { ...signals, challenge: { outcome: "passed" } }), receiptId: "r-1" } as ReceiptPredicate], "own-door", { receiptIds: true }).records;
+    expect(named.map((r) => r.receiptId)).toEqual(["r-1"]);
+    expect(parseLabels(JSON.stringify(named[0]))).toMatchObject([{ receiptId: "r-1", kind: "challenge-passed", automated: false, genuine: null, source: "challenge" }]);
     // a set name that door measure refuses is refused here, and not after the export
     for (const set of ["own door", "", "a\nb", "x".repeat(129)]) expect(() => labelsFromReceipts([], set), JSON.stringify(set)).toThrow("the set name is");
   });
@@ -228,7 +233,7 @@ describe("the labels from a door's own receipts", () => {
     expect(labels.stderr).toContain("3 door receipt(s) read, 0 file(s) skipped");
     expect(labels.stderr).toContain("1 human (challenge passed), 1 automated (verified agent), 1 without a label");
     const records = readFileSync(out, "utf8").trim().split("\n").map((l) => JSON.parse(l) as LabelledRecord);
-    expect(records.map((r) => [r.label, r.labelSource, Object.keys(r).sort().join()])).toEqual([["human", "challenge-passed", "flags,label,labelSource,session,set"], ["automated", "verified-agent", "flags,label,labelSource,session,set"]]);
+    expect(records.map((r) => [r.label, r.labelSource, Object.keys(r).sort().join()])).toEqual([["human", "challenge-passed", "automated,flags,genuine,kind,label,labelSource,session,set,source"], ["automated", "verified-agent", "automated,flags,genuine,kind,label,labelSource,session,set,source,validFor"]]);
     // a write with no page load before it, from a person and from an agent alike
     expect(records.map((r) => r.flags!["behaviour.navigation.directWrite"])).toEqual([true, false]);
     const measured = spawnSync(process.execPath, [cli, "door", "measure", out, "--json"], { encoding: "utf8" });
@@ -324,7 +329,10 @@ describe("the committed capture and the published page", () => {
   it("the page states no rate and no number that is not a number in the committed files", () => {
     const [start, end] = [page.indexOf(REGION[0]), page.indexOf(REGION[1])];
     // the tables between the markers are compared whole above; the rest is prose, without code and without link targets
-    const prose = (page.slice(0, start) + page.slice(end)).replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "").replace(/\]\([^)\s]*\)/g, "]");
+    const flagsPart = page.indexOf("\n## Behaviour and fingerprint flags");
+    expect(flagsPart).toBeGreaterThan(0);
+    // the part about the credential signals has its own test (door-error-rates.test.ts)
+    const prose = (page.slice(flagsPart, start) + page.slice(end)).replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "").replace(/\]\([^)\s]*\)/g, "]");
     const rates = new Set<string>();
     for (const s of results.sets) for (const f of s.flags) for (const side of [f.human, f.automated]) for (const r of [side.arrivals, side.sessions]) if (r.rate !== null) for (const text of [ratePercent(r), ...intervalText(r).split(" to ")]) rates.add(text);
     for (const name of ["TIMING_REGULAR_SPREAD_PERCENT"] as const) rates.add(`${results.thresholds[name]}%`);

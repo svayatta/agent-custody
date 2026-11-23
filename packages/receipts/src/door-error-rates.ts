@@ -6,32 +6,45 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { PublicKeyRef } from "./crypto.ts";
 import { ARRIVAL_FACT, type Arrival } from "./door-core.ts";
+import { LABELS, LABEL_USES, type LabelQuestion } from "./door-measure.ts";
 import type { ReceiptBundle, ReceiptStatement } from "./receipt.ts";
 import { verifyBundle } from "./verify.ts";
 
 /**
  * Where a label came from. `test-set`: the arrival was built to be that kind, so the label is true by construction.
  * `operator`: a person who knows the traffic said so. `challenge`: derived from a passed Turnstile or hCaptcha check,
- * so it carries the provider's own error rate.
+ * so it carries the provider's own error rate. `door`: the door's own check said so (a verified agent, from
+ * `door labels`). Such a label is good for the flags and never for a question about `class`, which would score the
+ * door against itself; its `validFor` says so.
  */
-export const LABEL_SOURCES = ["test-set", "operator", "challenge"] as const;
+export const LABEL_SOURCES = ["test-set", "operator", "challenge", "door"] as const;
 export type LabelSource = (typeof LABEL_SOURCES)[number];
 
-/** One line of a labels file: what one receipt's arrival really was. */
+/**
+ * One line of a labels file: what one receipt's arrival really was. A line that `door labels --receipt-ids` exports is
+ * also a record of `door measure`, so the fields of that format are accepted here and not read.
+ */
 export const DoorLabelSchema = z.object({
   receiptId: z.string().min(1),
   /** the kind of arrival, such as `browser` or `forged-signature`; rates are reported per kind */
   kind: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, { message: "a kind is lower-case letters, digits, and hyphens, at most 64" }),
   /** a program, not a person at a browser */
   automated: z.boolean(),
-  /** the agent it names, under a permission this door accepts for this route; null when it named no agent */
+  /** the agent it names, under a permission this door accepts for this route; null when it named no agent, or when the label does not say */
   genuine: z.boolean().nullable(),
   source: z.enum(LABEL_SOURCES),
-}).strict();
+  /** the questions and flags this label is good for; absent when it is good for all. A question that is not in the list does not score the label */
+  validFor: z.array(z.enum(LABEL_USES)).optional(),
+  set: z.string().optional(),
+  session: z.string().optional(),
+  label: z.enum(LABELS).optional(),
+  labelSource: z.string().optional(),
+  flags: z.record(z.string(), z.boolean()).optional(),
+}).strict().refine((l) => l.label === undefined || (l.label === "automated") === l.automated, { message: "label and automated disagree", path: ["label"] });
 export type DoorLabel = z.infer<typeof DoorLabelSchema>;
 
 export interface DoorQuestion {
-  id: "agent" | "verified";
+  id: LabelQuestion;
   asks: string;
   /** what an error is for this question */
   wrong: string;
@@ -163,7 +176,7 @@ export function doorErrorRates(arrivals: Map<string, Arrival>, labels: DoorLabel
       continue;
     }
     for (const q of DOOR_QUESTIONS) {
-      if (!q.applies(label)) continue;
+      if (!q.applies(label) || (label.validFor && !label.validFor.includes(q.id))) continue;
       const key = `${q.id}\0${label.source}\0${label.kind}`;
       const g = groups.get(key) ?? { question: q.id, kind: label.kind, source: label.source, arrivals: 0, wrong: 0 };
       g.arrivals++;
@@ -186,7 +199,7 @@ export function formatErrorRates(rows: ErrorRateRow[]): string {
   for (const q of DOOR_QUESTIONS) {
     const mine = rows.filter((r) => r.question === q.id);
     if (!mine.length) continue;
-    out.push(`**${q.asks}** An error is ${q.wrong}.`, "", "| kind | labels | arrivals | wrong | rate | 95% interval |", "| --- | --- | ---: | ---: | ---: | --- |");
+    out.push(`**${q.asks}** An error is ${q.wrong}.`, "", "| kind | labels | arrivals | wrong | error rate (lower is better) | 95% interval |", "| --- | --- | ---: | ---: | ---: | --- |");
     for (const r of mine) out.push(`| \`${r.kind}\` | ${r.source} | ${r.arrivals} | ${r.wrong} | ${pct(r.rate)} | ${pct(r.low)} to ${pct(r.high)} |`);
     out.push("");
   }

@@ -74,6 +74,16 @@ describe("door error rates", () => {
     expect(() => parseLabels("not json")).toThrow(/line 1: not JSON/);
   });
 
+  it("scores a label only on the questions in its validFor, and reads a line that door labels exports", () => {
+    const own = '{"receiptId":"a","set":"own-door","session":"s1","label":"automated","labelSource":"verified-agent","kind":"verified-agent","automated":true,"genuine":null,"source":"door","validFor":["behaviour.timing.regular"],"flags":{"behaviour.timing.regular":false}}';
+    const labels = parseLabels(`${own}\n{"receiptId":"b","kind":"verified-agent","automated":true,"genuine":null,"source":"operator"}`);
+    const arrivals = new Map([["a", arrival({ class: "verified" })], ["b", arrival({ class: "verified" })]]);
+    // the door's own word about a verified agent does not score the door's class; the operator's word does
+    expect(doorErrorRates(arrivals, labels).rows.map((r) => [r.question, r.source, r.arrivals])).toEqual([["agent", "operator", 1]]);
+    expect(() => parseLabels(own.replace('"label":"automated"', '"label":"human"'))).toThrow(/line 1: label/);
+    expect(() => parseLabels(own.replace("behaviour.timing.regular\"]", 'no-such-use"]'))).toThrow(/line 1: validFor/);
+  });
+
   it("derives challenge labels only for receipts that have no label of their own, and keeps them in their own source", () => {
     const arrivals = new Map([["a", arrival({ challenge: { provider: "turnstile", outcome: "passed" } })], ["b", arrival({ challenge: { provider: "turnstile", outcome: "passed" } })], ["c", arrival({ challenge: { provider: "turnstile", outcome: "failed" } })]]);
     expect(challengeLabels(arrivals, ["b"])).toEqual([{ receiptId: "a", kind: "challenge-passed", automated: false, genuine: null, source: "challenge" }]);

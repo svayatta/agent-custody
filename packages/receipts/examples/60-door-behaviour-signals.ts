@@ -1,5 +1,5 @@
 // Aspect: the door's behavioural and fingerprint signals, and a policy that reads a flag as a reason to ask for more. Source: src/door-signals.ts, src/door-core.ts
-// Run:    node examples/58-door-behaviour-signals.ts
+// Run:    node examples/60-door-behaviour-signals.ts
 //
 // A site has a contact form. The door stands in front of it with `behaviour` in its config, so each arrival fact also
 // carries `fingerprint` and `behaviour`. The door refuses nothing because of a signal. The policy reads four flags, and
@@ -56,7 +56,7 @@ const site = createServer((req, res) => {
 await new Promise<void>((r) => site.listen(0, "127.0.0.1", r));
 const siteUrl = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
 process.env.EXAMPLE_TURNSTILE_SECRET = "example-secret";
-const fx = buildDoorFixture(out("58-door-behaviour-signals"), siteUrl, {
+const fx = buildDoorFixture(out("60-door-behaviour-signals"), siteUrl, {
   routes: [{ name: "page", methods: ["GET"], path: "*" }, { name: "contact", methods: ["POST"], path: "/contact" }],
   trustProxy: true,
   behaviour: { tlsHeader: "x-ja4" },

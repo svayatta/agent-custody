@@ -13,6 +13,13 @@ import type { ReceiptPredicate } from "./receipt.ts";
 export const LABELS = ["human", "automated"] as const;
 export type Label = (typeof LABELS)[number];
 
+/** The questions about `class` that `door error-rates` scores (src/door-error-rates.ts). */
+export const LABEL_QUESTIONS = ["agent", "verified"] as const;
+export type LabelQuestion = (typeof LABEL_QUESTIONS)[number];
+/** What a label can be good for: a question about `class`, or a flag. `validFor` holds these names in both label formats. */
+export const LABEL_USES = [...LABEL_QUESTIONS, ...FLAG_SIGNALS] as const;
+export type LabelUse = (typeof LABEL_USES)[number];
+
 /** The value of each flag that applies to one arrival. A flag that does not apply is absent. */
 export type FlagValues = Partial<Record<FlagSignal, boolean>>;
 
@@ -28,12 +35,21 @@ export interface LabelledRecord {
   label: Label;
   /** how the label was assigned */
   labelSource: string;
-  /** the flags that this label is good for; absent when it is good for every flag. The other flags do not count the record */
-  validFor?: FlagSignal[];
+  /** what this label is good for; absent when it is good for every flag and question. A flag that is not in the list does not count the record */
+  validFor?: LabelUse[];
   /** what was recorded of the arrival; `at` is the recorded time in milliseconds */
   observation?: Observation;
   /** for a record exported from a door: the flags the door computed */
   flags?: FlagValues;
+  /**
+   * The fields of a `door error-rates` label (`DoorLabelSchema`), on a record that `door labels` exports. The measure
+   * does not read them. `automated` says what `label` says.
+   */
+  receiptId?: string;
+  kind?: string;
+  automated?: boolean;
+  genuine?: boolean | null;
+  source?: string;
 }
 
 /** A count with its rate. `rate`, `low`, and `high` are integers per 10,000, and null when `n` is 0: not measured. */
@@ -149,7 +165,8 @@ export function parseLabelledRecord(line: string): LabelledRecord {
   if (!isObject(r)) throw new Error("a record is a JSON object");
   for (const field of ["set", "session", "labelSource"] as const) if (!isName(r[field])) throw new Error(`${field} is a name of letters, digits, and . _ : / -`);
   if (r.label !== "human" && r.label !== "automated") throw new Error('label is "human" or "automated"');
-  if (r.validFor !== undefined && !(Array.isArray(r.validFor) && r.validFor.every((f) => (FLAG_SIGNALS as readonly unknown[]).includes(f)))) throw new Error("validFor is a list of flags");
+  if (r.validFor !== undefined && !(Array.isArray(r.validFor) && r.validFor.every((f) => (LABEL_USES as readonly unknown[]).includes(f)))) throw new Error("validFor is a list of flags and questions");
+  if (r.automated !== undefined && r.automated !== (r.label === "automated")) throw new Error("automated is true for the label automated and false for the label human");
   if ((r.observation === undefined) === (r.flags === undefined)) throw new Error("a record has observation or flags, and not both");
   if (r.observation !== undefined) {
     const o = r.observation;
@@ -346,8 +363,15 @@ export interface LabelExport {
  * (`challenge-passed`); an arrival of a verified agent is `automated` (`verified-agent`); the rest have no label and
  * are left out, as is a verified agent that passed the challenge. A record holds the label and the flags only. The session is a number: the door's source (the agent, else
  * the address), cut where it is silent for `HISTORY_WINDOW_MS`. No path, address, agent name, header, or time leaves.
+ *
+ * Each record also holds the label in the fields of `door error-rates`: `kind`, `automated`, `genuine`, and `source`.
+ * `genuine` is always null: a receipt does not say whether an agent is the agent that it names, except through the
+ * door's own check, and that check is what `door error-rates` scores. The label of a verified agent is the door's own
+ * word (`source: "door"`), so its `validFor` holds the flags only and no question about `class` counts it. With
+ * `receiptIds` a record has its `receiptId`, which `door error-rates --labels` needs. The id names one receipt of the
+ * operator, so it is off unless asked for.
  */
-export function labelsFromReceipts(predicates: Iterable<ReceiptPredicate>, set: string): LabelExport {
+export function labelsFromReceipts(predicates: Iterable<ReceiptPredicate>, set: string, opts: { receiptIds?: boolean } = {}): LabelExport {
   if (!isName(set)) throw new Error("the set name is letters, digits, and . _ : / -, as door measure reads it");
   const out: LabelExport = { records: [], read: 0, noSignals: 0, unlabelled: 0 };
   const door = [...predicates].filter((p) => p.issuer.kind === "door").sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
@@ -368,15 +392,19 @@ export function labelsFromReceipts(predicates: Iterable<ReceiptPredicate>, set: 
     const passed = arrival.challenge?.outcome === "passed";
     const verified = arrival.class === "verified";
     // a verified agent that passed the challenge has both labels, so it has none
-    const label: Pick<LabelledRecord, "label" | "labelSource"> | null =
-      passed === verified ? null : passed ? { label: "human", labelSource: "challenge-passed" } : { label: "automated", labelSource: "verified-agent" };
+    const label: Pick<LabelledRecord, "label" | "labelSource" | "kind" | "automated" | "genuine" | "source" | "validFor"> | null =
+      passed === verified
+        ? null
+        : passed
+          ? { label: "human", labelSource: "challenge-passed", kind: "challenge-passed", automated: false, genuine: null, source: "challenge" }
+          : { label: "automated", labelSource: "verified-agent", kind: "verified-agent", automated: true, genuine: null, source: "door", validFor: [...FLAG_SIGNALS] };
     if (!label) {
       out.unlabelled++;
       continue;
     }
     // the door's fact does not say whether it received the header set; `count` is present only when it did
     const flags = flagValues({ fingerprint: arrival.fingerprint, behaviour: arrival.behaviour }, arrival.fingerprint.headers.count !== undefined);
-    out.records.push({ set, session: `s${session.id}`, ...label, flags });
+    out.records.push({ ...(opts.receiptIds ? { receiptId: p.receiptId } : {}), set, session: `s${session.id}`, ...label, flags });
   }
   return out;
 }

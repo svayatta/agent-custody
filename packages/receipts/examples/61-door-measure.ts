@@ -1,5 +1,5 @@
 // Aspect: the false-positive rate of each door flag, measured on a labelled set. Source: src/door-measure.ts
-// Run:    node examples/59-door-measure.ts
+// Run:    node examples/61-door-measure.ts
 //
 // A labelled set is JSON Lines: one recorded arrival per line, with a label. The measure replays each session through
 // the door's own signal functions and counts, for each flag, the humans it marks and the automated clients it marks.
