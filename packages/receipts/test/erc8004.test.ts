@@ -10,7 +10,8 @@ import { didKeyOf } from "../src/did-key.ts";
 import { classifyArrival, type DoorRequest } from "../src/door.ts";
 import { createErc8004Resolver, decodeAbiString, ERC8004_REGISTRATION_TYPE, type Erc8004Resolver } from "../src/erc8004.ts";
 import { PostgresTenancy } from "../src/log-store.ts";
-import { servePortal, type RunningPortal } from "../src/portal.ts";
+import { portalHandler, servePortal, type RunningPortal } from "../src/portal.ts";
+import { Erc8004LinkSchema } from "../src/erc8004-link.ts";
 import { createDelegation } from "../src/delegation.ts";
 import { grantHeader } from "../src/gateway-http.ts";
 import { PASSPORT_HEADER, passportHeader, REGISTRY_DOCUMENT_PATH, registrationProof, RegistryStore, verifyPassport } from "../src/registry.ts";
@@ -157,6 +158,27 @@ describe("an ERC-8004 link", () => {
     }
   });
 
+  it("ends a registration file fetch at its deadline, even when the host keeps the connection alive", async () => {
+    // a host that sends a byte now and then never trips a socket idle timeout; the fetch must still end at the deadline
+    let given: AbortSignal | undefined;
+    const slow = createErc8004Resolver({ rpc: { [CHAIN]: RPC }, fetch: chain.fetchRpc, timeoutMs: 200, fetchFile: (_url, o) => { given = o.signal; return new Promise<Buffer>(() => {}); } });
+    chain.tokens.set("44", "https://slow.example/agent.json");
+    const started = Date.now();
+    const r = await slow.check({ agentRegistry: AGENT_REGISTRY, agentId: "44" }, did);
+    expect(r).toMatchObject({ ok: false, error: expect.stringContaining("did not finish within 200 ms") });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(given?.aborted).toBe(true);
+  });
+
+  it("takes a token id only when it is a uint256", () => {
+    const max = (2n ** 256n - 1n).toString();
+    expect(Erc8004LinkSchema.safeParse({ agentRegistry: AGENT_REGISTRY, agentId: max }).success).toBe(true);
+    const over = Erc8004LinkSchema.safeParse({ agentRegistry: AGENT_REGISTRY, agentId: (2n ** 256n).toString() });
+    expect(over.success).toBe(false);
+    expect(over.error?.issues[0]?.message).toBe("agentId is not a uint256");
+    expect(Erc8004LinkSchema.safeParse({ agentRegistry: AGENT_REGISTRY, agentId: "9".repeat(78) }).success).toBe(false);
+  });
+
   it("reads an ABI string only when its encoding holds together", () => {
     expect(decodeAbiString(abiString("ipfs://x"), 100)).toBe("ipfs://x");
     expect(() => decodeAbiString(abiString("ipfs://x").slice(0, 140), 100)).toThrow("shorter than the string");
@@ -234,6 +256,12 @@ describe("the registry with ERC-8004 links", () => {
     const t = classifyArrival(carried, [principal], "refund", false, new Date().toISOString(), { outcome: "verified", agent: thiefDid, keyid: thiefDid, label: "sig1", covered: ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"] }, undefined, [registryKey], true).arrival;
     expect(t).toMatchObject({ class: "verified", subject: thiefDid, passport: { outcome: "wrong-sender" } });
     expect(t.passport!.erc8004).toBeUndefined();
+  });
+
+  it("will not start with a recheck interval that would keep every link out of every passport", () => {
+    const start = (erc8004RecheckSeconds: number) => () => portalHandler({ tenancy: new PostgresTenancy(db), client: db, secret: "portal-secret-for-erc8004-tests-32-chars", publicUrl: "https://log.example.test/", portalUrl: "https://app.example.test/", registry: { signer: localSigner(registryKey), erc8004: resolver, erc8004RecheckSeconds }, log: () => {} });
+    for (const bad of [Number.NaN, 0, -1, 59, 1.5, 86_401]) expect(start(bad), String(bad)).toThrow("rechecked every 60 to 86400 seconds");
+    expect(start(60)).not.toThrow();
   });
 
   it("refuses a link the chain does not back, and a link on a registry that reads no chain", async () => {

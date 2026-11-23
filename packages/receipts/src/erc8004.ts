@@ -24,7 +24,7 @@ export interface Erc8004ResolverOptions {
   /** for the JSON-RPC calls; the global fetch by default */
   fetch?: typeof fetch;
   /** fetches an https registration file; by default over node:https, refusing internal addresses and redirects. For tests */
-  fetchFile?: (url: string, o: { timeoutMs: number; maxBytes: number }) => Promise<Buffer>;
+  fetchFile?: (url: string, o: { timeoutMs: number; maxBytes: number; signal: AbortSignal }) => Promise<Buffer>;
 }
 
 export interface Erc8004Resolver {
@@ -53,12 +53,12 @@ export function decodeAbiString(hex: string, maxBytes: number): string {
 }
 
 /** An https GET that never dials an internal address for a host name, follows no redirect, and stops at the size cap. */
-function httpsFile(url: string, o: { timeoutMs: number; maxBytes: number }): Promise<Buffer> {
+function httpsFile(url: string, o: { timeoutMs: number; maxBytes: number; signal: AbortSignal }): Promise<Buffer> {
   // an address literal is never looked up, so the lookup's filter does not see it
   const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
   if (isAddressLiteral(host) && internalAddress(host)) return Promise.reject(new Error(`${host} is an internal address; the registry does not fetch from it`));
   return new Promise((resolve, reject) => {
-    const req = httpsRequest(url, { method: "GET", headers: { accept: "application/json" }, lookup: publicOnlyLookup(), timeout: o.timeoutMs }, (res) => {
+    const req = httpsRequest(url, { method: "GET", headers: { accept: "application/json" }, lookup: publicOnlyLookup(), timeout: o.timeoutMs, signal: o.signal }, (res) => {
       if ((res.statusCode ?? 0) >= 300) {
         res.resume();
         return reject(new Error(`${url} answered ${res.statusCode}${res.headers.location ? `, a redirect, which the registry does not follow` : ""}`));
@@ -93,6 +93,17 @@ export function createErc8004Resolver(o: Erc8004ResolverOptions): Erc8004Resolve
   const maxFileBytes = o.maxFileBytes ?? 64 * 1024;
   const f = o.fetch ?? fetch;
   const fetchFile = o.fetchFile ?? httpsFile;
+  // `timeout` on node:https is the socket's idle time, so a host that sends a byte now and then would never trip it;
+  // the whole fetch ends at the deadline, whatever the fetcher does with the signal
+  const fileWithin = (url: string): Promise<Buffer> => {
+    const signal = AbortSignal.timeout(timeoutMs);
+    const late = new Promise<never>((_, reject) => {
+      const stop = () => reject(new Error(`${url} did not finish within ${timeoutMs} ms`));
+      if (signal.aborted) stop();
+      else signal.addEventListener("abort", stop, { once: true });
+    });
+    return Promise.race([fetchFile(url, { timeoutMs, maxBytes: maxFileBytes, signal }), late]);
+  };
   for (const [chain, url] of Object.entries(o.rpc)) {
     if (!/^[1-9][0-9]{0,11}$/.test(chain)) throw new Error(`ERC-8004: "${chain}" is not a chain id`);
     if (!/^https?:\/\//.test(url)) throw new Error(`ERC-8004: the RPC URL for chain ${chain} is not http(s)`);
@@ -131,12 +142,12 @@ export function createErc8004Resolver(o: Erc8004ResolverOptions): Erc8004Resolve
       const prefix = `${new URL(gateway).pathname.replace(/\/+$/, "")}/ipfs/${cid}`;
       const url = new URL(`${gateway}/ipfs/${path}`);
       if (url.origin !== new URL(gateway).origin || (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`))) throw new Error("the IPFS URI leaves the gateway's /ipfs/ path");
-      return fetchFile(url.toString(), { timeoutMs, maxBytes: maxFileBytes });
+      return fileWithin(url.toString());
     }
     if (uri.startsWith("https://")) {
       const u = new URL(uri);
       if (u.username || u.password) throw new Error("the registration file's URL carries credentials");
-      return fetchFile(u.toString(), { timeoutMs, maxBytes: maxFileBytes });
+      return fileWithin(u.toString());
     }
     throw new Error(`the token URI is not https, ipfs, or an inline JSON data URI: ${uri.slice(0, 60)}`);
   };
