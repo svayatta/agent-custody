@@ -42,6 +42,7 @@ alias agent-custody='npx -y -p @agent-custody/receipts agent-custody'
    - `ORIGIN_URL`, where allowed requests go;
    - `LOG_URL` and `LOG_KEYS`, the log's public key from `https://log.agent-custody.dev/.well-known/agent-custody-log.json`. `LOG_HASH_ONLY` stays `"true"` for a log someone else runs, and `LOG_ID` is set only if your log names itself in its tree heads;
    - `TRUSTED_PRINCIPAL_KEYS`, if agents will present grants;
+   - `ADMISSION_LISTS`, if the policy reads [admission lists](../../../packages/receipts/docs/admission-lists.md);
    - `TRUSTED_REGISTRY_KEYS`, if agents will present an [agent registry](../../../packages/receipts/docs/agent-registry.md) passport (with `webBotAuth` in `DOOR_CONFIG`);
    - `DOOR_POLICY` and `DOOR_CONFIG`.
 

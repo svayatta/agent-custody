@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { digestOf, generateKeyPair, publicKeyToPem } from "../src/crypto.ts";
 import { createDelegation } from "../src/delegation.ts";
 import { createDoorCoreWith, relayToOrigin, type DoorIO, type DoorRequest } from "../src/door-core.ts";
-import { CLOUDFLARE_FACT, cloudflareFacts, cloudflareTls, doorRequestOf, durableNonceStore, pemKeys, r2Store, workerDoorConfig, type DoorWorkerEnv, type DurableObjectNamespaceLike, type R2BucketLike } from "../src/door-worker.ts";
+import { CLOUDFLARE_FACT, cloudflareFacts, cloudflareTls, doorRequestOf, durableNonceStore, pemKeys, r2Store, workerDoorConfig, workerDoorIO, type DoorWorkerEnv, type DurableObjectNamespaceLike, type R2BucketLike } from "../src/door-worker.ts";
 import { grantHeader } from "../src/grant-header.ts";
 import { fileLog, type LogSink } from "../src/log-sink.ts";
 import { createObjectIssuer, type ObjectStore } from "../src/object-issuer.ts";
@@ -152,6 +152,17 @@ function baseEnv(over: Partial<DoorWorkerEnv> = {}): DoorWorkerEnv {
   };
 }
 
+describe("the Worker's admission lists", () => {
+  it("come from ADMISSION_LISTS, and a Worker without the variable has none", () => {
+    const pkcs8 = generateKeyPair().privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+    const lists = JSON.stringify({ lists: { partners: [{ agent: "https://crawler.example" }] } });
+    const io = workerDoorIO(baseEnv({ DOOR_KEY: pkcs8, ADMISSION_LISTS: lists }), fetch);
+    expect(io.readAdmission?.()).toEqual({ text: lists, key: "ADMISSION_LISTS" });
+    expect(io.admissionSource).toBe("the ADMISSION_LISTS variable");
+    expect(workerDoorIO(baseEnv({ DOOR_KEY: pkcs8 }), fetch).readAdmission).toBeUndefined();
+  });
+});
+
 describe("the Worker's config", () => {
   it("is checked by the door's own schema, with the origin and the log from their variables", () => {
     const cfg = workerDoorConfig(baseEnv({ DOOR_CONFIG: JSON.stringify({ routes: [{ name: "api", path: "/api/*" }], precommit: ["api"], origin: { timeoutMs: 5000 } }), LOG_ID: "acme" }));
@@ -164,6 +175,7 @@ describe("the Worker's config", () => {
       [{ identity: { keyFile: "k" } }, /identity.*DOOR_KEY secret/],
       [{ trustedPrincipalKeys: ["a.pub"] }, /TRUSTED_PRINCIPAL_KEYS/],
       [{ trustedRegistryKeys: ["r.pub"] }, /TRUSTED_REGISTRY_KEYS/],
+      [{ admissionLists: "admission.json" }, /ADMISSION_LISTS/],
       [{ revokedGrants: "r.json" }, /REVOKED_GRANTS/],
       [{ authz: true }, /authz/],
       [{ trustProxy: true }, /CF-Connecting-IP/],

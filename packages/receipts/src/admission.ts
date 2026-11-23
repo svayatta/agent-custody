@@ -1,0 +1,89 @@
+// Admission lists: a site's own named lists of agents ("partners", "blocked"), which its Cedar policy references. The
+// door matches each arrival against them and records the names of the lists the arrival's agent is on, with a digest
+// of the lists in force, in the arrival fact; the policy decides what each list means, and the receipt records the
+// decision. A list names agents only by what the door checks: a registry entry or an ERC-8004 identity from a verified
+// passport, or the subject of a verified arrival (a did:key, a Web Bot Auth origin, or the agent a trusted grant names).
+// An arrival the door did not verify is on no list, so a claim cannot put an agent on one, nor take it off a block list
+// the policy reads as "forbid unless listed".
+import { z } from "zod";
+import { sha256Hex } from "./crypto.ts";
+import { ERC8004_REGISTRY } from "./erc8004-link.ts";
+import { AGENT_ID } from "./passport.ts";
+
+export const LIST_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+export const MAX_LISTS = 64;
+export const MAX_LIST_ENTRIES = 10_000;
+
+const EntrySchema = z.union([
+  /** a registry entry: the registry's URL, as its passports name it, and the agent's id there; it survives key rotation */
+  z.object({ registry: z.string().url().max(200), agentId: z.string().regex(AGENT_ID) }).strict(),
+  /** an ERC-8004 identity, as a verified passport's registry checked it on chain */
+  z.object({ erc8004: z.object({ agentRegistry: z.string().regex(ERC8004_REGISTRY).transform((r) => r.toLowerCase()), agentId: z.string().regex(/^(0|[1-9][0-9]{0,77})$/) }).strict() }).strict(),
+  /** the subject of a verified arrival: a did:key, a Web Bot Auth signature agent's origin, or a grant's agent */
+  z.object({ agent: z.string().min(1).max(200) }).strict(),
+]);
+export type AdmissionEntry = z.infer<typeof EntrySchema>;
+
+export const AdmissionListsSchema = z.object({
+  lists: z.record(z.string(), z.array(EntrySchema).max(MAX_LIST_ENTRIES)).superRefine((lists, ctx) => {
+    const names = Object.keys(lists);
+    if (names.length > MAX_LISTS) ctx.addIssue({ code: "custom", message: `at most ${MAX_LISTS} lists` });
+    for (const name of names) if (!LIST_NAME.test(name)) ctx.addIssue({ code: "custom", path: [name], message: `"${name.slice(0, 40)}": a list name is lowercase letters, digits, and . _ -, at most 64 characters` });
+  }),
+}).strict();
+
+/** The lists in force, compiled for lookup, with the sha256 of the file they came from. */
+export interface AdmissionLists {
+  digest: string;
+  names: string[];
+  match(identity: ArrivalIdentity): string[];
+}
+
+/** What the door checked about an arrival, as far as a list can name it. */
+export interface ArrivalIdentity {
+  /** the arrival's class; only `verified` matches anything */
+  class: string;
+  subject: string;
+  /** the passport, when its outcome is `verified` */
+  passport?: { outcome: string; registry?: string; agentId?: string; erc8004?: { agentRegistry: string; agentId: string } };
+}
+
+const keyOf = (e: AdmissionEntry): string => ("registry" in e ? `registry ${e.registry} ${e.agentId}` : "erc8004" in e ? `erc8004 ${e.erc8004.agentRegistry} ${e.erc8004.agentId}` : `agent ${e.agent}`);
+
+/** Parses and compiles a lists file; throws, naming what is wrong, when it is not one. */
+export function compileAdmissionLists(text: string): AdmissionLists {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("the admission lists are not JSON");
+  }
+  const parsed = AdmissionListsSchema.safeParse(raw);
+  if (!parsed.success) throw new Error(`the admission lists are not valid: ${parsed.error.issues.slice(0, 5).map((i) => `${i.path.join(".") || "file"} ${i.message}`).join("; ")}`);
+  const index = new Map<string, Set<string>>();
+  for (const [name, entries] of Object.entries(parsed.data.lists)) {
+    for (const e of entries) {
+      const k = keyOf(e);
+      const on = index.get(k) ?? new Set<string>();
+      on.add(name);
+      index.set(k, on);
+    }
+  }
+  const names = Object.keys(parsed.data.lists).sort();
+  return {
+    digest: sha256Hex(text),
+    names,
+    match(a) {
+      if (a.class !== "verified") return [];
+      const keys = [`agent ${a.subject}`];
+      const p = a.passport;
+      if (p?.outcome === "verified" && p.registry && p.agentId) {
+        keys.push(`registry ${p.registry} ${p.agentId}`);
+        if (p.erc8004) keys.push(`erc8004 ${p.erc8004.agentRegistry.toLowerCase()} ${p.erc8004.agentId}`);
+      }
+      const on = new Set<string>();
+      for (const k of keys) for (const name of index.get(k) ?? []) on.add(name);
+      return [...on].sort();
+    },
+  };
+}

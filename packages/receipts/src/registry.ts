@@ -157,6 +157,7 @@ export class RegistryStore {
       // one live agent per key, held by the database so that two registrations at once cannot both pass
       await this.client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${this.t}_live_key ON ${this.t} (agent) WHERE revoked_at IS NULL`);
       await this.client.query(`ALTER TABLE ${this.t} ADD COLUMN IF NOT EXISTS erc8004 TEXT`);
+      await this.client.query(`CREATE INDEX IF NOT EXISTS ${this.t}_capabilities ON ${this.t} USING GIN (capabilities)`);
     })();
     return this.ready;
   }
@@ -216,6 +217,26 @@ export class RegistryStore {
       if (keyTaken(e)) throw new RegistryInputError(TAKEN);
       throw e;
     }
+  }
+  /**
+   * Active agents, by id, that hold `capability` (and belong to `owner`) when given: at most `limit` of them, after the
+   * id `after`. What the registry's public search serves; revoked and expired agents are not listed.
+   */
+  async search(o: { capability?: string; owner?: string; after?: string; limit?: number }, now = Date.now()): Promise<{ agents: AgentEntry[]; next: string | null }> {
+    await this.init();
+    if (o.capability !== undefined && !CAPABILITY.test(o.capability)) throw new RegistryInputError("capability: lowercase letters, digits, and . _ : -, at most 64 characters");
+    if (o.owner !== undefined && !/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/.test(o.owner)) throw new RegistryInputError("owner: a tenant id");
+    if (o.after !== undefined && !AGENT_ID.test(o.after)) throw new RegistryInputError("after: an agent id, the next value of the last page");
+    const limit = Math.min(Math.max(Math.trunc(o.limit ?? 50), 1), 100);
+    const where = ["revoked_at IS NULL", "expires_at > $1"];
+    const values: unknown[] = [new Date(now).toISOString()];
+    const param = (v: unknown) => { values.push(v); return `$${values.length}`; };
+    if (o.capability !== undefined) where.push(`capabilities @> ${param([o.capability])}::text[]`);
+    if (o.owner !== undefined) where.push(`owner = ${param(o.owner)}`);
+    if (o.after !== undefined) where.push(`id > ${param(o.after)}`);
+    const { rows } = await this.client.query(`SELECT * FROM ${this.t} WHERE ${where.join(" AND ")} ORDER BY id LIMIT ${param(limit + 1)}`, values);
+    const agents = rows.slice(0, limit).map((r) => RegistryStore.row(r as Record<string, unknown>));
+    return { agents, next: rows.length > limit ? agents.at(-1)!.id : null };
   }
   /**
    * Records a later check of an agent's standing link: the fresh result, or the error beside the last good one. `checked`

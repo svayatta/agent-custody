@@ -57,6 +57,8 @@ export interface DoorWorkerEnv {
   TRUSTED_PRINCIPAL_KEYS?: string;
   /** agent registry keys whose passports admit an agent, SPKI PEM */
   TRUSTED_REGISTRY_KEYS?: string;
+  /** the site's admission lists, the JSON of a door's `admissionLists` file */
+  ADMISSION_LISTS?: string;
   /** a JSON array of revoked grant digests, as in a gateway's or door's `revokedGrants` file */
   REVOKED_GRANTS?: string;
   /** secret: the door's signing key, PKCS8 PEM (`agent-custody keygen`) */
@@ -94,6 +96,7 @@ const NOT_IN_A_WORKER: Record<string, string> = {
   log: "the log is LOG_URL, LOG_KEYS, LOG_ID, LOG_TOKEN",
   trustedPrincipalKeys: "trusted principal keys are the TRUSTED_PRINCIPAL_KEYS variable",
   trustedRegistryKeys: "trusted registry keys are the TRUSTED_REGISTRY_KEYS variable",
+  admissionLists: "admission lists are the ADMISSION_LISTS variable",
   revokedGrants: "revoked grants are the REVOKED_GRANTS variable",
   authz: "a Worker relays; nginx and Envoy ask a Node door",
   trustProxy: "the Worker reads the client's address from Cloudflare (CF-Connecting-IP)",
@@ -221,6 +224,7 @@ export function workerDoorIO(env: DoorWorkerEnv, f: typeof fetch): DoorIO {
     trustedRegistryKeys: pemKeys(env.TRUSTED_REGISTRY_KEYS),
     readPolicy: () => ({ text: env.DOOR_POLICY, key: "DOOR_POLICY" }),
     policySource: "the DOOR_POLICY variable",
+    ...(env.ADMISSION_LISTS ? { readAdmission: () => ({ text: env.ADMISSION_LISTS!, key: "ADMISSION_LISTS" }), admissionSource: "the ADMISSION_LISTS variable" } : {}),
     revoked: (digests) => (!digests.some((d) => revoked.has(d)) ? null : revoked.has(digests[0]!) ? "the grant has been revoked" : "a grant above it in its chain has been revoked"),
     secret: (name) => (typeof env[name] === "string" ? (env[name] as string) : undefined),
     issuer: (capture) => createObjectIssuer(key, store, sink, { capture }),

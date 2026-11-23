@@ -86,6 +86,18 @@ export function nodeDoorIO(cfg: DoorConfig, options: Omit<DoorOptions, "fetch"> 
       }
     },
     policySource: cfg.policyFile,
+    ...(cfg.admissionLists ? {
+      readAdmission() {
+        const fd = openSync(cfg.admissionLists!, "r");
+        try {
+          const st = fstatSync(fd);
+          return { text: readFileSync(fd, "utf8"), key: `${st.ino}:${st.mtimeMs}:${st.ctimeMs}:${st.size}` };
+        } finally {
+          closeSync(fd);
+        }
+      },
+      admissionSource: cfg.admissionLists,
+    } : {}),
     revoked(chainDigests) {
       try {
         revocations.reload();

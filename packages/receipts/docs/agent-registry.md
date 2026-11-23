@@ -100,6 +100,7 @@ What the link does not do: it reads the ERC-8004 Identity Registry only, not its
 | --- | --- |
 | `GET /.well-known/agent-custody-registry.json` | the registry's key document: its URL, the passport type and header, how long a passport lives, the chain ids whose ERC-8004 registries it reads (`erc8004Chains`), and its keys (`keyid`, `alg`, `publicKeyPem`, `validFrom`) |
 | `GET /registry/agents/<id>` | the agent's entry: name, owner, contact, capabilities, its key as a did:key and as an Ed25519 JWK (`kid` is the did:key, `exp` the registration's expiry), `status` (`active`, `revoked`, or `expired`), and `erc8004`, the linked identity as last checked (with `error` when the last check failed) or null |
+| `GET /registry/agents?capability=&owner=&limit=&after=` | the active agents that hold a capability (or belong to an owner), by id, a page of up to 100 at a time; see [admission lists](admission-lists.md#find-agents-in-the-registry) |
 | `GET /registry/agents/<id>/passport` | a fresh passport for an active agent; `410` for a revoked or expired one |
 
 The agent fetches a fresh passport before the one it holds expires. It needs no session for that.
@@ -167,4 +168,4 @@ The receipt names the agent as `observed`, never `attested`: `agent: { id: "did:
 - **A key rotation is the same.** A passport for the old key works until it expires.
 - **Capabilities are the owner's claim.** The registry records what the organisation says the agent does, and signs that it said so. It does not check it.
 - **A passport says who, not on whose behalf.** It does not name a principal or a route. For that, the agent presents a [grant](door.md#presenting-a-passport) from a principal the site trusts, and the door decides by the grant.
-- **Admission lists** (allow these registered agents, block those) and a search of the registry by capability are not built yet.
+- **Who a site admits is the site's own list.** The registry answers a search by capability (`GET /registry/agents?capability=`), and a site lists the agents it admits or blocks in its door's [admission lists](admission-lists.md).

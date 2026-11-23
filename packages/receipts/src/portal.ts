@@ -1031,6 +1031,18 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       if (req.method === "GET" && url.pathname === "/favicon.svg") { res.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" }); return void res.end(FAVICON); }
       // ---- the agent registry's public side: its keys, each agent's entry, and passports, for anyone ----
       if (o.registry && agents && req.method === "GET" && url.pathname === REGISTRY_DOCUMENT_PATH) return json(200, await registryDocument(o.registry.signer, portalBase, passportSeconds, resolver?.chains ?? []));
+      if (o.registry && agents && req.method === "GET" && url.pathname === "/registry/agents") {
+        const q = (k: string) => url.searchParams.get(k) ?? undefined;
+        const limit = q("limit");
+        if (limit !== undefined && !/^[0-9]{1,3}$/.test(limit)) return json(400, { error: "limit is 1 to 100" });
+        try {
+          const page = await agents.search({ ...(q("capability") !== undefined ? { capability: q("capability")! } : {}), ...(q("owner") !== undefined ? { owner: q("owner")! } : {}), ...(q("after") !== undefined ? { after: q("after")! } : {}), ...(limit !== undefined ? { limit: Number(limit) } : {}) });
+          return json(200, { agents: page.agents.map((e) => publicEntry(e)), next: page.next });
+        } catch (e) {
+          if (e instanceof RegistryInputError) return json(400, { error: e.message });
+          throw e;
+        }
+      }
       const agentPath = /^\/registry\/agents\/([^/]+)(\/passport)?$/.exec(url.pathname);
       if (o.registry && agents && req.method === "GET" && agentPath) {
         const entry = await agents.get(agentPath[1]!);

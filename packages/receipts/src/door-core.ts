@@ -12,6 +12,7 @@ import { DID_KEY_PREFIX } from "./did-key.ts";
 import { decodeDelegation, delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { parseGrantHeader, GRANT_HEADER } from "./grant-header.ts";
 import { MAX_PASSPORT_HEADER, PASSPORT_HEADER, parsePassportHeader, verifyPassport } from "./passport.ts";
+import { compileAdmissionLists, type AdmissionLists } from "./admission.ts";
 import type { Issuer } from "./issue.ts";
 import { ReceiptPending, type FlushResult } from "./receipt-pending.ts";
 import { contentDigestMatches, createWebBotAuthVerifier, normalizeAuthority, type NonceStore, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
@@ -61,6 +62,8 @@ export interface Arrival {
   declared?: string;
   /** what became of an agent registry passport; absent when none was presented */
   passport?: ArrivalPassport;
+  /** the site's admission lists this arrival's agent is on, when the door has lists; absent otherwise, and from `classifyArrival` alone */
+  admission?: ArrivalAdmission;
   remote: string;
   method: string;
   path: string;
@@ -263,6 +266,16 @@ export interface ArrivalPassport {
   /** sha256 over the passport's signed payload */
   digest?: string;
   envelope?: Envelope;
+}
+
+/**
+ * The admission lists an arrival's agent is on, by name, sorted, and the sha256 of the lists file in force. Only a
+ * `verified` arrival is on any list: by its subject, or by the registry entry or ERC-8004 identity of its verified
+ * passport. The names mean what the policy makes of them.
+ */
+export interface ArrivalAdmission {
+  lists: string[];
+  digest: string;
 }
 
 /** The components a signature must cover for the passport it carries to admit its agent. */
@@ -636,6 +649,10 @@ export interface DoorIO {
   readPolicy(): { text: string; key: string };
   /** names the policy in messages: its file, or the variable it came from */
   policySource: string;
+  /** the admission lists file's text, and a value that changes whenever it may have; read on every arrival. Absent when the door has no lists. Throws when it cannot be read: the lists in force stay */
+  readAdmission?(): { text: string; key: string };
+  /** names the admission lists in messages */
+  admissionSource?: string;
   /** why a grant with these chain digests (leaf first) is revoked, or null when it is not. A list that cannot be read must revoke: return the reason */
   revoked(chainDigests: string[]): string | null;
   /** a secret by the name the config gives it (`captureKeyEnv`, `challenge.secretEnv`), or undefined when it is not set */
@@ -686,6 +703,30 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
   if (errors.length) throw new Error(`policy ${io.policySource} does not parse: ${errors.join("; ")}`);
   if (!hasPermitRule(first.text)) console.error(`agent-custody door: ${io.policySource} has no permit rule, so every arrival is refused`);
   let policyNow = { text: first.text, digest: policyDigest(first.text), key: first.key };
+  // The admission lists, re-read like the policy: a file that cannot be read or is not valid leaves the lists in force,
+  // because emptying them would drop every agent from a block list as well as from an allow list.
+  let admissionNow: { lists: AdmissionLists; key: string } | undefined;
+  if (io.readAdmission) {
+    const a = io.readAdmission();
+    admissionNow = { lists: compileAdmissionLists(a.text), key: a.key };
+  }
+  const currentAdmission = (): AdmissionLists | undefined => {
+    if (!io.readAdmission || !admissionNow) return undefined;
+    try {
+      const next = io.readAdmission();
+      if (next.key !== admissionNow.key) {
+        try {
+          admissionNow = { lists: compileAdmissionLists(next.text), key: next.key };
+        } catch (e) {
+          console.error(`agent-custody door: ADMISSION LISTS NOT RELOADED: ${io.admissionSource}: ${e instanceof Error ? e.message : String(e)}; lists ${admissionNow.lists.digest} stay in force`);
+          admissionNow = { ...admissionNow, key: next.key };
+        }
+      }
+    } catch (e) {
+      console.error(`agent-custody door: cannot read ${io.admissionSource}: ${e instanceof Error ? e.message : String(e)}; lists ${admissionNow.lists.digest} stay in force`);
+    }
+    return admissionNow.lists;
+  };
   const currentPolicy = () => {
     try {
       const next = readPolicy();
@@ -722,6 +763,8 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     const digestField = req.headers["content-digest"];
     const contentDigest = read !== null && body !== null && typeof digestField === "string" && contentDigestMatches(digestField, body);
     const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature, revoked, registry, contentDigest);
+    const admission = currentAdmission();
+    if (admission) arrival.admission = { lists: admission.match(arrival), digest: admission.digest };
     const checkedAgent = arrival.class === "verified";
     const by = checkedAgent ? "agent" : "remote";
     const source = `${by}:${checkedAgent ? arrival.subject : arrival.remote}`;
