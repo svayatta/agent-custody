@@ -262,21 +262,21 @@ describe("the agent registry on the portal", () => {
     const digestOf = (body: string) => `sha-256=:${createHash("sha256").update(body).digest("base64")}:`;
     /**
      * A request as a registered agent sends it: the passport, a Content-Digest of the body, and an RFC 9421 signature by
-     * `key` (its did:key as keyid) over @authority, @method, @path, the passport, and the digest. `cover` replaces the list.
+     * `key` (its did:key as keyid) over @authority, @method, @path, @query, the passport, and the digest. `cover` replaces the list.
      */
     const signedBy = (key: KeyPair, o: { nonce?: string; passport?: Envelope | null; body?: string; cover?: string[]; digest?: string } = {}) => {
       const body = o.body ?? BODY(100);
       const fields: Record<string, string> = { "content-digest": o.digest ?? digestOf(body), ...(o.passport === null ? {} : { [PASSPORT_HEADER]: passportHeader(o.passport ?? passport) }) };
-      const cover = o.cover ?? ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"];
+      const cover = o.cover ?? ["@authority", "@method", "@path", "@query", PASSPORT_HEADER, "content-digest"];
       const created = Math.floor(Date.now() / 1000);
       const input = `sig1=(${cover.map((c) => `"${c}"`).join(" ")});created=${created};expires=${created + 60};keyid="${didKeyOf(key.publicKey)}";alg="ed25519";nonce="${o.nonce ?? `reg-${process.pid}-${++n}`}";tag="web-bot-auth"`;
       const base = signatureBase({ method: "POST", target: "/refunds", authority: AUTHORITY, header: (name) => (fields[name] !== undefined ? [fields[name]!] : undefined) }, parseDictionary(input).get("sig1") as SfInnerList);
       return { ...fields, "signature-input": input, signature: `sig1=:${edSign(null, Buffer.from(base), key.privateKey).toString("base64")}:` };
     };
     // node:http, because fetch does not send a Host other than the URL's
-    const send = (headers: Record<string, string>, body = BODY(100)) => new Promise<{ status: number; st: ReceiptStatement; arrival: Arrival; ok: boolean }>((resolve, reject) => {
+    const send = (headers: Record<string, string>, body = BODY(100), path = "/refunds") => new Promise<{ status: number; st: ReceiptStatement; arrival: Arrival; ok: boolean }>((resolve, reject) => {
       const u = new URL(door.url);
-      const req = httpRequest({ host: u.hostname, port: u.port, method: "POST", path: "/refunds", headers: { host: AUTHORITY, "content-type": "application/json", ...headers } }, (res) => {
+      const req = httpRequest({ host: u.hostname, port: u.port, method: "POST", path, headers: { host: AUTHORITY, "content-type": "application/json", ...headers } }, (res) => {
         res.resume();
         res.on("end", () => {
           const bundle = JSON.parse(readFileSync(join(fx.receiptsDir, `${res.headers[RECEIPT_HEADER]}.json`), "utf8")) as ReceiptBundle;
@@ -288,7 +288,7 @@ describe("the agent registry on the portal", () => {
       req.end(body);
     });
     /** what the door's signature check reports for a signature by `key` that covered everything a passport needs */
-    const bound = (key: KeyPair) => ({ outcome: "verified" as const, agent: didKeyOf(key.publicKey), keyid: didKeyOf(key.publicKey), label: "sig1", covered: ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"] });
+    const bound = (key: KeyPair) => ({ outcome: "verified" as const, agent: didKeyOf(key.publicKey), keyid: didKeyOf(key.publicKey), label: "sig1", covered: ["@authority", "@method", "@path", "@query", PASSPORT_HEADER, "content-digest"] });
 
     beforeAll(async () => {
       origin = await startOrigin();
@@ -366,6 +366,26 @@ when {
       expect(again.arrival).toMatchObject({ class: "claimed", signature: "invalid", signatureError: "sig1 repeats a nonce already used", passport: { outcome: "wrong-sender" } });
     });
 
+    it("refuses a replayed signature with a grant header attached, so a grant cannot stop the door keeping the nonce", async () => {
+      // the grant header is not a covered component, so the signature still verifies; a grant from a key the door does
+      // not trust must not keep the door from recording the nonce of the signature the passport is checked against
+      const headers = signedBy(agent);
+      expect((await send(headers)).arrival.class).toBe("verified");
+      const stranger = createDelegation(generateKeyPair(), { version: "0.1", principal: "nobody", agent: didKeyOf(agent.publicKey), scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: inDays(1) });
+      const again = await send({ ...headers, authorization: `Bearer ${grantHeader(stranger)}` });
+      expect(again.arrival).toMatchObject({ class: "claimed", grant: "invalid", signature: "invalid", signatureError: "sig1 repeats a nonce already used", passport: { outcome: "wrong-sender" } });
+      expect(again.arrival.passport!.capabilities).toBeUndefined();
+    });
+
+    it("binds a passport to the query: a signature without @query is unbound, and one with it does not serve another query", async () => {
+      const noQuery = await send(signedBy(agent, { cover: ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"] }));
+      expect(noQuery.arrival).toMatchObject({ class: "claimed", passport: { outcome: "unbound", error: expect.stringContaining("@query") } });
+      // signed for /refunds with no query, sent to /refunds?order=o_2
+      const moved = await send(signedBy(agent), BODY(100), "/refunds?order=o_2");
+      expect(moved.arrival).toMatchObject({ class: "claimed", signature: "invalid" });
+      expect(moved.arrival.passport!.outcome).not.toBe("verified");
+    });
+
     it("does not admit on a passport from another registry, an edited one, or a header that is not a passport", async () => {
       const elsewhere = await issuePassport(localSigner(generateKeyPair()), "https://registry.example/", { id: agentId, owner: "india", name: "India shopper", contact: "x@india.example", capabilities: ["refunds"], agent: didKeyOf(agent.publicKey), createdAt: new Date().toISOString(), expiresAt: inDays(1), revokedAt: null });
       const foreign = await send(signedBy(agent, { passport: elsewhere }));
@@ -379,13 +399,13 @@ when {
     it("does not admit on a signature that does not bind the passport to this request", async () => {
       // a signature over @authority alone: the agent's, made for some request, with the public passport attached later
       const loose = await send(signedBy(agent, { cover: ["@authority"] }));
-      expect(loose.arrival).toMatchObject({ class: "claimed", signature: "invalid", passport: { outcome: "unbound", error: "the signature does not cover @method, @path, x-agent-custody-passport, content-digest, which bind the passport to this request" } });
+      expect(loose.arrival).toMatchObject({ class: "claimed", signature: "invalid", passport: { outcome: "unbound", error: "the signature does not cover @method, @path, @query, x-agent-custody-passport, content-digest, which bind the passport to this request" } });
       expect(loose.arrival.passport!.capabilities).toBeUndefined();
       // covering everything but the passport
       const noPassport = await send(signedBy(agent, { cover: ["@authority", "@method", "@path", "content-digest"] }));
       expect(noPassport.arrival.passport).toMatchObject({ outcome: "unbound", error: expect.stringContaining("x-agent-custody-passport") });
       // a write without the digest, and a digest that is not of this body
-      expect((await send(signedBy(agent, { cover: ["@authority", "@method", "@path", PASSPORT_HEADER] }))).arrival.passport).toMatchObject({ outcome: "unbound", error: expect.stringContaining("content-digest") });
+      expect((await send(signedBy(agent, { cover: ["@authority", "@method", "@path", "@query", PASSPORT_HEADER] }))).arrival.passport).toMatchObject({ outcome: "unbound", error: expect.stringContaining("content-digest") });
       const swapped = await send(signedBy(agent), BODY(4999));
       expect(swapped).toMatchObject({ status: 403, arrival: { class: "claimed", passport: { outcome: "unbound", error: expect.stringContaining("does not match the body") } }, ok: true });
     });
