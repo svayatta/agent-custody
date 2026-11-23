@@ -6,7 +6,7 @@
     "capture-headless-chrome",
     "capture-headless-chrome-browser-ua"
   ],
-  "date": "2026-11-22",
+  "date": "2026-11-23",
   "machine": {
     "os": "macOS 15.7.4",
     "arch": "arm64"
@@ -83,15 +83,19 @@
       "t13d1518h2_8daaf6152771_e2d80978ab2e"
     ],
     "chrome-headless-form-set-value": [
+      "t13d1517h2_8daaf6152771_cb7bf5808d99",
       "t13d1518h2_8daaf6152771_e2d80978ab2e"
     ],
     "chrome-headless-form-insert-text-click": [
-      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+      "t13d1518h2_8daaf6152771_e2d80978ab2e",
+      "t13d1517h2_8daaf6152771_cb7bf5808d99"
     ],
     "chrome-headless-form-keys-no-pause": [
-      "t13d1518h2_8daaf6152771_e2d80978ab2e"
+      "t13d1518h2_8daaf6152771_e2d80978ab2e",
+      "t13d1517h2_8daaf6152771_cb7bf5808d99"
     ],
     "chrome-headless-form-keys-paced": [
+      "t13d1517h2_8daaf6152771_cb7bf5808d99",
       "t13d1518h2_8daaf6152771_e2d80978ab2e"
     ],
     "chrome-headless-browser-ua-load": [

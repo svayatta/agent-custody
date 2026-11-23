@@ -14,7 +14,7 @@ import { parseGrantHeader, GRANT_HEADER } from "./grant-header.ts";
 import type { Issuer } from "./issue.ts";
 import { ReceiptPending, type FlushResult } from "./receipt-pending.ts";
 import { createWebBotAuthVerifier, normalizeAuthority, type NonceStore, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
-import { createHistoryTracker, FORM_REPORT_HEADER, observationOf, signalsOf, type ArrivalBehaviour, type ArrivalFingerprint, type TlsObservation } from "./door-signals.ts";
+import { createHistoryTracker, createSeenCounter, fingerprintKey, FORM_REPORT_HEADER, historySource, observationOf, signalsOf, type ArrivalBehaviour, type ArrivalFingerprint, type TlsObservation } from "./door-signals.ts";
 import { createPartnerEngine, PARTNER_FACT, PARTNER_TOOL, type ArrivalPartner, type PartnerVerdict } from "./door-partner.ts";
 import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
@@ -605,6 +605,7 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
   const rates = createRateTracker(undefined, { sweepTimer: io.timers });
   // one process's memory, like the rate counts
   const history = cfg.behaviour ? createHistoryTracker() : undefined;
+  const fingerprints = createSeenCounter();
   const webBotAuth = cfg.webBotAuth ? createWebBotAuthVerifier(cfg.webBotAuth, f, undefined, io.nonceStore) : undefined;
   const partner = cfg.partner ? createPartnerEngine(cfg.partner, f) : undefined;
 
@@ -650,7 +651,10 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     if (history) {
       // in authz mode the proxy selects the headers of a check, so the header set is not the client's
       const seen = observationOf(req, performance.now(), method, arrival.path, { trustProxy: !!cfg.trustProxy, ...(cfg.behaviour?.tlsHeader ? { tlsHeader: cfg.behaviour.tlsHeader } : {}), own: challengeHeader ? [challengeHeader] : [], partialHeaders: !!cfg.authz });
-      Object.assign(arrival, signalsOf(seen, history.record(source, seen)));
+      const signals = signalsOf(seen, history.record(checkedAgent ? source : `remote:${historySource(arrival.remote)}`, seen));
+      const key = fingerprintKey(signals.fingerprint);
+      if (key !== undefined) signals.fingerprint.seen = fingerprints.hit(key, seen.at);
+      Object.assign(arrival, signals);
     }
     if (cfg.challenge && challengeHeader) {
       const c = cfg.challenge;

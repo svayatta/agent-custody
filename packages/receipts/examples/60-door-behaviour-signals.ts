@@ -113,7 +113,7 @@ const keep = (label: string, r: Answer) => { all.push([label, r]); show(label, r
 step(2, "a person in a browser loads the page, fills the form, and sends it: no flag, and no challenge");
 const person = "203.0.113.7";
 const page = keep("page load", await send("GET", "/", person, ja4("t13d1516h2"), chrome("document", "navigate", "none")));
-const filled = keep("form post", await send("POST", "/contact", person, ja4("t13d1516h2"), [...chrome("empty", "cors", "same-origin"), ["referer", "https://shop.example/"], [FORM_REPORT_HEADER, "v=1;ms=41250;k=63;p=4;paste=0;trusted=1"]], "message=Where+is+my+order%3F"));
+const filled = keep("form post", await send("POST", "/contact", person, ja4("t13d1516h2"), [...chrome("empty", "cors", "same-origin"), ["referer", "https://shop.example/"], ["origin", "https://shop.example"], [FORM_REPORT_HEADER, "v=2;ms=41250;k=63;p=4;paste=0;trusted=1;mv=212;ks=1840;rd=3600"]], "message=Where+is+my+order%3F"));
 const a = arrivalOf(filled.receipt);
 console.log(`   fingerprint.headers: ${JSON.stringify(a.fingerprint!.headers)}`);
 console.log(`   fingerprint.tls:     ${JSON.stringify(a.fingerprint!.tls)}`);
@@ -125,12 +125,12 @@ step(3, "a tool posts the form directly, under its own name: one flag, and the d
 const tool = keep("tool post", await send("POST", "/contact", "198.51.100.20", ja4("t13d3112h2"), [["user-agent", "python-requests/2.32.3"], ["accept", "*/*"]], "message=hello"));
 
 step(4, "a script states a browser, with the headers and the TLS of a tool, and a form report with no input: four flags");
-const script = keep("script post", await send("POST", "/contact", "198.51.100.30", ja4("t12d151600"), [["user-agent", CHROME], ["accept", "*/*"], [FORM_REPORT_HEADER, "v=1;ms=0;k=0;p=0;paste=0;trusted=1"]], "message=cheap+pills"));
+const script = keep("script post", await send("POST", "/contact", "198.51.100.30", ja4("t12d151600"), [["user-agent", CHROME], ["accept", "*/*"], [FORM_REPORT_HEADER, "v=2;ms=0;k=0;p=0;paste=0;trusted=1;mv=0;ks=0;rd=0"]], "message=cheap+pills"));
 
 step(5, "a flag can be wrong: a person whose address changed after the page load, and whose form page is on another host of the site, is flagged too");
 const moved = "203.0.113.200";
-const wrong = keep("person, new address", await send("POST", "/contact", moved, ja4("t13d1516h2"), [...chrome("empty", "cors", "same-site"), [FORM_REPORT_HEADER, "v=1;ms=38000;k=41;p=3;paste=0;trusted=1"]], "message=Please+call+me"));
-const retried = keep("the same person, with a passed challenge", await send("POST", "/contact", moved, ja4("t13d1516h2"), [...chrome("empty", "cors", "same-site"), ["x-agent-custody-challenge", "passes"], [FORM_REPORT_HEADER, "v=1;ms=38000;k=41;p=3;paste=0;trusted=1"]], "message=Please+call+me"));
+const wrong = keep("person, new address", await send("POST", "/contact", moved, ja4("t13d1516h2"), [...chrome("empty", "cors", "same-site"), ["origin", "https://www.shop.example"], [FORM_REPORT_HEADER, "v=2;ms=38000;k=41;p=3;paste=0;trusted=1;mv=157;ks=2210;rd=5200"]], "message=Please+call+me"));
+const retried = keep("the same person, with a passed challenge", await send("POST", "/contact", moved, ja4("t13d1516h2"), [...chrome("empty", "cors", "same-site"), ["origin", "https://www.shop.example"], ["x-agent-custody-challenge", "passes"], [FORM_REPORT_HEADER, "v=2;ms=38000;k=41;p=3;paste=0;trusted=1;mv=157;ks=2210;rd=5200"]], "message=Please+call+me"));
 
 step(6, "every receipt verifies with the door's public key, and records the flags that the policy read");
 let ok = true;

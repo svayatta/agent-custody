@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   FLAG_SIGNALS, FORM_FAST_MIN_KEYS, FORM_FAST_MS_PER_KEY, FORM_REPORT_HEADER, HISTORY_MAX_ARRIVALS, HISTORY_WINDOW_MS, KNOWN_TOOL_JA4, MAX_FORM_EVENTS, MAX_FORM_FILL_MS, MAX_HEADER_NAMES,
   MAX_HEADER_NAME_LENGTH, MAX_USER_AGENT, SEC_CH_UA_SINCE, SEC_FETCH_SINCE, TIMING_MIN_GAPS, TLS13_SINCE,
-  createHistoryTracker, flagOf, formSignals, headerFingerprint, isPageLoad, navigationSignals, observationOf, parseFormReport, refererRelation, signalsOf, statedClient, timingSignals, tlsFingerprint,
+  SEEN_WINDOW_MS, createHistoryTracker, createSeenCounter, fingerprintKey, flagOf, historySource, formSignals, headerFingerprint, isPageLoad, navigationSignals, observationOf, parseFormReport, refererRelation, signalsOf, statedClient, timingSignals, tlsFingerprint,
   type Observation,
 } from "../src/door-signals.ts";
 
@@ -34,6 +34,16 @@ describe("the client a User-Agent states", () => {
       expect(statedClient(ua), ua).toEqual({ kind: "tool", family });
     }
     expect(statedClient("Mozilla/5.0 (Linux; Android 10; CUBOT_X30) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36")).toMatchObject({ kind: "browser", family: "chromium" });
+    // an AI agent that names itself, with the vendor and the purpose that the vendor documents
+    expect(statedClient("Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.4; +https://openai.com/gptbot")).toEqual({ kind: "agent", family: "gptbot", vendor: "openai", purpose: "training" });
+    expect(statedClient("Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; ChatGPT-User/1.0; +https://openai.com/bot")).toMatchObject({ kind: "agent", vendor: "openai", purpose: "user" });
+    expect(statedClient("Mozilla/5.0 (compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)")).toMatchObject({ kind: "agent", family: "perplexitybot", purpose: "search" });
+    expect(statedClient("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko; compatible; Google-Agent; +https://developers.google.com/crawling/docs/crawlers-fetchers/google-agent) Chrome/140.0.0.0 Safari/537.36")).toMatchObject({ kind: "agent", vendor: "google", purpose: "user" });
+    expect(statedClient("ClaudeBot")).toMatchObject({ kind: "agent", vendor: "anthropic", purpose: "training" });
+    // a longer token is another product, and a crawler that is in no vendor entry stays a crawler
+    expect(statedClient("NotClaudeBot/1.0")).toMatchObject({ kind: "tool", family: "crawler" });
+    expect(statedClient("Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; OAI-AdsBot/1.0; +https://openai.com/adsbot")).toEqual({ kind: "tool", family: "crawler" });
+    expect(headerFingerprint(seen({ userAgent: "Mozilla/5.0 (compatible; Perplexity-User/1.0; +https://perplexity.ai/perplexity-user)" }))).toMatchObject({ client: "agent", vendor: "perplexity", purpose: "user", mismatch: false });
     expect(statedClient("Mozilla/5.0")).toEqual({ kind: "other", family: "other" });
     expect(statedClient("MyApp/1.0")).toEqual({ kind: "other", family: "other" });
     expect(statedClient(undefined)).toEqual({ kind: "unstated", family: "unstated" });
@@ -49,7 +59,7 @@ describe("the client a User-Agent states", () => {
 describe("the header fingerprint", () => {
   it("does not flag a real browser's request, and hashes the header order", () => {
     const fp = headerFingerprint(browser());
-    expect(fp).toEqual({ client: "browser", family: "chromium", version: 126, order: expect.stringMatching(/^[0-9a-f]{16}$/), count: CHROME_HEADERS.length, mismatch: false });
+    expect(fp).toEqual({ client: "browser", family: "chromium", version: 126, order: expect.stringMatching(/^[0-9a-f]{16}$/), count: CHROME_HEADERS.length, mismatch: false, hintsMismatch: false, fetchInvalid: false });
     expect(headerFingerprint(browser()).order).toBe(fp.order);
     expect(headerFingerprint(browser({ headers: { names: [...CHROME_HEADERS].reverse(), ordered: true } })).order).not.toBe(fp.order);
     for (const userAgent of [FIREFOX, SAFARI]) expect(headerFingerprint(browser({ userAgent, headers: { names: CHROME_HEADERS.filter((n) => !n.startsWith("sec-ch-")), ordered: true } })).mismatch).toBe(false);
@@ -106,7 +116,7 @@ describe("the header fingerprint", () => {
     expect(unordered).not.toHaveProperty("order");
     const partial = browser();
     delete partial.headers;
-    expect(headerFingerprint(partial)).toEqual({ client: "browser", family: "chromium", version: 126, mismatch: false });
+    expect(headerFingerprint(partial)).toEqual({ client: "browser", family: "chromium", version: 126, mismatch: false, hintsMismatch: false, fetchInvalid: false });
   });
 
   it("reads at most a fixed number of names of a fixed length", () => {
@@ -178,13 +188,13 @@ describe("the source history", () => {
 
   it("a first arrival has no gap; later ones give the count and the median gap as integers", () => {
     expect(paced([])).toEqual({ gaps: 0, regular: false });
-    expect(paced([300])).toEqual({ gaps: 1, medianGapMs: 300, regular: false });
-    expect(paced([100, 900, 301])).toEqual({ gaps: 3, medianGapMs: 301, regular: false });
-    expect(paced([100, 201, 400, 900])).toEqual({ gaps: 4, medianGapMs: 300, regular: false });
+    expect(paced([300])).toEqual({ gaps: 1, medianGapMs: 300, minGapMs: 300, maxGapMs: 300, regular: false });
+    expect(paced([100, 900, 301])).toEqual({ gaps: 3, medianGapMs: 301, minGapMs: 100, maxGapMs: 900, regular: false });
+    expect(paced([100, 201, 400, 900])).toEqual({ gaps: 4, medianGapMs: 300, minGapMs: 100, maxGapMs: 900, regular: false });
     // a clock that gives fractions of a millisecond still gives integers
     const history = createHistoryTracker();
     history.record("s", seen({ at: 10.7 }));
-    expect(timingSignals(history.record("s", seen({ at: 250.2 })))).toEqual({ gaps: 1, medianGapMs: 240, regular: false });
+    expect(timingSignals(history.record("s", seen({ at: 250.2 })))).toEqual({ gaps: 1, medianGapMs: 240, minGapMs: 240, maxGapMs: 240, regular: false });
   });
 
   it("flags a steady pace only with enough gaps, a small spread, and a pace slower than a burst", () => {
@@ -212,7 +222,7 @@ describe("the source history", () => {
     history.record("s", seen({ at: 5000 }));
     expect(history.record("s", seen({ at: 100 })).times).toEqual([5000, 5000]);
     expect(history.record("s", seen({ at: Number.NaN })).times).toEqual([5000, 5000, 5000]);
-    expect(timingSignals(history.record("s", seen({ at: Number.POSITIVE_INFINITY })))).toEqual({ gaps: 3, medianGapMs: 0, regular: false });
+    expect(timingSignals(history.record("s", seen({ at: Number.POSITIVE_INFINITY })))).toEqual({ gaps: 3, medianGapMs: 0, minGapMs: 0, maxGapMs: 0, regular: false });
   });
 
   it("keeps at most maxSources sources, forgets the least recently seen first, and keeps a long key by its hash", () => {
@@ -263,12 +273,12 @@ describe("navigation", () => {
     const history = createHistoryTracker();
     const post = (at: number, over: Partial<Observation> = {}) => seen({ at, method: "POST", ...over });
     const cold = post(0);
-    expect(navigationSignals(cold, history.record("remote:bot", cold))).toEqual({ pageLoaded: false, referer: "absent", directWrite: true });
+    expect(navigationSignals(cold, history.record("remote:bot", cold))).toEqual({ pageLoaded: false, referer: "absent", origin: "absent", directWrite: true });
     for (const method of ["PUT", "PATCH", "DELETE"]) expect(navigationSignals(seen({ method }), { times: [0] }).directWrite, method).toBe(true);
     // a read is never a direct write
     expect(navigationSignals(seen(), { times: [0] }).directWrite).toBe(false);
     // a referer on the same origin: a form on a page the door did not see load
-    expect(navigationSignals(post(1, { referer: "same-origin" }), { times: [1] })).toMatchObject({ referer: "same-origin", directWrite: false });
+    expect(navigationSignals(post(1, { referer: "same-origin" }), { times: [1] })).toMatchObject({ referer: "same-origin", origin: "absent", directWrite: false });
     expect(navigationSignals(post(1, { referer: "cross-origin" }), { times: [1] }).directWrite).toBe(true);
     // no referer (Referrer-Policy: no-referrer), and the browser says that the page of the same origin sent the write
     expect(navigationSignals(post(1, { secFetch: { site: "same-origin" } }), { times: [1] }).directWrite).toBe(false);
@@ -321,11 +331,11 @@ describe("navigation", () => {
 });
 
 describe("the form report", () => {
-  const report = (ms: number, k: number, p: number, paste = 0, trusted = 1) => `v=1;ms=${ms};k=${k};p=${p};paste=${paste};trusted=${trusted}`;
+  const report = (ms: number, k: number, p: number, paste = 0, trusted = 1) => `v=2;ms=${ms};k=${k};p=${p};paste=${paste};trusted=${trusted};mv=0;ks=0;rd=0`;
 
   it("is labelled a claim, and carries the counts the script sent", () => {
-    expect(formSignals(seen({ form: report(41_250, 63, 4, 1, 1) }))).toEqual({ report: "claimed", fillMs: 41_250, keys: 63, pointers: 4, pasted: true, trusted: true, fast: false, noInput: false });
-    expect(formSignals(seen({ form: report(900, 2, 1, 0, 0) }))).toMatchObject({ pasted: false, trusted: false });
+    expect(formSignals(seen({ form: report(41_250, 63, 4, 1, 1) }))).toEqual({ report: "claimed", fillMs: 41_250, keys: 63, pointers: 4, pasted: true, trusted: true, moves: 0, keySpreadMs: 0, readyMs: 0, fast: false, noInput: false });
+    expect(formSignals(seen({ form: report(900, 2, 1, 0, 0) }))).toMatchObject({ pasted: false, trusted: false, moves: 0, keySpreadMs: 0, readyMs: 0 });
     expect(formSignals(seen())).toBeUndefined();
   });
 
@@ -340,9 +350,10 @@ describe("the form report", () => {
   });
 
   it("accepts only the exact report, and a malformed one sets no flag", () => {
-    expect(parseFormReport(report(MAX_FORM_FILL_MS, MAX_FORM_EVENTS, MAX_FORM_EVENTS))).toEqual({ fillMs: MAX_FORM_FILL_MS, keys: MAX_FORM_EVENTS, pointers: MAX_FORM_EVENTS, pasted: false, trusted: true });
+    expect(parseFormReport("v=2;ms=900;k=12;p=2;paste=0;trusted=1;mv=37;ks=410;rd=2600")).toMatchObject({ moves: 37, keySpreadMs: 410, readyMs: 2600 });
+    expect(parseFormReport(report(MAX_FORM_FILL_MS, MAX_FORM_EVENTS, MAX_FORM_EVENTS))).toEqual({ fillMs: MAX_FORM_FILL_MS, keys: MAX_FORM_EVENTS, pointers: MAX_FORM_EVENTS, pasted: false, trusted: true, moves: 0, keySpreadMs: 0, readyMs: 0 });
     const bad = [
-      "", "v=1", report(MAX_FORM_FILL_MS + 1, 1, 1), report(1, MAX_FORM_EVENTS + 1, 1), report(-1, 1, 1), report(1.5, 1, 1), report(1, 1, 1, 2), report(1, 1, 1).replace("v=1", "v=2"),
+      "", "v=1", report(MAX_FORM_FILL_MS + 1, 1, 1), report(1, MAX_FORM_EVENTS + 1, 1), report(-1, 1, 1), report(1.5, 1, 1), report(1, 1, 1, 2), report(1, 1, 1).replace("v=2", "v=1"), report(1, 1, 1).replace("rd=0", `rd=${MAX_FORM_FILL_MS + 1}`), report(1, 1, 1).replace(";rd=0", ""),
       ` ${report(1, 1, 1)}`, `${report(1, 1, 1)}\n`, `${report(1, 1, 1)};field=secret`, `${report(1, 1, 1)}, ${report(1, 1, 1)}`, report(1, 1, 1).replace("k=1", "k=0x1"), report(1, 1, 1).replace("ms=1", "ms=1e3"), "v=1;".repeat(100_000),
     ];
     for (const value of bad) {
@@ -401,7 +412,7 @@ describe("the observation of a request", () => {
 describe("every signal of an arrival", () => {
   it("has each flag as a boolean at its path, or the whole group absent; and every number is an integer", () => {
     const history = createHistoryTracker();
-    const full = browser({ at: 12.75, method: "POST", tls: { ja4: ja4("t13d1516h2"), helloLength: 508 }, form: "v=1;ms=5000;k=12;p=2;paste=0;trusted=1" });
+    const full = browser({ at: 12.75, method: "POST", tls: { ja4: ja4("t13d1516h2"), helloLength: 508 }, form: "v=2;ms=5000;k=12;p=2;paste=0;trusted=1;mv=0;ks=0;rd=0" });
     history.record("s", seen({ at: 1.5 }));
     const all = signalsOf(full, history.record("s", full));
     for (const name of FLAG_SIGNALS) expect(typeof flagOf(all, name), name).toBe("boolean");
@@ -413,18 +424,137 @@ describe("every signal of an arrival", () => {
     const bare = seen({ at: 20 });
     const least = signalsOf(bare, history.record("t", bare));
     expect(least).toEqual({
-      fingerprint: { headers: { client: "unstated", family: "unstated", mismatch: false } },
-      behaviour: { timing: { gaps: 0, regular: false }, navigation: { pageLoaded: false, referer: "absent", directWrite: false } },
+      fingerprint: { headers: { client: "unstated", family: "unstated", mismatch: false, hintsMismatch: false, fetchInvalid: false } },
+      behaviour: { timing: { gaps: 0, regular: false }, navigation: { pageLoaded: false, referer: "absent", origin: "absent", directWrite: false } },
     });
     expect(FLAG_SIGNALS.filter((name) => flagOf(least, name) === undefined)).toEqual(["fingerprint.tls.mismatch", "fingerprint.tls.knownTool", "behaviour.form.fast", "behaviour.form.noInput"]);
   });
 
   it("gives the same signals for the same observations, replayed", () => {
-    const arrivals = [seen({ at: 0, accept: "text/html" }), browser({ at: 800 }), browser({ at: 30_000, method: "POST", referer: "same-origin", form: "v=1;ms=20000;k=30;p=3;paste=0;trusted=1" })];
+    const arrivals = [seen({ at: 0, accept: "text/html" }), browser({ at: 800 }), browser({ at: 30_000, method: "POST", referer: "same-origin", form: "v=2;ms=20000;k=30;p=3;paste=0;trusted=1;mv=0;ks=0;rd=0" })];
     const run = () => {
       const history = createHistoryTracker();
       return arrivals.map((o) => signalsOf(o, history.record("remote:203.0.113.9", o)));
     };
     expect(run()).toEqual(run());
+  });
+});
+
+describe("the Origin header on a write", () => {
+  const post = (over: Partial<Observation> = {}) => browser({ method: "POST", headers: { names: [...CHROME_HEADERS, "origin"], ordered: true }, ...over });
+
+  it("is expected from a current browser, on any scheme, and not from a GET or an old browser", () => {
+    expect(headerFingerprint(post()).mismatch).toBe(false);
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) expect(headerFingerprint(browser({ method })), method).toMatchObject({ mismatch: true, missing: "origin" });
+    expect(headerFingerprint(browser({ method: "POST", secure: false, headers: { names: ["host", "user-agent", "accept-language"], ordered: true } }))).toMatchObject({ mismatch: true, missing: "origin" });
+    expect(headerFingerprint(browser({ method: "GET" })).mismatch).toBe(false);
+    const old = CHROME.replace("Chrome/126", `Chrome/${SEC_FETCH_SINCE.chromium - 1}`);
+    expect(headerFingerprint(browser({ method: "POST", userAgent: old })).mismatch).toBe(false);
+  });
+
+  it("is read for navigation: a same-origin Origin is not a direct write, and Origin: null is cross-origin", () => {
+    expect(observationOf({ headers: { host: "shop.example", origin: "https://shop.example" } }, 0, "POST", "/").origin).toBe("same-origin");
+    expect(observationOf({ headers: { host: "shop.example", origin: "null" } }, 0, "POST", "/").origin).toBe("cross-origin");
+    expect(observationOf({ headers: { host: "shop.example" } }, 0, "POST", "/").origin).toBe("absent");
+    const history = createHistoryTracker();
+    const own = seen({ method: "POST", origin: "same-origin" });
+    expect(navigationSignals(own, history.record("a", own))).toMatchObject({ origin: "same-origin", directWrite: false });
+    const other = seen({ method: "POST", origin: "cross-origin" });
+    expect(navigationSignals(other, history.record("b", other))).toMatchObject({ origin: "cross-origin", directWrite: true });
+  });
+});
+
+describe("the client hints and the Fetch Metadata headers", () => {
+  const hints = (version: number, brand = "Google Chrome") => `"Chromium";v="${version}", "Not=A?Brand";v="24", "${brand}";v="${version}"`;
+
+  it("flags a User-Agent and a sec-ch-ua that do not state the same browser, and no browser that agrees with itself", () => {
+    expect(headerFingerprint(browser({ clientHints: hints(126) }))).toMatchObject({ hints: { version: 126 }, hintsMismatch: false });
+    expect(headerFingerprint(browser({ userAgent: EDGE, clientHints: hints(126, "Microsoft Edge") })).hintsMismatch).toBe(false);
+    // a Chromium that is given another User-Agent keeps its own client hints; a brand name alone sets no flag
+    expect(headerFingerprint(browser({ clientHints: hints(126, "HeadlessChrome") })).hintsMismatch).toBe(false);
+    expect(headerFingerprint(browser({ clientHints: hints(131) })).hintsMismatch).toBe(true);
+    expect(headerFingerprint(browser({ userAgent: FIREFOX, clientHints: hints(126) })).hintsMismatch).toBe(true);
+    // no flag without the header, without a Chromium brand, or for a client that states no browser
+    expect(headerFingerprint(browser())).toMatchObject({ hintsMismatch: false });
+    expect(headerFingerprint(browser())).not.toHaveProperty("hints");
+    expect(headerFingerprint(browser({ clientHints: '"Brave";v="126"' })).hintsMismatch).toBe(false);
+    expect(headerFingerprint(seen({ userAgent: "curl/8.7.1", clientHints: hints(131) })).hintsMismatch).toBe(false);
+    expect(() => headerFingerprint(browser({ clientHints: '"Chromium";v="'.repeat(10_000) }))).not.toThrow();
+    // the value is read from the request, cut to a fixed length
+    expect(observationOf({ headers: { "sec-ch-ua": "x".repeat(5000) } }, 0, "GET", "/").clientHints).toHaveLength(256);
+  });
+
+  it("flags only the sec-fetch combinations that the specification rules out", () => {
+    const fetched = (secFetch: Observation["secFetch"]) => headerFingerprint(browser({ secFetch })).fetchInvalid;
+    expect(fetched({ site: "none", mode: "navigate", dest: "document", user: "?1" })).toBe(false);
+    expect(fetched({ site: "same-origin", mode: "navigate", dest: "iframe" })).toBe(false);
+    expect(fetched({ site: "same-origin", mode: "cors", dest: "empty" })).toBe(false);
+    expect(fetched({})).toBe(false);
+    expect(fetched({ site: "same-origin", mode: "cors", dest: "empty", user: "?1" })).toBe(true);
+    expect(fetched({ site: "same-origin", mode: "navigate", dest: "empty" })).toBe(true);
+    // an extension sends site none on a write, so that is not in the rule
+    expect(headerFingerprint(browser({ method: "POST", secFetch: { site: "none", mode: "cors", dest: "empty" } })).fetchInvalid).toBe(false);
+    expect(observationOf({ headers: { "sec-fetch-user": "?1" } }, 0, "GET", "/").secFetch).toEqual({ user: "?1" });
+  });
+});
+
+describe("the page load before an arrival", () => {
+  it("gives the time since the page load and the count of GETs after it, only when the source loaded a page", () => {
+    const history = createHistoryTracker();
+    const at = (o: Observation) => navigationSignals(o, history.record("s", o));
+    expect(at(seen({ at: 0, method: "POST" }))).not.toHaveProperty("sincePageMs");
+    expect(at(seen({ at: 1000, accept: "text/html" }))).not.toHaveProperty("sincePageMs");
+    expect(at(seen({ at: 1040, path: "/app.css" }))).toMatchObject({ pageLoaded: true, sincePageMs: 40, subresources: 0 });
+    expect(at(seen({ at: 1090, path: "/app.js" }))).toMatchObject({ sincePageMs: 90, subresources: 1 });
+    expect(at(seen({ at: 9000.9, method: "POST" }))).toMatchObject({ sincePageMs: 8000, subresources: 2, directWrite: false });
+    // a write is not a subresource, a new page load starts the count again, and the count stops at the history's size
+    expect(at(seen({ at: 9500, accept: "text/html" }))).toMatchObject({ sincePageMs: 8500, subresources: 2 });
+    for (let i = 0; i < HISTORY_MAX_ARRIVALS + 5; i++) at(seen({ at: 9600 + i }));
+    expect(at(seen({ at: 9700, method: "POST" }))).toMatchObject({ sincePageMs: 200, subresources: HISTORY_MAX_ARRIVALS });
+  });
+});
+
+describe("the source of an unverified arrival", () => {
+  it("is the /64 of an IPv6 address, and any other address as it is", () => {
+    expect(historySource("2001:db8:1:2:aaaa:bbbb:cccc:dddd")).toBe("2001:db8:1:2::/64");
+    expect(historySource("2001:0DB8:0001:0002::1")).toBe("2001:db8:1:2::/64");
+    expect(historySource("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(historySource("::1")).toBe("0:0:0:0::/64");
+    expect(historySource("fe80::1%en0")).toBe("fe80:0:0:0::/64");
+    for (const same of ["203.0.113.9", "::ffff:203.0.113.9", "unknown", "", "1::2::3", "2001:db8:1:2:3:4:5:6:7", "g::1", ":".repeat(5000)]) expect(historySource(same), same.slice(0, 20)).toBe(same);
+  });
+});
+
+describe("the count of a fingerprint across sources", () => {
+  it("counts the arrivals of one fingerprint in the last minute, whatever their source, in bounded memory", () => {
+    const counter = createSeenCounter({ maxKeys: 2, maxPerKey: 3 });
+    expect([counter.hit("a", 0), counter.hit("a", 1000), counter.hit("b", 1500)]).toEqual([1, 2, 1]);
+    expect(counter.hit("a", SEEN_WINDOW_MS + 500)).toBe(2);
+    expect([counter.hit("a", SEEN_WINDOW_MS + 600), counter.hit("a", SEEN_WINDOW_MS + 700), counter.hit("a", SEEN_WINDOW_MS + 800)]).toEqual([3, 3, 3]);
+    counter.hit("c", SEEN_WINDOW_MS + 900);
+    expect(counter.size()).toBe(2);
+    expect(counter.hit("b", SEEN_WINDOW_MS + 950)).toBe(1);
+    expect(counter.hit("b", Number.NaN)).toBe(2);
+  });
+
+  it("has a key only when the arrival has a JA4 or a header order", () => {
+    const history = createHistoryTracker();
+    const of = (o: Observation) => fingerprintKey(signalsOf(o, history.record("s", o)).fingerprint);
+    expect(of(seen())).toBeUndefined();
+    expect(of(browser({ tls: { ja4: ja4("t13d1516h2") } }))).toMatch(/^t13d1516h2_000000000000_111111111111\|[0-9a-f]{16}$/);
+    expect(of(seen({ tls: { ja4: ja4("t13d1516h2") } }))).toBe("t13d1516h2_000000000000_111111111111|");
+  });
+});
+
+describe("what the host knows of the connection and the network", () => {
+  it("records the HTTP version and the network only in the shapes it knows", () => {
+    const history = createHistoryTracker();
+    const of = (o: Observation) => signalsOf(o, history.record("s", o)).fingerprint;
+    expect(of(seen({ http: "HTTP/2", network: { asn: 64500, organization: " Example Hosting " } }))).toMatchObject({ headers: { http: "2" }, network: { asn: 64500, organization: "Example Hosting" } });
+    expect(of(seen({ http: "HTTP/1.1" })).headers.http).toBe("1.1");
+    const odd = of(seen({ http: "SPDY/3", network: { asn: -1, organization: "" } }));
+    expect(odd.headers).not.toHaveProperty("http");
+    expect(odd).not.toHaveProperty("network");
+    expect(of(seen({ network: { asn: 1.5, organization: "x".repeat(500) } })).network).toEqual({ organization: "x".repeat(64) });
   });
 });

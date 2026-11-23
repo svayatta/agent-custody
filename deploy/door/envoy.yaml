@@ -48,6 +48,9 @@ static_resources:
                 - { exact: sec-fetch-site }
                 - { exact: sec-fetch-mode }
                 - { exact: sec-fetch-dest }
+                - { exact: sec-fetch-user }
+                - { exact: sec-ch-ua }
+                - { exact: origin }
                 - { exact: x-agent-custody-form }
               http_service:
                 server_uri: { uri: "http://door:8780", cluster: door, timeout: 5s }

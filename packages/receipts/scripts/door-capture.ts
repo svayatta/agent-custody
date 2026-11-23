@@ -35,7 +35,7 @@ const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 // A label is good only for a flag that the capture can show true or false. The known-tool table of door-signals.ts is
 // filled from this capture, so no session here is good for that flag: its tools are in the table and its browsers are
 // not, by construction. The pace of a session is the pace of this script, so no session is good for the timing flag.
-const MISMATCH_FLAGS: FlagSignal[] = ["fingerprint.headers.mismatch", "fingerprint.tls.mismatch"];
+const MISMATCH_FLAGS: FlagSignal[] = ["fingerprint.headers.mismatch", "fingerprint.headers.hintsMismatch", "fingerprint.headers.fetchInvalid", "fingerprint.tls.mismatch"];
 const BEHAVIOUR_FLAGS: FlagSignal[] = ["behaviour.navigation.directWrite", "behaviour.form.fast", "behaviour.form.noInput"];
 
 const tmp = mkdtempSync(join(tmpdir(), "door-capture-"));

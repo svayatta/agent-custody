@@ -23,7 +23,7 @@ export const FORM_FAST_MIN_KEYS = 8;
 /** `form.fast`: the fill took less than this many milliseconds for each key press */
 export const FORM_FAST_MS_PER_KEY = 20;
 /** a form report longer than this is malformed */
-export const MAX_FORM_REPORT = 64;
+export const MAX_FORM_REPORT = 96;
 /** the largest fill time a form report can state: one day */
 export const MAX_FORM_FILL_MS = 86_400_000;
 /** the largest event count a form report can state */
@@ -46,8 +46,20 @@ export const SEC_CH_UA_SINCE = 100;
 export const TLS13_SINCE: Record<BrowserFamily, number> = { chromium: 70, firefox: 63, safari: 13 };
 /** the header that every browser family sends on every request */
 export const BROWSER_HEADERS = ["accept-language"];
+/** the header that a browser from `SEC_FETCH_SINCE` sends on every POST, PUT, PATCH, and DELETE; its value can be `null` */
+export const WRITE_HEADERS = ["origin"];
+/** the `sec-fetch-dest` values of a navigation; `sec-fetch-mode: navigate` with another one is not a browser's */
+export const NAVIGATE_DESTS: ReadonlySet<string> = new Set(["document", "iframe", "frame", "embed", "object", "fencedframe"]);
+/** how long `fingerprint.seen` counts arrivals with the same fingerprint */
+export const SEEN_WINDOW_MS = 60_000;
+/** a `sec-ch-ua` value is read up to this length */
+export const MAX_CLIENT_HINT = 256;
 export const SEC_FETCH_HEADERS = ["sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"];
 /**
+ * Only the JA4 TLS client fingerprint is used here and in scripts/ja4.ts: it is BSD-3-Clause. JA4H, JA4S, JA4T, and
+ * the rest of JA4+ are under the FoxIO License 1.1, which restricts commercial use, so the header fingerprint is the
+ * door's own hash and not JA4H.
+ *
  * JA4 fingerprints of known tools, each with the tool's family. Every value was recorded by the labelled capture
  * (scripts/door-capture.ts, labelled/capture.meta.json), never taken from memory. A fingerprint belongs to one build of
  * the tool's TLS library, so another version of the tool can have another fingerprint, and the table misses it.
@@ -76,6 +88,14 @@ export interface TlsObservation {
   helloLength?: number;
 }
 
+/** The network that the client's address belongs to, as the host gives it. */
+export interface NetworkObservation {
+  /** the autonomous system number */
+  asn?: number;
+  /** the name of the organisation that holds it */
+  organization?: string;
+}
+
 export type RefererRelation = "same-origin" | "cross-origin" | "absent";
 
 /** What the door saw of one arrival: all that the signals read. It holds no cookie, no query, no body, and no address. */
@@ -95,8 +115,16 @@ export interface Observation {
   userAgent?: string;
   accept?: string;
   referer: RefererRelation;
-  /** `sec-fetch-site`, `sec-fetch-mode`, and `sec-fetch-dest`, as sent */
-  secFetch: { site?: string; mode?: string; dest?: string };
+  /** the relation of the `Origin` header to the host; `Origin: null` is `cross-origin`. Absent in a recording made before the door read it */
+  origin?: RefererRelation;
+  /** `sec-fetch-site`, `sec-fetch-mode`, `sec-fetch-dest`, and `sec-fetch-user`, as sent */
+  secFetch: { site?: string; mode?: string; dest?: string; user?: string };
+  /** the `sec-ch-ua` header, as sent: brand names and major versions. It names a browser build, not a person */
+  clientHints?: string;
+  /** the HTTP version between the client and the edge (`HTTP/2`), when the host knows it: a Worker's `request.cf` */
+  http?: string;
+  /** the network of the client's address, when the host knows it: a Worker's `request.cf` */
+  network?: NetworkObservation;
   tls?: TlsObservation;
   /** the form report header, as sent; a claim by the client */
   form?: string;
@@ -108,7 +136,7 @@ export interface ObservedRequest {
   /** names and values in turn, in the order received, as Node keeps them */
   rawHeaders?: string[] | undefined;
   /** set by the host from the connection, never from a client header */
-  transport?: { secure?: boolean; tls?: TlsObservation } | undefined;
+  transport?: { secure?: boolean; tls?: TlsObservation; http?: string; network?: NetworkObservation } | undefined;
 }
 
 export interface ObserveOptions {
@@ -175,6 +203,9 @@ export function observationOf(req: ObservedRequest, at: number, method: string, 
   const site = one(h["sec-fetch-site"], 32);
   const mode = one(h["sec-fetch-mode"], 32);
   const dest = one(h["sec-fetch-dest"], 32);
+  const user = one(h["sec-fetch-user"], 32);
+  const clientHints = one(h["sec-ch-ua"], MAX_CLIENT_HINT);
+  const { http, network } = req.transport ?? {};
   const form = one(h[FORM_REPORT_HEADER], MAX_FORM_REPORT + 1);
   return {
     at,
@@ -185,13 +216,46 @@ export function observationOf(req: ObservedRequest, at: number, method: string, 
     ...(userAgent !== undefined ? { userAgent } : {}),
     ...(accept !== undefined ? { accept } : {}),
     referer: refererRelation(one(h.referer, 2048), host),
-    secFetch: { ...(site !== undefined ? { site } : {}), ...(mode !== undefined ? { mode } : {}), ...(dest !== undefined ? { dest } : {}) },
+    origin: refererRelation(one(h.origin, 2048), host),
+    secFetch: { ...(site !== undefined ? { site } : {}), ...(mode !== undefined ? { mode } : {}), ...(dest !== undefined ? { dest } : {}), ...(user !== undefined ? { user } : {}) },
+    ...(clientHints !== undefined ? { clientHints } : {}),
+    ...(http !== undefined ? { http } : {}),
+    ...(network ? { network } : {}),
     ...(tls ? { tls } : {}),
     ...(form !== undefined ? { form } : {}),
   };
 }
 
-export type ClientKind = "browser" | "tool" | "other" | "unstated";
+/** the methods that `directWrite` and the `origin` rule read as a write */
+export const STATE_CHANGING: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+export type ClientKind = "browser" | "agent" | "tool" | "other" | "unstated";
+
+/** What a vendor says its agent fetches for: to train a model, to build a search index, or because one user asked. */
+export type AgentPurpose = "training" | "search" | "user";
+
+/**
+ * AI agents that name themselves in the User-Agent, by product token. Each entry is from the vendor's own page, read on
+ * 2026-11-23, and never from memory. A token that a vendor documents for another purpose (an ads check, a crawl that the
+ * site owner asked for) is not here, and reads as a crawler. A claim: any client can send any of these names.
+ */
+export const AI_AGENTS: ReadonlyMap<string, { vendor: string; purpose: AgentPurpose }> = new Map([
+  // https://developers.openai.com/api/docs/bots
+  ["GPTBot", { vendor: "openai", purpose: "training" }],
+  ["OAI-SearchBot", { vendor: "openai", purpose: "search" }],
+  ["ChatGPT-User", { vendor: "openai", purpose: "user" }],
+  // https://support.claude.com/en/articles/8896518-does-anthropic-crawl-data-from-the-web-and-how-can-site-owners-block-the-crawler
+  ["ClaudeBot", { vendor: "anthropic", purpose: "training" }],
+  ["Claude-SearchBot", { vendor: "anthropic", purpose: "search" }],
+  ["Claude-User", { vendor: "anthropic", purpose: "user" }],
+  // https://docs.perplexity.ai/guides/bots
+  ["PerplexityBot", { vendor: "perplexity", purpose: "search" }],
+  ["Perplexity-User", { vendor: "perplexity", purpose: "user" }],
+  // https://developers.google.com/search/docs/crawling-indexing/google-user-triggered-fetchers
+  ["Google-GeminiNotebook", { vendor: "google", purpose: "user" }],
+  ["Google-Agent", { vendor: "google", purpose: "user" }],
+]);
+const AI_AGENT = new RegExp(`(?<![A-Za-z0-9-])(${[...AI_AGENTS.keys()].join("|")})(?![A-Za-z0-9-])`);
 
 /** The client that a User-Agent states. A claim: any client can send any User-Agent. */
 export interface StatedClient {
@@ -200,6 +264,9 @@ export interface StatedClient {
   family: string;
   /** the browser's major version, when the User-Agent states the version of its engine */
   version?: number;
+  /** for an `agent`: the vendor, and what the vendor says the agent fetches for */
+  vendor?: string;
+  purpose?: AgentPurpose;
 }
 
 const TOOLS: [RegExp, string][] = [
@@ -227,6 +294,8 @@ const TOOLS: [RegExp, string][] = [
 export function statedClient(userAgent: string | undefined): StatedClient {
   const ua = (userAgent ?? "").slice(0, MAX_USER_AGENT).trim();
   if (!ua) return { kind: "unstated", family: "unstated" };
+  const agent = AI_AGENT.exec(ua);
+  if (agent) return { kind: "agent", family: agent[1]!.toLowerCase(), ...AI_AGENTS.get(agent[1]!)! };
   for (const [pattern, family] of TOOLS) if (pattern.test(ua)) return { kind: "tool", family };
   if (!ua.startsWith("Mozilla/5.0 ")) return { kind: "other", family: "other" };
   const major = (pattern: RegExp) => {
@@ -258,22 +327,49 @@ export interface HeaderFingerprint {
   client: ClientKind;
   family: string;
   version?: number;
+  /** for a client that states an AI agent: the vendor and the purpose that the vendor documents. A claim, like the User-Agent */
+  vendor?: string;
+  purpose?: AgentPurpose;
   /** true when the User-Agent states a browser and the request lacks a header that this browser always sends */
   mismatch: boolean;
   /** the missing header names, separated by a space; only when `mismatch` is true */
   missing?: string;
+  /** from `sec-ch-ua`, when the arrival sent it: the major version of the `Chromium` brand, when there is one */
+  hints?: { version?: number };
+  /** true when `sec-ch-ua` and the User-Agent do not state the same browser */
+  hintsMismatch: boolean;
+  /** true when the `sec-fetch-*` headers have a combination that no browser sends */
+  fetchInvalid: boolean;
+  /** the HTTP version between the client and the edge (`1.1`, `2`, `3`), when the host knows it */
+  http?: string;
 }
 
 /**
  * The header fingerprint. `mismatch` reads only rules that hold for every request of a browser family, so that a real
  * browser is not flagged: `accept-language` always, and, when the host knows that the client used https, `sec-fetch-*`
  * and (Chromium) `sec-ch-ua` from the versions in `SEC_FETCH_SINCE` and `SEC_CH_UA_SINCE`. Browsers send these only to
- * an https site. For an OPTIONS request and an upgrade, only `accept-language` is checked. A proxy in front of the door that drops one of
+ * an https site. On a write, a browser from `SEC_FETCH_SINCE` also sends `origin`, to any site. For an OPTIONS request and an upgrade, only `accept-language` is checked. A proxy in front of the door that drops one of
  * these headers makes every browser a mismatch: the door records what it received.
  */
 export function headerFingerprint(o: Observation): HeaderFingerprint {
   const c = statedClient(o.userAgent);
-  const out: HeaderFingerprint = { client: c.kind, family: c.family, ...(c.version !== undefined ? { version: c.version } : {}), mismatch: false };
+  const out: HeaderFingerprint = { client: c.kind, family: c.family, ...(c.version !== undefined ? { version: c.version } : {}), ...(c.vendor !== undefined ? { vendor: c.vendor, purpose: c.purpose! } : {}), mismatch: false, hintsMismatch: false, fetchInvalid: false };
+  const http = typeof o.http === "string" ? /^HTTP\/(1\.0|1\.1|2|3)$/.exec(o.http) : null;
+  if (http) out.http = http[1]!;
+  // A Chromium that is given another User-Agent keeps its own `sec-ch-ua`, so the two can name different browsers.
+  // The rule reads no brand name: in the labelled capture, headless Chrome sends the brands of Chrome.
+  if (typeof o.clientHints === "string") {
+    const version = /"Chromium";\s*v="(\d{1,4})"/.exec(o.clientHints.slice(0, MAX_CLIENT_HINT));
+    out.hints = version ? { version: Number(version[1]) } : {};
+    // Firefox and Safari send no `sec-ch-ua`; a Chromium sends the major version that its User-Agent states
+    out.hintsMismatch = c.kind === "browser" && (c.family !== "chromium" || (out.hints.version !== undefined && c.version !== undefined && out.hints.version !== c.version));
+  }
+  // From the Fetch Metadata specification, not from data: `sec-fetch-user` is sent only on a navigation, and a
+  // navigation has a document destination. `sec-fetch-site: none` on a write is not in the rule, because a browser
+  // extension sends it.
+  const fetchMode = o.secFetch?.mode?.toLowerCase();
+  const fetchDest = o.secFetch?.dest?.toLowerCase();
+  out.fetchInvalid = (o.secFetch?.user !== undefined && fetchMode !== "navigate") || (fetchMode === "navigate" && fetchDest !== undefined && !NAVIGATE_DESTS.has(fetchDest));
   if (!o.headers) return out;
   const names = o.headers.names.slice(0, MAX_HEADER_NAMES).map((n) => String(n).toLowerCase().slice(0, MAX_HEADER_NAME_LENGTH));
   if (o.headers.ordered) out.order = sha256Hex(names.join("\n")).slice(0, 16);
@@ -283,6 +379,7 @@ export function headerFingerprint(o: Observation): HeaderFingerprint {
   const version = c.version ?? 0;
   const present = new Set(names);
   const expected = [...BROWSER_HEADERS];
+  if (STATE_CHANGING.has(o.method) && version >= SEC_FETCH_SINCE[family]) expected.push(...WRITE_HEADERS);
   if (o.secure === true && o.method !== "OPTIONS" && !present.has("upgrade")) {
     if (version >= SEC_FETCH_SINCE[family]) expected.push(...SEC_FETCH_HEADERS);
     if (family === "chromium" && version >= SEC_CH_UA_SINCE && !EMBEDDED_CHROMIUM.test(o.userAgent ?? "")) expected.push("sec-ch-ua");
@@ -375,12 +472,32 @@ export function tlsFingerprint(o: Observation): TlsFingerprint | undefined {
   return seen ? out : undefined;
 }
 
+/**
+ * The key of an unverified source in the history: the address, and for IPv6 its /64, because one client uses many
+ * addresses of its /64 (privacy extensions). An IPv4-mapped address and anything that is not an IPv6 address stay as
+ * they are. The door keys by address alone, not by address and User-Agent: a client that changes its User-Agent would
+ * else look new each time. So clients behind one address (NAT) share one history.
+ */
+export function historySource(address: string): string {
+  const a = address.trim().toLowerCase().replace(/%.*$/, "");
+  if (!a.includes(":") || a.includes(".") || !/^[0-9a-f:]{2,39}$/.test(a)) return address;
+  const [head, tail, more] = a.split("::");
+  if (more !== undefined) return address;
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? left : [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return address;
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
+
 /** What the door remembers of one source when an arrival comes. */
 export interface SourceHistory {
   /** the times of the source's latest arrivals inside the window, oldest first, this arrival included */
   times: number[];
   /** the time of the source's latest page load before this arrival, when it is inside the window */
   pageAt?: number;
+  /** how many GET requests that are not page loads the source sent after that page load and before this arrival, at most `HISTORY_MAX_ARRIVALS` */
+  subresources?: number;
 }
 
 export interface HistoryLimits {
@@ -416,7 +533,7 @@ export function createHistoryTracker(limits: HistoryLimits = {}): HistoryTracker
   const maxSources = Math.max(1, limits.maxSources ?? 10_000);
   const maxKeyLength = limits.maxKeyLength ?? 256;
   // least recently seen first: a record moves its key to the end
-  const seen = new Map<string, { times: number[]; pageAt?: number }>();
+  const seen = new Map<string, { times: number[]; pageAt?: number; subresources?: number }>();
   let last = -Infinity;
   let swept = -Infinity;
   return {
@@ -433,11 +550,14 @@ export function createHistoryTracker(limits: HistoryLimits = {}): HistoryTracker
       times.push(t);
       if (times.length > HISTORY_MAX_ARRIVALS) times.splice(0, times.length - HISTORY_MAX_ARRIVALS);
       const pageAt = prior?.pageAt !== undefined && prior.pageAt > cutoff ? prior.pageAt : undefined;
-      const now = isPageLoad(o) ? t : pageAt;
+      const page = isPageLoad(o);
+      const now = page ? t : pageAt;
+      const subresources = pageAt !== undefined ? (prior?.subresources ?? 0) : undefined;
+      const next = page ? 0 : subresources !== undefined ? Math.min(HISTORY_MAX_ARRIVALS, subresources + (o.method === "GET" ? 1 : 0)) : undefined;
       seen.delete(key);
-      seen.set(key, { times, ...(now !== undefined ? { pageAt: now } : {}) });
+      seen.set(key, { times, ...(now !== undefined ? { pageAt: now } : {}), ...(next !== undefined ? { subresources: next } : {}) });
       while (seen.size > maxSources) seen.delete(seen.keys().next().value!);
-      return { times: [...times], ...(pageAt !== undefined ? { pageAt } : {}) };
+      return { times: [...times], ...(pageAt !== undefined ? { pageAt, subresources: subresources! } : {}) };
     },
     size: () => seen.size,
   };
@@ -448,6 +568,9 @@ export interface TimingSignals {
   gaps: number;
   /** the median gap in milliseconds; absent when there is no gap */
   medianGapMs?: number;
+  /** the shortest and the longest gap in milliseconds; absent when there is no gap */
+  minGapMs?: number;
+  maxGapMs?: number;
   /** true when the source arrives at a steady pace */
   regular: boolean;
 }
@@ -470,45 +593,58 @@ export function timingSignals(history: SourceHistory): TimingSignals {
   const median = gaps.length % 2 ? gaps[mid]! : Math.floor((gaps[mid - 1]! + gaps[mid]!) / 2);
   const spread = gaps[gaps.length - 1]! - gaps[0]!;
   const regular = gaps.length >= TIMING_MIN_GAPS && median >= TIMING_REGULAR_MIN_MEDIAN_MS && spread * 100 <= median * TIMING_REGULAR_SPREAD_PERCENT;
-  return { gaps: gaps.length, medianGapMs: median, regular };
+  return { gaps: gaps.length, medianGapMs: median, minGapMs: gaps[0]!, maxGapMs: gaps[gaps.length - 1]!, regular };
 }
 
 export interface NavigationSignals {
   /** true when the source loaded an HTML document earlier, inside `HISTORY_WINDOW_MS` */
   pageLoaded: boolean;
+  /** milliseconds from that page load to this arrival; only when `pageLoaded` is true */
+  sincePageMs?: number;
+  /** GET requests that are not page loads, from the source, after that page load and before this arrival; only when `pageLoaded` is true. It counts only what goes through the door */
+  subresources?: number;
   referer: RefererRelation;
+  /** the relation of the `Origin` header to the host; `Origin: null` is `cross-origin` */
+  origin: RefererRelation;
   /** `sec-fetch-site` as sent, lowercase; `other` when it is not a token */
   site?: string;
   mode?: string;
   dest?: string;
-  /** true when a POST, PUT, PATCH, or DELETE arrives with no earlier page load from the source, no same-origin referer, and no `sec-fetch-site: same-origin` */
+  /** true when a POST, PUT, PATCH, or DELETE arrives with no earlier page load from the source, no same-origin referer, no same-origin `Origin`, and no `sec-fetch-site: same-origin` */
   directWrite: boolean;
 }
 
-/** the methods that `directWrite` reads as a write */
-export const STATE_CHANGING: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const token = (v: unknown): string | undefined => (typeof v !== "string" ? undefined : /^[a-z-]{1,24}$/.test(v.toLowerCase()) ? v.toLowerCase() : "other");
 
 /**
  * How the arrival fits the source's navigation. `directWrite` is true for every API client that never loads a page,
  * a verified agent included. A person whose page load came from another address, another door process, or before the
- * window is not flagged when the browser sends a same-origin `Referer` or `Sec-Fetch-Site: same-origin`; a site with
- * `Referrer-Policy: no-referrer` still gets the second. Both headers are the client's word: a program can send them.
+ * window is not flagged when the browser sends a same-origin `Referer`, a same-origin `Origin`, or
+ * `Sec-Fetch-Site: same-origin`; a site with `Referrer-Policy: no-referrer` still gets the last. The three headers are
+ * the client's word: a program can send them. A program that loads the page first is not flagged; `sincePageMs` is
+ * then the time that it took to read and fill the page.
  */
 export function navigationSignals(o: Observation, history: SourceHistory): NavigationSignals {
   const pageAt = history?.pageAt;
   const pageLoaded = typeof pageAt === "number" && o.at - pageAt <= HISTORY_WINDOW_MS;
-  const referer: RefererRelation = o.referer === "same-origin" || o.referer === "cross-origin" ? o.referer : "absent";
+  const relation = (v: unknown): RefererRelation => (v === "same-origin" || v === "cross-origin" ? v : "absent");
+  const referer = relation(o.referer);
+  const origin = relation(o.origin);
+  const since = pageLoaded ? Math.floor(o.at - pageAt) : NaN;
+  const subresources = history?.subresources;
   const site = token(o.secFetch?.site);
   const mode = token(o.secFetch?.mode);
   const dest = token(o.secFetch?.dest);
   return {
     pageLoaded,
+    ...(Number.isFinite(since) && since >= 0 ? { sincePageMs: since } : {}),
+    ...(pageLoaded && Number.isSafeInteger(subresources) && subresources! >= 0 ? { subresources: Math.min(subresources!, HISTORY_MAX_ARRIVALS) } : {}),
     referer,
+    origin,
     ...(site !== undefined ? { site } : {}),
     ...(mode !== undefined ? { mode } : {}),
     ...(dest !== undefined ? { dest } : {}),
-    directWrite: STATE_CHANGING.has(o.method) && !pageLoaded && referer !== "same-origin" && site !== "same-origin",
+    directWrite: STATE_CHANGING.has(o.method) && !pageLoaded && referer !== "same-origin" && origin !== "same-origin" && site !== "same-origin",
   };
 }
 
@@ -521,9 +657,15 @@ export interface FormReport {
   pasted: boolean;
   /** false when one of the events did not come from the browser's own input handling (`event.isTrusted`) */
   trusted: boolean;
+  /** pointer and touch moves over the form */
+  moves: number;
+  /** the longest gap between two key presses minus the shortest, in milliseconds; 0 with fewer than three key presses */
+  keySpreadMs: number;
+  /** milliseconds from the start of the script to the first key press, pointer press, click, or paste; 0 when there was none */
+  readyMs: number;
 }
 
-const FORM_REPORT = /^v=1;ms=(\d{1,8});k=(\d{1,5});p=(\d{1,5});paste=([01]);trusted=([01])$/;
+const FORM_REPORT = /^v=2;ms=(\d{1,8});k=(\d{1,5});p=(\d{1,5});paste=([01]);trusted=([01]);mv=(\d{1,5});ks=(\d{1,8});rd=(\d{1,8})$/;
 
 /** The form report from its header value, or null when the value is not exactly a report: its length, its fields, and its ranges are fixed. */
 export function parseFormReport(value: unknown): FormReport | null {
@@ -531,8 +673,9 @@ export function parseFormReport(value: unknown): FormReport | null {
   const m = FORM_REPORT.exec(value);
   if (!m) return null;
   const fillMs = Number(m[1]);
-  if (fillMs > MAX_FORM_FILL_MS) return null;
-  return { fillMs, keys: Number(m[2]), pointers: Number(m[3]), pasted: m[4] === "1", trusted: m[5] === "1" };
+  const [keySpreadMs, readyMs] = [Number(m[7]), Number(m[8])];
+  if (fillMs > MAX_FORM_FILL_MS || keySpreadMs > MAX_FORM_FILL_MS || readyMs > MAX_FORM_FILL_MS) return null;
+  return { fillMs, keys: Number(m[2]), pointers: Number(m[3]), pasted: m[4] === "1", trusted: m[5] === "1", moves: Number(m[6]), keySpreadMs, readyMs };
 }
 
 export interface FormSignals extends Partial<FormReport> {
@@ -563,6 +706,58 @@ export interface ArrivalFingerprint {
   headers: HeaderFingerprint;
   /** present only when the host gave a TLS fingerprint */
   tls?: TlsFingerprint;
+  /** present only when the host knows the network of the address: `asn`, and `organization` cut to 64 characters */
+  network?: NetworkObservation;
+  /**
+   * How many arrivals in the last `SEEN_WINDOW_MS` had this fingerprint, from every source, this one included. A number
+   * for the policy and not a flag: thousands of people share the fingerprint of one browser build.
+   */
+  seen?: number;
+}
+
+/** The key of `fingerprint.seen`: the JA4 and the header order. Undefined when the arrival has neither. */
+export function fingerprintKey(f: ArrivalFingerprint): string | undefined {
+  return f.tls?.ja4 === undefined && f.headers.order === undefined ? undefined : `${f.tls?.ja4 ?? ""}|${f.headers.order ?? ""}`;
+}
+
+export interface SeenCounter {
+  /** counts the arrival and returns how many arrivals had the key in the last `SEEN_WINDOW_MS` */
+  hit(key: string, at: number): number;
+  size(): number;
+}
+
+/**
+ * Counts arrivals for each fingerprint across sources, so that a client that changes its address and keeps its TLS
+ * stack and header order is still counted as one. One process's memory, with the limits of the history: at most
+ * `maxKeys` fingerprints, the least recently seen forgotten first, and at most `maxPerKey` times for each, so the
+ * count stops there.
+ */
+export function createSeenCounter(limits: { maxKeys?: number; maxPerKey?: number } = {}): SeenCounter {
+  const maxKeys = Math.max(1, limits.maxKeys ?? 10_000);
+  const maxPerKey = Math.max(1, limits.maxPerKey ?? 1_000);
+  const seen = new Map<string, number[]>();
+  let last = -Infinity;
+  return {
+    hit(key, at) {
+      const t = (last = Math.max(last, Number.isFinite(at) ? Math.floor(at) : 0));
+      const times = (seen.get(key) ?? []).filter((x) => x > t - SEEN_WINDOW_MS);
+      times.push(t);
+      if (times.length > maxPerKey) times.splice(0, times.length - maxPerKey);
+      seen.delete(key);
+      seen.set(key, times);
+      while (seen.size > maxKeys) seen.delete(seen.keys().next().value!);
+      return times.length;
+    },
+    size: () => seen.size,
+  };
+}
+
+function networkOf(o: Observation): NetworkObservation | undefined {
+  const n = o.network;
+  if (!n || typeof n !== "object") return undefined;
+  const asn = Number.isSafeInteger(n.asn) && n.asn! > 0 && n.asn! <= 4_294_967_295 ? n.asn! : undefined;
+  const organization = typeof n.organization === "string" && n.organization.trim() ? n.organization.trim().slice(0, 64) : undefined;
+  return asn === undefined && organization === undefined ? undefined : { ...(asn !== undefined ? { asn } : {}), ...(organization !== undefined ? { organization } : {}) };
 }
 
 /** `arrival.behaviour`: how the source acts over time */
@@ -582,8 +777,9 @@ export interface Signals {
 export function signalsOf(o: Observation, history: SourceHistory): Signals {
   const tls = tlsFingerprint(o);
   const form = formSignals(o);
+  const network = networkOf(o);
   return {
-    fingerprint: { headers: headerFingerprint(o), ...(tls ? { tls } : {}) },
+    fingerprint: { headers: headerFingerprint(o), ...(tls ? { tls } : {}), ...(network ? { network } : {}) },
     behaviour: { timing: timingSignals(history), navigation: navigationSignals(o, history), ...(form ? { form } : {}) },
   };
 }
@@ -591,6 +787,8 @@ export function signalsOf(o: Observation, history: SourceHistory): Signals {
 /** The boolean signals that mark an arrival, by their path in the arrival fact. */
 export const FLAG_SIGNALS = [
   "fingerprint.headers.mismatch",
+  "fingerprint.headers.hintsMismatch",
+  "fingerprint.headers.fetchInvalid",
   "fingerprint.tls.mismatch",
   "fingerprint.tls.knownTool",
   "behaviour.timing.regular",

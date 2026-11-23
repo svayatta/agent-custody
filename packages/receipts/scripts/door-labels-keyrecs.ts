@@ -44,7 +44,7 @@ for (const row of rows) {
     labelSource: "recruited-participant",
     validFor: ["behaviour.form.fast"],
     // the dataset has no clock time: the repetition number keeps the order
-    observation: { at: Number(row[2]), method: "POST", path: "/", referer: "absent", secFetch: {}, form: `v=1;ms=${ms};k=${KEYS};p=0;paste=0;trusted=1` },
+    observation: { at: Number(row[2]), method: "POST", path: "/", referer: "absent", secFetch: {}, form: `v=2;ms=${ms};k=${KEYS};p=0;paste=0;trusted=1;mv=0;ks=0;rd=0` },
   };
   out.push(JSON.stringify(record));
 }

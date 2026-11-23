@@ -27,7 +27,8 @@ export function formScript(challenge: Challenge, report = false): string {
   // a click with no pointer press before it (a keyboard or an assistive tool pressed the button) counts as a pointer press
   const count = report ? `
     // the form report: counts only, no field value and no key identity
-    let first = -1, keys = 0, pointers = 0, pasted = 0, trusted = 1, down = false;
+    const started = performance.now();
+    let first = -1, keys = 0, pointers = 0, pasted = 0, trusted = 1, down = false, moves = 0, lastKey = -1, shortest = -1, longest = -1;
     const saw = (event) => {
       if (first < 0) first = performance.now();
       if (!event.isTrusted) trusted = 0;
@@ -38,14 +39,30 @@ export function formScript(challenge: Challenge, report = false): string {
       return !!target && (target.form === form || (typeof target.closest === "function" && target.closest("form") === form));
     };
     const on = (type, count) => document.addEventListener(type, (event) => { if (mine(event)) count(event); }, true);
-    on("keydown", (event) => { if (!event.repeat) { saw(event); keys++; } });
+    on("keydown", (event) => {
+      if (event.repeat) return;
+      saw(event);
+      keys++;
+      const now = performance.now();
+      if (lastKey >= 0) {
+        const gap = now - lastKey;
+        if (shortest < 0 || gap < shortest) shortest = gap;
+        if (gap > longest) longest = gap;
+      }
+      lastKey = now;
+    });
+    // moves do not start the fill: a pointer crosses a form on its way elsewhere
+    on("pointermove", () => { moves++; });
+    on("touchmove", () => { moves++; });
     on("pointerdown", (event) => { saw(event); down = true; pointers++; });
     on("click", (event) => { saw(event); if (!down) pointers++; down = false; });
     on("paste", (event) => { saw(event); pasted = 1; });
     const filled = (event) => {
       const ms = first < 0 ? 0 : Math.min(Math.max(Math.round(performance.now() - first), 0), ${MAX_FORM_FILL_MS});
-      const value = "v=1;ms=" + ms + ";k=" + Math.min(keys, ${MAX_FORM_EVENTS}) + ";p=" + Math.min(pointers, ${MAX_FORM_EVENTS}) + ";paste=" + pasted + ";trusted=" + (event.isTrusted ? trusted : 0);
-      first = -1; keys = 0; pointers = 0; pasted = 0; trusted = 1; down = false;
+      const cut = (v) => Math.min(Math.max(Math.round(v), 0), ${MAX_FORM_FILL_MS});
+      const value = "v=2;ms=" + ms + ";k=" + Math.min(keys, ${MAX_FORM_EVENTS}) + ";p=" + Math.min(pointers, ${MAX_FORM_EVENTS}) + ";paste=" + pasted + ";trusted=" + (event.isTrusted ? trusted : 0)
+        + ";mv=" + Math.min(moves, ${MAX_FORM_EVENTS}) + ";ks=" + (keys > 2 ? cut(longest - shortest) : 0) + ";rd=" + (first < 0 ? 0 : cut(first - started));
+      first = -1; keys = 0; pointers = 0; pasted = 0; trusted = 1; down = false; moves = 0; lastKey = -1; shortest = -1; longest = -1;
       return value;
     };` : "";
   const send = report ? `{ [settings.header]: token, ${JSON.stringify(FORM_REPORT_HEADER)}: filled(event) }` : "{ [settings.header]: token }";

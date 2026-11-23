@@ -211,6 +211,10 @@ describe("what Cloudflare saw of the TLS handshake", () => {
     const request = Object.assign(new Request("https://shop.test/products/tea", { headers: { "user-agent": "curl/8.7.1", "x-ja4": "t12d1516h2_000000000000_111111111111" } }), { cf });
     expect(doorRequestOf(request).transport).toEqual({ secure: true, tls: { ja4: "t13d1516h2_000000000000_111111111111", negotiated: "TLSv1.3", cipher: "AEAD-AES128-GCM-SHA256", extensionsSha1: "2jmj7l5rSw0yVb/vlWAYkK/YBwk=", helloLength: 508 } });
     expect(doorRequestOf(new Request("http://shop.test/")).transport).toEqual({ secure: false });
+    // every zone gets the HTTP version and the network of the address
+    const edge = Object.assign(new Request("https://shop.test/"), { cf: { httpProtocol: "HTTP/2", asn: 64500, asOrganization: "Example Hosting" } });
+    expect(doorRequestOf(edge).transport).toEqual({ secure: true, http: "HTTP/2", network: { asn: 64500, organization: "Example Hosting" } });
+    expect(doorRequestOf(Object.assign(new Request("https://shop.test/"), { cf: { httpProtocol: 2, asn: "64500", asOrganization: null } })).transport).toEqual({ secure: true });
   });
 
   it("takes only short strings and a length that is a number, and nothing from a cf without them", () => {

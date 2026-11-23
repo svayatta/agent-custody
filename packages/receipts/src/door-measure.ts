@@ -3,7 +3,7 @@
 // with the recorded times, and counts per flag and per set. Nothing here does I/O: the caller passes the records.
 import type { Arrival } from "./door-core.ts";
 import {
-  BROWSER_HEADERS, FLAG_SIGNALS, FORM_FAST_MIN_KEYS, FORM_FAST_MS_PER_KEY, HISTORY_MAX_ARRIVALS, HISTORY_WINDOW_MS, KNOWN_TOOL_JA4, MAX_FORM_FILL_MS, MAX_FORM_REPORT,
+  BROWSER_HEADERS, MAX_CLIENT_HINT, NAVIGATE_DESTS, WRITE_HEADERS, FLAG_SIGNALS, FORM_FAST_MIN_KEYS, FORM_FAST_MS_PER_KEY, HISTORY_MAX_ARRIVALS, HISTORY_WINDOW_MS, KNOWN_TOOL_JA4, MAX_FORM_FILL_MS, MAX_FORM_REPORT,
   MAX_HEADER_NAMES, MAX_HEADER_NAME_LENGTH, MAX_TLS_VALUE, MAX_USER_AGENT, SEC_CH_UA_SINCE, SEC_FETCH_HEADERS, SEC_FETCH_SINCE, STATE_CHANGING,
   TIMING_MIN_GAPS, TIMING_REGULAR_MIN_MEDIAN_MS, TIMING_REGULAR_SPREAD_PERCENT, TLS13_SINCE, createHistoryTracker, flagOf, signalsOf,
   type FlagSignal, type HistoryTracker, type Observation, type Signals,
@@ -107,7 +107,7 @@ export function thresholds(): Record<string, unknown> {
   return {
     HISTORY_WINDOW_MS, HISTORY_MAX_ARRIVALS, TIMING_MIN_GAPS, TIMING_REGULAR_SPREAD_PERCENT, TIMING_REGULAR_MIN_MEDIAN_MS, FORM_FAST_MIN_KEYS, FORM_FAST_MS_PER_KEY,
     MAX_FORM_REPORT, MAX_FORM_FILL_MS, MAX_HEADER_NAMES, MAX_HEADER_NAME_LENGTH, MAX_USER_AGENT, MAX_TLS_VALUE, STATE_CHANGING: [...STATE_CHANGING].sort(),
-    BROWSER_HEADERS, SEC_FETCH_HEADERS, SEC_FETCH_SINCE, SEC_CH_UA_SINCE, TLS13_SINCE, KNOWN_TOOL_JA4: Object.fromEntries([...KNOWN_TOOL_JA4].sort(([a], [b]) => (a < b ? -1 : 1))),
+    BROWSER_HEADERS, WRITE_HEADERS, SEC_FETCH_HEADERS, NAVIGATE_DESTS: [...NAVIGATE_DESTS].sort(), MAX_CLIENT_HINT, SEC_FETCH_SINCE, SEC_CH_UA_SINCE, TLS13_SINCE, KNOWN_TOOL_JA4: Object.fromEntries([...KNOWN_TOOL_JA4].sort(([a], [b]) => (a < b ? -1 : 1))),
   };
 }
 
@@ -132,7 +132,8 @@ export function rateOf(flagged: number, n: number): Rate {
 
 /**
  * The flags that apply to an arrival, from its signals. The header flag applies only when the record has the header
- * names. The TLS flags apply only when a well-formed JA4 arrived. The form flags apply only to a well-formed form report.
+ * names. The client-hints flag applies only when the arrival sent `sec-ch-ua`, and the Fetch Metadata flag only when it
+ * sent a `sec-fetch-*` header: without them the flag is false by construction. The TLS flags apply only when a well-formed JA4 arrived. The form flags apply only to a well-formed form report.
  */
 export function flagValues(signals: Pick<Signals, "fingerprint" | "behaviour">, hasHeaders: boolean): FlagValues {
   const out: FlagValues = {};
@@ -140,6 +141,9 @@ export function flagValues(signals: Pick<Signals, "fingerprint" | "behaviour">, 
     const value = flagOf(signals as Signals, flag);
     if (value === undefined) continue;
     if (flag === "fingerprint.headers.mismatch" && !hasHeaders) continue;
+    if (flag === "fingerprint.headers.hintsMismatch" && signals.fingerprint.headers.hints === undefined) continue;
+    const nav = signals.behaviour.navigation;
+    if (flag === "fingerprint.headers.fetchInvalid" && nav.site === undefined && nav.mode === undefined && nav.dest === undefined) continue;
     if (flag.startsWith("fingerprint.tls.") && signals.fingerprint.tls?.ja4 === undefined) continue;
     if (flag.startsWith("behaviour.form.") && signals.behaviour.form?.report !== "claimed") continue;
     out[flag] = value;
@@ -173,10 +177,16 @@ export function parseLabelledRecord(line: string): LabelledRecord {
     if (!isObject(o) || !Number.isFinite(o.at) || typeof o.method !== "string" || typeof o.path !== "string") throw new Error("observation needs at (a number), method, and path");
     if (!/^[A-Z]{1,16}$/.test(o.method)) throw new Error("observation.method is in upper case, as the door records it");
     if (o.referer !== "same-origin" && o.referer !== "cross-origin" && o.referer !== "absent") throw new Error('observation.referer is "same-origin", "cross-origin", or "absent"');
-    optional(o, "observation.", ["userAgent", "accept", "form"], "string");
+    if (o.origin !== undefined && o.origin !== "same-origin" && o.origin !== "cross-origin" && o.origin !== "absent") throw new Error('observation.origin is "same-origin", "cross-origin", or "absent"');
+    optional(o, "observation.", ["userAgent", "accept", "form", "clientHints", "http"], "string");
+    if (o.network !== undefined) {
+      if (!isObject(o.network)) throw new Error("observation.network is an object");
+      optional(o.network, "observation.network.", ["asn"], "number");
+      optional(o.network, "observation.network.", ["organization"], "string");
+    }
     optional(o, "observation.", ["secure"], "boolean");
     if (!isObject(o.secFetch)) throw new Error("observation.secFetch is an object");
-    optional(o.secFetch, "observation.secFetch.", ["site", "mode", "dest"], "string");
+    optional(o.secFetch, "observation.secFetch.", ["site", "mode", "dest", "user"], "string");
     if (o.headers !== undefined && (!isObject(o.headers) || !Array.isArray(o.headers.names) || !o.headers.names.every((n) => typeof n === "string") || typeof o.headers.ordered !== "boolean")) throw new Error("observation.headers is { names, ordered }, and each name is a string");
     if (o.tls !== undefined) {
       if (!isObject(o.tls)) throw new Error("observation.tls is an object");

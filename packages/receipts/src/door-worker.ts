@@ -75,6 +75,9 @@ interface CfProperties {
   tlsCipher?: unknown;
   tlsClientExtensionsSha1?: unknown;
   tlsClientHelloLength?: unknown;
+  httpProtocol?: unknown;
+  asn?: unknown;
+  asOrganization?: unknown;
 }
 
 /** the fact the Worker records when Cloudflare Bot Management scored the request */
@@ -234,8 +237,12 @@ export function doorRequestOf(request: Request): DoorRequest {
   const headers: Record<string, string> = {};
   request.headers.forEach((v, k) => { if (!k.startsWith("cf-") && k !== "cdn-loop") headers[k] = v; });
   headers.host = url.host;
-  const tls = cloudflareTls((request as { cf?: CfProperties }).cf);
-  return { method: request.method, url: url.pathname + url.search, headers, transport: { secure: url.protocol === "https:", ...(tls ? { tls } : {}) }, socket: { remoteAddress: request.headers.get("cf-connecting-ip") ?? undefined } };
+  const cf = (request as { cf?: CfProperties }).cf;
+  const tls = cloudflareTls(cf);
+  // what every zone gets of the connection and of the address's network; the door's signal code checks their shape
+  const http = typeof cf?.httpProtocol === "string" && cf.httpProtocol.length <= 16 ? cf.httpProtocol : undefined;
+  const network = { ...(typeof cf?.asn === "number" ? { asn: cf.asn } : {}), ...(typeof cf?.asOrganization === "string" ? { organization: cf.asOrganization.slice(0, 256) } : {}) };
+  return { method: request.method, url: url.pathname + url.search, headers, transport: { secure: url.protocol === "https:", ...(tls ? { tls } : {}), ...(http ? { http } : {}), ...(Object.keys(network).length ? { network } : {}) }, socket: { remoteAddress: request.headers.get("cf-connecting-ip") ?? undefined } };
 }
 
 /**

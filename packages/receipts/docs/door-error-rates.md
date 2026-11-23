@@ -5,7 +5,7 @@
 The door does not say whether an arrival is a person. It records signals, and your policy decides. The door has two families of signals, and this page measures each of them:
 
 - **The credential signals** are `class` and its three values: `verified`, `claimed`, and `unknown`. They say what the arrival presented and how far the door could check it. Every door records them.
-- **The behaviour and fingerprint flags** are seven booleans that say whether an arrival looks and acts as its `User-Agent` states. A door records them only with `behaviour` in its config. A flag is a signal, not a verdict: the door refuses nothing because of one.
+- **The behaviour and fingerprint flags** are nine booleans that say whether an arrival looks and acts as its `User-Agent` states. A door records them only with `behaviour` in its config. A flag is a signal, not a verdict: the door refuses nothing because of one.
 
 What the two measurements show together: `verified` goes to the genuine agent and to no other arrival in the test set. A program that presents no credential is `unknown`, like a person, and no credential signal can change that. The flags mark some of those programs: in the recorded set, a tool that posts a form with no page load before it, and a tool that sends the `User-Agent` of a browser without the headers of that browser. They do not mark a real browser that a program drives. The labelled sets for the flags are small or have weak labels, so their intervals are wide, and the tables show the intervals.
 
@@ -13,7 +13,7 @@ The two families have different measurements, because their labelled data are di
 
 | | [Credential signals](#credential-signals) | [Behaviour and fingerprint flags](#behaviour-and-fingerprint-flags) |
 | --- | --- | --- |
-| What is scored | two questions about `class` | each of the seven flags |
+| What is scored | two questions about `class` | each of the nine flags |
 | The labelled data | a test set that the tool builds in memory, where each arrival is one known kind; or your receipts with your labels file | recorded arrivals: a capture of real clients and two public datasets; or the flags in your receipts |
 | How a signal gets its value | the door core decides each arrival and writes a receipt, and the tool reads only a receipt that verifies | the tool replays each recorded session through the signal functions of the door; for your receipts it reads the flags that the door computed |
 | The unit | one arrival | one session first, then one arrival |
@@ -46,13 +46,13 @@ The two tools read different files, because they need different data. `door erro
 | `automated` | `label` | `automated: true` is `label: "automated"`, and `automated: false` is `label: "human"`. Each tool refuses a line where the two fields disagree. |
 | `genuine` | none | No flag asks whether an agent is the agent that it names. `door labels` writes `null`. |
 | `source` | `labelSource` | `source` is one of four classes: `test-set`, `operator`, `challenge`, `door`. `labelSource` is a free name that says more. `door labels` writes `challenge` for `challenge-passed` and `door` for `verified-agent`. |
-| `validFor` | `validFor` | The same field with the same names: the two questions (`agent`, `verified`) and the seven flags. A tool counts a label only for the names in the list. Without the field, the label is good for all of them. |
+| `validFor` | `validFor` | The same field with the same names: the two questions (`agent`, `verified`) and the nine flags. A tool counts a label only for the names in the list. Without the field, the label is good for all of them. |
 | none | `session`, and `observation` or `flags` | `door error-rates` reads the signal from the receipt. It accepts `set`, `session`, and `flags` on a line and does not read them. It refuses a line with `observation`. |
 
 `agent-custody door labels` writes all of these fields from the receipts of your door, so one file is input for the two tools. Three values cannot come from a receipt, and the command does not invent them:
 
 - **`genuine` is always `null`.** A receipt says that an agent is genuine only through the check of the door, and that check is the thing that the `verified` question scores. So the `verified` question never counts a line of this file. Only you can supply `genuine`, in your own labels file.
-- **A verified agent is good for the flags only.** Its label comes from `class`. Its `validFor` holds the seven flags, so the `agent` question does not count it.
+- **A verified agent is good for the flags only.** Its label comes from `class`. Its `validFor` holds the nine flags, so the `agent` question does not count it.
 - **An arrival with no passed challenge and no verified agent has no label.** The command leaves it out. It also leaves out a verified agent that passed the challenge, because that arrival has the two labels.
 
 ### Intervals
@@ -199,7 +199,7 @@ Rules that keep the numbers honest:
 
 ## Behaviour and fingerprint flags
 
-The `behaviour` config adds seven flags to the arrival fact ([door signals](door-signals.md#the-behaviour-and-fingerprint-signals)). This part says how often each flag is wrong, as far as that is measured.
+The `behaviour` config adds nine flags to the arrival fact ([door signals](door-signals.md#the-behaviour-and-fingerprint-signals)). This part says how often each flag is wrong, as far as that is measured.
 
 Two rates describe a flag:
 
@@ -210,13 +210,14 @@ A flag with no labelled data on one side has no rate on that side. The tables sa
 
 ### The rates
 
-Measured on 2026-11-22 (UTC) with the thresholds that the door ships. The source of every number in the tables is [`labelled/results.json`](../labelled/results.json). `scripts/door-flag-rates-page.ts` writes the four tables of this part from that file, and `test/door-measure.test.ts` makes them again and fails when this page differs. The same test fails when the text of this part states a number that is not a number in a committed file of [`labelled/`](../labelled/).
+Measured on 2026-11-23 (UTC) with the thresholds that the door ships. The source of every number in the tables is [`labelled/results.json`](../labelled/results.json). `scripts/door-flag-rates-page.ts` writes the four tables of this part from that file, and `test/door-measure.test.ts` makes them again and fails when this page differs. The same test fails when the text of this part states a number that is not a number in a committed file of [`labelled/`](../labelled/).
 
 Read the tables per session first. The arrivals of one session are not independent, so an interval per arrival is narrower than the data supports. Each interval is a 95% Wilson interval, and each bound is printed outward: the low bound is rounded down and the high bound is rounded up. A rate of `<0.1%` is above zero and rounds to 0.0%.
 
 A set is in a table only for the flags that its label is good for. Two cases are left out because the answer is fixed before the measure:
 
-- A mismatch flag compares the request with the browser that the User-Agent states. A client with its own User-Agent (`curl/8.7.1`, `HeadlessChrome`) states no browser, so the flag is false for it by construction. The sets `capture-tools` and `capture-headless-chrome` do not count for the two mismatch flags. A zero for them would not be a measured miss.
+- A mismatch flag compares the request with the browser that the User-Agent states. A client with its own User-Agent (`curl/8.7.1`, `HeadlessChrome`) states no browser, so the flag is false for it by construction. The sets `capture-tools` and `capture-headless-chrome` do not count for `fingerprint.headers.mismatch`, `fingerprint.headers.hintsMismatch`, and `fingerprint.tls.mismatch`. A zero for them would not be a measured miss. The capture also leaves these two sets out for `fingerprint.headers.fetchInvalid`, which does not read the User-Agent; the sets with the User-Agent of Chrome hold the same clients.
+- `fingerprint.headers.hintsMismatch` counts an arrival only when it sent `sec-ch-ua`, and `fingerprint.headers.fetchInvalid` only when it sent a `sec-fetch-*` header. Without the header, the flag is false by construction.
 - `fingerprint.tls.knownTool` has no measured rate on either side. The table of known tools was filled from the capture. Each tool of the capture is in the table and no browser of the capture is, by construction.
 
 <!-- flag-rates:begin -->
@@ -225,6 +226,8 @@ A set is in a table only for the flags that its label is good for. Two cases are
 | flag | set | sessions | flagged | false-positive rate (lower is better) | 95% interval | what `human` means in this set |
 | --- | --- | --- | --- | --- | --- | --- |
 | `fingerprint.headers.mismatch` | capture-real-browsers | 3 | 0 | 0.0% | 0.0% to 56.2% | a real browser, which a script started; the label names the client software and not who used it |
+| `fingerprint.headers.hintsMismatch` | capture-real-browsers | 2 | 0 | 0.0% | 0.0% to 65.8% | a real browser, which a script started; the label names the client software and not who used it |
+| `fingerprint.headers.fetchInvalid` | capture-real-browsers | 3 | 0 | 0.0% | 0.0% to 56.2% | a real browser, which a script started; the label names the client software and not who used it |
 | `fingerprint.tls.mismatch` | capture-real-browsers | 2 | 0 | 0.0% | 0.0% to 65.8% | a real browser, which a script started; the label names the client software and not who used it |
 | `fingerprint.tls.knownTool` | not measured | | | | | The known-tool table was filled from the capture: no browser of the capture is in the table, by construction, so a rate of zero on the same capture says nothing. No other set has a TLS fingerprint of a real browser |
 | `behaviour.timing.regular` | lagopoulos-2018 | 50724 | 9 | <0.1% | 0.0% to 0.1% | ROBOT=0: the dataset's authors did not identify the session as a robot. A robot that hides is on this side, so the rate is biased upward |
@@ -238,6 +241,9 @@ A set is in a table only for the flags that its label is good for. Two cases are
 | --- | --- | --- | --- | --- | --- | --- |
 | `fingerprint.headers.mismatch` | capture-headless-chrome-browser-ua | 5 | 0 | 0.0% | 0.0% to 43.5% | headless Chrome that sends the User-Agent of Chrome, driven by the capture script |
 | `fingerprint.headers.mismatch` | capture-tools-browser-ua | 5 | 5 | 100.0% | 56.5% to 100.0% | an HTTP tool that sends the User-Agent of Chrome, run by the capture script |
+| `fingerprint.headers.hintsMismatch` | capture-headless-chrome-browser-ua | 5 | 0 | 0.0% | 0.0% to 43.5% | headless Chrome that sends the User-Agent of Chrome, driven by the capture script |
+| `fingerprint.headers.fetchInvalid` | capture-headless-chrome-browser-ua | 5 | 0 | 0.0% | 0.0% to 43.5% | headless Chrome that sends the User-Agent of Chrome, driven by the capture script |
+| `fingerprint.headers.fetchInvalid` | capture-tools-browser-ua | 1 | 0 | 0.0% | 0.0% to 79.4% | an HTTP tool that sends the User-Agent of Chrome, run by the capture script |
 | `fingerprint.tls.mismatch` | capture-headless-chrome-browser-ua | 5 | 0 | 0.0% | 0.0% to 43.5% | headless Chrome that sends the User-Agent of Chrome, driven by the capture script |
 | `fingerprint.tls.mismatch` | capture-tools-browser-ua | 5 | 1 | 20.0% | 3.6% to 62.5% | an HTTP tool that sends the User-Agent of Chrome, run by the capture script |
 | `fingerprint.tls.knownTool` | not measured | | | | | The known-tool table was filled from the capture: every tool of the capture is in the table, by construction, so a detection rate on the same capture says nothing. No other set has a TLS fingerprint of a tool |
@@ -257,6 +263,8 @@ A set is in a table only for the flags that its label is good for. Two cases are
 | flag | set | arrivals | flagged | false-positive rate (lower is better) | 95% interval | what `human` means in this set |
 | --- | --- | --- | --- | --- | --- | --- |
 | `fingerprint.headers.mismatch` | capture-real-browsers | 27 | 0 | 0.0% | 0.0% to 12.5% | a real browser, which a script started; the label names the client software and not who used it |
+| `fingerprint.headers.hintsMismatch` | capture-real-browsers | 18 | 0 | 0.0% | 0.0% to 17.6% | a real browser, which a script started; the label names the client software and not who used it |
+| `fingerprint.headers.fetchInvalid` | capture-real-browsers | 27 | 0 | 0.0% | 0.0% to 12.5% | a real browser, which a script started; the label names the client software and not who used it |
 | `fingerprint.tls.mismatch` | capture-real-browsers | 10 | 0 | 0.0% | 0.0% to 27.8% | a real browser, which a script started; the label names the client software and not who used it |
 | `fingerprint.tls.knownTool` | not measured | | | | | The known-tool table was filled from the capture: no browser of the capture is in the table, by construction, so a rate of zero on the same capture says nothing. No other set has a TLS fingerprint of a real browser |
 | `behaviour.timing.regular` | lagopoulos-2018 | 3640733 | 25 | <0.1% | 0.0% to 0.1% | ROBOT=0: the dataset's authors did not identify the session as a robot. A robot that hides is on this side, so the rate is biased upward |
@@ -270,6 +278,9 @@ A set is in a table only for the flags that its label is good for. Two cases are
 | --- | --- | --- | --- | --- | --- | --- |
 | `fingerprint.headers.mismatch` | capture-headless-chrome-browser-ua | 45 | 0 | 0.0% | 0.0% to 7.9% | headless Chrome that sends the User-Agent of Chrome, driven by the capture script |
 | `fingerprint.headers.mismatch` | capture-tools-browser-ua | 10 | 10 | 100.0% | 72.2% to 100.0% | an HTTP tool that sends the User-Agent of Chrome, run by the capture script |
+| `fingerprint.headers.hintsMismatch` | capture-headless-chrome-browser-ua | 45 | 0 | 0.0% | 0.0% to 7.9% | headless Chrome that sends the User-Agent of Chrome, driven by the capture script |
+| `fingerprint.headers.fetchInvalid` | capture-headless-chrome-browser-ua | 45 | 0 | 0.0% | 0.0% to 7.9% | headless Chrome that sends the User-Agent of Chrome, driven by the capture script |
+| `fingerprint.headers.fetchInvalid` | capture-tools-browser-ua | 2 | 0 | 0.0% | 0.0% to 65.8% | an HTTP tool that sends the User-Agent of Chrome, run by the capture script |
 | `fingerprint.tls.mismatch` | capture-headless-chrome-browser-ua | 45 | 0 | 0.0% | 0.0% to 7.9% | headless Chrome that sends the User-Agent of Chrome, driven by the capture script |
 | `fingerprint.tls.mismatch` | capture-tools-browser-ua | 10 | 2 | 20.0% | 5.6% to 51.0% | an HTTP tool that sends the User-Agent of Chrome, run by the capture script |
 | `fingerprint.tls.knownTool` | not measured | | | | | The known-tool table was filled from the capture: every tool of the capture is in the table, by construction, so a detection rate on the same capture says nothing. No other set has a TLS fingerprint of a tool |
@@ -288,6 +299,8 @@ A set is in a table only for the flags that its label is good for. Two cases are
 #### What the rates say
 
 - `fingerprint.headers.mismatch` marked each tool that sends the User-Agent of Chrome: 5 of 5 sessions. It did not mark headless Chrome that sends the User-Agent of Chrome, because headless Chrome sends the headers of Chrome. It marked no request of Chrome or Safari, but that is 3 sessions on one machine, so the interval is wide.
+- `fingerprint.headers.hintsMismatch` marked no session on either side. The real browsers agree with their own client hints. Headless Chrome with the User-Agent of Chrome has the same version in both, because the capture copies the User-Agent of the Chrome that it runs. The flag is for a program that sends a User-Agent of another version or another browser, and the capture has no such program. So its detection rate here says little.
+- `fingerprint.headers.fetchInvalid` marked no session on either side. No client of the capture writes its own `sec-fetch-*` headers, so the capture does not measure what the flag is for.
 - `fingerprint.tls.mismatch` marked 1 of the 5 tools that send the User-Agent of Chrome: Python, which sends no ALPN. The other tools offer TLS 1.3 and ALPN, as a browser does, and the flag does not see them.
 - `fingerprint.tls.knownTool` is not measured, for the reason above.
 - `behaviour.timing.regular` is rare for the sessions that the public log calls human, and it is also rare for the robots in that log. Most robots that say what they are do not arrive at a steady pace, or the one-second times of the log hide that they do.
@@ -357,10 +370,16 @@ From evidence that is not a rate:
 From a code review, with no labelled data:
 
 - `fingerprint.headers.mismatch` no longer expects `sec-ch-ua` from a User-Agent with `Version/` before `Chrome/` (a WebView browser), or with `like Chrome/`. Not every such browser sends the header. A false flag on a real browser is the costly error, so a doubtful form is not flagged.
+- `fingerprint.headers.mismatch` expects `origin` on a write from a current browser. Each write of a real browser in the capture has it, and no write of a tool has it.
+- `fingerprint.headers.hintsMismatch` is new. The review proposed a rule on the brand `HeadlessChrome` in `sec-ch-ua`. The capture then recorded the header: headless Chrome sends the brands of Chrome, with and without another User-Agent. So the rule reads no brand, and it reads the version of the `Chromium` brand only.
+- `fingerprint.headers.fetchInvalid` is new. Its rules are from the Fetch Metadata specification.
+- `behaviour.navigation.directWrite` is false when the `Origin` names the host.
 - `behaviour.navigation.directWrite` is false when the request has `Sec-Fetch-Site: same-origin`. A browser sends this header to an https site, also when the site's `Referrer-Policy` removes the Referer.
 - The Referer is on the same origin when the host is the same with or without its default port.
 
-The Referer and `Sec-Fetch-Site` are the client's word. A program can send them, and the direct-write flag is then false for it. The capture has no tool that does this, so its detection rates are for tools that send neither header.
+These rules were in the code before the capture was recorded again, and the tables are the first measure of them.
+
+The Referer, the `Origin`, and `Sec-Fetch-Site` are the client's word. A program can send them, and the direct-write flag is then false for it. The capture has no tool that does this, so its detection rates are for tools that send none of the three.
 
 ### The labelled sets
 
@@ -368,9 +387,9 @@ The Referer and `Sec-Fetch-Site` are the client's word. A program can send them,
 
 #### The capture
 
-`labelled/capture.jsonl` is committed: 143 arrivals in 29 sessions, recorded on one machine on 2026-11-22. `labelled/capture.meta.json` has the versions of the browsers, the tools, and the system. The file holds five sets:
+`labelled/capture.jsonl` is committed: 143 arrivals in 29 sessions, recorded on one machine on 2026-11-23. `labelled/capture.meta.json` has the versions of the browsers, the tools, and the system. The file holds five sets:
 
-- `capture-real-browsers`: Chrome and Safari, each started as a person starts it, with a temporary profile for Chrome. The label is `human` with the source `real-browser`. The label names the client software, and not who used it. **A real browser that a program drives sends the same headers and the same ClientHello, so these flags cannot tell it from a person.** The label is good for the two mismatch flags only.
+- `capture-real-browsers`: Chrome and Safari, each started as a person starts it, with a temporary profile for Chrome. The label is `human` with the source `real-browser`. The label names the client software, and not who used it. **A real browser that a program drives sends the same headers and the same ClientHello, so these flags cannot tell it from a person.** The label is good for the three header flags and the TLS mismatch flag only.
 - `capture-tools`: curl, Python urllib, Go net/http, Node fetch, and Bun fetch, each with its own User-Agent. The label is good for the direct-write flag and the form flags.
 - `capture-tools-browser-ua`: the same tools with the User-Agent that Chrome sent.
 - `capture-headless-chrome`: headless Chrome, driven through its DevTools protocol, with its own User-Agent. Four sessions fill the form through the door's own form protector script, each in another way. The script's challenge widget is replaced by a local stub, so the capture asks no outside service. The label is good for the direct-write flag and the form flags.

@@ -333,16 +333,16 @@ describe("the form protector", () => {
       now += 4200;
       const before = shop.seen.length;
       await submit(contact);
-      expect(sent[0]!["x-agent-custody-form"]).toBe("v=1;ms=4200;k=3;p=2;paste=1;trusted=1");
+      expect(sent[0]!["x-agent-custody-form"]).toBe("v=2;ms=4200;k=3;p=2;paste=1;trusted=1;mv=0;ks=0;rd=0");
       // counts only: no key and no field value is in what the script sends beside the form itself
       expect(JSON.stringify(sent[0])).not.toMatch(/4111|Ada/);
       expect(shop.seen.length).toBe(before + 1);
       expect(shop.seen.at(-1)!.headers).not.toHaveProperty("x-agent-custody-form");
-      expect(arrivalFor(shop.seen.at(-1)!.headers[RECEIPT_HEADER] as string).behaviour!.form).toEqual({ report: "claimed", fillMs: 4200, keys: 3, pointers: 2, pasted: true, trusted: true, fast: false, noInput: false });
+      expect(arrivalFor(shop.seen.at(-1)!.headers[RECEIPT_HEADER] as string).behaviour!.form).toEqual({ report: "claimed", fillMs: 4200, keys: 3, pointers: 2, pasted: true, trusted: true, moves: 0, keySpreadMs: 0, readyMs: 0, fast: false, noInput: false });
 
       // the counts start again for the next send. A script that submits the form itself sends no input, an untrusted submit, and the policy's rule refuses it
       await submit(contact, undefined, false);
-      expect(sent[1]!["x-agent-custody-form"]).toBe("v=1;ms=0;k=0;p=0;paste=0;trusted=0");
+      expect(sent[1]!["x-agent-custody-form"]).toBe("v=2;ms=0;k=0;p=0;paste=0;trusted=0;mv=0;ks=0;rd=0");
       expect(shop.seen.length).toBe(before + 1);
       expect(noteOf(contact)).toMatch(/^This form was refused \(receipt [0-9a-f-]{36}\)\.$/);
 
@@ -354,10 +354,12 @@ describe("the form protector", () => {
       fire("keydown", { target: { form: other.element } });
       fire("pointerdown", { target: { form: null, closest: () => null } });
       fire("paste", { target: null });
+      fire("pointermove", { target: { form: contact.element } });
+      fire("pointermove", { target: { form: other.element } });
       now += 900;
       const outside = shop.seen.length;
       await submit(contact);
-      expect(sent[2]!["x-agent-custody-form"]).toBe("v=1;ms=900;k=1;p=1;paste=0;trusted=1");
+      expect(sent[2]!["x-agent-custody-form"]).toBe("v=2;ms=900;k=1;p=1;paste=0;trusted=1;mv=1;ks=0;rd=4200");
       expect(shop.seen.length).toBe(outside + 1);
       sent.splice(2, 1);
 
@@ -366,7 +368,7 @@ describe("the form protector", () => {
       fire("keydown", { isTrusted: false });
       now += 50;
       await submit(contact);
-      expect(sent[2]!["x-agent-custody-form"]).toBe("v=1;ms=50;k=1;p=1;paste=0;trusted=0");
+      expect(sent[2]!["x-agent-custody-form"]).toBe("v=2;ms=50;k=1;p=1;paste=0;trusted=0;mv=0;ks=0;rd=5100");
       expect(shop.seen.length).toBe(before + 3);
     } finally {
       await d.close();

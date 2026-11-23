@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-22",
+  "date": "2026-11-23",
   "format": "agent-custody/door-measure/v1",
   "per": 10000,
   "confidencePercent": 95,
@@ -11,7 +11,7 @@
     "TIMING_REGULAR_MIN_MEDIAN_MS": 100,
     "FORM_FAST_MIN_KEYS": 8,
     "FORM_FAST_MS_PER_KEY": 20,
-    "MAX_FORM_REPORT": 64,
+    "MAX_FORM_REPORT": 96,
     "MAX_FORM_FILL_MS": 86400000,
     "MAX_HEADER_NAMES": 128,
     "MAX_HEADER_NAME_LENGTH": 64,
@@ -26,11 +26,23 @@
     "BROWSER_HEADERS": [
       "accept-language"
     ],
+    "WRITE_HEADERS": [
+      "origin"
+    ],
     "SEC_FETCH_HEADERS": [
       "sec-fetch-site",
       "sec-fetch-mode",
       "sec-fetch-dest"
     ],
+    "NAVIGATE_DESTS": [
+      "document",
+      "embed",
+      "fencedframe",
+      "frame",
+      "iframe",
+      "object"
+    ],
+    "MAX_CLIENT_HINT": 256,
     "SEC_FETCH_SINCE": {
       "chromium": 80,
       "firefox": 90,
@@ -71,6 +83,76 @@
       "flags": [
         {
           "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.hintsMismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.fetchInvalid",
           "human": {
             "arrivals": {
               "n": 0,
@@ -369,6 +451,76 @@
           }
         },
         {
+          "flag": "fingerprint.headers.hintsMismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 45,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 787
+            },
+            "sessions": {
+              "n": 5,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 4345
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.fetchInvalid",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 45,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 787
+            },
+            "sessions": {
+              "n": 5,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 4345
+            }
+          }
+        },
+        {
           "flag": "fingerprint.tls.mismatch",
           "human": {
             "arrivals": {
@@ -599,6 +751,76 @@
       "flags": [
         {
           "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 27,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 1246
+            },
+            "sessions": {
+              "n": 3,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 5615
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.hintsMismatch",
+          "human": {
+            "arrivals": {
+              "n": 18,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 1759
+            },
+            "sessions": {
+              "n": 2,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 6577
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.fetchInvalid",
           "human": {
             "arrivals": {
               "n": 27,
@@ -897,6 +1119,76 @@
           }
         },
         {
+          "flag": "fingerprint.headers.hintsMismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.fetchInvalid",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
           "flag": "fingerprint.tls.mismatch",
           "human": {
             "arrivals": {
@@ -1157,6 +1449,76 @@
               "rate": 10000,
               "low": 5655,
               "high": 10000
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.hintsMismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.fetchInvalid",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 2,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 6577
+            },
+            "sessions": {
+              "n": 1,
+              "flagged": 0,
+              "rate": 0,
+              "low": 0,
+              "high": 7935
             }
           }
         },
@@ -1425,6 +1787,76 @@
           }
         },
         {
+          "flag": "fingerprint.headers.hintsMismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.fetchInvalid",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
           "flag": "fingerprint.tls.mismatch",
           "human": {
             "arrivals": {
@@ -1657,6 +2089,76 @@
       "flags": [
         {
           "flag": "fingerprint.headers.mismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.hintsMismatch",
+          "human": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          },
+          "automated": {
+            "arrivals": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            },
+            "sessions": {
+              "n": 0,
+              "flagged": 0,
+              "rate": null,
+              "low": null,
+              "high": null
+            }
+          }
+        },
+        {
+          "flag": "fingerprint.headers.fetchInvalid",
           "human": {
             "arrivals": {
               "n": 0,

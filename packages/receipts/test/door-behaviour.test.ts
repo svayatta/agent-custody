@@ -69,10 +69,10 @@ afterAll(async () => {
 describe("a door without behaviour configured", () => {
   it("records the arrival fact with the fields it always had, reads no TLS or form header, and relays both as any other header", async () => {
     const { fx, url } = await proxyDoor("off", { trustProxy: true }, "permit(principal, action, resource);\n");
-    const r = await send(url, "GET", "/catalogue/shoes", [["user-agent", CHROME], ["x-forwarded-for", "203.0.113.1"], ["x-ja4", ja4("t12d1516h2")], [FORM_REPORT_HEADER, "v=1;ms=0;k=0;p=0;paste=0;trusted=1"]]);
+    const r = await send(url, "GET", "/catalogue/shoes", [["user-agent", CHROME], ["x-forwarded-for", "203.0.113.1"], ["x-ja4", ja4("t12d1516h2")], [FORM_REPORT_HEADER, "v=2;ms=0;k=0;p=0;paste=0;trusted=1;mv=0;ks=0;rd=0"]]);
     expect(r.status).toBe(200);
     expect(await arrivalOf(fx, r.receipt)).toEqual({ class: "unknown", subject: "unknown", grant: "absent", signature: "absent", remote: "203.0.113.1", method: "GET", path: "/catalogue/shoes", route: "catalogue", rate: { by: "remote", burst: 1, minute: 1 } });
-    expect(origin.seen.at(-1)!.headers[FORM_REPORT_HEADER]).toBe("v=1;ms=0;k=0;p=0;paste=0;trusted=1");
+    expect(origin.seen.at(-1)!.headers[FORM_REPORT_HEADER]).toBe("v=2;ms=0;k=0;p=0;paste=0;trusted=1;mv=0;ks=0;rd=0");
   });
 });
 
@@ -89,10 +89,11 @@ describe("the door proxy with behaviour configured", () => {
     expect(r.status).toBe(200);
     const arrival = await arrivalOf(fx, r.receipt);
     expect(arrival.fingerprint).toEqual({
-      headers: { order: expect.stringMatching(/^[0-9a-f]{16}$/), count: 5, client: "tool", family: "curl", mismatch: false },
+      headers: { order: expect.stringMatching(/^[0-9a-f]{16}$/), count: 5, client: "tool", family: "curl", mismatch: false, hintsMismatch: false, fetchInvalid: false },
       tls: { ja4: ja4("t13d3112h2"), malformed: false, protocol: "tcp", version: "13", sni: true, ciphers: 31, extensions: 12, alpn: "h2", mismatch: false, knownTool: false },
+      seen: 1,
     });
-    expect(arrival.behaviour).toEqual({ timing: { gaps: 0, regular: false }, navigation: { pageLoaded: false, referer: "absent", directWrite: false } });
+    expect(arrival.behaviour).toEqual({ timing: { gaps: 0, regular: false }, navigation: { pageLoaded: false, referer: "absent", origin: "absent", directWrite: false } });
     expect(verifyBundle(await bundleOf(fx, r.receipt), { issuerKeys: [loadPublicKey(fx.doorPub)], principalKeys: [loadPublicKey(fx.principalPub)], logFile: fx.logFile }).ok).toBe(true);
 
     // the same headers in another order are another fingerprint; the same order is the same one; the second arrival has a gap
@@ -108,7 +109,7 @@ describe("the door proxy with behaviour configured", () => {
     const refund: [string, string][] = [["content-type", "application/json"]];
     const cold = await send(url, "POST", "/refunds", [...refund, from("203.0.113.20")], '{"amount":100}');
     expect(cold.status).toBe(403);
-    expect((await arrivalOf(fx, cold.receipt)).behaviour!.navigation).toEqual({ pageLoaded: false, referer: "absent", directWrite: true });
+    expect((await arrivalOf(fx, cold.receipt)).behaviour!.navigation).toEqual({ pageLoaded: false, referer: "absent", origin: "absent", directWrite: true });
 
     const page = await send(url, "GET", "/catalogue/returns", [["accept", "text/html,application/xhtml+xml"], from("203.0.113.21")]);
     expect(page.status).toBe(200);
@@ -119,7 +120,7 @@ describe("the door proxy with behaviour configured", () => {
     // a form on a page of this site, by its referer; the host is the one the proxy says the client named
     const referred = await send(url, "POST", "/refunds", [...refund, from("203.0.113.22"), ["x-forwarded-host", "shop.example"], ["referer", "https://shop.example/returns"], ["sec-fetch-site", "same-origin"], ["sec-fetch-mode", "cors"], ["sec-fetch-dest", "empty"]], '{"amount":100}');
     expect(referred.status).toBe(200);
-    expect((await arrivalOf(fx, referred.receipt)).behaviour!.navigation).toEqual({ pageLoaded: false, referer: "same-origin", site: "same-origin", mode: "cors", dest: "empty", directWrite: false });
+    expect((await arrivalOf(fx, referred.receipt)).behaviour!.navigation).toEqual({ pageLoaded: false, referer: "same-origin", origin: "absent", site: "same-origin", mode: "cors", dest: "empty", directWrite: false });
   });
 
   it("a policy tests for a signal that may be absent: no TLS fingerprint passes, a browser's passes, and a stated browser with a ClientHello no browser sends is refused", async () => {
@@ -137,10 +138,10 @@ describe("the door proxy with behaviour configured", () => {
 
   it("refuses nothing itself: an arrival with every flag the door can raise is relayed when the policy does not read them", async () => {
     const lenient = await proxyDoor("lenient", { trustProxy: true, behaviour: { tlsHeader: "x-ja4" } }, "permit(principal, action, resource);\n");
-    const r = await send(lenient.url, "POST", "/refunds", [["user-agent", CHROME], ["x-forwarded-proto", "https"], from("203.0.113.40"), ["x-ja4", ja4("t12d151600")], [FORM_REPORT_HEADER, "v=1;ms=0;k=0;p=0;paste=0;trusted=0"], ["content-type", "application/json"]], "{}");
+    const r = await send(lenient.url, "POST", "/refunds", [["user-agent", CHROME], ["x-forwarded-proto", "https"], from("203.0.113.40"), ["x-ja4", ja4("t12d151600")], [FORM_REPORT_HEADER, "v=2;ms=0;k=0;p=0;paste=0;trusted=0;mv=0;ks=0;rd=0"], ["content-type", "application/json"]], "{}");
     expect(r.status).toBe(200);
     const a = await arrivalOf(lenient.fx, r.receipt);
-    expect(a.fingerprint).toMatchObject({ headers: { mismatch: true, missing: "accept-language sec-fetch-site sec-fetch-mode sec-fetch-dest sec-ch-ua" }, tls: { mismatch: true } });
+    expect(a.fingerprint).toMatchObject({ headers: { mismatch: true, missing: "accept-language origin sec-fetch-site sec-fetch-mode sec-fetch-dest sec-ch-ua" }, tls: { mismatch: true } });
     expect(a.behaviour).toMatchObject({ navigation: { directWrite: true }, form: { report: "claimed", noInput: true, trusted: false } });
     // the form report is the door's to read, not the origin's
     expect(origin.seen.at(-1)!.headers).not.toHaveProperty(FORM_REPORT_HEADER);
@@ -186,7 +187,7 @@ describe("the door answering authz checks with behaviour configured", () => {
     expect(r.status).toBe(200);
     const a = await arrivalOf(fx, r.receipt);
     // the check carries no accept-language, and that says nothing about the client
-    expect(a.fingerprint!.headers).toEqual({ client: "browser", family: "chromium", version: 126, mismatch: false });
+    expect(a.fingerprint!.headers).toEqual({ client: "browser", family: "chromium", version: 126, mismatch: false, hintsMismatch: false, fetchInvalid: false });
     expect(a.fingerprint!.tls).toMatchObject({ ja4: ja4("t13d1516h2"), mismatch: false });
     expect(a.behaviour!.navigation).toMatchObject({ directWrite: true });
     expect(checkDoorConfig(fx.configFile)).toContainEqual({ level: "ok", check: "behaviour", message: expect.stringContaining("authz mode") });
@@ -215,7 +216,7 @@ describe("the in-process door with behaviour configured", () => {
   it("the middleware sees the header order, and the policy's rule on a signal refuses before the app runs", async () => {
     const read = await send(base, "GET", "/catalogue/shoes", [["user-agent", "Go-http-client/1.1"], ["accept-encoding", "gzip"]]);
     expect(read.status).toBe(200);
-    expect((await arrivalOf(fx, read.receipt)).fingerprint!.headers).toEqual({ order: expect.stringMatching(/^[0-9a-f]{16}$/), count: 4, client: "tool", family: "go-http-client", mismatch: false });
+    expect((await arrivalOf(fx, read.receipt)).fingerprint!.headers).toEqual({ order: expect.stringMatching(/^[0-9a-f]{16}$/), count: 4, client: "tool", family: "go-http-client", mismatch: false, hintsMismatch: false, fetchInvalid: false });
     const write = await send(base, "POST", "/refunds", [["content-type", "application/json"]], "{}");
     expect(write.status).toBe(403);
     expect((await arrivalOf(fx, write.receipt)).behaviour!.navigation.directWrite).toBe(true);
@@ -228,6 +229,6 @@ describe("the in-process door with behaviour configured", () => {
     expect(res.status).toBe(200);
     expect(ran).toBe(1);
     const a = await arrivalOf(fx, res.headers.get(RECEIPT_HEADER));
-    expect(a.fingerprint).toEqual({ headers: { count: 4, client: "browser", family: "chromium", version: 126, mismatch: false } });
+    expect(a.fingerprint).toEqual({ headers: { count: 4, client: "browser", family: "chromium", version: 126, mismatch: false, hintsMismatch: false, fetchInvalid: false } });
   });
 });

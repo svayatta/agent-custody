@@ -84,8 +84,8 @@ describe("the replay of recorded sessions", () => {
   });
 
   it("records every exported constant of door-signals.ts that a flag reads", () => {
-    // not read by a flag: the name of the header, the cap that the form script applies in the browser, and the list of the flags
-    const notRead = ["FORM_REPORT_HEADER", "MAX_FORM_EVENTS", "FLAG_SIGNALS"];
+    // not read by a flag: the name of the header, the cap that the form script applies in the browser, the list of the flags, the window of a count, and the table of declared agents (a User-Agent rule, which is code)
+    const notRead = ["FORM_REPORT_HEADER", "MAX_FORM_EVENTS", "FLAG_SIGNALS", "SEEN_WINDOW_MS", "AI_AGENTS"];
     const constants = Object.keys(signals).filter((name) => /^[A-Z][A-Z0-9_]+$/.test(name) && !notRead.includes(name));
     expect(Object.keys(thresholds()).sort()).toEqual(constants.sort());
     expect(thresholds()).toMatchObject({ STATE_CHANGING: ["DELETE", "PATCH", "POST", "PUT"], MAX_FORM_FILL_MS: signals.MAX_FORM_FILL_MS });
@@ -110,17 +110,21 @@ describe("the replay of recorded sessions", () => {
       record("headers", "automated", seen(0, { userAgent: CHROME, secure: true, headers: names })),
       record("tls", "automated", seen(0, { userAgent: CHROME, tls: { ja4: "t12d1516h2_000000000000_111111111111" } })),
       record("tls-other", "automated", seen(0, { tls: { negotiated: "TLSv1.3" } })),
-      record("form", "automated", seen(0, { form: "v=1;ms=0;k=0;p=0;paste=0;trusted=1" })),
+      record("form", "automated", seen(0, { form: "v=2;ms=0;k=0;p=0;paste=0;trusted=1;mv=0;ks=0;rd=0" })),
       record("form-bad", "automated", seen(0, { form: "not a report" })),
-      record("limited", "automated", seen(0, { userAgent: CHROME, secure: true, headers: names, form: "v=1;ms=10;k=20;p=0;paste=0;trusted=1" }), { validFor: ["behaviour.form.fast"] }),
+      record("hints", "automated", seen(0, { userAgent: CHROME, clientHints: '"Chromium";v="1"' })),
+      record("fetch", "automated", seen(0, { secFetch: { mode: "cors", user: "?1" } })),
+      record("limited", "automated", seen(0, { userAgent: CHROME, secure: true, headers: names, form: "v=2;ms=10;k=20;p=0;paste=0;trusted=1;mv=0;ks=0;rd=0" }), { validFor: ["behaviour.form.fast"] }),
     ]);
     const counted = Object.fromEntries(FLAG_SIGNALS.map((f) => [f, [flagOf(result, f).automated.arrivals.n, flagOf(result, f).automated.arrivals.flagged]]));
     expect(counted).toEqual({
       "fingerprint.headers.mismatch": [1, 1],
+      "fingerprint.headers.hintsMismatch": [1, 1],
+      "fingerprint.headers.fetchInvalid": [1, 1],
       "fingerprint.tls.mismatch": [1, 1],
       "fingerprint.tls.knownTool": [1, 0],
-      "behaviour.timing.regular": [6, 0],
-      "behaviour.navigation.directWrite": [6, 0],
+      "behaviour.timing.regular": [8, 0],
+      "behaviour.navigation.directWrite": [8, 0],
       "behaviour.form.fast": [2, 1],
       "behaviour.form.noInput": [1, 1],
     });
@@ -164,13 +168,13 @@ describe("the replay of recorded sessions", () => {
     ] as const) {
       expect(() => parseLabelledRecord(line(over)), why).toThrow(why);
     }
-    const full = seen(1, { method: "POST", userAgent: CHROME, accept: "*/*", secure: true, form: "v=1;ms=1;k=1;p=1;paste=0;trusted=1", secFetch: { site: "same-origin" }, headers: { names: ["host"], ordered: false }, tls: { ja4: "t13d1516h2_000000000000_111111111111", helloLength: 517 } });
+    const full = seen(1, { method: "POST", userAgent: CHROME, accept: "*/*", secure: true, form: "v=2;ms=1;k=1;p=1;paste=0;trusted=1;mv=0;ks=0;rd=0", secFetch: { site: "same-origin" }, headers: { names: ["host"], ordered: false }, tls: { ja4: "t13d1516h2_000000000000_111111111111", helloLength: 517 } });
     expect(parseLabelledRecord(JSON.stringify(record("a", "human", full))).observation).toEqual(full);
   });
 });
 
 describe("the labels from a door's own receipts", () => {
-  const signals = { fingerprint: { headers: { client: "browser", family: "chromium", count: 12, mismatch: false } }, behaviour: { timing: { gaps: 0, regular: false }, navigation: { pageLoaded: false, referer: "absent", directWrite: true } } };
+  const signals = { fingerprint: { headers: { client: "browser", family: "chromium", count: 12, mismatch: false, hintsMismatch: false, fetchInvalid: false } }, behaviour: { timing: { gaps: 0, regular: false }, navigation: { pageLoaded: false, referer: "absent", origin: "absent", directWrite: true } } };
   const predicate = (minute: number, arrival: Record<string, unknown>, kind = "door") =>
     ({ issuer: { kind }, timestamp: new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString(), facts: { arrival: { value: { remote: "203.0.113.9", subject: "unknown", class: "unknown", path: "/private/path", ...arrival } } } }) as unknown as ReceiptPredicate;
 
@@ -205,7 +209,7 @@ describe("the labels from a door's own receipts", () => {
   });
 
   it("applies a flag as the measure of a recording does: no header flag without the header set, no TLS flag without a JA4, no form flag for a malformed report", () => {
-    const partial = { fingerprint: { headers: { client: "browser", family: "chromium", mismatch: false }, tls: { malformed: false, negotiated: "13", mismatch: false, knownTool: false } }, behaviour: { ...signals.behaviour, form: { report: "malformed", fast: false, noInput: false } } };
+    const partial = { fingerprint: { headers: { client: "browser", family: "chromium", mismatch: false, hintsMismatch: false, fetchInvalid: false }, tls: { malformed: false, negotiated: "13", mismatch: false, knownTool: false } }, behaviour: { ...signals.behaviour, form: { report: "malformed", fast: false, noInput: false } } };
     expect(Object.keys(flagValues(partial as never, false))).toEqual(["behaviour.timing.regular", "behaviour.navigation.directWrite"]);
   });
 

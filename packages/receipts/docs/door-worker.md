@@ -29,6 +29,7 @@ Where the zone has Cloudflare Bot Management, its score and verified-bot flag en
 
 With `behaviour` in `DOOR_CONFIG` (an empty object is sufficient), the arrival fact has the door's [behaviour and fingerprint signals](door.md#behaviour-and-fingerprint-signals). In a Worker they differ from the Node door in four ways:
 
+- `request.cf` also gives the HTTP version (`fingerprint.headers.http`) and the network of the address (`fingerprint.network.asn` and `organization`) on every zone. The Node door has neither.
 - The TLS fingerprint comes from `request.cf`, never from a header. A config with `behaviour.tlsHeader` answers 500 with the reason and relays nothing. `fingerprint.tls` has `negotiated`, `cipher`, `extensionsSha1`, and `helloLength` from the fields that every zone gets. It has `ja4`, and the fields the door reads from it, only where the zone has Bot Management. Without a JA4, `fingerprint.tls.mismatch` is always false.
 - The Worker cannot see the order of the headers, so `fingerprint.headers.order` is absent. `count` leaves out Cloudflare's own `cf-*` and `cdn-loop` headers.
 - The Worker knows from the request URL whether the client used https. For an https request, `fingerprint.headers.mismatch` also reads `sec-fetch-*` and `sec-ch-ua`.

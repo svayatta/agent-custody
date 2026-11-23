@@ -11,7 +11,7 @@
       "files": [
         {
           "name": "capture.jsonl",
-          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+          "sha256": "dc861e3bb212e066447ff0389ad344e116bf3e81bbab854213cf8dc74a328628"
         }
       ],
       "counts": {
@@ -29,11 +29,10 @@
         "human": "a real browser, which a script started; the label names the client software and not who used it"
       },
       "validFor": [
-        "fingerprint.headers.mismatch",
         "fingerprint.tls.mismatch"
       ],
       "command": "node scripts/door-capture.ts --out labelled/capture.jsonl --meta labelled/capture.meta.json --hellos labelled/capture.hellos.json",
-      "validForNote": "The label is good for the two mismatch flags only. It is not good for fingerprint.tls.knownTool: the known-tool table was filled from this capture, so no browser of the capture is in it, by construction."
+      "validForNote": "The label is good for the header flags and the TLS mismatch flag only. It is not good for fingerprint.tls.knownTool: the known-tool table was filled from this capture, so no browser of the capture is in it, by construction."
     },
     {
       "set": "capture-tools",
@@ -44,7 +43,7 @@
       "files": [
         {
           "name": "capture.jsonl",
-          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+          "sha256": "dc861e3bb212e066447ff0389ad344e116bf3e81bbab854213cf8dc74a328628"
         }
       ],
       "counts": {
@@ -78,7 +77,7 @@
       "files": [
         {
           "name": "capture.jsonl",
-          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+          "sha256": "dc861e3bb212e066447ff0389ad344e116bf3e81bbab854213cf8dc74a328628"
         }
       ],
       "counts": {
@@ -97,6 +96,8 @@
       },
       "validFor": [
         "fingerprint.headers.mismatch",
+        "fingerprint.headers.hintsMismatch",
+        "fingerprint.headers.fetchInvalid",
         "fingerprint.tls.mismatch",
         "behaviour.navigation.directWrite",
         "behaviour.form.fast",
@@ -113,7 +114,7 @@
       "files": [
         {
           "name": "capture.jsonl",
-          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+          "sha256": "dc861e3bb212e066447ff0389ad344e116bf3e81bbab854213cf8dc74a328628"
         }
       ],
       "counts": {
@@ -147,7 +148,7 @@
       "files": [
         {
           "name": "capture.jsonl",
-          "sha256": "6c98ac90057af3b0b2b45c6d5a56538597eaef0eff0a2e65c563c1db46c2f80c"
+          "sha256": "dc861e3bb212e066447ff0389ad344e116bf3e81bbab854213cf8dc74a328628"
         }
       ],
       "counts": {
@@ -166,6 +167,8 @@
       },
       "validFor": [
         "fingerprint.headers.mismatch",
+        "fingerprint.headers.hintsMismatch",
+        "fingerprint.headers.fetchInvalid",
         "fingerprint.tls.mismatch",
         "behaviour.navigation.directWrite",
         "behaviour.form.fast",
@@ -274,7 +277,9 @@
     "behaviour.form.fast": {},
     "behaviour.form.noInput": {
       "human": "No set has a person who sends a form through the form protector script. KeyRecs records key presses only, with no pointer press and no submit"
-    }
+    },
+    "fingerprint.headers.hintsMismatch": {},
+    "fingerprint.headers.fetchInvalid": {}
   },
   "ruleChecks": [
     {
