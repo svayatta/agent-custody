@@ -158,14 +158,25 @@ describe("the Worker's admission lists", () => {
     const a = generateKeyPair();
     const b = generateKeyPair();
     const pem = (k: typeof a) => k.publicKey.export({ type: "spki", format: "pem" }) as string;
-    // the keys of a registry's key document, each with the registry it speaks for; extra fields such as keyid are kept out of the way
-    const bound = workerDoorIO(baseEnv({ DOOR_KEY: pkcs8, TRUSTED_REGISTRY_KEYS: JSON.stringify([{ publicKeyPem: pem(a), keyid: a.keyid, registry: "https://registry-a.example/" }, { publicKeyPem: pem(b) }]) }), fetch);
+    const io = (value: string) => workerDoorIO(baseEnv({ DOOR_KEY: pkcs8, TRUSTED_REGISTRY_KEYS: value }), fetch);
+    // the keys of a registry's key document, each with the registry it speaks for; their other fields, such as keyid, are ignored
+    const bound = io(JSON.stringify([{ publicKeyPem: pem(a), keyid: a.keyid, registry: "https://registry-a.example/" }, { publicKeyPem: pem(b), registry: "https://registry-b.example/" }]));
     expect(bound.trustedRegistryKeys?.map((k) => k.keyid)).toEqual([a.keyid, b.keyid]);
-    expect(bound.registryUrls).toEqual({ [a.keyid]: "https://registry-a.example/" });
-    const plain = workerDoorIO(baseEnv({ DOOR_KEY: pkcs8, TRUSTED_REGISTRY_KEYS: pem(a) + pem(b) }), fetch);
+    expect(bound.registryUrls).toEqual({ [a.keyid]: "https://registry-a.example/", [b.keyid]: "https://registry-b.example/" });
+    const plain = io(pem(a) + pem(b));
     expect(plain.trustedRegistryKeys?.map((k) => k.keyid)).toEqual([a.keyid, b.keyid]);
     expect(plain.registryUrls).toEqual({});
-    expect(() => workerDoorIO(baseEnv({ DOOR_KEY: pkcs8, TRUSTED_REGISTRY_KEYS: JSON.stringify([{ publicKeyPem: pem(a), registry: "not a url" }]) }), fetch)).toThrow("TRUSTED_REGISTRY_KEYS is not a list of { publicKeyPem, registry }");
+    // every way of meaning a binding and not getting one is refused, never read as a key bound to nothing
+    for (const [value, why] of [
+      [JSON.stringify([{ publicKeyPem: pem(a) }]), "TRUSTED_REGISTRY_KEYS is not a list of { publicKeyPem, registry }"],
+      [JSON.stringify([{ publicKeyPem: pem(a), registy: "https://registry-a.example/" }]), "TRUSTED_REGISTRY_KEYS is not a list of { publicKeyPem, registry }"],
+      [JSON.stringify([{ publicKeyPem: pem(a), registry: "mailto:ops@registry-a.example" }]), "registry is an http(s) URL"],
+      [JSON.stringify([]), "TRUSTED_REGISTRY_KEYS is not a list of { publicKeyPem, registry }"],
+      // a whole key document pasted with real newlines in its PEM, as a TOML basic string decodes it
+      [`{ "registry": "https://registry-a.example/", "keys": [{ "publicKeyPem": "${pem(a)}" }] }`, "TRUSTED_REGISTRY_KEYS is a JSON object"],
+      ["[ not json", "TRUSTED_REGISTRY_KEYS starts with [ and is not JSON"],
+      [JSON.stringify([{ publicKeyPem: pem(a), registry: "https://registry-a.example/" }, { publicKeyPem: pem(a), registry: "https://registry-b.example/" }]), "is listed twice"],
+    ] as const) expect(() => io(value), value.slice(0, 60)).toThrow(why);
   });
 
   it("come from ADMISSION_LISTS, and a Worker without the variable has none", () => {

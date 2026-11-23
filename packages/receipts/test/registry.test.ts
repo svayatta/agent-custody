@@ -513,6 +513,39 @@ when {
       expect(await classify(b, "https://registry-a.example/", {})).toMatchObject({ passport: { outcome: "verified", registry: "https://registry-a.example/" } });
     });
 
+    it("applies the binding at a door started from its config: another registry's key cannot vouch for this one's agent", async () => {
+      // the door's own wiring, from the config file to the passport check: a door that read the binding and dropped it would pass the test above
+      const other = generateKeyPair();
+      const dir = mkdtempSync(join(tmpdir(), "agent-custody-registry-wired-"));
+      const wired = buildDoorFixture(dir, origin.url, { trustedPrincipalKeys: [], webBotAuth: { authorities: [AUTHORITY] }, trustedRegistryKeys: [{ key: "keys/registry.pub", registry: PORTAL_URL }, { key: "keys/other.pub", registry: "https://registry-b.example/" }] });
+      writeFileSync(join(dir, "keys", "registry.pub"), registryKey.publicKey.export({ type: "spki", format: "pem" }) as string);
+      writeFileSync(join(dir, "keys", "other.pub"), other.publicKey.export({ type: "spki", format: "pem" }) as string);
+      writeFileSync(join(dir, "policy.cedar"), `permit(principal, action == Action::"refund", resource) when { context.facts.arrival.class == "verified" };\n`);
+      const wiredHost = await createDoorHost(loadDoorConfig(wired.configFile));
+      const wiredDoor = await serveDoor(wiredHost, { port: 0, log: () => {} });
+      try {
+        const through = (headers: Record<string, string>) => new Promise<Arrival>((resolve, reject) => {
+          const u = new URL(wiredDoor.url);
+          const req = httpRequest({ host: u.hostname, port: u.port, method: "POST", path: "/refunds", headers: { host: AUTHORITY, "content-type": "application/json", ...headers } }, (res) => {
+            res.resume();
+            res.on("end", () => {
+              const bundle = JSON.parse(readFileSync(join(wired.receiptsDir, `${res.headers[RECEIPT_HEADER]}.json`), "utf8")) as ReceiptBundle;
+              resolve((JSON.parse(Buffer.from(bundle.envelope.payload, "base64").toString("utf8")) as ReceiptStatement).predicate.facts[ARRIVAL_FACT]!.value as Arrival);
+            });
+          });
+          req.on("error", reject);
+          req.end(BODY(100));
+        });
+        const entry: AgentEntry = { id: agentId, owner: "india", name: "India shopper", contact: "x@india.example", capabilities: ["refunds"], agent: didKeyOf(agent.publicKey), createdAt: new Date().toISOString(), expiresAt: inDays(30), revokedAt: null };
+        const forged = await through(signedBy(agent, { passport: await issuePassport(localSigner(other), PORTAL_URL, entry, 3600) }));
+        expect(forged).toMatchObject({ class: "claimed", passport: { outcome: "invalid", error: expect.stringContaining(`trusted for https://registry-b.example/ only`) } });
+        expect((await through(signedBy(agent))).passport).toMatchObject({ outcome: "verified", registry: PORTAL_URL });
+      } finally {
+        await wiredDoor.close();
+        await wiredHost.close();
+      }
+    });
+
     it("reads a bound registry key from the door config, and check warns about keys bound to no URL", () => {
       const dir = mkdtempSync(join(tmpdir(), "agent-custody-registry-bound-"));
       const bound2 = buildDoorFixture(dir, origin.url, { webBotAuth: { authorities: [AUTHORITY] }, trustedRegistryKeys: [{ key: "keys/principal.pub", registry: PORTAL_URL }, { key: "keys/door.pub", registry: "https://other.example/" }] });
@@ -523,7 +556,13 @@ when {
       expect(checkDoorConfig(mixed.configFile).find((f) => f.check === "registry keys" && f.level === "warn")?.message).toContain("1 of 2 registry keys are bound to no registry URL");
       const one = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-registry-one-")), origin.url, { webBotAuth: { authorities: [AUTHORITY] }, trustedRegistryKeys: ["keys/principal.pub"] });
       expect(checkDoorConfig(one.configFile).filter((f) => f.check === "registry keys" && f.level === "warn")).toEqual([]);
-      expect(() => loadDoorConfig(buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-registry-badurl-")), origin.url, { trustedRegistryKeys: [{ key: "keys/principal.pub", registry: "not a url" }] }).configFile)).toThrow();
+      for (const bad of [{ key: "keys/principal.pub", registry: "not a url" }, { key: "keys/principal.pub", registry: "mailto:ops@registry.example" }, { key: "", registry: PORTAL_URL }, ""]) {
+        expect(() => loadDoorConfig(buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-registry-bad-")), origin.url, { trustedRegistryKeys: [bad] }).configFile), JSON.stringify(bad)).toThrow();
+      }
+      // one key for two registries cannot both hold: check says so, and the door does not start
+      const twice = buildDoorFixture(mkdtempSync(join(tmpdir(), "agent-custody-registry-twice-")), origin.url, { webBotAuth: { authorities: [AUTHORITY] }, trustedRegistryKeys: [{ key: "keys/principal.pub", registry: PORTAL_URL }, { key: "keys/principal.pub", registry: "https://other.example/" }] });
+      expect(checkDoorConfig(twice.configFile).find((f) => f.check === "registry keys" && f.level === "error")?.message).toContain("is listed twice");
+      return expect(createDoorHost(loadDoorConfig(twice.configFile))).rejects.toThrow("is listed twice");
     });
 
     it("records a passport as unchecked at a door that trusts no registry", () => {

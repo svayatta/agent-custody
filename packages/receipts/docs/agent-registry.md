@@ -135,7 +135,7 @@ Put the registry's public key in a file, list it in `trustedRegistryKeys` with t
 
 A key bound to a registry admits only passports that name that registry, in any spelling of its URL; a passport it signed that names another registry is `invalid`. A registry writes its own URL into its passports, so without the binding a door that trusts two registries lets either one vouch for the other's agents. A bare path, `"keys/registry.pub"`, is still accepted and trusts the key for any registry; `agent-custody check` warns when more than one registry key is trusted and any is bare.
 
-The door refuses to start with `trustedRegistryKeys` and no `webBotAuth`. In a Worker the keys are the `TRUSTED_REGISTRY_KEYS` variable: SPKI PEM keys, each trusted for any registry, or a JSON list of `{ "publicKeyPem", "registry" }`, the `keys` of the key document with the registry's URL added to each.
+The door refuses to start with `trustedRegistryKeys` and no `webBotAuth`. In a Worker the keys are the `TRUSTED_REGISTRY_KEYS` variable: SPKI PEM keys, each trusted for any registry, or a JSON list of `{ "publicKeyPem", "registry" }`, the `keys` of the key document with the registry's URL added to each. In the list, `registry` is required, and a JSON object, such as the whole key document, is refused: its key would otherwise be read bare. One key listed twice, for two registries or bound and also bare, stops the door at start.
 
 The agent sends the passport as base64url JSON in `X-Agent-Custody-Passport`, and signs the request as for [Web Bot Auth](door.md#a-did-key-signature): RFC 9421, Ed25519, `tag="web-bot-auth"`, a nonce, and `keyid` set to its did:key. For the passport to count, the signature also covers what binds it to this one request:
 
