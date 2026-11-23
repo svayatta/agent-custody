@@ -65,6 +65,28 @@ describe("admission lists", () => {
     expect(spelled({ agent: "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH" }).match(verified({ subject: "did:key:z6mkpthr8vnsbxyaawhut2geadd9jswubv8xroanwwsdvkth" }))).toEqual([]);
   });
 
+  it("names an agent at one version or a range of versions, and never an arrival whose passport carries none", () => {
+    const ranged = compileAdmissionLists(JSON.stringify({ lists: {
+      exact: [{ registry: REGISTRY, agentId: "agt_00000000000000a1", version: "1.4.0" }],
+      ones: [{ registry: REGISTRY, agentId: "agt_00000000000000a1", versions: { from: "1.2.0", below: "2.0.0" } }],
+      old: [{ registry: REGISTRY, agentId: "agt_00000000000000a1", versions: { below: "1.0.0" } }],
+      any: [{ registry: REGISTRY, agentId: "agt_00000000000000a1" }],
+    } }));
+    const at = (agentVersion?: string) => ranged.match(verified({ passport: { outcome: "verified", registry: REGISTRY, agentId: "agt_00000000000000a1", ...(agentVersion ? { agentVersion } : {}) } }));
+    expect(at("1.4.0")).toEqual(["any", "exact", "ones"]);
+    expect(at("1.4.1")).toEqual(["any", "ones"]);
+    expect(at("1.10.0")).toEqual(["any", "ones"]); // numbers, not strings: 1.10 is above 1.2
+    expect(at("2.0.0")).toEqual(["any"]);
+    expect(at("0.9.9")).toEqual(["any", "old"]);
+    expect(at()).toEqual(["any"]);
+    for (const [bad, why] of [
+      [{ version: "1.4" }, "MAJOR.MINOR.PATCH"],
+      [{ versions: {} }, "versions needs from, below, or both"],
+      [{ versions: { from: "2.0.0", below: "1.0.0" } }, "from must be below below"],
+      [{ version: "1.0.0", versions: { from: "1.0.0" } }, "give version or versions, not both"],
+    ] as const) expect(() => compileAdmissionLists(JSON.stringify({ lists: { x: [{ registry: REGISTRY, agentId: "agt_00000000000000a1", ...bad }] } })), why).toThrow(why);
+  });
+
   it("puts nothing the door did not check on a list", () => {
     expect(lists.match({ class: "claimed", subject: "https://crawler.example" })).toEqual([]);
     expect(lists.match({ class: "unknown", subject: "unknown" })).toEqual([]);
@@ -173,6 +195,26 @@ when { context.facts.arrival has admission && context.facts.arrival.admission.li
   it("does not put a copied passport's agent on its lists", async () => {
     const r = await send(signedBy(generateKeyPair(), partner.passport));
     expect(r).toMatchObject({ status: 403, arrival: { class: "claimed", passport: { outcome: "wrong-sender" }, admission: { lists: [] } }, ok: true });
+  });
+
+  it("admits an agent at the version its list names, and at the next version records the version and that no list named it", async () => {
+    // svayatta/pm#79's done-when: the site admits version 1.4.0; the agent's owner ships 1.5.0
+    const key = generateKeyPair();
+    const entry: AgentEntry = { id: "agt_00000000000000d4", owner: "carted", name: "versioned agent", contact: "agents@carted.example", capabilities: ["refunds"], agent: didKeyOf(key.publicKey), createdAt: new Date().toISOString(), expiresAt: inDays(30), revokedAt: null, endpoints: ["api.stripe.com", "https://mcp.carted.example/mcp"] };
+    const before = readFileSync(listsFile(), "utf8");
+    const lists = JSON.parse(before) as { lists: Record<string, unknown[]> };
+    lists.lists.partners!.push({ registry: REGISTRY, agentId: entry.id, version: "1.4.0" });
+    writeLists(lists);
+    try {
+      const at = (version: string) => issuePassport(signer, REGISTRY, { ...entry, version }, 3600);
+      const known = await send(signedBy(key, await at("1.4.0")));
+      expect(known).toMatchObject({ status: 200, ok: true, arrival: { class: "verified", passport: { outcome: "verified", agentVersion: "1.4.0", endpoints: ["api.stripe.com", "https://mcp.carted.example/mcp"] }, admission: { lists: ["partners"] } } });
+      const next = await send(signedBy(key, await at("1.5.0")));
+      expect(next).toMatchObject({ status: 403, ok: true, arrival: { class: "verified", passport: { outcome: "verified", agentVersion: "1.5.0" }, admission: { lists: [] } } });
+      expect(next.st.predicate.policy?.decision).toBe("deny");
+    } finally {
+      writeLists(before);
+    }
   });
 
   it("reads a changed lists file on the next arrival, and keeps the lists in force when the file breaks", async () => {

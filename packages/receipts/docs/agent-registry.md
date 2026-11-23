@@ -16,6 +16,8 @@ A passport is a DSSE envelope of type `application/vnd.agent-custody.passport+js
   "owner": "carted",
   "contact": "agents@carted.example",
   "capabilities": ["refunds"],
+  "agentVersion": "1.4.0",
+  "endpoints": ["api.stripe.com", "https://mcp.carted.example/mcp"],
   "issuedAt": "2026-11-23T09:00:00.000Z",
   "expiresAt": "2026-11-24T09:00:00.000Z"
 }
@@ -24,6 +26,8 @@ A passport is a DSSE envelope of type `application/vnd.agent-custody.passport+js
 - `agent` is the agent's own Ed25519 key, written as a [did:key](https://w3c-ccg.github.io/did-key-spec/). The agent holds the private key; the registry never sees it.
 - `owner` is the portal tenant that registered the agent. `contact` is how a site reaches the agent's operator.
 - `capabilities` are the organisation's own words for what the agent does: lowercase letters, digits, and `. _ : -`, at most 32. The registry does not check them. A site's policy decides what they are worth.
+- `agentVersion`, when the owner registered one: the agent's version, `MAJOR.MINOR.PATCH`, numbers only. `version` is the passport format's own.
+- `endpoints`, when the owner declared any: the tool endpoints the agent says it calls, host names or https or wss URLs (an MCP server), at most 32. They are a claim: the registry does not check them, and only an [egress witness](egress.md) on the agent's own host can show what it really calls.
 - A passport lives for a day by default (`--passport-seconds`, from 60 seconds to 7 days), and never past the registration's own expiry.
 - `erc8004`, when the agent is [linked to an ERC-8004 identity](#link-an-erc-8004-identity): `{ agentRegistry, agentId, owner, block }`, as the registry last checked it on chain.
 
@@ -57,6 +61,17 @@ The proof is the key's Ed25519 signature over the registry's URL, the tenant, an
 The answer has the registry entry and a first passport. Every key belongs to one live agent, which the database enforces, and a tenant has at most 100 agents that are not revoked. An expired agent counts until it is revoked. `POST /api/agents/<id>` changes the name, contact, capabilities, key, or expiry, and `POST /api/agents/<id>/revoke` revokes the agent for good. Each is in the tenant's audit trail. The [hosted reference](../../../site/reference/hosted.md) lists every route.
 
 In code, `didKeyOf(publicKey)` gives a key's did:key.
+
+### Versions and declared endpoints
+
+A registration, and a change to one, may carry `version` (`MAJOR.MINOR.PATCH`, or `null` for none) and `endpoints` (the tool endpoints the agent says it calls). The entry keeps the agent's history: each change of version, and each key rotation, closes the stretch the agent was in, and the entry records it, newest first, as `{ version, agent, from, to }`. `replaces` is the version the current one replaced. A change of name, contact, capabilities, or expiry leaves the history alone. The entry keeps the last 100 stretches.
+
+```bash
+curl -b session.txt -H 'content-type: application/json' https://app.example/api/agents/agt_5325ae63b111bdcb -d '{ "version": "1.5.0" }'
+# { "agent": { …, "version": "1.5.0", "replaces": "1.4.0", "history": [ { "version": "1.4.0", "agent": "did:key:z6Mk…", "from": "…", "to": "…" } ] }, "passport": … }
+```
+
+A site that admits one version of an agent names it in its [admission list](admission-lists.md#write-the-lists) with `version` or `versions`. When the agent arrives at a later version, its receipt records `passport.agentVersion` and that no list named it.
 
 ## Link an ERC-8004 identity
 
@@ -170,6 +185,7 @@ The receipt names the agent as `observed`, never `attested`: `agent: { id: "did:
 
 - **Revocation reaches the door when the passport expires.** Revoking an agent stops new passports. The passport the agent already holds works until its `expiresAt`, because the door asks the registry nothing. `--passport-seconds` is that delay; shorten it if a day is too long.
 - **A key rotation is the same.** A passport for the old key works until it expires.
+- **Declared endpoints are the owner's claim, and so is the version.** The registry records them and signs that the owner said so. An [egress witness](egress.md) on the agent's own host is what shows the endpoints it really calls.
 - **Capabilities are the owner's claim.** The registry records what the organisation says the agent does, and signs that it said so. It does not check it.
 - **A passport says who, not on whose behalf.** It does not name a principal or a route. For that, the agent presents a [grant](door.md#presenting-a-passport) from a principal the site trusts, and the door decides by the grant.
 - **Who a site admits is the site's own list.** The registry answers a search by capability (`GET /registry/agents?capability=`), and a site lists the agents it admits or blocks in its door's [admission lists](admission-lists.md).

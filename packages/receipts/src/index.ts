@@ -72,7 +72,7 @@ export * from "./operations.ts";
 export * from "./crypto.ts";
 export * from "./delegation.ts";
 export { base58btcDecode, base58btcEncode, DID_KEY_PREFIX, didKeyOf, publicKeyFromDidKey } from "./did-key.ts";
-export { DEFAULT_PASSPORT_SECONDS, MAX_PASSPORT_HEADER, MAX_PASSPORT_SECONDS, PASSPORT_HEADER, PASSPORT_TYPE, PassportSchema, REGISTRY_DOCUMENT_PATH, issuePassport, parsePassportHeader, passportDigest, passportHeader, registrationMessage, registrationProof, verifyPassport } from "./registry.ts";
+export { AGENT_VERSION, compareVersions, DEFAULT_PASSPORT_SECONDS, EndpointSchema, MAX_AGENT_HISTORY, MAX_PASSPORT_HEADER, MAX_PASSPORT_SECONDS, PASSPORT_HEADER, PASSPORT_TYPE, PassportSchema, REGISTRY_DOCUMENT_PATH, issuePassport, parsePassportHeader, passportDigest, passportHeader, registrationMessage, registrationProof, verifyPassport } from "./registry.ts";
 export type { AgentEntry, Passport, PassportVerifyResult } from "./registry.ts";
 export { AdmissionListsSchema, canonicalAgent, canonicalRegistry, compileAdmissionLists, LIST_NAME, MAX_LIST_ENTRIES, MAX_LISTS } from "./admission.ts";
 export type { AdmissionEntry, AdmissionLists, ArrivalIdentity } from "./admission.ts";

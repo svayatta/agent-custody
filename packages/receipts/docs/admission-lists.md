@@ -44,9 +44,11 @@ A list name is lowercase letters, digits, and `. _ -`, at most 64 characters. Th
 
 | entry | matches a `verified` arrival | survives a key rotation |
 | --- | --- | --- |
-| `{ "registry", "agentId" }` | whose [passport](agent-registry.md#admit-registered-agents-at-a-door) is `verified`, from that registry, for that agent id | yes |
+| `{ "registry", "agentId", "version"? \| "versions"? }` | whose [passport](agent-registry.md#admit-registered-agents-at-a-door) is `verified`, from that registry, for that agent id | yes |
 | `{ "erc8004": { "agentRegistry", "agentId" } }` | whose `verified` passport carries that [ERC-8004 link](agent-registry.md#link-an-erc-8004-identity), which the registry checked on chain | yes, while the token's file names the new key |
 | `{ "agent" }` | whose `subject` is that value: a did:key, a Web Bot Auth signature agent's origin, or the agent a trusted grant names | no, for a did:key |
+
+A registry entry may also name the agent's versions: `"version": "1.4.0"` for one, or `"versions": { "from": "1.2.0", "below": "2.0.0" }` for a range (`from` included, `below` not, either may be left out). Versions compare as numbers, so 1.10.0 is above 1.2.0. An entry with a version matches only a `verified` passport that carries a version in it; an agent whose owner registered no version is not on the list by that entry. When the agent arrives at a version the list does not name, the receipt shows `passport.agentVersion` and lists without that name, so the site sees the change before it admits it.
 
 The registry's URL is part of a registry entry because an agent id is unique only within one registry. A URL or origin is compared in one spelling, so `https://APP.example.test:443` and `https://app.example.test/` name the same registry, and `https://Crawler.Example/` the agent `https://crawler.example`; a did:key is compared exactly.
 

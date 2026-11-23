@@ -1607,7 +1607,7 @@ document.getElementById("f").onsubmit = async (e) => {
           if (req.method === "GET" && !id) return json(200, { agents: (await agents.list(tenantId)).map((e) => publicEntry(e)) });
           if (req.method === "POST" && !id) {
             const entry = await agents.register(tenantId, await jsonBody(), Date.now(), checker);
-            await o.tenancy.record(actor, "agent.register", tenantId, { agent: entry.id, key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt, ...(entry.erc8004 ? { erc8004: `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` } : {}) });
+            await o.tenancy.record(actor, "agent.register", tenantId, { agent: entry.id, key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt, ...(entry.version ? { version: entry.version } : {}), ...(entry.erc8004 ? { erc8004: `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` } : {}) });
             return json(200, { agent: publicEntry(entry), passport: await passportFor(entry) });
           }
           if (req.method === "POST" && id && revokeAgent) {
@@ -1620,7 +1620,7 @@ document.getElementById("f").onsubmit = async (e) => {
             const b = await jsonBody();
             const entry = await agents.update(tenantId, id, b, Date.now(), checker);
             if (!entry) return json(404, { error: "no active agent with this id belongs to this tenant" });
-            await o.tenancy.record(actor, "agent.update", tenantId, { agent: entry.id, changed: Object.keys(b).sort(), key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt, erc8004: entry.erc8004 ? `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` : null });
+            await o.tenancy.record(actor, "agent.update", tenantId, { agent: entry.id, changed: Object.keys(b).sort(), key: entry.agent, capabilities: entry.capabilities, ...(entry.version ? { version: entry.version } : {}), expiresAt: entry.expiresAt, erc8004: entry.erc8004 ? `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` : null });
             return json(200, { agent: publicEntry(entry), ...(agentStatus(entry) === "active" ? { passport: await passportFor(entry) } : {}) });
           }
         } catch (e) {

@@ -260,6 +260,10 @@ export interface ArrivalPassport {
   name?: string;
   owner?: string;
   capabilities?: string[];
+  /** the agent's version, as its owner registered it */
+  agentVersion?: string;
+  /** the tool endpoints its owner says it calls: a claim the registry passed on, not a fact the door checked */
+  endpoints?: string[];
   /** the agent's ERC-8004 identity, as the registry checked it against the chain */
   erc8004?: { agentRegistry: string; agentId: string; owner: string; block: number };
   expiresAt?: string;
@@ -308,7 +312,7 @@ function checkPassport(req: DoorRequest, method: string, registry: PublicKeyRef[
   const missing = [...PASSPORT_COVERED, ...(writes ? ["content-digest"] : [])].filter((c) => !signer.covered?.includes(c));
   if (missing.length) return { outcome: "unbound", error: `the signature does not cover ${missing.join(", ")}, which bind the passport to this request`, ...named };
   if (writes && !contentDigest) return { outcome: "unbound", error: "the Content-Digest the signature covers does not match the body the door read, or the door did not read the body" };
-  return { outcome: "verified", ...named, registryKeyid: v.keyid, agentId: p.agentId, name: p.name, owner: p.owner, capabilities: p.capabilities, ...(p.erc8004 ? { erc8004: p.erc8004 } : {}), expiresAt: p.expiresAt, digest: v.digest, envelope: env };
+  return { outcome: "verified", ...named, registryKeyid: v.keyid, agentId: p.agentId, name: p.name, owner: p.owner, capabilities: p.capabilities, ...(p.agentVersion ? { agentVersion: p.agentVersion } : {}), ...(p.endpoints ? { endpoints: p.endpoints } : {}), ...(p.erc8004 ? { erc8004: p.erc8004 } : {}), expiresAt: p.expiresAt, digest: v.digest, envelope: env };
 }
 
 export interface Classified {

@@ -249,6 +249,48 @@ describe("the agent registry on the portal", () => {
     await expect(store.register("hotel", { name: "one more", contact: "h@hotel.example", ...registrationProof(generateKeyPair(), PORTAL_URL, "hotel"), expiresAt: inDays(10) })).rejects.toThrow("at most 100 agents");
   }, 60_000);
 
+  it("keeps an agent's versions and keys as history, and its passport carries the version and the declared endpoints", async () => {
+    const call = await owner("lima");
+    const first = generateKeyPair();
+    const r = await call("POST", "/api/agents", { name: "Lima agent", contact: "l@lima.example", capabilities: ["orders"], ...keyed("lima", first), expiresAt: inDays(30), version: "1.4.0", endpoints: ["api.stripe.com", "https://mcp.lima.example/mcp"] });
+    expect(r.status).toBe(200);
+    expect(r.json.agent).toMatchObject({ version: "1.4.0", replaces: null, endpoints: ["api.stripe.com", "https://mcp.lima.example/mcp"], history: [] });
+    const passportOf = (env: Envelope) => verifyPassport(env, [registryKey], new Date().toISOString());
+    expect(passportOf(r.json.passport)).toMatchObject({ ok: true, passport: { agentVersion: "1.4.0", endpoints: ["api.stripe.com", "https://mcp.lima.example/mcp"] } });
+    const id = r.json.agent.id as string;
+
+    // a change that is not a new version or key leaves the history alone
+    expect((await call("POST", `/api/agents/${id}`, { name: "Lima shopper" })).json.agent.history).toEqual([]);
+    // a new version: the one it replaces is kept, with when it was in force
+    const v15 = await call("POST", `/api/agents/${id}`, { version: "1.5.0" });
+    expect(v15.json.agent).toMatchObject({ version: "1.5.0", replaces: "1.4.0", history: [{ version: "1.4.0", agent: didKeyOf(first.publicKey), from: r.json.agent.versionSince, to: v15.json.agent.versionSince }] });
+    expect(passportOf(v15.json.passport)).toMatchObject({ ok: true, passport: { agentVersion: "1.5.0" } });
+    // a key rotation at the same version is part of the history too
+    const second = generateKeyPair();
+    const rotated = await call("POST", `/api/agents/${id}`, keyed("lima", second));
+    expect(rotated.json.agent.history.map((h: { version: string; agent: string }) => [h.version, h.agent])).toEqual([["1.5.0", didKeyOf(first.publicKey)], ["1.4.0", didKeyOf(first.publicKey)]]);
+    // the public entry shows it all
+    expect((await open(`/registry/agents/${id}`)).json).toMatchObject({ version: "1.5.0", replaces: "1.5.0", agent: didKeyOf(second.publicKey), history: [{ version: "1.5.0" }, { version: "1.4.0" }] });
+    // no version: the passport carries none, and the history records the version it had
+    const none = await call("POST", `/api/agents/${id}`, { version: null, endpoints: [] });
+    expect(none.json.agent).toMatchObject({ version: null, endpoints: [], replaces: "1.5.0" });
+    const p = passportOf(none.json.passport);
+    expect(p.ok && p.passport.agentVersion).toBeUndefined();
+    expect(p.ok && p.passport.endpoints).toBeUndefined();
+
+    for (const [bad, why] of [
+      [{ version: "1.5" }, "version is MAJOR.MINOR.PATCH"],
+      [{ version: "01.0.0" }, "version is MAJOR.MINOR.PATCH"],
+      [{ endpoints: ["http://plain.example"] }, "an endpoint is"],
+      [{ endpoints: ["https://user:pw@mcp.example"] }, "an endpoint is"],
+      [{ endpoints: ["API.STRIPE.COM"] }, "an endpoint is"],
+    ] as const) {
+      const res = await call("POST", `/api/agents/${id}`, bad);
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(res.json.error, JSON.stringify(bad)).toContain(why);
+    }
+  });
+
   describe("and a door that holds only the registry's key", () => {
     let origin: Origin;
     let fx: DoorFixture;
