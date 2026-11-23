@@ -153,6 +153,21 @@ function baseEnv(over: Partial<DoorWorkerEnv> = {}): DoorWorkerEnv {
 }
 
 describe("the Worker's admission lists", () => {
+  it("bind each registry key to its registry when TRUSTED_REGISTRY_KEYS is a list, and bind none when it is PEM", () => {
+    const pkcs8 = generateKeyPair().privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+    const a = generateKeyPair();
+    const b = generateKeyPair();
+    const pem = (k: typeof a) => k.publicKey.export({ type: "spki", format: "pem" }) as string;
+    // the keys of a registry's key document, each with the registry it speaks for; extra fields such as keyid are kept out of the way
+    const bound = workerDoorIO(baseEnv({ DOOR_KEY: pkcs8, TRUSTED_REGISTRY_KEYS: JSON.stringify([{ publicKeyPem: pem(a), keyid: a.keyid, registry: "https://registry-a.example/" }, { publicKeyPem: pem(b) }]) }), fetch);
+    expect(bound.trustedRegistryKeys?.map((k) => k.keyid)).toEqual([a.keyid, b.keyid]);
+    expect(bound.registryUrls).toEqual({ [a.keyid]: "https://registry-a.example/" });
+    const plain = workerDoorIO(baseEnv({ DOOR_KEY: pkcs8, TRUSTED_REGISTRY_KEYS: pem(a) + pem(b) }), fetch);
+    expect(plain.trustedRegistryKeys?.map((k) => k.keyid)).toEqual([a.keyid, b.keyid]);
+    expect(plain.registryUrls).toEqual({});
+    expect(() => workerDoorIO(baseEnv({ DOOR_KEY: pkcs8, TRUSTED_REGISTRY_KEYS: JSON.stringify([{ publicKeyPem: pem(a), registry: "not a url" }]) }), fetch)).toThrow("TRUSTED_REGISTRY_KEYS is not a list of { publicKeyPem, registry }");
+  });
+
   it("come from ADMISSION_LISTS, and a Worker without the variable has none", () => {
     const pkcs8 = generateKeyPair().privateKey.export({ type: "pkcs8", format: "pem" }) as string;
     const lists = JSON.stringify({ lists: { partners: [{ agent: "https://crawler.example" }] } });

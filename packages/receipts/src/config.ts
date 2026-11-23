@@ -274,7 +274,7 @@ export const DoorConfigSchema = z.object({
   /** principal keys whose grants the door accepts as a passport: an arrival carrying one of their grants, in scope for its route, is `verified` */
   trustedPrincipalKeys: z.array(z.string()).default([]),
   /** agent registry keys (the key document at the registry's /.well-known/agent-custody-registry.json): an arrival that presents a passport one of them signed, and signs the request with the did:key the passport names, is `verified`. Needs `webBotAuth`, which checks the signature */
-  trustedRegistryKeys: z.array(z.string()).default([]),
+  trustedRegistryKeys: z.array(z.union([z.string(), z.object({ key: z.string(), registry: z.string().url() }).strict()])).default([]),
   /** a JSON file listing digests of revoked grant envelopes, the same file and format as the gateway's (`agent-custody revoke --config door.json` appends to it); re-read whenever it changes, checked on every arrival. A grant it lists, or one whose chain it lists, is `revoked` */
   revokedGrants: z.string().min(1).optional(),
   /** a JSON file of the site's named admission lists (`{ "lists": { "partners": [ { "registry", "agentId" } | { "erc8004": { "agentRegistry", "agentId" } } | { "agent" } ] } }`); re-read whenever it changes. The names of the lists a verified arrival's agent is on are `arrival.admission.lists` */
@@ -387,6 +387,9 @@ export const DoorConfigSchema = z.object({
   .refine((c) => !c.log || !!c.log.keys?.length, { message: "a remote log needs log.keys: the log's public key files, pinned, to check its answer before a request is relayed" });
 export type DoorConfig = z.infer<typeof DoorConfigSchema>;
 
+/** A trusted registry key's file and, when the entry binds it, the one registry URL its passports may name. */
+export const registryKeyEntry = (e: DoorConfig["trustedRegistryKeys"][number]): { key: string; registry?: string } => (typeof e === "string" ? { key: e } : e);
+
 /**
  * The egress witness: a forward proxy in the agent's network path for every connection that does not go to the gateway.
  * Each agent proves who it is with its own proxy credential (`Proxy-Authorization: Basic`, id and secret); the secret
@@ -436,7 +439,7 @@ export function loadDoorConfig(path: string): DoorConfig {
     ...cfg,
     identity: { keyFile: r(cfg.identity.keyFile) },
     trustedPrincipalKeys: cfg.trustedPrincipalKeys.map(r),
-    trustedRegistryKeys: cfg.trustedRegistryKeys.map(r),
+    trustedRegistryKeys: cfg.trustedRegistryKeys.map((e) => (typeof e === "string" ? r(e) : { ...e, key: r(e.key) })),
     ...(cfg.revokedGrants ? { revokedGrants: r(cfg.revokedGrants) } : {}),
     ...(cfg.admissionLists ? { admissionLists: r(cfg.admissionLists) } : {}),
     policyFile: r(cfg.policyFile),

@@ -12,7 +12,7 @@ import { DID_KEY_PREFIX } from "./did-key.ts";
 import { decodeDelegation, delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { parseGrantHeader, GRANT_HEADER } from "./grant-header.ts";
 import { MAX_PASSPORT_HEADER, PASSPORT_HEADER, parsePassportHeader, passportSignedBy, verifyPassport } from "./passport.ts";
-import { compileAdmissionLists, type AdmissionLists } from "./admission.ts";
+import { canonicalRegistry, compileAdmissionLists, type AdmissionLists } from "./admission.ts";
 import type { Issuer } from "./issue.ts";
 import { ReceiptPending, type FlushResult } from "./receipt-pending.ts";
 import { contentDigestMatches, createWebBotAuthVerifier, normalizeAuthority, type NonceStore, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
@@ -278,6 +278,11 @@ export interface ArrivalAdmission {
   digest: string;
 }
 
+/** Trusted registry keys for the door's IO: the keys, and the URL that each bound key's passports may name, by keyid. */
+export function registryKeysOf(keys: { ref: PublicKeyRef; registry?: string }[]): { trustedRegistryKeys: PublicKeyRef[]; registryUrls: Record<string, string> } {
+  return { trustedRegistryKeys: keys.map((k) => k.ref), registryUrls: Object.fromEntries(keys.filter((k) => k.registry !== undefined).map((k) => [k.ref.keyid, k.registry!])) };
+}
+
 /** The components a signature must cover for the passport it carries to admit its agent. */
 export const PASSPORT_COVERED = ["@method", "@path", "@query", PASSPORT_HEADER] as const;
 
@@ -285,7 +290,7 @@ export const PASSPORT_COVERED = ["@method", "@path", "@query", PASSPORT_HEADER] 
  * The passport check for an arrival. `signer` is the did:key whose signature on this request the door verified, with
  * the components it covered; `contentDigest` is true when a `Content-Digest` field matched the body the door read.
  */
-function checkPassport(req: DoorRequest, method: string, registry: PublicKeyRef[] | undefined, at: string, signer: { agent: string; covered?: string[] } | undefined, contentDigest: boolean | undefined): ArrivalPassport | undefined {
+function checkPassport(req: DoorRequest, method: string, registry: PublicKeyRef[] | undefined, at: string, signer: { agent: string; covered?: string[] } | undefined, contentDigest: boolean | undefined, registryUrls: Record<string, string> = {}): ArrivalPassport | undefined {
   const raw = req.headers[PASSPORT_HEADER];
   if (raw === undefined) return undefined;
   const env = parsePassportHeader(req.headers);
@@ -294,6 +299,9 @@ function checkPassport(req: DoorRequest, method: string, registry: PublicKeyRef[
   const v = verifyPassport(env, registry, at);
   if (!v.ok) return { outcome: "invalid", error: v.error };
   const p = v.passport;
+  // a registry writes its own URL into the passports it signs; a key bound to one URL must not vouch for another registry's agents
+  const bound = registryUrls[v.keyid];
+  if (bound !== undefined && canonicalRegistry(p.registry) !== canonicalRegistry(bound)) return { outcome: "invalid", error: `the passport names the registry ${p.registry}, and the key ${v.keyid} that signed it is trusted for ${bound} only` };
   const named = { registry: p.registry, agent: p.agent };
   if (signer?.agent !== p.agent) return { outcome: "wrong-sender", error: signer ? `the passport names ${p.agent}, and the request is signed by ${signer.agent}` : `the passport names ${p.agent}, and the request carries no signature by that key that the door verified`, ...named };
   const writes = !SAFE_METHODS.has(method);
@@ -474,7 +482,7 @@ export function signedRequestOf(req: DoorRequest): SignedRequest {
  * Without `signature`, a `Signature-Input` header is recorded as `unchecked`. `revoked`, when given, says why a grant
  * that verified is revoked (from its chain's digests, leaf first), or null when it is not; a revoked grant is `claimed`.
  */
-export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string, signature?: SignatureCheck, revoked?: (chainDigests: string[]) => string | null, registry?: PublicKeyRef[], contentDigest?: boolean): Classified {
+export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string, signature?: SignatureCheck, revoked?: (chainDigests: string[]) => string | null, registry?: PublicKeyRef[], contentDigest?: boolean, registryUrls?: Record<string, string>): Classified {
   const url = requestUrl(req);
   const method = (req.method ?? "GET").toUpperCase();
   const declaredRaw = req.headers[AGENT_HEADER];
@@ -485,7 +493,7 @@ export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route
   // only on the last line, with a verified grant for that did:key. Everywhere else it is invalid, so that no policy
   // takes it for a checked identity.
   const didSigner = signer?.agent.startsWith(DID_KEY_PREFIX) ? signer : undefined;
-  const passport = checkPassport(req, method, registry, at, didSigner ? { agent: didSigner.agent, ...(sig.outcome === "verified" && sig.covered ? { covered: sig.covered } : {}) } : undefined, contentDigest);
+  const passport = checkPassport(req, method, registry, at, didSigner ? { agent: didSigner.agent, ...(sig.outcome === "verified" && sig.covered ? { covered: sig.covered } : {}) } : undefined, contentDigest, registryUrls);
   const admitted = passport?.outcome === "verified";
   const norm = normalizePath(url.pathname);
   const baseOf = (s: SignatureCheck) => ({
@@ -645,6 +653,8 @@ export interface DoorIO {
   trustedPrincipalKeys: PublicKeyRef[];
   /** agent registry keys whose passports admit the did:key they name */
   trustedRegistryKeys?: PublicKeyRef[];
+  /** the one registry URL a registry key's passports may name, by the key's keyid; a key absent here may name any */
+  registryUrls?: Record<string, string>;
   /** the policy text, and a value that changes whenever the text may have; read on every arrival. Throws when it cannot be read: the policy in force stays */
   readPolicy(): { text: string; key: string };
   /** names the policy in messages: its file, or the variable it came from */
@@ -772,7 +782,7 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     const body = read === null ? Buffer.alloc(0) : "body" in read ? read.body : null;
     const digestField = req.headers["content-digest"];
     const contentDigest = read !== null && body !== null && typeof digestField === "string" && contentDigestMatches(digestField, body);
-    const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature, revoked, registry, contentDigest);
+    const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature, revoked, registry, contentDigest, io.registryUrls);
     const admission = currentAdmission();
     if (admission) arrival.admission = { lists: admission.match(arrival), digest: admission.digest };
     const checkedAgent = arrival.class === "verified";

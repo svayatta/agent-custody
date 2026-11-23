@@ -57,6 +57,7 @@ REPLACE WITH THE LOG'S PUBLIC KEY
 TRUSTED_PRINCIPAL_KEYS = ""
 # Agent registry keys, SPKI PEM, from the registry's /.well-known/agent-custody-registry.json. With them, an agent that
 # presents the registry's passport and signs with its did:key is verified; needs webBotAuth in DOOR_CONFIG. Empty: none.
+# To bind each key to the registry it speaks for, give a JSON list instead: [{ "publicKeyPem": "...", "registry": "https://..." }].
 TRUSTED_REGISTRY_KEYS = ""
 # The site's admission lists, the JSON of a door's admissionLists file: { "lists": { "partners": [ ... ] } }. Unset: no lists.
 # ADMISSION_LISTS = '{ "lists": {} }'

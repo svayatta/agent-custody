@@ -4,6 +4,7 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **Registry keys bound to their registry.** A `trustedRegistryKeys` entry may be `{ "key": "keys/registry.pub", "registry": "https://app.agent-custody.dev/" }`. A passport signed by a bound key that names any other registry (compared in one spelling) is `invalid`, so a door that trusts two registries no longer lets one vouch for the other's agents and put its own agent on the other's list entries. A bare path is still accepted and trusts the key for any registry; `agent-custody check` warns when more than one registry key is trusted and any is bare. In a Worker, `TRUSTED_REGISTRY_KEYS` may be a JSON list of `{ "publicKeyPem", "registry" }`, the `keys` of a registry's key document with its URL added. `classifyArrival` takes the bindings as a new last argument, `registryUrls`, by keyid; `DoorIO.registryUrls` carries them.
 ## 0.16.13 — 2026-11-23
 
 - **Agent registry passports: the nonce of a passport not yet valid is kept.** A door whose clock was behind its registry's refused a fresh passport and kept no nonce, so the same request could be sent again, and admitted, once the passport's window opened. The door now keeps the nonce for any passport a trusted registry key signed that has not expired. A token id that is not decimal in an ERC-8004 link is a `400` again, not a `500`.

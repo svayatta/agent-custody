@@ -3,9 +3,10 @@
 // variables; receipts go to an R2 bucket and to the log over HTTP; Web Bot Auth nonces go to a Durable Object. Built for workerd by scripts/build-door-worker.ts,
 // deployed from deploy/door/cloudflare-worker/.
 import { createPrivateKey, createPublicKey } from "node:crypto";
+import { z } from "zod";
 import { DoorConfigSchema, type DoorConfig } from "./config.ts";
 import { keyidOf, publicKeyFromPem, type KeyPair, type PublicKeyRef } from "./crypto.ts";
-import { createDoorCoreWith, DOOR_VERSION, jsonAnswer, readStream, RECEIPT_HEADER, relayedAnswer, relayToOrigin, type DoorAnswer, type DoorCore, type DoorIO, type DoorRequest, type ObservedFact, type OriginTarget } from "./door-core.ts";
+import { createDoorCoreWith, registryKeysOf, DOOR_VERSION, jsonAnswer, readStream, RECEIPT_HEADER, relayedAnswer, relayToOrigin, type DoorAnswer, type DoorCore, type DoorIO, type DoorRequest, type ObservedFact, type OriginTarget } from "./door-core.ts";
 import { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
 import type { TlsObservation } from "./door-signals.ts";
 import { httpLog } from "./log-http.ts";
@@ -108,6 +109,21 @@ const NOT_IN_A_WORKER: Record<string, string> = {
 /** Every SPKI PEM block in a variable. */
 export function pemKeys(text: string | undefined): PublicKeyRef[] {
   return [...(text ?? "").matchAll(/-----BEGIN PUBLIC KEY-----[\s\S]+?-----END PUBLIC KEY-----/g)].map((m) => publicKeyFromPem(m[0]));
+}
+
+const BoundRegistryKeysSchema = z.array(z.object({ publicKeyPem: z.string(), registry: z.string().url().optional() }).passthrough());
+
+/**
+ * The trusted registry keys: PEM public keys, each trusted for any registry URL, or a JSON list of
+ * `{ publicKeyPem, registry }`, the shape of the `keys` in a registry's key document, that binds each key to the one
+ * registry URL its passports may name.
+ */
+export function registryKeys(text: string | undefined): { trustedRegistryKeys: PublicKeyRef[]; registryUrls: Record<string, string> } {
+  const t = (text ?? "").trim();
+  if (!t.startsWith("[")) return registryKeysOf(pemKeys(t).map((ref) => ({ ref })));
+  const parsed = BoundRegistryKeysSchema.safeParse(JSON.parse(t));
+  if (!parsed.success) throw new Error(`TRUSTED_REGISTRY_KEYS is not a list of { publicKeyPem, registry }: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`);
+  return registryKeysOf(parsed.data.map((e) => ({ ref: publicKeyFromPem(e.publicKeyPem), ...(e.registry ? { registry: e.registry } : {}) })));
 }
 
 /**
@@ -221,7 +237,7 @@ export function workerDoorIO(env: DoorWorkerEnv, f: typeof fetch): DoorIO {
   return {
     key,
     trustedPrincipalKeys: pemKeys(env.TRUSTED_PRINCIPAL_KEYS),
-    trustedRegistryKeys: pemKeys(env.TRUSTED_REGISTRY_KEYS),
+    ...registryKeys(env.TRUSTED_REGISTRY_KEYS),
     readPolicy: () => ({ text: env.DOOR_POLICY, key: "DOOR_POLICY" }),
     policySource: "the DOOR_POLICY variable",
     ...(env.ADMISSION_LISTS ? { readAdmission: () => ({ text: env.ADMISSION_LISTS!, key: "ADMISSION_LISTS" }), admissionSource: "the ADMISSION_LISTS variable" } : {}),
