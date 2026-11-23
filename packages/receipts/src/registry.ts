@@ -191,6 +191,9 @@ export class RegistryStore {
       await this.client.query(`ALTER TABLE ${this.t} ADD COLUMN IF NOT EXISTS version_since TIMESTAMPTZ`);
       await this.client.query(`ALTER TABLE ${this.t} ADD COLUMN IF NOT EXISTS endpoints TEXT[] NOT NULL DEFAULT '{}'`);
       await this.client.query(`ALTER TABLE ${this.t} ADD COLUMN IF NOT EXISTS history TEXT`);
+      // a row from before these columns starts its first stretch at its registration, to the millisecond, as the entry
+      // reads it: the guard in update compares the stored value with the one it read, and NULL would never match
+      await this.client.query(`UPDATE ${this.t} SET version_since = date_trunc('milliseconds', created_at) WHERE version_since IS NULL`);
     })();
     return this.ready;
   }

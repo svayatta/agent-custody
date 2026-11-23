@@ -1057,7 +1057,12 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         if (!agentPath[2]) return json(200, publicEntry(entry));
         const status = agentStatus(entry);
         if (status !== "active") return json(410, { error: `the agent is ${status}; the registry issues it no passport`, status });
-        return json(200, await passportFor(entry));
+        try {
+          return json(200, await passportFor(entry));
+        } catch (e) {
+          if (e instanceof RegistryInputError) return json(400, { error: e.message });
+          throw e;
+        }
       }
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'" });

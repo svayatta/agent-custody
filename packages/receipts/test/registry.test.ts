@@ -334,6 +334,22 @@ describe("the agent registry on the portal", () => {
     expect(after.history).toHaveLength(1);
   });
 
+  it("lets every change through for an agent registered before versions existed, starting its history at its registration", async () => {
+    // the table as main created it, before the version columns: created_at from now(), with microseconds
+    const key = generateKeyPair();
+    await db.query(`CREATE TABLE legacy_agents (id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, contact TEXT NOT NULL, capabilities TEXT[] NOT NULL, agent TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, revoked_at TIMESTAMPTZ)`);
+    await db.query(`ALTER TABLE legacy_agents ADD COLUMN erc8004 TEXT`);
+    await db.query(`INSERT INTO legacy_agents (id, owner, name, contact, capabilities, agent, expires_at) VALUES ('agt_00000000000000e5', 'oscar', 'Oscar agent', 'o@oscar.example', '{orders}', $1, $2)`, [didKeyOf(key.publicKey), inDays(30)]);
+    const store = new RegistryStore(db, PORTAL_URL, "legacy_");
+    const before = (await store.get("agt_00000000000000e5"))!;
+    expect(before).toMatchObject({ version: null, endpoints: [], history: [], versionSince: before.createdAt });
+    expect(await store.update("oscar", before.id, { name: "Oscar shopper" })).toMatchObject({ name: "Oscar shopper", history: [] });
+    const versioned = await store.update("oscar", before.id, { version: "1.0.0" });
+    expect(versioned).toMatchObject({ version: "1.0.0", history: [{ version: null, agent: didKeyOf(key.publicKey), from: before.createdAt }] });
+    const next = generateKeyPair();
+    expect(await store.update("oscar", before.id, registrationProof(next, PORTAL_URL, "oscar"))).toMatchObject({ agent: didKeyOf(next.publicKey), history: [{ version: "1.0.0" }, { version: null }] });
+  });
+
   it("keeps the last hundred stretches of an agent's history, dropping the oldest", async () => {
     const store = new RegistryStore(db, PORTAL_URL, "lineage_");
     const e = await store.register("november", { name: "November agent", contact: "n@november.example", ...registrationProof(generateKeyPair(), PORTAL_URL, "november"), expiresAt: inDays(30), version: "1.0.0" });
