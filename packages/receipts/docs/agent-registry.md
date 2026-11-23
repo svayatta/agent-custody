@@ -41,15 +41,19 @@ agent-custody portal --db-env DATABASE_URL --secret-env PORTAL_SECRET --public-u
 
 The registry key is its own, never the log's. To keep it out of the process that faces the internet, hold it in a signer, `agent-custody signer --key keys/registry.key --port 8791 --token-env REGISTRY_SIGNER_TOKEN`, and start the portal with `--registry-signer-url http://signer:8791/ --registry-signer-token-env REGISTRY_SIGNER_TOKEN` instead.
 
-An admin of a tenant registers an agent with the agent's did:key, a contact, its capabilities, and an expiry at most 366 days out:
+An admin of a tenant registers an agent with the agent's did:key, a proof that whoever registers it holds that key, a contact, its capabilities, and an expiry at most 366 days out. The agent's operator makes the proof with the agent's private key:
 
 ```bash
+agent-custody registry proof --key agent.key --registry https://app.example/ --tenant carted
+# {"agent":"did:key:z6Mk…","proof":"…"}
 curl -b session.txt -H 'content-type: application/json' https://app.example/api/agents \
   -d '{ "name": "Carted shopper", "contact": "agents@carted.example", "capabilities": ["refunds"],
-        "agent": "did:key:z6Mk…", "expiresAt": "2027-02-21T00:00:00Z" }'
+        "agent": "did:key:z6Mk…", "proof": "…", "expiresAt": "2027-02-21T00:00:00Z" }'
 ```
 
-The answer has the registry entry and a first passport. Every key belongs to one agent, and a tenant has at most 100 active agents. `POST /api/agents/<id>` changes the name, contact, capabilities, key, or expiry, and `POST /api/agents/<id>/revoke` revokes the agent for good. Each is in the tenant's audit trail. The [hosted reference](../../../site/reference/hosted.md) lists every route.
+The proof is the key's Ed25519 signature over the registry's URL, the tenant, and the did:key (`registrationProof` in code), so it registers that key with that tenant at that registry only. Without it, a tenant could register a did:key it saw in a grant or a signature and choose that agent's capabilities. A key rotation needs the new key's proof.
+
+The answer has the registry entry and a first passport. Every key belongs to one live agent, which the database enforces, and a tenant has at most 100 active agents. `POST /api/agents/<id>` changes the name, contact, capabilities, key, or expiry, and `POST /api/agents/<id>/revoke` revokes the agent for good. Each is in the tenant's audit trail. The [hosted reference](../../../site/reference/hosted.md) lists every route.
 
 In code, `didKeyOf(publicKey)` gives a key's did:key.
 
@@ -76,18 +80,30 @@ Put the registry's public key in a file, list it in `trustedRegistryKeys`, and c
 
 The door refuses to start with `trustedRegistryKeys` and no `webBotAuth`. In a Worker the keys are the `TRUSTED_REGISTRY_KEYS` variable.
 
-The agent sends the passport as base64url JSON in `X-Agent-Custody-Passport`, and signs the request as for [Web Bot Auth](door.md#a-did-key-signature): RFC 9421, Ed25519, `tag="web-bot-auth"`, `@authority` covered, a nonce, and `keyid` set to its did:key. With no grant in the request, the door then records:
+The agent sends the passport as base64url JSON in `X-Agent-Custody-Passport`, and signs the request as for [Web Bot Auth](door.md#a-did-key-signature): RFC 9421, Ed25519, `tag="web-bot-auth"`, a nonce, and `keyid` set to its did:key. For the passport to count, the signature also covers what binds it to this one request:
+
+- `@authority`, `@method`, `@path`, and `x-agent-custody-passport`;
+- on any method but GET, HEAD, and OPTIONS, `content-digest`: a `Content-Digest` field (RFC 9530, `sha-256` or `sha-512`) that the door checks against the body it read.
+
+```
+Signature-Input: sig1=("@authority" "@method" "@path" "x-agent-custody-passport" "content-digest");created=…;expires=…;keyid="did:key:z6Mk…";alg="ed25519";nonce="…";tag="web-bot-auth"
+```
+
+A passport is public, so without that a signature the agent made for one request, or before it held a passport the door would take, could be sent again with the passport attached. A door in authz mode does not see the body, so it admits a passport on a safe method only. With no grant in the request, the door then records:
 
 - `class: "verified"`, and `subject` the agent's did:key, which is the Cedar `principal`;
 - `arrival.passport`, with `outcome: "verified"`, the registry, the registry's keyid, the agent's id, did:key, name, owner, capabilities, expiry, the passport's digest, and the passport itself (`envelope`).
 
-A policy reads the registry's word as a fact. Test that the field is there first, since an arrival without a passport has none:
+Only a `verified` passport puts the registry's entry in the fact. Any other outcome records the outcome, the error, and at most the registry and the did:key the passport names, so a passport the signer is not bound to cannot carry another agent's capabilities into the policy, even on an arrival that a grant or a signature verified.
+
+A policy reads the registry's word as a fact. Test that the field is there and that the passport was verified, since an arrival without a passport has none:
 
 ```cedar
 permit(principal, action == Action::"refund", resource)
 when {
   context.facts.arrival.class == "verified" &&
   context.facts.arrival has passport &&
+  context.facts.arrival.passport.outcome == "verified" &&
   context.facts.arrival.passport.capabilities.contains("refunds") &&
   context.args.body.amount <= 5000
 };
@@ -95,7 +111,8 @@ when {
 
 | what arrived | `passport.outcome` | `class` |
 | --- | --- | --- |
-| a passport from a trusted registry, in its window, under a signature by its did:key | `verified` | `verified` |
+| a passport from a trusted registry, in its window, under a signature by its did:key that covers all of the above | `verified` | `verified` |
+| the same, with a signature that leaves out a component above, or a `Content-Digest` that is not of the body | `unbound` | `claimed` |
 | the same passport under another key's signature, or with no signature | `wrong-sender` | `claimed` |
 | a passport from another registry, edited, expired, or a header that is not a passport | `invalid` | `claimed` |
 | a passport at a door with no `trustedRegistryKeys` | `unchecked` | `claimed` |

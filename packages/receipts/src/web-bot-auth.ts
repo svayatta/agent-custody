@@ -263,6 +263,29 @@ export function signatureBase(req: SignedRequest, input: SfInnerList): string {
   return lines.join("\n");
 }
 
+/**
+ * True when a `Content-Digest` field (RFC 9530) holds a sha-256 or sha-512 digest of `body`, and every such digest it
+ * holds matches. A field with neither, or one that does not parse, is false.
+ */
+export function contentDigestMatches(field: string | undefined, body: Uint8Array): boolean {
+  if (!field) return false;
+  let members: Map<string, SfMember>;
+  try {
+    members = parseDictionary(field);
+  } catch {
+    return false;
+  }
+  let checked = 0;
+  for (const alg of ["sha-256", "sha-512"] as const) {
+    const m = members.get(alg);
+    if (!m) continue;
+    if ("list" in m || m.item.t !== "bytes") return false;
+    if (!createHash(alg.replace("-", "")).update(body).digest().equals(m.item.v)) return false;
+    checked++;
+  }
+  return checked > 0;
+}
+
 /** The RFC 7638 thumbprint of an Ed25519 JWK (RFC 8037 appendix A.3): the base64url SHA-256 of `{"crv","kty","x"}`. */
 export function jwkThumbprint(x: string): string {
   return createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
@@ -290,7 +313,7 @@ export interface WebBotAuthOptions {
  * arrived and the door has no `webBotAuth` config. `absent`: no `Signature-Input`.
  */
 export type SignatureCheck =
-  | { outcome: "verified"; agent: string; keyid: string; label: string }
+  | { outcome: "verified"; agent: string; keyid: string; label: string; /** the components the signature covered whole (no parameters), as named in Signature-Input */ covered?: string[] }
   | { outcome: "invalid" | "unavailable"; error: string; agent?: string; keyid?: string }
   | { outcome: "unchecked" | "absent" };
 
@@ -563,7 +586,7 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
       if (claim === "replayed") return invalid(`${label} repeats a nonce already used`, { agent, keyid });
       if (claim === "full") return full;
     }
-    return { outcome: "verified", agent, keyid, label };
+    return { outcome: "verified", agent, keyid, label, covered: covered.filter((c) => c.params.length === 0 && c.item.t === "string").map((c) => c.item.v as string) };
   }
 
   return { verify, nonces: () => nonces.size?.() };
