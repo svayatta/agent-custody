@@ -66,6 +66,19 @@ describe("admission lists", () => {
     expect(spelled({ agent: "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH" }).match(verified({ subject: "did:key:z6mkpthr8vnsbxyaawhut2geadd9jswubv8xroanwwsdvkth" }))).toEqual([]);
   });
 
+  it("binds an ERC-8004 entry to the registry that must vouch for the link, so another trusted registry cannot claim it", () => {
+    // a door that trusts two registries: B can sign a passport, naming its own URL, that carries the ERC-8004 identity
+    // of A's agent; an entry that names A must not take B's word for the link
+    const B = "https://registry-b.example/";
+    const bound = compileAdmissionLists(JSON.stringify({ lists: { partners: [{ erc8004: { agentRegistry: ERC, agentId: "7" }, registry: "https://APP.example.test:443" }] } }));
+    const link = { agentRegistry: ERC, agentId: "7" };
+    expect(bound.match(verified({ passport: { outcome: "verified", registry: REGISTRY, agentId: "agt_00000000000000a1", erc8004: link } }))).toEqual(["partners"]);
+    expect(bound.match(verified({ passport: { outcome: "verified", registry: B, agentId: "agt_00000000000000b2", erc8004: link } }))).toEqual([]);
+    // an entry without a registry keeps trusting every trusted registry's check, as before
+    expect(lists.match(verified({ passport: { outcome: "verified", registry: B, agentId: "agt_00000000000000b2", erc8004: link } }))).toEqual(["partners"]);
+    expect(() => compileAdmissionLists(JSON.stringify({ lists: { x: [{ erc8004: link, registry: "not a url" }] } }))).toThrow("lists.x.0");
+  });
+
   it("names an agent at one version or a range of versions, and never an arrival whose passport carries none", () => {
     const ranged = compileAdmissionLists(JSON.stringify({ lists: {
       exact: [{ registry: REGISTRY, agentId: "agt_00000000000000a1", version: "1.4.0" }],
