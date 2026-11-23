@@ -11,7 +11,9 @@ import { classifyArrival, type DoorRequest } from "../src/door.ts";
 import { createErc8004Resolver, decodeAbiString, ERC8004_REGISTRATION_TYPE, type Erc8004Resolver } from "../src/erc8004.ts";
 import { PostgresTenancy } from "../src/log-store.ts";
 import { servePortal, type RunningPortal } from "../src/portal.ts";
-import { PASSPORT_HEADER, passportHeader, REGISTRY_DOCUMENT_PATH, registrationProof, verifyPassport } from "../src/registry.ts";
+import { createDelegation } from "../src/delegation.ts";
+import { grantHeader } from "../src/gateway-http.ts";
+import { PASSPORT_HEADER, passportHeader, REGISTRY_DOCUMENT_PATH, registrationProof, RegistryStore, verifyPassport } from "../src/registry.ts";
 import { localSigner } from "../src/signer.ts";
 
 const CHAIN = "8453";
@@ -123,6 +125,28 @@ describe("an ERC-8004 link", () => {
     chain.setDown(false);
   });
 
+  it("never lets an IPFS path climb out of the gateway's /ipfs/ path", async () => {
+    for (const [id, uri] of [
+      ["32", "ipfs://bafy/../../.well-known/x"],
+      ["33", "ipfs://bafy/./agent.json"],
+      ["34", "ipfs://bafy/a/../../../admin"],
+      ["35", "ipfs://bafy/%2e%2e/%2e%2e/x"],
+      ["36", "ipfs://../x"],
+    ] as const) {
+      chain.tokens.set(id, uri);
+      const before = fetched.length;
+      const r = await check(id);
+      expect(r.ok, uri).toBe(false);
+      expect(!r.ok && r.error, uri).toContain("the IPFS URI is not a CID and a path of plain segments");
+      expect(fetched.length, uri).toBe(before);
+    }
+    // a gateway with a path of its own keeps the path under its own /ipfs/
+    const prefixed = createErc8004Resolver({ rpc: { [CHAIN]: RPC }, fetch: chain.fetchRpc, ipfsGateway: "https://gw.example.test/base", fetchFile: async (url) => { fetched.push(url); return Buffer.from(registration({ did, agentId: "37" })); } });
+    chain.tokens.set("37", "ipfs://bafyok/agent.json");
+    expect((await prefixed.check({ agentRegistry: AGENT_REGISTRY, agentId: "37" }, did)).ok).toBe(true);
+    expect(fetched.at(-1)).toBe("https://gw.example.test/base/ipfs/bafyok/agent.json");
+  });
+
   it("never fetches a registration file from an internal address", async () => {
     const plain = createErc8004Resolver({ rpc: { [CHAIN]: RPC }, fetch: chain.fetchRpc, timeoutMs: 2000 });
     for (const [id, uri] of [["40", "https://127.0.0.1/agent.json"], ["41", "https://[::1]/agent.json"], ["42", "https://169.254.169.254/latest/meta-data"], ["43", "https://localhost/agent.json"]] as const) {
@@ -200,6 +224,16 @@ describe("the registry with ERC-8004 links", () => {
     const req = { method: "POST", url: "/refunds", headers: { host: "shop.example", [PASSPORT_HEADER]: passportHeader(r.json.passport) }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
     const a = classifyArrival(req, [], "refund", false, new Date().toISOString(), { outcome: "verified", agent: did, keyid: did, label: "sig1", covered: ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"] }, undefined, [registryKey], true).arrival;
     expect(a).toMatchObject({ class: "verified", passport: { outcome: "verified", erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "7", owner: OWNER } } });
+
+    // someone verified as themselves, by their own grant, attaching this agent's public passport: the link stays out
+    const principal = generateKeyPair();
+    const thief = generateKeyPair();
+    const thiefDid = didKeyOf(thief.publicKey);
+    const grant = createDelegation(principal, { version: "0.1", principal: "shop-owner", agent: thiefDid, scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: inDays(1) });
+    const carried = { method: "POST", url: "/refunds", headers: { host: "shop.example", authorization: `Bearer ${grantHeader(grant)}`, [PASSPORT_HEADER]: passportHeader(r.json.passport) }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
+    const t = classifyArrival(carried, [principal], "refund", false, new Date().toISOString(), { outcome: "verified", agent: thiefDid, keyid: thiefDid, label: "sig1", covered: ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"] }, undefined, [registryKey], true).arrival;
+    expect(t).toMatchObject({ class: "verified", subject: thiefDid, passport: { outcome: "wrong-sender" } });
+    expect(t.passport!.erc8004).toBeUndefined();
   });
 
   it("refuses a link the chain does not back, and a link on a registry that reads no chain", async () => {
@@ -235,6 +269,33 @@ describe("the registry with ERC-8004 links", () => {
     expect(unlinked.json.agent.erc8004).toBeNull();
     const v = verifyPassport(unlinked.json.passport, [registryKey], new Date().toISOString());
     expect(v.ok && v.passport.erc8004).toBeUndefined();
+  });
+
+  it("stores a late recheck only while the row still names the key and the token that were checked", async () => {
+    const store = new RegistryStore(db, "https://app.example.test/", "cas_");
+    const checker = (link: { agentRegistry: string; agentId: string }, key: string) => resolver.check(link, key);
+    const key = generateKeyPair();
+    const did = didKeyOf(key.publicKey);
+    publish("80", did);
+    publish("81", did);
+    const e = await store.register("foxtrot", { name: "Fox", contact: "f@fox.example", ...registrationProof(key, "https://app.example.test/", "foxtrot"), expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "80" } }, Date.now(), checker);
+    // a recheck of token 80 starts; while it is in flight the owner moves the link to token 81
+    const checked = { agent: did, link: { agentRegistry: AGENT_REGISTRY, agentId: "80" } };
+    const late = await resolver.check(checked.link, did);
+    expect(late.ok).toBe(true);
+    await store.update("foxtrot", e.id, { erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "81" } }, Date.now(), checker);
+    // the late success does not bring token 80 back, and a late failure does not mark token 81 broken
+    expect((await store.recordErc8004(e.id, checked, late))!.erc8004).toMatchObject({ agentId: "81" });
+    expect((await store.recordErc8004(e.id, checked, { ok: false, error: "the registration file says the agent is not active" }))!.erc8004!.error).toBeUndefined();
+    // the same after a key rotation: a result checked for the old key is not stored
+    const next = generateKeyPair();
+    publish("81", didKeyOf(next.publicKey));
+    await store.update("foxtrot", e.id, registrationProof(next, "https://app.example.test/", "foxtrot"), Date.now(), checker);
+    const oldKey = { agent: did, link: { agentRegistry: AGENT_REGISTRY, agentId: "81" } };
+    expect((await store.recordErc8004(e.id, oldKey, { ok: false, error: "no DID service" }))!.erc8004!.error).toBeUndefined();
+    // a result for what the row names now is stored
+    const now = { agent: didKeyOf(next.publicKey), link: { agentRegistry: AGENT_REGISTRY, agentId: "81" } };
+    expect((await store.recordErc8004(e.id, now, { ok: false, error: "the registration file says the agent is not active" }))!.erc8004!.error).toContain("not active");
   });
 
   it("checks a stale link again before a passport carries it, drops it when the file stops agreeing, and does not ask the chain on every request", async () => {

@@ -72,14 +72,14 @@ agent-custody portal … --registry-key-env REGISTRY_KEY --erc8004-rpc-env 8453=
 The owner adds `"erc8004": { "agentRegistry": "eip155:8453:0x…", "agentId": "7" }` to `POST /api/agents` or `POST /api/agents/<id>`. `agentId` is the token id in decimal. Before it stores the link, the registry reads, at one block:
 
 1. `ownerOf(agentId)`: the token exists and has an owner.
-2. `tokenURI(agentId)`: where the registration file is. It fetches the file: an inline `data:application/json` URI, `https://` (never from an internal address, following no redirect, within 5 seconds and 64 KiB), or `ipfs://` through `--ipfs-gateway`.
+2. `tokenURI(agentId)`: where the registration file is. It fetches the file: an inline `data:application/json` URI, `https://` (never from an internal address, following no redirect, within 5 seconds and 64 KiB), or `ipfs://` through `--ipfs-gateway`, as a CID and plain path segments that stay under the gateway's `/ipfs/<cid>/`; a `.` or `..` segment is refused.
 3. The file: its `type` is `registration-v1`, `active` is true, `registrations` lists this `agentRegistry` and `agentId`, and `services` has `{ "name": "DID", "endpoint": "<the agent's did:key>" }`.
 
 So the agent's owner publishes its did:key in the token's registration file first. Anything that does not agree is refused with the reason. The entry records the owner address, the block, the file's sha256, and when it was checked. A new key while a link stands is checked against the file again, so rotate the key in the file first. `"erc8004": null` unlinks.
 
-A link is checked again before a passport carries it, when the last check is older than `--erc8004-recheck-seconds` (an hour by default), at most once a minute per agent. When that check fails, for example because the owner marked the agent inactive or moved the token to a file that no longer lists the key, passports carry no link until a check succeeds, and the entry shows the error.
+A link is checked again before a passport carries it, when the last check is older than `--erc8004-recheck-seconds` (an hour by default), at most once a minute per agent. When that check fails, for example because the owner marked the agent inactive or moved the token to a file that no longer lists the key, passports carry no link until a check succeeds, and the entry shows the error. A check that finishes after the owner changed the link or rotated the key is not stored: it was for a link the agent no longer has.
 
-The door reads no chain. It records the link from the passport in `arrival.passport.erc8004`, and a policy can require it:
+The door reads no chain. It records the link from the passport in `arrival.passport.erc8004`, only when the passport is `verified`, bound to the request by the agent's signature; a passport under another key carries no link into the policy. A policy can require it, testing the outcome too:
 
 ```cedar
 permit(principal, action == Action::"refund", resource)

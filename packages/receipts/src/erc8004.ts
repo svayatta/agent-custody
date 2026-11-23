@@ -125,8 +125,13 @@ export function createErc8004Resolver(o: Erc8004ResolverOptions): Erc8004Resolve
     if (uri.startsWith("ipfs://")) {
       if (!gateway) throw new Error("the registration file is on IPFS, and this registry has no IPFS gateway configured");
       const path = uri.slice("ipfs://".length).replace(/^ipfs\//, "");
-      if (!/^[A-Za-z0-9]+(\/[A-Za-z0-9._~-]+)*$/.test(path)) throw new Error("the IPFS URI is not a CID and path");
-      return fetchFile(`${gateway}/ipfs/${path}`, { timeoutMs, maxBytes: maxFileBytes });
+      const [cid, ...segments] = path.split("/");
+      // the token's owner writes this path: a "." or ".." segment would climb out of /ipfs/ to any path on the gateway
+      if (!cid || !/^[A-Za-z0-9]+$/.test(cid) || segments.some((p) => !/^[A-Za-z0-9._~-]+$/.test(p) || p === "." || p === "..")) throw new Error("the IPFS URI is not a CID and a path of plain segments");
+      const prefix = `${new URL(gateway).pathname.replace(/\/+$/, "")}/ipfs/${cid}`;
+      const url = new URL(`${gateway}/ipfs/${path}`);
+      if (url.origin !== new URL(gateway).origin || (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`))) throw new Error("the IPFS URI leaves the gateway's /ipfs/ path");
+      return fetchFile(url.toString(), { timeoutMs, maxBytes: maxFileBytes });
     }
     if (uri.startsWith("https://")) {
       const u = new URL(uri);

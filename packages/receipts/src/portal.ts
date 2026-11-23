@@ -899,7 +899,8 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
     if (resolver && agents && e.erc8004 && !freshErc8004(e, recheckSeconds) && Date.now() - (lastRecheck.get(e.id) ?? 0) >= 60_000) {
       lastRecheck.set(e.id, Date.now());
       if (lastRecheck.size > 10_000) lastRecheck.delete(lastRecheck.keys().next().value!);
-      e = (await agents.recordErc8004(e.id, await resolver.check(e.erc8004, e.agent))) ?? e;
+      const checked = { agent: e.agent, link: { agentRegistry: e.erc8004.agentRegistry, agentId: e.erc8004.agentId } };
+      e = (await agents.recordErc8004(e.id, checked, await resolver.check(checked.link, checked.agent))) ?? e;
     }
     return issuePassport(o.registry!.signer, portalBase, e, passportSeconds, Date.now(), freshErc8004(e, recheckSeconds));
   };

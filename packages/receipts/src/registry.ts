@@ -217,14 +217,21 @@ export class RegistryStore {
       throw e;
     }
   }
-  /** Records a later check of an agent's standing link: the fresh result, or the error beside the last good one. */
-  async recordErc8004(id: string, r: Erc8004Check, now = Date.now()): Promise<AgentEntry | null> {
+  /**
+   * Records a later check of an agent's standing link: the fresh result, or the error beside the last good one. `checked`
+   * is the key and the link that were checked. The result is stored only while the row still names them: a check that
+   * finishes after the owner changed the link or rotated the key would otherwise write over the new link. Returns the
+   * row as it is.
+   */
+  async recordErc8004(id: string, checked: { agent: string; link: Erc8004Link }, r: Erc8004Check, now = Date.now()): Promise<AgentEntry | null> {
     await this.init();
     const current = await this.get(id);
     if (!current?.erc8004) return current;
+    if (current.agent !== checked.agent || current.erc8004.agentRegistry !== checked.link.agentRegistry || current.erc8004.agentId !== checked.link.agentId) return current;
     const link = r.ok ? r.link : { ...current.erc8004, error: r.error.slice(0, 300), errorAt: new Date(now).toISOString() };
-    const { rows } = await this.client.query(`UPDATE ${this.t} SET erc8004 = $2 WHERE id = $1 AND erc8004 IS NOT NULL RETURNING *`, [id, JSON.stringify(link)]);
-    return rows[0] ? RegistryStore.row(rows[0] as Record<string, unknown>) : null;
+    // the same comparison in the write, so a change between the read and the write is not overwritten either
+    const { rows } = await this.client.query(`UPDATE ${this.t} SET erc8004 = $2 WHERE id = $1 AND agent = $3 AND erc8004::jsonb->>'agentRegistry' = $4 AND erc8004::jsonb->>'agentId' = $5 AND revoked_at IS NULL RETURNING *`, [id, JSON.stringify(link), checked.agent, checked.link.agentRegistry, checked.link.agentId]);
+    return rows[0] ? RegistryStore.row(rows[0] as Record<string, unknown>) : await this.get(id);
   }
   /** Revokes an agent of this owner for good: the registry issues it no more passports. False when there is none to revoke. */
   async revoke(owner: string, id: string, now = Date.now()): Promise<boolean> {
