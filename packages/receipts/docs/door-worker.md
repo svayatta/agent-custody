@@ -14,7 +14,7 @@ It is the same code as the reverse proxy, the in-process door, and authz mode, w
 | receipts | the receipts directory | the `RECEIPTS` R2 bucket, same names: `<id>.json`, `<id>.authorization.json`, `salts/<id>.json`, `outbox/<id>.json` |
 | log | `logFile` or `log.url` | `LOG_URL`, its keys pinned in `LOG_KEYS`, token in the `LOG_TOKEN` secret |
 | receipts whose log append failed | the outbox, flushed every 30 seconds | the bucket's outbox, flushed by a cron trigger every minute |
-| trusted principal keys, revoked grants | files, re-read | the `TRUSTED_PRINCIPAL_KEYS` and `REVOKED_GRANTS` variables; a change is a deploy |
+| trusted principal keys, trusted registry keys, revoked grants | files, re-read | the `TRUSTED_PRINCIPAL_KEYS`, `TRUSTED_REGISTRY_KEYS`, and `REVOKED_GRANTS` variables; a change is a deploy |
 | the arrival's address | the socket, or `X-Forwarded-For` with `trustProxy` | `CF-Connecting-IP`, which Cloudflare sets |
 | Web Bot Auth nonces | one process's memory | a Durable Object per nonce, which every isolate reaches (the `NONCES` binding) |
 | arrival rates | one process's memory | one isolate's memory |

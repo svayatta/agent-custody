@@ -124,6 +124,7 @@ export default withMermaid(
             { text: "The door in Go, Rails, Django, and Spring", link: "/receipts/door-languages" },
             { text: "Door signals", link: "/receipts/door-signals" },
             { text: "Door error rates", link: "/receipts/door-error-rates" },
+            { text: "The agent registry", link: "/receipts/agent-registry" },
             { text: "Safe financial operations", link: "/receipts/financial-operations" },
             { text: "Completeness", link: "/receipts/completeness" },
             { text: "Anchoring the log on a chain", link: "/receipts/anchoring" },

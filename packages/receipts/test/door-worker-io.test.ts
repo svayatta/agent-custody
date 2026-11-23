@@ -163,6 +163,7 @@ describe("the Worker's config", () => {
       [{ policyFile: "p.cedar" }, /policyFile.*DOOR_POLICY variable/],
       [{ identity: { keyFile: "k" } }, /identity.*DOOR_KEY secret/],
       [{ trustedPrincipalKeys: ["a.pub"] }, /TRUSTED_PRINCIPAL_KEYS/],
+      [{ trustedRegistryKeys: ["r.pub"] }, /TRUSTED_REGISTRY_KEYS/],
       [{ revokedGrants: "r.json" }, /REVOKED_GRANTS/],
       [{ authz: true }, /authz/],
       [{ trustProxy: true }, /CF-Connecting-IP/],

@@ -17,6 +17,8 @@ import { welcomeSheet } from "./log-admin.ts";
 import { clientAddress } from "./log-sink.ts";
 import { SITE_NAV, siteUrl } from "./site-links.ts";
 import { PLAN_QUOTAS, RateLimiter, type Plan, type PostgresLike, type PostgresTenancy } from "./log-store.ts";
+import { agentStatus, issuePassport, publicEntry, registryDocument, RegistryInputError, RegistryStore, DEFAULT_PASSPORT_SECONDS, MAX_PASSPORT_SECONDS, REGISTRY_DOCUMENT_PATH } from "./registry.ts";
+import type { Signer } from "./signer.ts";
 import { oidcAuthorizeUrl, oidcExchange, pkce, samlAuthorizeUrl, samlValidate, type OidcConfig, type SamlConfig, type SsoIdentity } from "./sso.ts";
 
 export interface StripeOptions {
@@ -70,6 +72,11 @@ export interface PortalOptions {
   trustProxy?: boolean;
   /** table prefix; default portal_ */
   prefix?: string;
+  /**
+   * The agent registry: organisations register their agents, and the portal signs their passports with `signer`, a key
+   * of its own (not the log's). Needs `portalUrl`, which names the registry in every passport. Off when absent.
+   */
+  registry?: { signer: Signer; passportSeconds?: number };
   log?: (message: string) => void;
 }
 
@@ -870,6 +877,10 @@ export async function sendFollowUps(store: PortalStore, mail: MailOptions, o: { 
 
 export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const store = new PortalStore(o.client, o.prefix);
+  if (o.registry && !o.portalUrl) throw new Error("the agent registry needs portalUrl: it names the registry in every passport");
+  const passportSeconds = o.registry?.passportSeconds ?? DEFAULT_PASSPORT_SECONDS;
+  if (!Number.isInteger(passportSeconds) || passportSeconds < 60 || passportSeconds > MAX_PASSPORT_SECONDS) throw new Error(`a passport lives from 60 to ${MAX_PASSPORT_SECONDS} seconds; got ${passportSeconds}`);
+  const agents = o.registry ? new RegistryStore(o.client, (o.portalUrl ?? "http://localhost/").replace(/\/?$/, "/"), o.prefix) : null;
   const heads: CheckpointStore = postgresCheckpoints(o.client);
   const log = o.log ?? ((m) => console.error(m));
   const loginFailures = new RateLimiter({ perSecond: 1 / 30, burst: 8 });
@@ -995,6 +1006,17 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
     try {
       if (req.method === "GET" && url.pathname === "/health") return json(200, { ok: true, stripe: !!o.stripe });
       if (req.method === "GET" && url.pathname === "/favicon.svg") { res.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" }); return void res.end(FAVICON); }
+      // ---- the agent registry's public side: its keys, each agent's entry, and passports, for anyone ----
+      if (o.registry && agents && req.method === "GET" && url.pathname === REGISTRY_DOCUMENT_PATH) return json(200, await registryDocument(o.registry.signer, portalBase, passportSeconds));
+      const agentPath = /^\/registry\/agents\/([^/]+)(\/passport)?$/.exec(url.pathname);
+      if (o.registry && agents && req.method === "GET" && agentPath) {
+        const entry = await agents.get(agentPath[1]!);
+        if (!entry) return json(404, { error: "no agent with this id is registered" });
+        if (!agentPath[2]) return json(200, publicEntry(entry));
+        const status = agentStatus(entry);
+        if (status !== "active") return json(410, { error: `the agent is ${status}; the registry issues it no passport`, status });
+        return json(200, await issuePassport(o.registry.signer, portalBase, entry, passportSeconds));
+      }
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'" });
         const providers = JSON.stringify((["github", "google"] as const).filter((p) => !!o.oauth?.[p]));
@@ -1533,6 +1555,38 @@ document.getElementById("f").onsubmit = async (e) => {
         await jsonBody();
         return json(200, { revoked: await o.tenancy.revokeToken(tenantId, revoke[1]!, `portal:${user.email}`) });
       }
+      // The tenant's agents in the registry. Writes need admin, like keys.
+      const agentRoute = /^\/api\/agents(?:\/([^/]+)(\/revoke)?)?$/.exec(url.pathname);
+      if (agentRoute) {
+        if (!o.registry || !agents) return json(404, { error: "this portal runs no agent registry" });
+        const [, id, revokeAgent] = agentRoute;
+        const actor = `portal:${user.email}`;
+        try {
+          if (req.method === "GET" && !id) return json(200, { agents: (await agents.list(tenantId)).map((e) => publicEntry(e)) });
+          if (req.method === "POST" && !id) {
+            const entry = await agents.register(tenantId, await jsonBody());
+            await o.tenancy.record(actor, "agent.register", tenantId, { agent: entry.id, key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt });
+            return json(200, { agent: publicEntry(entry), passport: await issuePassport(o.registry.signer, portalBase, entry, passportSeconds) });
+          }
+          if (req.method === "POST" && id && revokeAgent) {
+            await jsonBody();
+            const revoked = await agents.revoke(tenantId, id);
+            if (revoked) await o.tenancy.record(actor, "agent.revoke", tenantId, { agent: id });
+            return json(revoked ? 200 : 404, revoked ? { revoked: true } : { error: "no active agent with this id belongs to this tenant" });
+          }
+          if (req.method === "POST" && id) {
+            const b = await jsonBody();
+            const entry = await agents.update(tenantId, id, b);
+            if (!entry) return json(404, { error: "no active agent with this id belongs to this tenant" });
+            await o.tenancy.record(actor, "agent.update", tenantId, { agent: entry.id, changed: Object.keys(b).sort(), key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt });
+            return json(200, { agent: publicEntry(entry), ...(agentStatus(entry) === "active" ? { passport: await issuePassport(o.registry.signer, portalBase, entry, passportSeconds) } : {}) });
+          }
+        } catch (e) {
+          if (e instanceof RegistryInputError) return json(400, { error: e.message });
+          throw e;
+        }
+        return json(404, { error: "not found" });
+      }
       // Policies: named versions the tenant publishes so a receipt's policyDigest reads as a name. The gateway never
       // reads these; enforcement stays on the tenant's machines.
       if (req.method === "GET" && url.pathname === "/api/policies") {
@@ -2065,6 +2119,9 @@ ${DESIGN_CSS}
     "sso.set": (d) => "set up single sign-on" + (d.protocol ? " (" + String(d.protocol).toUpperCase() + ")" : ""),
     "sso.remove": () => "removed single sign-on",
     "user.mfa-reset": (d) => "turned off two-step sign-in for " + (d.email || "a member"),
+    "agent.register": (d) => "registered the agent " + d.agent + " in the agent registry",
+    "agent.update": (d) => "changed the agent " + d.agent + (Array.isArray(d.changed) && d.changed.length ? " (" + d.changed.join(", ") + ")" : ""),
+    "agent.revoke": (d) => "revoked the agent " + d.agent + "; the registry issues it no more passports",
   };
   const sentence = (e) => { const d = e.detail || {}; return actor(e.actor) + " " + (Object.hasOwn(SENTENCES, e.action) ? SENTENCES[e.action](d) : "did '" + e.action + "'" + (Object.keys(d).length ? " (" + Object.entries(d).map(([k, v]) => k + ": " + v).join(", ") + ")" : "")) + "."; };
   const feed = (entries) => entries.map((e) => "<li><span title=\\"" + esc(e.action + " " + JSON.stringify(e.detail || {})) + "\\">" + esc(sentence(e)) + "</span>" + when(e.at) + "</li>").join("");

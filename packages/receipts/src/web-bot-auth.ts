@@ -263,6 +263,29 @@ export function signatureBase(req: SignedRequest, input: SfInnerList): string {
   return lines.join("\n");
 }
 
+/**
+ * True when a `Content-Digest` field (RFC 9530) holds a sha-256 or sha-512 digest of `body`, and every such digest it
+ * holds matches. A field with neither, or one that does not parse, is false.
+ */
+export function contentDigestMatches(field: string | undefined, body: Uint8Array): boolean {
+  if (!field) return false;
+  let members: Map<string, SfMember>;
+  try {
+    members = parseDictionary(field);
+  } catch {
+    return false;
+  }
+  let checked = 0;
+  for (const alg of ["sha-256", "sha-512"] as const) {
+    const m = members.get(alg);
+    if (!m) continue;
+    if ("list" in m || m.item.t !== "bytes") return false;
+    if (!createHash(alg.replace("-", "")).update(body).digest().equals(m.item.v)) return false;
+    checked++;
+  }
+  return checked > 0;
+}
+
 /** The RFC 7638 thumbprint of an Ed25519 JWK (RFC 8037 appendix A.3): the base64url SHA-256 of `{"crv","kty","x"}`. */
 export function jwkThumbprint(x: string): string {
   return createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
@@ -290,7 +313,7 @@ export interface WebBotAuthOptions {
  * arrived and the door has no `webBotAuth` config. `absent`: no `Signature-Input`.
  */
 export type SignatureCheck =
-  | { outcome: "verified"; agent: string; keyid: string; label: string }
+  | { outcome: "verified"; agent: string; keyid: string; label: string; /** the components the signature covered whole (no parameters), as named in Signature-Input */ covered?: string[] }
   | { outcome: "invalid" | "unavailable"; error: string; agent?: string; keyid?: string }
   | { outcome: "unchecked" | "absent" };
 
@@ -298,8 +321,8 @@ interface DirectoryKey { key: KeyObject; nbf?: number; exp?: number }
 type Directory = { ok: true; keys: Map<string, DirectoryKey> } | { ok: false; outcome: "invalid" | "unavailable"; error: string };
 
 export interface WebBotAuthVerifier {
-  /** `grantAgent`: the agent of the request's grant, when a trusted principal signed it; a did:key signature keeps its nonce only for that agent */
-  verify(req: SignedRequest, grantAgent?: string): Promise<SignatureCheck>;
+  /** `keyAgents`: the did:key, or did:keys, that a trusted grant or a trusted registry's passport in the request names; a did:key signature keeps its nonce only for one of them */
+  verify(req: SignedRequest, keyAgents?: string | readonly string[]): Promise<SignatureCheck>;
   /** nonces held now, or undefined when the nonce store does not count them */
   nonces(): number | undefined;
 }
@@ -442,7 +465,7 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
     return p;
   };
 
-  async function verify(req: SignedRequest, grantAgent?: string): Promise<SignatureCheck> {
+  async function verify(req: SignedRequest, keyAgents: string | readonly string[] = []): Promise<SignatureCheck> {
     const inputText = req.header("signature-input");
     const sigText = req.header("signature");
     if (!inputText && !sigText) return { outcome: "absent" };
@@ -527,8 +550,8 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
     }
     if (opts.requireNonce && !nonceP) return invalid(`${label} has no nonce, and this door requires one`, { agent, keyid });
     // Anyone can make a did:key, so a stranger's signatures must not fill the nonce store. A did:key signature that no
-    // trusted grant names is never accepted by the door, and its nonce is not kept.
-    const nonceKey = nonceP && (!didKey || keyid === grantAgent) ? `${agent} ${keyid} ${nonceP.v}` : undefined;
+    // trusted grant or passport names is never accepted by the door, and its nonce is not kept.
+    const nonceKey = nonceP && (!didKey || (typeof keyAgents === "string" ? keyAgents === keyid : keyAgents.includes(keyid))) ? `${agent} ${keyid} ${nonceP.v}` : undefined;
     const full: SignatureCheck = { outcome: "unavailable", error: nonceStore ? "the door's nonce store is full and cannot record another" : `the door holds ${opts.maxNonces} nonces and cannot record another`, agent, keyid };
     if (nonceKey && nonces.check) {
       let state: NonceState;
@@ -563,7 +586,7 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
       if (claim === "replayed") return invalid(`${label} repeats a nonce already used`, { agent, keyid });
       if (claim === "full") return full;
     }
-    return { outcome: "verified", agent, keyid, label };
+    return { outcome: "verified", agent, keyid, label, covered: covered.filter((c) => c.params.length === 0 && c.item.t === "string").map((c) => c.item.v as string) };
   }
 
   return { verify, nonces: () => nonces.size?.() };
