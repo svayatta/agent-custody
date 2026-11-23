@@ -43,6 +43,15 @@ static_resources:
                 - { exact: user-agent }
                 - { exact: accept }
                 - { exact: content-type }
+                # read only with `behaviour` in the door config; add the `behaviour.tlsHeader` header here when you set one
+                - { exact: referer }
+                - { exact: sec-fetch-site }
+                - { exact: sec-fetch-mode }
+                - { exact: sec-fetch-dest }
+                - { exact: sec-fetch-user }
+                - { exact: sec-ch-ua }
+                - { exact: origin }
+                - { exact: x-agent-custody-form }
               http_service:
                 server_uri: { uri: "http://door:8780", cluster: door, timeout: 5s }
                 path_prefix: /_agent_custody

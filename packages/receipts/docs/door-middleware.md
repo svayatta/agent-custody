@@ -26,6 +26,8 @@ The proxy's `door.json` without `origin`: there is nothing to relay to, because 
 }
 ```
 
+With `"behaviour": {}` in the config, the arrival fact has the door's [behaviour and fingerprint signals](door.md#behaviour-and-fingerprint-signals), as for the proxy. The limits that are specific to the in-process door are in [the list below](#what-the-receipt-records-of-your-answer-and-what-it-does-not).
+
 ## Quick start: the parts both frameworks share
 
 You need Node 22 or later and `curl`. The in-process door is in `@agent-custody/receipts` from 0.16.7.
@@ -189,12 +191,14 @@ export const GET = () => new Response(guard.formScript(), { headers: { "content-
 
 The form's own route is wrapped as any other: `export const POST = guard.route(handler)`.
 
+With `behaviour` in the config too, the script also sends the form report in `X-Agent-Custody-Form`: counts of key presses, pointer presses, and pastes, and the fill time. `guard.formScript()` returns the script with the report. The report is a claim by the script in the client's browser ([door signals](door-signals.md#the-behaviour-and-fingerprint-signals)).
+
 ## What your code receives
 
 An allowed request reaches your code with:
 
 - `X-Agent-Custody-Receipt`: the receipt id, and `X-Agent-Custody-Class`: `verified`, `claimed`, or `unknown`. The door sets both; a client that sends either has its value replaced.
-- No grant: `X-Agent-Custody-Grant` is removed, and so is `Authorization` when it carried the grant. `X-Agent-Custody-Agent` and the challenge header are removed too. In Express they leave `req.headers` and `req.rawHeaders` both.
+- No grant: `X-Agent-Custody-Grant` is removed, and so is `Authorization` when it carried the grant. `X-Agent-Custody-Agent` and the challenge header are removed too. In Express they leave `req.headers` and `req.rawHeaders` both. With `behaviour` in the config, `X-Agent-Custody-Form` is removed too.
 - The body the door read, unchanged.
 
 The door does not touch the client-address headers (`X-Forwarded-For`, `X-Real-IP`, and the rest) as the proxy does: in-process, your app reads the socket itself, and what it trusts is its own setting (`app.set("trust proxy")` in Express).
@@ -218,6 +222,7 @@ What is not recorded, or not the same as the proxy:
 - **Next.js pages, Server Actions, and the `middleware.ts` / `proxy.ts` file are not covered.** Only the route handlers you wrap are decided and receipted. Next's middleware runs before the route and cannot see its answer, so a receipt from it could not say what the app did; the door does not offer one. A `GET` handler that Next prerenders at build time (`export const dynamic = "force-static"`) runs at build time, not per request: do not wrap one.
 - **A signature on a fetch request.** A Web Bot Auth signature is checked over the request as the route handler gets it: a field sent more than once arrives joined with `, `, and a `Request` built without a `Host` field takes its authority from its URL. In Express the door reads every value of each field, as the proxy does.
 - **The arrival's address in Next.js.** A route handler gets no socket. Without `trustProxy` the arrival's `remote` is `unknown`, and the `rate` signal counts every unknown arrival as one source. Behind a proxy you run, or on a host that sets `X-Forwarded-For` (Vercel does), set `trustProxy: true` and the door takes the last address in it.
+- **The behaviour signals.** The Express middleware sees the order of the headers. A route handler does not, so its arrivals have no `fingerprint.headers.order`. The in-process door does not see the TLS handshake: `fingerprint.tls` is present only with `behaviour.tlsHeader` and `trustProxy`, behind a proxy that overwrites that header. The door knows that the client used https only from `X-Forwarded-Proto: https` with `trustProxy`; the URL of a route handler's request is not read for this. Without that, `fingerprint.headers.mismatch` reads `accept-language` only. In Next.js without `trustProxy`, every arrival is the source `unknown`: all arrivals share one history, so a page load by one client is a page load for all, and `behaviour.timing` is the pace of all of them together. The history is one process's memory: each Node process, and each serverless instance, has its own.
 - **A refused request's body in Express.** For an arrival the door refuses, the body is read up to `maxBodyBytes` and the rest drained, as by the proxy; nothing after the door runs.
 
 ## Why Express and Next.js are not dependencies

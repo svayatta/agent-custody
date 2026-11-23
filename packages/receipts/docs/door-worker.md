@@ -18,12 +18,24 @@ It is the same code as the reverse proxy, the in-process door, and authz mode, w
 | the arrival's address | the socket, or `X-Forwarded-For` with `trustProxy` | `CF-Connecting-IP`, which Cloudflare sets |
 | Web Bot Auth nonces | one process's memory | a Durable Object per nonce, which every isolate reaches (the `NONCES` binding) |
 | arrival rates | one process's memory | one isolate's memory |
+| the history behind the timing and navigation signals | one process's memory | one isolate's memory |
+| the TLS fingerprint | the header that `behaviour.tlsHeader` names, set by your proxy | `request.cf`, which Cloudflare sets; `behaviour.tlsHeader` is refused |
 
 ## What reaches the policy
 
 Everything the Node door gives it: the arrival fact, the request's arguments, and the grant. Web Bot Auth works unchanged. The request's own `Signature`, `Signature-Input`, and `Signature-Agent` headers reach the Worker, and directories are fetched with `fetch` and cached in the isolate. A grant in `X-Agent-Custody-Grant` or `Authorization: Bearer` is checked as at any door.
 
 Where the zone has Cloudflare Bot Management, its score and verified-bot flag enter as a fact named `cloudflare`, labelled `observed`. They reach the policy as `context.facts.cloudflare.score` and `context.facts.cloudflare.verifiedBot`. Cloudflare does not sign them, unlike a partner engine's verdict, which enters `attested`. The fact is read only when `request.cf.botManagement` carries an integer score and a boolean flag, and is never required. A policy that reads it should test for it first: `context.facts has cloudflare && context.facts.cloudflare.score < 30`.
+
+With `behaviour` in `DOOR_CONFIG` (an empty object is sufficient), the arrival fact has the door's [behaviour and fingerprint signals](door.md#behaviour-and-fingerprint-signals). In a Worker they differ from the Node door in four ways:
+
+- `request.cf` also gives the HTTP version (`fingerprint.headers.http`) and the network of the address (`fingerprint.network.asn` and `organization`) on every zone. The Node door has neither.
+- The TLS fingerprint comes from `request.cf`, never from a header. A config with `behaviour.tlsHeader` answers 500 with the reason and relays nothing. `fingerprint.tls` has `negotiated`, `cipher`, `extensionsSha1`, and `helloLength` from the fields that every zone gets. It has `ja4`, and the fields the door reads from it, only where the zone has Bot Management. Without a JA4, `fingerprint.tls.mismatch` is always false.
+- The Worker cannot see the order of the headers, so `fingerprint.headers.order` is absent. `count` leaves out Cloudflare's own `cf-*` and `cdn-loop` headers.
+- The Worker knows from the request URL whether the client used https. For an https request, `fingerprint.headers.mismatch` also reads `sec-fetch-*` and `sec-ch-ua`.
+- The history behind the timing and navigation signals is one isolate's memory.
+
+The signals are not verdicts: [door signals](door-signals.md#the-behaviour-and-fingerprint-signals) says what each flag does and does not mean, and [door error rates](door-error-rates.md) gives the method and the measured rates.
 
 ## When R2 or the log is unavailable
 
@@ -42,6 +54,7 @@ There is no lock between isolates. Two flushes at once can each append the same 
 - **What the Node door does that the Worker does not:** authz mode for nginx and Envoy, a partner engine, OpenTelemetry and Splunk export, a local receipts directory, a local log file, `trustProxy`, and reloading the policy or the revocation list without a deploy.
 - **Each Web Bot Auth signature costs a Durable Object request.** See [Web Bot Auth nonces](#web-bot-auth-nonces): one claim per verified signature that carries a nonce, and a wait of up to 3 seconds when the object is slow.
 - **Arrival rates live in one isolate too.** A pace rule sees what one isolate counted.
+- **The history behind the timing and navigation signals lives in one isolate too.** A page load that one isolate saw is unknown to another isolate, so a form post that follows it can be `behaviour.navigation.directWrite` there when it carries no same-origin `Referer`. `behaviour.timing` reads only the arrivals that one isolate saw.
 
 ## Web Bot Auth nonces
 

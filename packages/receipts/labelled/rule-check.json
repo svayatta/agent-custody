@@ -1,0 +1,94 @@
+{
+  "browserVersions": 155,
+  "userAgents": 339,
+  "familyDiffers": [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0 Safari/537.36 AgentReadyScan/0.1 (+https://agentready.co/methodology) (model: chrome/156.0 macos; door: crawler)"
+  ],
+  "expectsClientHints": 201,
+  "modelAlwaysHasThem": 189,
+  "modelLacksThemCount": 12,
+  "modelNeverHasThem": 7,
+  "modelLacksThem": [
+    {
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 12_5_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6834.160 Safari/537.36",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.65 Safari/537.36",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.212 Safari/537.36",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.54 Safari/537.36",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.79 Safari/537.36",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+      "shareWithout": 0.8519
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+      "shareWithout": 0.1429
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+      "shareWithout": 0.0769
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+      "shareWithout": 0.0003
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+      "shareWithout": 0.0002
+    }
+  ],
+  "doesNotExpect": 138,
+  "doesNotExpectButModelAlwaysHasThem": 2,
+  "embeddedExemptCount": 4,
+  "embeddedExemptNeverHasThem": 4,
+  "embeddedExemptAlwaysHasThem": 0,
+  "embeddedExempt": [
+    {
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/4.16336.0 Chrome/152.0.7977.167 Safari/537.36",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/4.4212.0 Chrome/152.0.7977.167 Safari/537.36",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Claude/4.16336.0 Chrome/152.0.7977.167 Safari/537.36 MSIX",
+      "shareWithout": 1
+    },
+    {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Claude/4.4212.0 Chrome/152.0.7977.167 Safari/537.36 MSIX",
+      "shareWithout": 1
+    }
+  ],
+  "headersAbsentFromOrderList": {
+    "safari": [
+      "sec-ch-ua"
+    ],
+    "chrome": [],
+    "firefox": [
+      "sec-ch-ua"
+    ],
+    "edge": []
+  }
+}

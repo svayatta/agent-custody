@@ -14,6 +14,7 @@ import { parseGrantHeader, GRANT_HEADER } from "./grant-header.ts";
 import type { Issuer } from "./issue.ts";
 import { ReceiptPending, type FlushResult } from "./receipt-pending.ts";
 import { createWebBotAuthVerifier, normalizeAuthority, type NonceStore, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
+import { createHistoryTracker, createSeenCounter, fingerprintKey, FORM_REPORT_HEADER, historySource, observationOf, signalsOf, type ArrivalBehaviour, type ArrivalFingerprint, type TlsObservation } from "./door-signals.ts";
 import { createPartnerEngine, PARTNER_FACT, PARTNER_TOOL, type ArrivalPartner, type PartnerVerdict } from "./door-partner.ts";
 import { evaluate, hasPermitRule, policyDigest, policyParseErrors, type PolicyDecision } from "./policy.ts";
 import type { AuthorizationBundle, FactRecord, ReceiptPredicate } from "./receipt.ts";
@@ -67,6 +68,10 @@ export interface Arrival {
   challenge?: ArrivalChallenge;
   /** what became of the question to the partner engine, when the door asks one about this route; absent otherwise, and from `classifyArrival` alone. The verdict itself is the `partner` fact, present only when `outcome` is `verified` */
   partner?: ArrivalPartner;
+  /** what the request and its connection look like, when the door has `behaviour` configured; absent otherwise, and from `classifyArrival` alone. Signals, never a verdict (door-signals.ts) */
+  fingerprint?: ArrivalFingerprint;
+  /** how the source acts over time, when the door has `behaviour` configured; absent otherwise, and from `classifyArrival` alone */
+  behaviour?: ArrivalBehaviour;
 }
 
 /**
@@ -311,6 +316,10 @@ export interface DoorRequest {
   headers: IncomingHttpHeaders;
   /** every value of each field, as Node keeps them; read for an HTTP message signature */
   headersDistinct?: Record<string, string[] | undefined>;
+  /** names and values in turn, in the order received, as Node keeps them; read for the header fingerprint */
+  rawHeaders?: string[] | undefined;
+  /** what the host knows of the client's connection (a Worker reads it from `request.cf`); never read from a header */
+  transport?: { secure?: boolean; tls?: TlsObservation } | undefined;
   socket: { remoteAddress?: string | undefined };
 }
 
@@ -531,7 +540,7 @@ export interface DoorCore {
    * `context.facts.<name>`. A name the door uses itself (`arrival`, `partner`) is refused.
    */
   decide(req: DoorRequest, receiptId: string, read: ((max: number) => Promise<BodyRead>) | null, framework?: string, observed?: Record<string, ObservedFact>): Promise<DoorDecision>;
-  /** a header the door consumed and never passes on: the grant (and `Authorization` when it carried it), the declared agent, the challenge token */
+  /** a header the door consumed and never passes on: the grant (and `Authorization` when it carried it), the declared agent, the challenge token, and with `behaviour` the form report */
   consumed(name: string, req: DoorRequest, arrival: Arrival): boolean;
   /** writes the receipt; null when it could not be written, after saying why on stderr */
   record(d: DoorDecision, execution: Execution): Promise<{ logPending: boolean } | null>;
@@ -594,6 +603,9 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
   const issuedBy = { kind: "door" as const, keyid: issuer.keyid, version: DOOR_VERSION, framework };
   const precommit = new Set(cfg.precommit);
   const rates = createRateTracker(undefined, { sweepTimer: io.timers });
+  // one process's memory, like the rate counts
+  const history = cfg.behaviour ? createHistoryTracker() : undefined;
+  const fingerprints = createSeenCounter();
   const webBotAuth = cfg.webBotAuth ? createWebBotAuthVerifier(cfg.webBotAuth, f, undefined, io.nonceStore) : undefined;
   const partner = cfg.partner ? createPartnerEngine(cfg.partner, f) : undefined;
 
@@ -634,7 +646,16 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature, revoked);
     const checkedAgent = arrival.class === "verified";
     const by = checkedAgent ? "agent" : "remote";
-    arrival.rate = { by, ...rates.hit(`${by}:${checkedAgent ? arrival.subject : arrival.remote}`) };
+    const source = `${by}:${checkedAgent ? arrival.subject : arrival.remote}`;
+    arrival.rate = { by, ...rates.hit(source) };
+    if (history) {
+      // in authz mode the proxy selects the headers of a check, so the header set is not the client's
+      const seen = observationOf(req, performance.now(), method, arrival.path, { trustProxy: !!cfg.trustProxy, ...(cfg.behaviour?.tlsHeader ? { tlsHeader: cfg.behaviour.tlsHeader } : {}), own: challengeHeader ? [challengeHeader] : [], partialHeaders: !!cfg.authz });
+      const signals = signalsOf(seen, history.record(checkedAgent ? source : `remote:${historySource(arrival.remote)}`, seen));
+      const key = fingerprintKey(signals.fingerprint);
+      if (key !== undefined) signals.fingerprint.seen = fingerprints.hit(key, seen.at);
+      Object.assign(arrival, signals);
+    }
     if (cfg.challenge && challengeHeader) {
       const c = cfg.challenge;
       const token = req.headers[challengeHeader];
@@ -767,7 +788,7 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     busy: () => json(503, { "retry-after": "1" }, { error: `the door is handling ${cfg.maxInFlight} requests; this one was not read, decided, or relayed. Retry` }),
     decide,
     consumed: (name, req, arrival) =>
-      name === GRANT_HEADER || name === AGENT_HEADER || name === challengeHeader ||
+      name === GRANT_HEADER || name === AGENT_HEADER || name === challengeHeader || (!!history && name === FORM_REPORT_HEADER) ||
       // the grant travelled in Authorization: it is the door's credential, not the origin's
       (name === "authorization" && arrival.grant !== "absent" && !req.headers[GRANT_HEADER]),
     async record(d, execution) {

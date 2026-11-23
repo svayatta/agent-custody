@@ -268,6 +268,43 @@ describe("the door as a Cloudflare Worker", () => {
   });
 });
 
+describe("the Worker door with behaviour configured", () => {
+  // The Worker cannot see the header order, and Cloudflare, not a header, tells it what the TLS handshake was.
+  it("records the signals from request.cf and the request, with no header order, and a policy reads one", async () => {
+    const policy = `permit(principal, action, resource);
+forbid(principal, action, resource) when { context.facts.arrival.fingerprint has tls && context.facts.arrival.fingerprint.tls.mismatch };`;
+    const base = doorWorker();
+    const signals = new Miniflare({ ...base, cf: false, bindings: { ...base.bindings, DOOR_CONFIG: JSON.stringify({ routes: CONFIG.routes, behaviour: {} }), DOOR_POLICY: policy } });
+    const chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+    const ask = async (headers: Record<string, string>, cf?: Record<string, unknown>) => {
+      const res = await signals.dispatchFetch(`https://${SITE}/products/tea`, { headers, ...(cf ? { cf } : {}) });
+      await res.text();
+      const text = await (await (await signals.getR2Bucket("RECEIPTS")).get(`${res.headers.get("x-agent-custody-receipt")}.json`))!.text();
+      return { status: res.status, bundle: JSON.parse(text) as ReceiptBundle };
+    };
+    try {
+      const tool = await ask({ "user-agent": "curl/8.7.1", "x-ja4": "t12d151600_000000000000_111111111111" }, { tlsVersion: "TLSv1.3", tlsCipher: "AEAD-AES128-GCM-SHA256", tlsClientHelloLength: "508", botManagement: { ja4: "t13d3112h2_000000000000_111111111111" } });
+      expect(tool.status).toBe(200);
+      const a = arrivalOf(tool.bundle);
+      expect(a.fingerprint!.headers).toMatchObject({ client: "tool", family: "curl", mismatch: false, hintsMismatch: false, fetchInvalid: false });
+      expect(a.fingerprint!.headers).not.toHaveProperty("order");
+      expect(a.fingerprint!.tls).toEqual({ ja4: "t13d3112h2_000000000000_111111111111", malformed: false, protocol: "tcp", version: "13", sni: true, ciphers: 31, extensions: 12, alpn: "h2", negotiated: "13", cipher: "AEAD-AES128-GCM-SHA256", helloLength: 508, mismatch: false, knownTool: false });
+      expect(a.behaviour).toMatchObject({ timing: { regular: false }, navigation: { referer: "absent", origin: "absent", directWrite: false } });
+      expect(verified(tool.bundle).ok).toBe(true);
+
+      // the site is https, so a current Chromium sends sec-ch-ua; this one states Chrome and does not (the test's own client adds sec-fetch-mode)
+      const stated = await ask({ "user-agent": chrome, "accept-language": "en" }, { botManagement: { ja4: "t13d1516h2_000000000000_111111111111" } });
+      expect(stated.status).toBe(200);
+      expect(arrivalOf(stated.bundle).fingerprint).toMatchObject({ headers: { client: "browser", mismatch: true, missing: expect.stringMatching(/sec-ch-ua$/) }, tls: { mismatch: false } });
+      const old = await ask({ "user-agent": chrome, "accept-language": "en" }, { botManagement: { ja4: "t12d1516h2_000000000000_111111111111" } });
+      expect(old.status).toBe(403);
+      expect(arrivalOf(old.bundle).fingerprint!.tls).toMatchObject({ version: "12", mismatch: true });
+    } finally {
+      await signals.dispose();
+    }
+  });
+});
+
 describe("Web Bot Auth nonces in a Durable Object, shared by every isolate of the Worker", () => {
   // Two copies of the Worker are two isolates with their own memory, as at two Cloudflare locations; both reach one
   // DoorNonce namespace. A third reaches a nonce object that fails, standing in for one that cannot be reached.

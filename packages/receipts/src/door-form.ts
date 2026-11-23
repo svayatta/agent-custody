@@ -3,8 +3,10 @@
 // secret). In the browser it renders the provider's widget in each same-origin POST form, and on submit sends the form
 // with fetch, the widget's token in the door's challenge header, then follows the answer as a form post would. The
 // door verifies the token with the provider and records the outcome as the arrival's `challenge` signal; the site's
-// backend gets the request with the receipt id, or never hears of it.
+// backend gets the request with the receipt id, or never hears of it. With `behaviour` configured the script also counts
+// how the form was filled and sends the counts as the form report (door-signals.ts): no field value, no key identity.
 import type { DoorConfig } from "./config.ts";
+import { FORM_REPORT_HEADER, MAX_FORM_EVENTS, MAX_FORM_FILL_MS } from "./door-signals.ts";
 
 export const FORM_SCRIPT_PATH = "/.well-known/agent-custody-door/form.js";
 
@@ -15,8 +17,55 @@ const PROVIDER_SCRIPT: Record<Challenge["provider"], string> = {
   hcaptcha: "https://js.hcaptcha.com/1/api.js?render=explicit",
 };
 
-/** The browser script for a door's challenge config. Public: it carries the provider, the site key, the header, and the action. */
-export function formScript(challenge: Challenge): string {
+/**
+ * The browser script for a door's challenge config. Public: it carries the provider, the site key, the header, and the
+ * action. With `report` the script also sends the form report: the time from the first key press, pointer press, click,
+ * or paste in the form to the submit, the counts of key presses and pointer presses, whether a paste happened, and
+ * whether every event was trusted.
+ */
+export function formScript(challenge: Challenge, report = false): string {
+  // a click with no pointer press before it (a keyboard or an assistive tool pressed the button) counts as a pointer press
+  const count = report ? `
+    // the form report: counts only, no field value and no key identity
+    const started = performance.now();
+    let first = -1, keys = 0, pointers = 0, pasted = 0, trusted = 1, down = false, moves = 0, lastKey = -1, shortest = -1, longest = -1;
+    const saw = (event) => {
+      if (first < 0) first = performance.now();
+      if (!event.isTrusted) trusted = 0;
+    };
+    // on the document, since a control outside the form element can belong to it (a button with form="id")
+    const mine = (event) => {
+      const target = event.target;
+      return !!target && (target.form === form || (typeof target.closest === "function" && target.closest("form") === form));
+    };
+    const on = (type, count) => document.addEventListener(type, (event) => { if (mine(event)) count(event); }, true);
+    on("keydown", (event) => {
+      if (event.repeat) return;
+      saw(event);
+      keys++;
+      const now = performance.now();
+      if (lastKey >= 0) {
+        const gap = now - lastKey;
+        if (shortest < 0 || gap < shortest) shortest = gap;
+        if (gap > longest) longest = gap;
+      }
+      lastKey = now;
+    });
+    // moves do not start the fill: a pointer crosses a form on its way elsewhere
+    on("pointermove", () => { moves++; });
+    on("touchmove", () => { moves++; });
+    on("pointerdown", (event) => { saw(event); down = true; pointers++; });
+    on("click", (event) => { saw(event); if (!down) pointers++; down = false; });
+    on("paste", (event) => { saw(event); pasted = 1; });
+    const filled = (event) => {
+      const ms = first < 0 ? 0 : Math.min(Math.max(Math.round(performance.now() - first), 0), ${MAX_FORM_FILL_MS});
+      const cut = (v) => Math.min(Math.max(Math.round(v), 0), ${MAX_FORM_FILL_MS});
+      const value = "v=2;ms=" + ms + ";k=" + Math.min(keys, ${MAX_FORM_EVENTS}) + ";p=" + Math.min(pointers, ${MAX_FORM_EVENTS}) + ";paste=" + pasted + ";trusted=" + (event.isTrusted ? trusted : 0)
+        + ";mv=" + Math.min(moves, ${MAX_FORM_EVENTS}) + ";ks=" + (keys > 2 ? cut(longest - shortest) : 0) + ";rd=" + (first < 0 ? 0 : cut(first - started));
+      first = -1; keys = 0; pointers = 0; pasted = 0; trusted = 1; down = false; moves = 0; lastKey = -1; shortest = -1; longest = -1;
+      return value;
+    };` : "";
+  const send = report ? `{ [settings.header]: token, ${JSON.stringify(FORM_REPORT_HEADER)}: filled(event) }` : "{ [settings.header]: token }";
   const settings = { provider: challenge.provider, siteKey: challenge.siteKey, header: challenge.header, src: PROVIDER_SCRIPT[challenge.provider], ...(challenge.action ? { action: challenge.action } : {}) };
   return `// agent-custody door: form protector. Load it with a script tag, src ${FORM_SCRIPT_PATH} and defer; data-forms on the tag selects the forms.
 (() => {
@@ -45,7 +94,7 @@ export function formScript(challenge: Challenge): string {
       options["response-field"] = false;
       if (settings.action) options.action = settings.action;
     }
-    const widget = api().render(box, options);
+    const widget = api().render(box, options);${count}
     let sending = false;
     form.addEventListener("submit", async (event) => {
       // a button's formaction, formmethod, and formenctype override the form's; a GET or another site's action goes natively
@@ -71,7 +120,7 @@ export function formScript(challenge: Challenge): string {
       for (const field of tokenFields) data.delete(field);
       const multipart = (attr("formenctype", form.getAttribute("enctype")) || "").toLowerCase() === "multipart/form-data";
       try {
-        const res = await fetch(to, { method: "POST", body: multipart ? data : new URLSearchParams(data), headers: { [settings.header]: token }, credentials: "same-origin", signal: AbortSignal.timeout(30000) });
+        const res = await fetch(to, { method: "POST", body: multipart ? data : new URLSearchParams(data), headers: ${send}, credentials: "same-origin", signal: AbortSignal.timeout(30000) });
         if (res.redirected) return location.assign(res.url);
         const type = res.headers.get("content-type") || "";
         if (res.status === 403 && type.includes("application/json")) {
