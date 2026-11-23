@@ -8,7 +8,7 @@
 import { z } from "zod";
 import { sha256Hex } from "./crypto.ts";
 import { ERC8004_REGISTRY } from "./erc8004-link.ts";
-import { AGENT_ID } from "./passport.ts";
+import { AGENT_ID, AGENT_VERSION, compareVersions } from "./passport.ts";
 
 export const LIST_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const MAX_LISTS = 64;
@@ -39,8 +39,20 @@ export const canonicalRegistry = (v: string): string => {
 };
 
 const EntrySchema = z.union([
-  /** a registry entry: the registry's URL, as its passports name it, and the agent's id there; it survives key rotation */
-  z.object({ registry: z.string().url().max(200).transform(canonicalRegistry), agentId: z.string().regex(AGENT_ID) }).strict(),
+  /**
+   * a registry entry: the registry's URL, as its passports name it, and the agent's id there; it survives key rotation.
+   * `version` names one version of the agent, and `versions` a range (`from` inclusive, `below` exclusive); an arrival
+   * whose passport carries another version, or none, is not on the list by this entry
+   */
+  z.object({
+    registry: z.string().url().max(200).transform(canonicalRegistry),
+    agentId: z.string().regex(AGENT_ID),
+    version: z.string().regex(AGENT_VERSION, { message: "version is MAJOR.MINOR.PATCH, numbers only" }).optional(),
+    versions: z.object({ from: z.string().regex(AGENT_VERSION).optional(), below: z.string().regex(AGENT_VERSION).optional() }).strict()
+      .refine((r) => r.from !== undefined || r.below !== undefined, { message: "versions needs from, below, or both" })
+      .refine((r) => r.from === undefined || r.below === undefined || compareVersions(r.from, r.below) < 0, { message: "versions: from must be below below" })
+      .optional(),
+  }).strict().refine((e) => e.version === undefined || e.versions === undefined, { message: "give version or versions, not both" }),
   /** an ERC-8004 identity, as a verified passport's registry checked it on chain */
   z.object({ erc8004: z.object({ agentRegistry: z.string().regex(ERC8004_REGISTRY).transform((r) => r.toLowerCase()), agentId: z.string().regex(/^(0|[1-9][0-9]{0,77})$/) }).strict() }).strict(),
   /** the subject of a verified arrival: a did:key, a Web Bot Auth signature agent's origin, or a grant's agent */
@@ -69,10 +81,22 @@ export interface ArrivalIdentity {
   class: string;
   subject: string;
   /** the passport, when its outcome is `verified` */
-  passport?: { outcome: string; registry?: string; agentId?: string; erc8004?: { agentRegistry: string; agentId: string } };
+  passport?: { outcome: string; registry?: string; agentId?: string; agentVersion?: string; erc8004?: { agentRegistry: string; agentId: string } };
 }
 
 const keyOf = (e: AdmissionEntry): string => ("registry" in e ? `registry ${e.registry} ${e.agentId}` : "erc8004" in e ? `erc8004 ${e.erc8004.agentRegistry} ${e.erc8004.agentId}` : `agent ${e.agent}`);
+
+/** The versions an entry admits (`from` and `upTo` inclusive, `below` exclusive), or undefined for every version. */
+type VersionRange = { from?: string; upTo?: string; below?: string } | undefined;
+const rangeOf = (e: AdmissionEntry): VersionRange => ("registry" in e ? (e.version !== undefined ? { from: e.version, upTo: e.version } : e.versions) : undefined);
+function inRange(r: VersionRange, version: string | undefined): boolean {
+  if (!r) return true;
+  // a version that is not one is in no range: compareVersions would refuse it, and a list must not admit it
+  if (version === undefined || !AGENT_VERSION.test(version)) return false;
+  if (r.from !== undefined && compareVersions(version, r.from) < 0) return false;
+  if (r.upTo !== undefined && compareVersions(version, r.upTo) > 0) return false;
+  return r.below === undefined || compareVersions(version, r.below) < 0;
+}
 
 /** Parses and compiles a lists file; throws, naming what is wrong, when it is not one. */
 export function compileAdmissionLists(text: string): AdmissionLists {
@@ -84,13 +108,12 @@ export function compileAdmissionLists(text: string): AdmissionLists {
   }
   const parsed = AdmissionListsSchema.safeParse(raw);
   if (!parsed.success) throw new Error(`the admission lists are not valid: ${parsed.error.issues.slice(0, 5).map((i) => `${i.path.join(".") || "file"} ${i.message}`).join("; ")}`);
-  const index = new Map<string, Set<string>>();
+  // each key holds the lists that name it, with the versions each entry admits
+  const index = new Map<string, { name: string; range: VersionRange }[]>();
   for (const [name, entries] of Object.entries(parsed.data.lists)) {
     for (const e of entries) {
       const k = keyOf(e);
-      const on = index.get(k) ?? new Set<string>();
-      on.add(name);
-      index.set(k, on);
+      index.set(k, [...(index.get(k) ?? []), { name, range: rangeOf(e) }]);
     }
   }
   const names = Object.keys(parsed.data.lists).sort();
@@ -106,7 +129,8 @@ export function compileAdmissionLists(text: string): AdmissionLists {
         if (p.erc8004) keys.push(`erc8004 ${p.erc8004.agentRegistry.toLowerCase()} ${p.erc8004.agentId}`);
       }
       const on = new Set<string>();
-      for (const k of keys) for (const name of index.get(k) ?? []) on.add(name);
+      const version = p?.outcome === "verified" ? p.agentVersion : undefined;
+      for (const k of keys) for (const { name, range } of index.get(k) ?? []) if (inRange(range, version)) on.add(name);
       return [...on].sort();
     },
   };

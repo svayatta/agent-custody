@@ -1044,8 +1044,8 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         if (limit !== undefined && !(/^[1-9][0-9]{0,2}$/.test(limit) && Number(limit) <= 100)) return json(400, { error: "limit is 1 to 100" });
         try {
           const page = await agents.search({ ...(q("capability") !== undefined ? { capability: q("capability")! } : {}), ...(q("owner") !== undefined ? { owner: q("owner")! } : {}), ...(q("after") !== undefined ? { after: q("after")! } : {}), ...(limit !== undefined ? { limit: Number(limit) } : {}) });
-          // a search finds agents; it is not a directory of contacts, which each agent's own entry and passport carry
-          return json(200, { registry: portalBase, agents: page.agents.map((e) => { const { contact: _contact, ...listed } = publicEntry(e); return listed; }), next: page.next });
+          // a search finds agents; it is not a directory of contacts, nor of each agent's history, which each agent's own entry carries
+          return json(200, { registry: portalBase, agents: page.agents.map((e) => { const { contact: _contact, history: _history, ...listed } = publicEntry(e); return listed; }), next: page.next });
         } catch (e) {
           if (e instanceof RegistryInputError) return json(400, { error: e.message });
           throw e;
@@ -1057,7 +1057,12 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         if (!agentPath[2]) return json(200, publicEntry(entry));
         const status = agentStatus(entry);
         if (status !== "active") return json(410, { error: `the agent is ${status}; the registry issues it no passport`, status });
-        return json(200, await passportFor(entry));
+        try {
+          return json(200, await passportFor(entry));
+        } catch (e) {
+          if (e instanceof RegistryInputError) return json(400, { error: e.message });
+          throw e;
+        }
       }
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'" });
@@ -1607,7 +1612,7 @@ document.getElementById("f").onsubmit = async (e) => {
           if (req.method === "GET" && !id) return json(200, { agents: (await agents.list(tenantId)).map((e) => publicEntry(e)) });
           if (req.method === "POST" && !id) {
             const entry = await agents.register(tenantId, await jsonBody(), Date.now(), checker);
-            await o.tenancy.record(actor, "agent.register", tenantId, { agent: entry.id, key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt, ...(entry.erc8004 ? { erc8004: `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` } : {}) });
+            await o.tenancy.record(actor, "agent.register", tenantId, { agent: entry.id, key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt, ...(entry.version ? { version: entry.version } : {}), ...(entry.erc8004 ? { erc8004: `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` } : {}) });
             return json(200, { agent: publicEntry(entry), passport: await passportFor(entry) });
           }
           if (req.method === "POST" && id && revokeAgent) {
@@ -1620,7 +1625,7 @@ document.getElementById("f").onsubmit = async (e) => {
             const b = await jsonBody();
             const entry = await agents.update(tenantId, id, b, Date.now(), checker);
             if (!entry) return json(404, { error: "no active agent with this id belongs to this tenant" });
-            await o.tenancy.record(actor, "agent.update", tenantId, { agent: entry.id, changed: Object.keys(b).sort(), key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt, erc8004: entry.erc8004 ? `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` : null });
+            await o.tenancy.record(actor, "agent.update", tenantId, { agent: entry.id, changed: Object.keys(b).sort(), key: entry.agent, capabilities: entry.capabilities, ...(entry.version ? { version: entry.version } : {}), expiresAt: entry.expiresAt, erc8004: entry.erc8004 ? `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` : null });
             return json(200, { agent: publicEntry(entry), ...(agentStatus(entry) === "active" ? { passport: await passportFor(entry) } : {}) });
           }
         } catch (e) {

@@ -10,14 +10,14 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { DoorConfig } from "./config.ts";
+import { registryKeyEntry, type DoorConfig } from "./config.ts";
 import { loadPrivateKey, loadPublicKey } from "./crypto.ts";
 import { createIssuer, type FlushResult } from "./issue.ts";
 import { openLog, type LogSink } from "./log-sink.ts";
 import { FORM_SCRIPT_PATH, formScript } from "./door-form.ts";
 import { createRevocationList } from "./revocation.ts";
 import { openExporter, type ReceiptExporter } from "./otel.ts";
-import { AUTHZ_ALLOWED_REASON, DOOR_VERSION, RECEIPT_HEADER, authzTarget, createDoorCoreWith, jsonAnswer as json, relayedAnswer, relayToOrigin, type BodyRead, type DoorAnswer, type DoorCore, type DoorIO, type Execution, type OriginTarget } from "./door-core.ts";
+import { AUTHZ_ALLOWED_REASON, DOOR_VERSION, RECEIPT_HEADER, authzTarget, createDoorCoreWith, registryKeysOf, jsonAnswer as json, relayedAnswer, relayToOrigin, type BodyRead, type DoorAnswer, type DoorCore, type DoorIO, type Execution, type OriginTarget } from "./door-core.ts";
 
 export * from "./door-core.ts";
 
@@ -74,7 +74,7 @@ export function nodeDoorIO(cfg: DoorConfig, options: Omit<DoorOptions, "fetch"> 
   return {
     key,
     trustedPrincipalKeys: cfg.trustedPrincipalKeys.map(loadPublicKey),
-    trustedRegistryKeys: cfg.trustedRegistryKeys.map(loadPublicKey),
+    ...registryKeysOf(cfg.trustedRegistryKeys.map(registryKeyEntry).map((e) => ({ ref: loadPublicKey(e.key), ...(e.registry ? { registry: e.registry } : {}) }))),
     // the bytes and the metadata come from one open file
     readPolicy() {
       const fd = openSync(cfg.policyFile, "r");

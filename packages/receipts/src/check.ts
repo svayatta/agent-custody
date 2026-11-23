@@ -3,11 +3,12 @@
 // is where tool-name collisions and unreachable servers show up, and compares every tool name the config mentions with
 // the tools the upstreams actually offer.
 import { compileAdmissionLists } from "./admission.ts";
+import { registryKeysOf } from "./door-core.ts";
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
-import { DoorConfigSchema, EgressConfigSchema, GatewayConfigSchema, loadConfig, loadDoorConfig, loadEgressConfig, ONE_LOG, strictRefusals, type GatewayConfig } from "./config.ts";
+import { DoorConfigSchema, EgressConfigSchema, GatewayConfigSchema, loadConfig, loadDoorConfig, loadEgressConfig, ONE_LOG, registryKeyEntry, strictRefusals, type GatewayConfig } from "./config.ts";
 import { generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair, type Envelope, type PublicKeyRef } from "./crypto.ts";
 import { delegationValidAt, verifyDelegation } from "./delegation.ts";
 import { hasPermitRule } from "./policy.ts";
@@ -148,7 +149,7 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
     }
   }
   let registries = 0;
-  for (const f of cfg.trustedRegistryKeys) {
+  for (const { key: f } of cfg.trustedRegistryKeys.map(registryKeyEntry)) {
     try {
       loadPublicKey(f);
       registries++;
@@ -162,6 +163,19 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
   if (cfg.trustedRegistryKeys.length > 0) {
     if (!cfg.webBotAuth) add("error", "registry keys", "trustedRegistryKeys needs webBotAuth: a passport admits an agent only on a request its did:key signed, and webBotAuth checks that signature");
     else if (registries === cfg.trustedRegistryKeys.length) add("ok", "registry keys", `${registries} trusted registry key${registries === 1 ? "" : "s"} load`);
+    try {
+      registryKeysOf(cfg.trustedRegistryKeys.map(registryKeyEntry).flatMap((e) => {
+        try {
+          return [{ ref: loadPublicKey(e.key), ...(e.registry !== undefined ? { registry: e.registry } : {}) }];
+        } catch {
+          return [];
+        }
+      }));
+    } catch (e) {
+      add("error", "registry keys", e instanceof Error ? e.message : String(e));
+    }
+    const unbound = cfg.trustedRegistryKeys.map(registryKeyEntry).filter((e) => e.registry === undefined).length;
+    if (cfg.trustedRegistryKeys.length > 1 && unbound > 0) add("warn", "registry keys", `${unbound} of ${cfg.trustedRegistryKeys.length} registry keys are bound to no registry URL, and such a key can sign passports that name any registry, so one registry can put its agents on another's list entries: give each { "key", "registry" }`);
   }
   if (!existsSync(cfg.policyFile)) add("error", "policy", `${cfg.policyFile} does not exist`);
   else {

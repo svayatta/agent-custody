@@ -19,6 +19,42 @@ export const MAX_PASSPORT_SECONDS = 7 * 86_400;
 export const AGENT_ID = /^agt_[0-9a-f]{16}$/;
 export const CAPABILITY = /^[a-z0-9][a-z0-9._:-]{0,63}$/;
 export const DID_KEY = /^did:key:z[1-9A-HJ-NP-Za-km-z]{40,60}$/;
+/** an agent's version: MAJOR.MINOR.PATCH, numbers only, compared as numbers */
+export const AGENT_VERSION = /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$/;
+
+/** Orders two versions that match AGENT_VERSION: negative, zero, or positive. */
+export function compareVersions(a: string, b: string): number {
+  // anything else would compare as NaN, which is neither below nor above, and a range check would let it through
+  if (!AGENT_VERSION.test(a) || !AGENT_VERSION.test(b)) throw new Error(`not a version, MAJOR.MINOR.PATCH: ${!AGENT_VERSION.test(a) ? a : b}`.slice(0, 120));
+  const x = a.split(".").map(Number);
+  const y = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i]! - y[i]!;
+  return 0;
+}
+
+const HOSTNAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
+
+/** A tool endpoint an agent says it calls: a host name, or an https or wss URL (an MCP server). A claim, never checked by the registry. */
+export const EndpointSchema = z.string().max(200)
+  .refine((v) => !/[\s\u0000-\u001f\u007f]/.test(v), { message: "an endpoint has no white space or control characters" })
+  .refine((v) => {
+    if (HOSTNAME.test(v)) return true;
+    try {
+      const u = new URL(v);
+      return (u.protocol === "https:" || u.protocol === "wss:") && !u.username && !u.password && HOSTNAME.test(u.hostname);
+    } catch {
+      return false;
+    }
+  }, { message: "an endpoint is a lowercase host name, or an https or wss URL without credentials" })
+  // one spelling: a URL is kept as its href, so what the passport carries is what the URL means
+  .transform((v) => (HOSTNAME.test(v) ? v : new URL(v).href));
+
+/**
+ * The most characters the declared endpoints of one agent may take, together. With the largest of every other field, a
+ * passport stays within MAX_PASSPORT_HEADER, so a door can always read it.
+ */
+export const MAX_ENDPOINT_CHARS = 1024;
+
 export const text = (max: number) => z.string().trim().min(1).max(max).refine((s) => !/[\u0000-\u001f\u007f]/.test(s), { message: "control characters are not allowed" });
 
 export const PassportSchema = z.object({
@@ -34,6 +70,10 @@ export const PassportSchema = z.object({
   /** how a site reaches the agent's operator */
   contact: text(200),
   capabilities: z.array(z.string().regex(CAPABILITY)).max(32),
+  /** the version of the agent its owner registered; absent when none was */
+  agentVersion: z.string().regex(AGENT_VERSION).optional(),
+  /** the tool endpoints the agent's owner says it calls: a claim, which the registry does not check */
+  endpoints: z.array(EndpointSchema).max(32).optional(),
   /** the agent's ERC-8004 identity, as the registry last checked it against the chain; absent when it has none or the check is stale */
   erc8004: z.object({ agentRegistry: z.string().regex(ERC8004_REGISTRY), agentId: z.string().regex(/^[0-9]{1,78}$/), owner: z.string().regex(/^0x[0-9a-f]{40}$/), block: z.number().int().nonnegative() }).optional(),
   issuedAt: z.iso.datetime({ offset: true }),
