@@ -235,6 +235,9 @@ describe("the registry's search by capability", () => {
     expect(all.json.next).toBeNull();
     // the registry names itself as its passports do, so a site copies it into a list entry rather than typing it
     expect(all.json.registry).toBe(REGISTRY);
+    // a search is not a directory of contacts: the contact is on the agent's own entry, and in its passport
+    expect(all.json.agents.every((e: object) => !("contact" in e))).toBe(true);
+    expect((await get(`/registry/agents/${a}`)).json.contact).toBe("a@carted.example");
     const first = await get("/registry/agents?capability=refunds&limit=1");
     expect(first.json.agents).toHaveLength(1);
     const second = await get(`/registry/agents?capability=refunds&limit=1&after=${first.json.next}`);
@@ -242,6 +245,22 @@ describe("the registry's search by capability", () => {
     expect(second.json.next).toBeNull();
     expect((await get("/registry/agents?owner=carted")).json.agents).toHaveLength(3);
     expect((await get("/registry/agents?capability=payouts")).json.agents).toEqual([]);
+  });
+
+  it("slows one address that walks the registry, and not another", async () => {
+    const proxied = await servePortal({ tenancy: new PostgresTenancy(db), client: db, secret: "portal-secret-for-admission-tests-32ch", publicUrl: "https://log.example.test/", portalUrl: REGISTRY, registry: { signer: localSigner(generateKeyPair()) }, trustProxy: true, log: () => {}, prefix: "walk_" }, { port: 0 });
+    try {
+      const from = (addr: string, path: string) => fetch(new URL(path, proxied.url), { headers: { "x-forwarded-for": addr } });
+      const statuses: number[] = [];
+      for (let i = 0; i < 125; i++) statuses.push((await from("198.51.100.7", i % 2 ? "/registry/agents?capability=refunds" : "/registry/agents/agt_00000000000000a1")).status);
+      expect(statuses.slice(0, 120).every((s) => s === 200 || s === 404)).toBe(true);
+      const slowed = await from("198.51.100.7", "/registry/agents?capability=refunds");
+      expect(slowed.status).toBe(429);
+      expect(slowed.headers.get("retry-after")).toBe("2");
+      expect((await from("198.51.100.8", "/registry/agents?capability=refunds")).status).toBe(200);
+    } finally {
+      await proxied.close();
+    }
   });
 
   it("refuses a capability, an owner, a cursor, or a limit that is not one", async () => {

@@ -13,7 +13,9 @@ curl 'https://app.agent-custody.dev/registry/agents?capability=refunds&limit=50'
 # { "registry": "https://app.agent-custody.dev/", "agents": [ <entry>, … ], "next": "agt_…" | null }
 ```
 
-It lists active agents only, never a revoked or expired one, ordered by id. `capability` filters by one capability and `owner` by one tenant. `limit` is 1 to 100 (50 by default); any other value is a `400`. To get the next page, send `after=<next>`. `registry` is the registry's URL as its passports name it: copy it into a list entry. Each entry is the one `GET /registry/agents/<id>` publishes: id, name, owner, contact, capabilities, its key as a did:key and a JWK, and its ERC-8004 link when it has one.
+It lists active agents only, never a revoked or expired one, ordered by id. `capability` filters by one capability and `owner` by one tenant. `limit` is 1 to 100 (50 by default); any other value is a `400`. To get the next page, send `after=<next>`. `registry` is the registry's URL as its passports name it: copy it into a list entry. Each entry is the one `GET /registry/agents/<id>` publishes, without `contact`: id, name, owner, capabilities, its key as a did:key and a JWK, and its ERC-8004 link when it has one. A search finds agents; it is not a directory of contacts. An agent's contact is on its own entry and in its passport, which reaches every site the agent visits.
+
+The registry's public reads (the search, an agent's entry, and its passport) allow each address a burst of 120 and then one every 2 seconds; past that they answer `429` with `Retry-After`.
 
 The registry signs nothing about a search. A site that lists an agent from a search names it by the entry's registry and id, and the door then admits the agent only on a passport the registry signed.
 

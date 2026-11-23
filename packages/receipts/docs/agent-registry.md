@@ -103,6 +103,8 @@ What the link does not do: it reads the ERC-8004 Identity Registry only, not its
 | `GET /registry/agents?capability=&owner=&limit=&after=` | the active agents that hold a capability (or belong to an owner), by id, a page of up to 100 at a time; see [admission lists](admission-lists.md#find-agents-in-the-registry) |
 | `GET /registry/agents/<id>/passport` | a fresh passport for an active agent; `410` for a revoked or expired one |
 
+These reads need no session. Each address gets a burst of 120 of them (search, entries, and passports together) and then one every 2 seconds; past that the registry answers `429` with `Retry-After`.
+
 The agent fetches a fresh passport before the one it holds expires. It needs no session for that.
 
 ## Admit registered agents at a door
