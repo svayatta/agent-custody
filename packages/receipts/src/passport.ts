@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { dsseVerify, sha256Hex, type Envelope, type PublicKeyRef } from "./crypto.ts";
 import { publicKeyFromDidKey } from "./did-key.ts";
+import { ERC8004_REGISTRY } from "./erc8004-link.ts";
 
 export const PASSPORT_TYPE = "application/vnd.agent-custody.passport+json";
 /** the header an agent presents its passport in: the DSSE envelope as base64url JSON */
@@ -33,6 +34,8 @@ export const PassportSchema = z.object({
   /** how a site reaches the agent's operator */
   contact: text(200),
   capabilities: z.array(z.string().regex(CAPABILITY)).max(32),
+  /** the agent's ERC-8004 identity, as the registry last checked it against the chain; absent when it has none or the check is stale */
+  erc8004: z.object({ agentRegistry: z.string().regex(ERC8004_REGISTRY), agentId: z.string().regex(/^[0-9]{1,78}$/), owner: z.string().regex(/^0x[0-9a-f]{40}$/), block: z.number().int().nonnegative() }).optional(),
   issuedAt: z.iso.datetime({ offset: true }),
   expiresAt: z.iso.datetime({ offset: true }),
 });

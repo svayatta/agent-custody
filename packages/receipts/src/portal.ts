@@ -17,7 +17,8 @@ import { welcomeSheet } from "./log-admin.ts";
 import { clientAddress } from "./log-sink.ts";
 import { SITE_NAV, siteUrl } from "./site-links.ts";
 import { PLAN_QUOTAS, RateLimiter, type Plan, type PostgresLike, type PostgresTenancy } from "./log-store.ts";
-import { agentStatus, issuePassport, publicEntry, registryDocument, RegistryInputError, RegistryStore, DEFAULT_PASSPORT_SECONDS, MAX_PASSPORT_SECONDS, REGISTRY_DOCUMENT_PATH } from "./registry.ts";
+import type { Erc8004Resolver } from "./erc8004.ts";
+import { agentStatus, freshErc8004, issuePassport, publicEntry, type AgentEntry, registryDocument, RegistryInputError, RegistryStore, DEFAULT_PASSPORT_SECONDS, MAX_PASSPORT_SECONDS, REGISTRY_DOCUMENT_PATH } from "./registry.ts";
 import type { Signer } from "./signer.ts";
 import { oidcAuthorizeUrl, oidcExchange, pkce, samlAuthorizeUrl, samlValidate, type OidcConfig, type SamlConfig, type SsoIdentity } from "./sso.ts";
 
@@ -76,7 +77,14 @@ export interface PortalOptions {
    * The agent registry: organisations register their agents, and the portal signs their passports with `signer`, a key
    * of its own (not the log's). Needs `portalUrl`, which names the registry in every passport. Off when absent.
    */
-  registry?: { signer: Signer; passportSeconds?: number };
+  registry?: {
+    signer: Signer;
+    passportSeconds?: number;
+    /** links agents to ERC-8004 identities, checked against the chain; without it a link is refused */
+    erc8004?: Erc8004Resolver;
+    /** how old a link's last check may be for a passport to carry it; an older one is checked again first. Default 3600 */
+    erc8004RecheckSeconds?: number;
+  };
   log?: (message: string) => void;
 }
 
@@ -881,6 +889,22 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   const passportSeconds = o.registry?.passportSeconds ?? DEFAULT_PASSPORT_SECONDS;
   if (!Number.isInteger(passportSeconds) || passportSeconds < 60 || passportSeconds > MAX_PASSPORT_SECONDS) throw new Error(`a passport lives from 60 to ${MAX_PASSPORT_SECONDS} seconds; got ${passportSeconds}`);
   const agents = o.registry ? new RegistryStore(o.client, (o.portalUrl ?? "http://localhost/").replace(/\/?$/, "/"), o.prefix) : null;
+  const recheckSeconds = o.registry?.erc8004RecheckSeconds ?? 3600;
+  if (!Number.isInteger(recheckSeconds) || recheckSeconds < 60 || recheckSeconds > 86_400) throw new Error(`an ERC-8004 link is rechecked every 60 to 86400 seconds; got ${recheckSeconds}`);
+  const resolver = o.registry?.erc8004;
+  const checker = resolver ? (link: Parameters<Erc8004Resolver["check"]>[0], didKey: string) => resolver.check(link, didKey) : undefined;
+  // a stale link is checked again at most once a minute per agent, so anonymous passport requests cannot drive the chain
+  const lastRecheck = new Map<string, number>();
+  const passportFor = async (entry: AgentEntry) => {
+    let e = entry;
+    if (resolver && agents && e.erc8004 && !freshErc8004(e, recheckSeconds) && Date.now() - (lastRecheck.get(e.id) ?? 0) >= 60_000) {
+      lastRecheck.set(e.id, Date.now());
+      if (lastRecheck.size > 10_000) lastRecheck.delete(lastRecheck.keys().next().value!);
+      const checked = { agent: e.agent, link: { agentRegistry: e.erc8004.agentRegistry, agentId: e.erc8004.agentId } };
+      e = (await agents.recordErc8004(e.id, checked, await resolver.check(checked.link, checked.agent))) ?? e;
+    }
+    return issuePassport(o.registry!.signer, portalBase, e, passportSeconds, Date.now(), freshErc8004(e, recheckSeconds));
+  };
   const heads: CheckpointStore = postgresCheckpoints(o.client);
   const log = o.log ?? ((m) => console.error(m));
   const loginFailures = new RateLimiter({ perSecond: 1 / 30, burst: 8 });
@@ -1007,7 +1031,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       if (req.method === "GET" && url.pathname === "/health") return json(200, { ok: true, stripe: !!o.stripe });
       if (req.method === "GET" && url.pathname === "/favicon.svg") { res.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" }); return void res.end(FAVICON); }
       // ---- the agent registry's public side: its keys, each agent's entry, and passports, for anyone ----
-      if (o.registry && agents && req.method === "GET" && url.pathname === REGISTRY_DOCUMENT_PATH) return json(200, await registryDocument(o.registry.signer, portalBase, passportSeconds));
+      if (o.registry && agents && req.method === "GET" && url.pathname === REGISTRY_DOCUMENT_PATH) return json(200, await registryDocument(o.registry.signer, portalBase, passportSeconds, resolver?.chains ?? []));
       const agentPath = /^\/registry\/agents\/([^/]+)(\/passport)?$/.exec(url.pathname);
       if (o.registry && agents && req.method === "GET" && agentPath) {
         const entry = await agents.get(agentPath[1]!);
@@ -1015,7 +1039,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
         if (!agentPath[2]) return json(200, publicEntry(entry));
         const status = agentStatus(entry);
         if (status !== "active") return json(410, { error: `the agent is ${status}; the registry issues it no passport`, status });
-        return json(200, await issuePassport(o.registry.signer, portalBase, entry, passportSeconds));
+        return json(200, await passportFor(entry));
       }
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'" });
@@ -1564,9 +1588,9 @@ document.getElementById("f").onsubmit = async (e) => {
         try {
           if (req.method === "GET" && !id) return json(200, { agents: (await agents.list(tenantId)).map((e) => publicEntry(e)) });
           if (req.method === "POST" && !id) {
-            const entry = await agents.register(tenantId, await jsonBody());
-            await o.tenancy.record(actor, "agent.register", tenantId, { agent: entry.id, key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt });
-            return json(200, { agent: publicEntry(entry), passport: await issuePassport(o.registry.signer, portalBase, entry, passportSeconds) });
+            const entry = await agents.register(tenantId, await jsonBody(), Date.now(), checker);
+            await o.tenancy.record(actor, "agent.register", tenantId, { agent: entry.id, key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt, ...(entry.erc8004 ? { erc8004: `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` } : {}) });
+            return json(200, { agent: publicEntry(entry), passport: await passportFor(entry) });
           }
           if (req.method === "POST" && id && revokeAgent) {
             await jsonBody();
@@ -1576,10 +1600,10 @@ document.getElementById("f").onsubmit = async (e) => {
           }
           if (req.method === "POST" && id) {
             const b = await jsonBody();
-            const entry = await agents.update(tenantId, id, b);
+            const entry = await agents.update(tenantId, id, b, Date.now(), checker);
             if (!entry) return json(404, { error: "no active agent with this id belongs to this tenant" });
-            await o.tenancy.record(actor, "agent.update", tenantId, { agent: entry.id, changed: Object.keys(b).sort(), key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt });
-            return json(200, { agent: publicEntry(entry), ...(agentStatus(entry) === "active" ? { passport: await issuePassport(o.registry.signer, portalBase, entry, passportSeconds) } : {}) });
+            await o.tenancy.record(actor, "agent.update", tenantId, { agent: entry.id, changed: Object.keys(b).sort(), key: entry.agent, capabilities: entry.capabilities, expiresAt: entry.expiresAt, erc8004: entry.erc8004 ? `${entry.erc8004.agentRegistry}:${entry.erc8004.agentId}` : null });
+            return json(200, { agent: publicEntry(entry), ...(agentStatus(entry) === "active" ? { passport: await passportFor(entry) } : {}) });
           }
         } catch (e) {
           if (e instanceof RegistryInputError) return json(400, { error: e.message });
