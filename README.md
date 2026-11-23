@@ -42,6 +42,8 @@ bun run demo
 
 `bun run demo:refund` runs Demo 1, the refund, on both halves. A shop has the door in front of its refund API and pays through the gateway. A shopping agent with a passport is paid once, even when it retries. Over the limit, or with a forged passport, it is refused at the door. An agent with no passport waits until a person approves that exact refund. An auditor with public keys and a read-only view of Stripe verifies every receipt and finds a refund made in Stripe directly. It needs no key and no network. [Tutorial 59](packages/receipts/examples/59-refund-demo.ts) is the source.
 
+`bun run demo:admitted` runs Demo 3, agent admitted. A marketplace has the door in front of its order API and admits only the agents on its partners list. An agent-commerce company's agent, sending only its signature, is blocked. The company registers the agent at the registry and gets a passport. The door then knows who the agent is and who owns it, and still blocks it, because the marketplace has not listed it. The marketplace finds the agent by searching the registry for a capability and lists it, and the next order goes through. The merchant then verifies every receipt with the door's public key and reads who each agent was, who owns it, and what it did. It needs no key and no network. [Tutorial 65](packages/receipts/examples/65-agent-admitted-demo.ts) is the source.
+
 ### Use the packages
 
 ```bash
