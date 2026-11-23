@@ -8,7 +8,8 @@
 // listed it. The marketplace searches the registry for agents that place orders, finds Carted's, and lists it by its
 // registry entry; the door reads the changed list on the next request, without a restart. The order goes through.
 // Then the merchant reads its own receipts, with the door's public key and nothing else: who each agent was, who owns
-// it, how to reach them, and what it did. Postgres runs in-process through PGlite; everything listens on loopback.
+// it, and what it did. To reach the agent's operator, it looks up the registry entry that the passport names. Postgres
+// runs in-process through PGlite; everything listens on loopback.
 import { createHash, sign as edSign } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
@@ -31,7 +32,8 @@ import { out, step } from "./_out.ts";
 
 const MARKETPLACE = "bazaar.example";
 const REGISTRY = "https://app.example.test/";
-const dir = out("65-agent-admitted-demo");
+// one directory per run: the run of every example and the cold-twice test may run this at the same time
+const dir = out(`65-agent-admitted-demo/${process.pid}`);
 
 // The marketplace's order API: every order that reaches it is kept, so the run can show what got through.
 const orders: { path: string; body: string }[] = [];

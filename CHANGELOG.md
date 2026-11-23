@@ -5,6 +5,7 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 ## Unreleased
 
 - **Demo 3, agent admitted** (svayatta/pm#43). `bun run demo:admitted` (tutorial 65, `examples/65-agent-admitted-demo.ts`) runs the agent-commerce story end to end with no key and no network. A marketplace's door admits only agents on its `partners` admission list. Carted's agent, sending only a did:key signature, is `claimed` and blocked. Carted signs up at the registry, registers the agent with proof of its key, and gets a passport. The next order is `verified`, with the agent's name, id, and owner in the receipt, and still blocked, because the marketplace has not listed it. The marketplace searches the registry by capability, lists the agent by its registry entry, and the door reads the changed list on the next request. The order is placed, once. The merchant verifies all three receipts with the door's public key and reads who each agent was, who owns it, and what it did, and looks up the operator's contact in the registry. `test/admitted-demo.test.ts` runs it cold twice in a row.
+
 ## 0.16.13 — 2026-11-23
 
 - **Agent registry passports: the nonce of a passport not yet valid is kept.** A door whose clock was behind its registry's refused a fresh passport and kept no nonce, so the same request could be sent again, and admitted, once the passport's window opened. The door now keeps the nonce for any passport a trusted registry key signed that has not expired. A token id that is not decimal in an ERC-8004 link is a `400` again, not a `500`.
