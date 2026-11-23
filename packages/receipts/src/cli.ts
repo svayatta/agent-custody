@@ -20,6 +20,7 @@ import { postgresResolver, serveLog } from "./log-sink.ts";
 import { importLogFile, PostgresTenancy, type PostgresLike, type Plan } from "./log-store.ts";
 import { bothCheckpoints, dirCheckpoints, postgresCheckpoints, type CheckpointStore } from "./checkpoints.ts";
 import { connectSigner, fetchLogKeys, localSigner, serveSigner, type RetiredKey, type Signer } from "./signer.ts";
+import { createErc8004Resolver } from "./erc8004.ts";
 import { fetchWitnessKeys, Witness } from "./witness.ts";
 import { checkLog, formatLogCheck } from "./log-check.ts";
 import { Anchor, ANCHOR_CHAINS, resolveAnchorChain } from "./anchor.ts";
@@ -270,8 +271,10 @@ const USAGE = `agent-custody <command>
   portal  --db-env NAME --secret-env NAME --public-url <log url> [--checkpoints-url <url>] [--portal-url <url>] [--port 8792] [--host 127.0.0.1]
           [--stripe-key-env NAME --stripe-webhook-env NAME --stripe-price-team <price id>] [--trust-proxy]
           [--registry-key-env NAME | --registry-signer-url <url> [--registry-signer-token-env NAME]] [--passport-seconds 86400]
+          [--erc8004-rpc-env <chain id>=NAME]... [--ipfs-gateway <https url>] [--erc8004-recheck-seconds 3600]
                                                    the tenant portal: register, first key, usage against plan, keys, billing, export
                                                    with a registry key, also the agent registry: register agents, sign their passports
+                                                   with an RPC per chain, it links agents to ERC-8004 identities it checks on chain
   log-admin --db-env NAME import --file <log.jsonl> [--tenant default]      copies a file log into the database as hashes
   portal-followup --db-env NAME --secret-env NAME --mail-key-env NAME --mail-from <address> [--mail-notify <address>] [--mail-reply-to <address>]
                   [--signer <name>] [--signer-role <role>] [--portal-url <url>] [--dry-run]
@@ -776,7 +779,7 @@ async function main(argv: string[]): Promise<number> {
       return r.failed.length ? 1 : 0;
     }
     case "portal": {
-      const { values } = parseArgs({ args: rest, options: { "db-env": { type: "string" }, "secret-env": { type: "string" }, "public-url": { type: "string" }, "checkpoints-url": { type: "string" }, "portal-url": { type: "string" }, port: { type: "string", default: "8792" }, host: { type: "string", default: "127.0.0.1" }, "stripe-key-env": { type: "string" }, "stripe-webhook-env": { type: "string" }, "stripe-price-team": { type: "string" }, "mail-key-env": { type: "string" }, "mail-from": { type: "string" }, "mail-notify": { type: "string" }, "mail-reply-to": { type: "string" }, "github-client-id": { type: "string" }, "github-secret-env": { type: "string" }, "google-client-id": { type: "string" }, "google-secret-env": { type: "string" }, "trust-proxy": { type: "boolean", default: false }, "registry-key-env": { type: "string" }, "registry-signer-url": { type: "string" }, "registry-signer-token-env": { type: "string" }, "passport-seconds": { type: "string" } } });
+      const { values } = parseArgs({ args: rest, options: { "db-env": { type: "string" }, "secret-env": { type: "string" }, "public-url": { type: "string" }, "checkpoints-url": { type: "string" }, "portal-url": { type: "string" }, port: { type: "string", default: "8792" }, host: { type: "string", default: "127.0.0.1" }, "stripe-key-env": { type: "string" }, "stripe-webhook-env": { type: "string" }, "stripe-price-team": { type: "string" }, "mail-key-env": { type: "string" }, "mail-from": { type: "string" }, "mail-notify": { type: "string" }, "mail-reply-to": { type: "string" }, "github-client-id": { type: "string" }, "github-secret-env": { type: "string" }, "google-client-id": { type: "string" }, "google-secret-env": { type: "string" }, "trust-proxy": { type: "boolean", default: false }, "registry-key-env": { type: "string" }, "registry-signer-url": { type: "string" }, "registry-signer-token-env": { type: "string" }, "passport-seconds": { type: "string" }, "erc8004-rpc-env": { type: "string", multiple: true }, "ipfs-gateway": { type: "string" }, "erc8004-recheck-seconds": { type: "string" } } });
       if (!values["db-env"] || !values["secret-env"] || !values["public-url"]) throw new Error("portal needs --db-env, --secret-env, and --public-url");
       // the registry's key is its own, never the log's: in the environment, or held by a signer process
       let registry: { signer: Signer; passportSeconds?: number } | undefined;
@@ -795,8 +798,19 @@ async function main(argv: string[]): Promise<number> {
           if (values["registry-signer-token-env"] && !token) throw new Error(`portal: environment variable ${values["registry-signer-token-env"]} is not set`);
           signer = await connectSigner(values["registry-signer-url"]!, token ? { token } : {});
         }
-        registry = { signer, ...(values["passport-seconds"] ? { passportSeconds: Number(values["passport-seconds"]) } : {}) };
-      } else if (values["passport-seconds"] || values["registry-signer-token-env"]) throw new Error("--passport-seconds and --registry-signer-token-env need --registry-key-env or --registry-signer-url");
+        // each RPC URL is read from the environment: a provider's URL often carries its key
+        const rpc: Record<string, string> = {};
+        for (const pair of values["erc8004-rpc-env"] ?? []) {
+          const [chain, env] = pair.split("=");
+          if (!chain || !env) throw new Error(`--erc8004-rpc-env takes <chain id>=<variable>, got ${pair}`);
+          const rpcUrl = process.env[env];
+          if (!rpcUrl) throw new Error(`portal: environment variable ${env} is not set`);
+          rpc[chain] = rpcUrl;
+        }
+        if (!Object.keys(rpc).length && (values["ipfs-gateway"] || values["erc8004-recheck-seconds"])) throw new Error("--ipfs-gateway and --erc8004-recheck-seconds need --erc8004-rpc-env");
+        const erc8004 = Object.keys(rpc).length ? createErc8004Resolver({ rpc, ...(values["ipfs-gateway"] ? { ipfsGateway: values["ipfs-gateway"] } : {}) }) : undefined;
+        registry = { signer, ...(values["passport-seconds"] ? { passportSeconds: Number(values["passport-seconds"]) } : {}), ...(erc8004 ? { erc8004 } : {}), ...(values["erc8004-recheck-seconds"] ? { erc8004RecheckSeconds: Number(values["erc8004-recheck-seconds"]) } : {}) };
+      } else if (values["passport-seconds"] || values["registry-signer-token-env"] || values["erc8004-rpc-env"]) throw new Error("--passport-seconds, --registry-signer-token-env, and --erc8004-rpc-env need --registry-key-env or --registry-signer-url");
       let oauth: OAuthOptions | undefined;
       for (const p of ["github", "google"] as const) {
         const id = values[`${p}-client-id`];

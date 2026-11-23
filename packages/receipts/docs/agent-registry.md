@@ -25,6 +25,7 @@ A passport is a DSSE envelope of type `application/vnd.agent-custody.passport+js
 - `owner` is the portal tenant that registered the agent. `contact` is how a site reaches the agent's operator.
 - `capabilities` are the organisation's own words for what the agent does: lowercase letters, digits, and `. _ : -`, at most 32. The registry does not check them. A site's policy decides what they are worth.
 - A passport lives for a day by default (`--passport-seconds`, from 60 seconds to 7 days), and never past the registration's own expiry.
+- `erc8004`, when the agent is [linked to an ERC-8004 identity](#link-an-erc-8004-identity): `{ agentRegistry, agentId, owner, block }`, as the registry last checked it on chain.
 
 **A passport is public.** It proves nothing without a signature by the agent's key on the same request, so the registry serves one to anyone who asks, like a certificate.
 
@@ -53,12 +54,47 @@ The answer has the registry entry and a first passport. Every key belongs to one
 
 In code, `didKeyOf(publicKey)` gives a key's did:key.
 
+## Link an ERC-8004 identity
+
+An agent that already has a token in an [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) Identity Registry can carry it in its passport. The registry vouches for the agent, as before; the link adds the agent's portable on-chain identity, so a site can require one. ERC-8004 is still a draft, and only its `registration-v1` file is read.
+
+The portal reads a chain only with an RPC URL for it, from the environment:
+
+```bash
+export BASE_RPC="https://…"   # a provider's URL often carries its key
+agent-custody portal … --registry-key-env REGISTRY_KEY --erc8004-rpc-env 8453=BASE_RPC [--ipfs-gateway https://ipfs.io]
+```
+
+The owner adds `"erc8004": { "agentRegistry": "eip155:8453:0x…", "agentId": "7" }` to `POST /api/agents` or `POST /api/agents/<id>`. `agentId` is the token id in decimal. Before it stores the link, the registry reads, at one block:
+
+1. `ownerOf(agentId)`: the token exists and has an owner.
+2. `tokenURI(agentId)`: where the registration file is. It fetches the file: an inline `data:application/json` URI, `https://` (never from an internal address, following no redirect, within 5 seconds and 64 KiB), or `ipfs://` through `--ipfs-gateway`.
+3. The file: its `type` is `registration-v1`, `active` is true, `registrations` lists this `agentRegistry` and `agentId`, and `services` has `{ "name": "DID", "endpoint": "<the agent's did:key>" }`.
+
+So the agent's owner publishes its did:key in the token's registration file first. Anything that does not agree is refused with the reason. The entry records the owner address, the block, the file's sha256, and when it was checked. A new key while a link stands is checked against the file again, so rotate the key in the file first. `"erc8004": null` unlinks.
+
+A link is checked again before a passport carries it, when the last check is older than `--erc8004-recheck-seconds` (an hour by default), at most once a minute per agent. When that check fails, for example because the owner marked the agent inactive or moved the token to a file that no longer lists the key, passports carry no link until a check succeeds, and the entry shows the error.
+
+The door reads no chain. It records the link from the passport in `arrival.passport.erc8004`, and a policy can require it:
+
+```cedar
+permit(principal, action == Action::"refund", resource)
+when {
+  context.facts.arrival.class == "verified" &&
+  context.facts.arrival has passport &&
+  context.facts.arrival.passport has erc8004 &&
+  context.facts.arrival.passport.erc8004.agentRegistry == "eip155:8453:0x…"
+};
+```
+
+What the link does not do: it reads the ERC-8004 Identity Registry only, not its Reputation or Validation registries; it does not make anyone's token trustworthy (anyone can register one for gas, which is why the registry still vouches); and a door that trusts ERC-8004 registries directly, with no portal, is not built.
+
 ## What the registry publishes
 
 | path | what |
 | --- | --- |
-| `GET /.well-known/agent-custody-registry.json` | the registry's key document: its URL, the passport type and header, how long a passport lives, and its keys (`keyid`, `alg`, `publicKeyPem`, `validFrom`) |
-| `GET /registry/agents/<id>` | the agent's entry: name, owner, contact, capabilities, its key as a did:key and as an Ed25519 JWK (`kid` is the did:key, `exp` the registration's expiry), and `status` (`active`, `revoked`, or `expired`) |
+| `GET /.well-known/agent-custody-registry.json` | the registry's key document: its URL, the passport type and header, how long a passport lives, the chain ids whose ERC-8004 registries it reads (`erc8004Chains`), and its keys (`keyid`, `alg`, `publicKeyPem`, `validFrom`) |
+| `GET /registry/agents/<id>` | the agent's entry: name, owner, contact, capabilities, its key as a did:key and as an Ed25519 JWK (`kid` is the did:key, `exp` the registration's expiry), `status` (`active`, `revoked`, or `expired`), and `erc8004`, the linked identity as last checked (with `error` when the last check failed) or null |
 | `GET /registry/agents/<id>/passport` | a fresh passport for an active agent; `410` for a revoked or expired one |
 
 The agent fetches a fresh passport before the one it holds expires. It needs no session for that.

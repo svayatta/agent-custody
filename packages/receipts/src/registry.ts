@@ -13,6 +13,7 @@ import { dsseVerify, sha256Hex, type Envelope, type PublicKeyRef } from "./crypt
 import { DID_KEY_PREFIX, publicKeyFromDidKey } from "./did-key.ts";
 import type { PostgresLike } from "./log-store.ts";
 import type { Signer } from "./signer.ts";
+import { ERC8004_REGISTRY, Erc8004LinkSchema, type Erc8004Check, type Erc8004Checked, type Erc8004Link } from "./erc8004-link.ts";
 
 export const PASSPORT_TYPE = "application/vnd.agent-custody.passport+json";
 /** the header an agent presents its passport in: the DSSE envelope as base64url JSON */
@@ -46,6 +47,8 @@ export const PassportSchema = z.object({
   /** how a site reaches the agent's operator */
   contact: text(200),
   capabilities: z.array(z.string().regex(CAPABILITY)).max(32),
+  /** the agent's ERC-8004 identity, as the registry last checked it against the chain; absent when it has none or the check is stale */
+  erc8004: z.object({ agentRegistry: z.string().regex(ERC8004_REGISTRY), agentId: z.string().regex(/^[0-9]{1,78}$/), owner: z.string().regex(/^0x[0-9a-f]{40}$/), block: z.number().int().nonnegative() }).optional(),
   issuedAt: z.iso.datetime({ offset: true }),
   expiresAt: z.iso.datetime({ offset: true }),
 });
@@ -103,6 +106,14 @@ export interface AgentEntry {
   createdAt: string;
   expiresAt: string;
   revokedAt: string | null;
+  /** the linked ERC-8004 identity as last checked, with the error of the last check when it failed */
+  erc8004?: (Erc8004Checked & { error?: string; errorAt?: string }) | null;
+}
+
+/** The ERC-8004 link a passport may carry: one whose last check succeeded within `recheckSeconds`. */
+export function freshErc8004(e: AgentEntry, recheckSeconds: number, now = Date.now()): Erc8004Checked | null {
+  const l = e.erc8004;
+  return l && !l.error && now - Date.parse(l.checkedAt) <= recheckSeconds * 1000 ? l : null;
 }
 
 export type AgentStatus = "active" | "revoked" | "expired";
@@ -122,6 +133,7 @@ export function publicEntry(e: AgentEntry, now = Date.now()) {
     createdAt: e.createdAt,
     expiresAt: e.expiresAt,
     status: agentStatus(e, now),
+    erc8004: e.erc8004 ?? null,
   };
 }
 
@@ -132,10 +144,22 @@ export const AgentInputSchema = z.object({
   capabilities: z.array(z.string().regex(CAPABILITY, { message: "a capability is lowercase letters, digits, and . _ : -, at most 64 characters" })).max(32).optional(),
   agent: z.string().regex(DID_KEY, { message: "the agent's key is an Ed25519 did:key (did:key:z6Mk...)" }),
   expiresAt: z.iso.datetime({ offset: true }),
+  /** link an ERC-8004 identity (checked against the chain before it is stored), or null to unlink */
+  erc8004: Erc8004LinkSchema.nullable().optional(),
 });
 export type AgentInput = z.infer<typeof AgentInputSchema>;
 
 export class RegistryInputError extends Error {}
+
+/** Checks an ERC-8004 link against the chain for a did:key; absent when the registry reads no chain. */
+export type Erc8004Checker = (link: Erc8004Link, didKey: string) => Promise<Erc8004Check>;
+
+async function checkedLink(checker: Erc8004Checker | undefined, link: Erc8004Link, didKey: string): Promise<Erc8004Checked> {
+  if (!checker) throw new RegistryInputError("erc8004: this registry reads no ERC-8004 registry");
+  const r = await checker(link, didKey);
+  if (!r.ok) throw new RegistryInputError(`erc8004: ${r.error}`);
+  return r.link;
+}
 
 function checkInput(raw: unknown, partial: boolean, now: number): Partial<AgentInput> {
   const schema = partial ? AgentInputSchema.partial() : AgentInputSchema;
@@ -172,14 +196,15 @@ export class RegistryStore {
     this.ready ??= (async () => {
       await this.client.query(`CREATE TABLE IF NOT EXISTS ${this.t} (id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, contact TEXT NOT NULL, capabilities TEXT[] NOT NULL, agent TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, revoked_at TIMESTAMPTZ)`);
       await this.client.query(`CREATE INDEX IF NOT EXISTS ${this.t}_owner ON ${this.t} (owner)`);
+      await this.client.query(`ALTER TABLE ${this.t} ADD COLUMN IF NOT EXISTS erc8004 TEXT`);
     })();
     return this.ready;
   }
   private static row(r: Record<string, unknown>): AgentEntry {
     const iso = (v: unknown) => (v instanceof Date ? v.toISOString() : new Date(String(v)).toISOString());
-    return { id: String(r.id), owner: String(r.owner), name: String(r.name), contact: String(r.contact), capabilities: (r.capabilities as string[]) ?? [], agent: String(r.agent), createdAt: iso(r.created_at), expiresAt: iso(r.expires_at), revokedAt: r.revoked_at ? iso(r.revoked_at) : null };
+    return { id: String(r.id), owner: String(r.owner), name: String(r.name), contact: String(r.contact), capabilities: (r.capabilities as string[]) ?? [], agent: String(r.agent), createdAt: iso(r.created_at), expiresAt: iso(r.expires_at), revokedAt: r.revoked_at ? iso(r.revoked_at) : null, erc8004: r.erc8004 ? (JSON.parse(String(r.erc8004)) as AgentEntry["erc8004"]) : null };
   }
-  async register(owner: string, raw: unknown, now = Date.now()): Promise<AgentEntry> {
+  async register(owner: string, raw: unknown, now = Date.now(), erc8004?: Erc8004Checker): Promise<AgentEntry> {
     await this.init();
     const v = checkInput(raw, false, now) as AgentInput;
     const capabilities = v.capabilities ?? [];
@@ -187,8 +212,9 @@ export class RegistryStore {
     if (Number((count[0] as { n: number }).n) >= MAX_AGENTS_PER_OWNER) throw new RegistryInputError(`an owner registers at most ${MAX_AGENTS_PER_OWNER} agents; revoke one first`);
     const { rows: taken } = await this.client.query(`SELECT id FROM ${this.t} WHERE agent = $1 AND revoked_at IS NULL`, [v.agent]);
     if (taken.length) throw new RegistryInputError("agent: this key is already registered to an agent; each agent has its own key");
+    const link = v.erc8004 ? await checkedLink(erc8004, v.erc8004, v.agent) : null;
     const id = `agt_${randomBytes(8).toString("hex")}`;
-    const { rows } = await this.client.query(`INSERT INTO ${this.t} (id, owner, name, contact, capabilities, agent, created_at, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`, [id, owner, v.name, v.contact, capabilities, v.agent, new Date(now).toISOString(), v.expiresAt]);
+    const { rows } = await this.client.query(`INSERT INTO ${this.t} (id, owner, name, contact, capabilities, agent, created_at, expires_at, erc8004) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`, [id, owner, v.name, v.contact, capabilities, v.agent, new Date(now).toISOString(), v.expiresAt, link ? JSON.stringify(link) : null]);
     return RegistryStore.row(rows[0] as Record<string, unknown>);
   }
   async get(id: string): Promise<AgentEntry | null> {
@@ -202,19 +228,35 @@ export class RegistryStore {
     const { rows } = await this.client.query(`SELECT * FROM ${this.t} WHERE owner = $1 ORDER BY created_at, id`, [owner]);
     return rows.map((r) => RegistryStore.row(r as Record<string, unknown>));
   }
-  /** Changes an active agent of this owner: any of name, contact, capabilities, key, expiry. Null when the owner has no such active agent. */
-  async update(owner: string, id: string, raw: unknown, now = Date.now()): Promise<AgentEntry | null> {
+  /**
+   * Changes an active agent of this owner: any of name, contact, capabilities, key, expiry, and its ERC-8004 link. A new
+   * link, or a new key while a link stands, is checked against the chain first. Null when the owner has no such active agent.
+   */
+  async update(owner: string, id: string, raw: unknown, now = Date.now(), erc8004?: Erc8004Checker): Promise<AgentEntry | null> {
     await this.init();
     const v = checkInput(raw, true, now);
-    if (Object.keys(v).length === 0) throw new RegistryInputError("nothing to change: give name, contact, capabilities, agent, or expiresAt");
+    if (Object.keys(v).length === 0) throw new RegistryInputError("nothing to change: give name, contact, capabilities, agent, expiresAt, or erc8004");
     const current = await this.get(id);
     if (!current || current.owner !== owner || agentStatus(current, now) === "revoked") return null;
     if (v.agent && v.agent !== current.agent) {
       const { rows: taken } = await this.client.query(`SELECT id FROM ${this.t} WHERE agent = $1 AND revoked_at IS NULL`, [v.agent]);
       if (taken.length) throw new RegistryInputError("agent: this key is already registered to an agent; each agent has its own key");
     }
-    const next = { ...current, ...v };
-    const { rows } = await this.client.query(`UPDATE ${this.t} SET name = $3, contact = $4, capabilities = $5, agent = $6, expires_at = $7 WHERE id = $1 AND owner = $2 AND revoked_at IS NULL RETURNING *`, [id, owner, next.name, next.contact, next.capabilities, next.agent, next.expiresAt]);
+    const { erc8004: wanted, ...fields } = v;
+    const next = { ...current, ...fields };
+    // a link stays only while the registration file lists the agent's key: a new key checks the standing link again
+    const target = wanted === undefined ? (current.erc8004 && next.agent !== current.agent ? current.erc8004 : undefined) : wanted;
+    const link = target === undefined ? current.erc8004 : target === null ? null : await checkedLink(erc8004, target, next.agent);
+    const { rows } = await this.client.query(`UPDATE ${this.t} SET name = $3, contact = $4, capabilities = $5, agent = $6, expires_at = $7, erc8004 = $8 WHERE id = $1 AND owner = $2 AND revoked_at IS NULL RETURNING *`, [id, owner, next.name, next.contact, next.capabilities, next.agent, next.expiresAt, link ? JSON.stringify(link) : null]);
+    return rows[0] ? RegistryStore.row(rows[0] as Record<string, unknown>) : null;
+  }
+  /** Records a later check of an agent's standing link: the fresh result, or the error beside the last good one. */
+  async recordErc8004(id: string, r: Erc8004Check, now = Date.now()): Promise<AgentEntry | null> {
+    await this.init();
+    const current = await this.get(id);
+    if (!current?.erc8004) return current;
+    const link = r.ok ? r.link : { ...current.erc8004, error: r.error.slice(0, 300), errorAt: new Date(now).toISOString() };
+    const { rows } = await this.client.query(`UPDATE ${this.t} SET erc8004 = $2 WHERE id = $1 AND erc8004 IS NOT NULL RETURNING *`, [id, JSON.stringify(link)]);
     return rows[0] ? RegistryStore.row(rows[0] as Record<string, unknown>) : null;
   }
   /** Revokes an agent of this owner for good: the registry issues it no more passports. False when there is none to revoke. */
@@ -227,10 +269,10 @@ export class RegistryStore {
 }
 
 /**
- * Signs a passport for an active agent. It lives `passportSeconds`, never past the registration's expiry. Throws when
- * the agent is revoked or expired.
+ * Signs a passport for an active agent. It lives `passportSeconds`, never past the registration's expiry, and carries
+ * `erc8004` when given (the link as last checked). Throws when the agent is revoked or expired.
  */
-export async function issuePassport(signer: Signer, registryUrl: string, e: AgentEntry, passportSeconds = DEFAULT_PASSPORT_SECONDS, now = Date.now()): Promise<Envelope> {
+export async function issuePassport(signer: Signer, registryUrl: string, e: AgentEntry, passportSeconds = DEFAULT_PASSPORT_SECONDS, now = Date.now(), erc8004?: Erc8004Checked | null): Promise<Envelope> {
   const status = agentStatus(e, now);
   if (status !== "active") throw new RegistryInputError(`the agent ${e.id} is ${status}; the registry issues it no passport`);
   if (!e.agent.startsWith(DID_KEY_PREFIX)) throw new Error("the agent's key is not a did:key");
@@ -244,6 +286,7 @@ export async function issuePassport(signer: Signer, registryUrl: string, e: Agen
     owner: e.owner,
     contact: e.contact,
     capabilities: e.capabilities,
+    ...(erc8004 ? { erc8004: { agentRegistry: erc8004.agentRegistry, agentId: erc8004.agentId, owner: erc8004.owner, block: erc8004.block } } : {}),
     issuedAt: new Date(now).toISOString(),
     expiresAt: new Date(expires).toISOString(),
   });
@@ -251,9 +294,11 @@ export async function issuePassport(signer: Signer, registryUrl: string, e: Agen
 }
 
 /** The registry's key document, served at REGISTRY_DOCUMENT_PATH. */
-export async function registryDocument(signer: Signer, registryUrl: string, passportSeconds: number) {
+export async function registryDocument(signer: Signer, registryUrl: string, passportSeconds: number, erc8004Chains: string[] = []) {
   return {
     registry: registryUrl,
+    /** the chain ids whose ERC-8004 registries it checks links against */
+    erc8004Chains,
     passportType: PASSPORT_TYPE,
     passportHeader: PASSPORT_HEADER,
     passportSeconds,

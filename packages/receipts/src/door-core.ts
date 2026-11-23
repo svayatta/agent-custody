@@ -253,6 +253,8 @@ export interface ArrivalPassport {
   name?: string;
   owner?: string;
   capabilities?: string[];
+  /** the agent's ERC-8004 identity, as the registry checked it against the chain */
+  erc8004?: { agentRegistry: string; agentId: string; owner: string; block: number };
   expiresAt?: string;
   /** sha256 over the passport's signed payload */
   digest?: string;
@@ -269,7 +271,7 @@ function checkPassport(req: DoorRequest, registry: PublicKeyRef[] | undefined, a
   const v = verifyPassport(env, registry, at);
   if (!v.ok) return { outcome: "invalid", error: v.error };
   const p = v.passport;
-  const entry = { registry: p.registry, registryKeyid: v.keyid, agentId: p.agentId, agent: p.agent, name: p.name, owner: p.owner, capabilities: p.capabilities, expiresAt: p.expiresAt, digest: v.digest };
+  const entry = { registry: p.registry, registryKeyid: v.keyid, agentId: p.agentId, agent: p.agent, name: p.name, owner: p.owner, capabilities: p.capabilities, ...(p.erc8004 ? { erc8004: p.erc8004 } : {}), expiresAt: p.expiresAt, digest: v.digest };
   if (signer?.agent === p.agent) return { outcome: "verified", ...entry, envelope: env };
   return { outcome: "wrong-sender", error: signer ? `the passport names ${p.agent}, and the request is signed by ${signer.agent}` : `the passport names ${p.agent}, and the request carries no signature by that key that the door verified`, ...entry };
 }
