@@ -77,7 +77,7 @@ const bodyOf = (amount: number) => JSON.stringify({ order: "o_77", amount });
 const signedBy = (key: KeyPair, amount: number) => {
   const fields: Record<string, string> = { [PASSPORT_HEADER]: passportHeader(passport), "content-digest": `sha-256=:${createHash("sha256").update(bodyOf(amount)).digest("base64")}:` };
   const created = Math.floor(Date.now() / 1000);
-  const input = `sig1=("@authority" "@method" "@path" "${PASSPORT_HEADER}" "content-digest");created=${created};expires=${created + 60};keyid="${didKeyOf(key.publicKey)}";alg="ed25519";nonce="example-${++n}";tag="web-bot-auth"`;
+  const input = `sig1=("@authority" "@method" "@path" "@query" "${PASSPORT_HEADER}" "content-digest");created=${created};expires=${created + 60};keyid="${didKeyOf(key.publicKey)}";alg="ed25519";nonce="example-${++n}";tag="web-bot-auth"`;
   const base = signatureBase({ method: "POST", target: "/refunds", authority: SHOP, header: (name) => (fields[name] !== undefined ? [fields[name]!] : undefined) }, parseDictionary(input).get("sig1") as SfInnerList);
   return { ...fields, "signature-input": input, signature: `sig1=:${edSign(null, Buffer.from(base), key.privateKey).toString("base64")}:` };
 };

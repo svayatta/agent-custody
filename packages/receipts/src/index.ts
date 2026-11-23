@@ -8,7 +8,7 @@ export { hecEvent, splunkExporter } from "./splunk.ts";
 export { serveConsole, type ConsoleOptions, type RunningConsole } from "./console.ts";
 export { checkConfig, formatFindings, type CheckFinding, type CheckOptions } from "./check.ts";
 export { GRANT_HEADER, grantHeader, parseGrantHeader, serveHttp } from "./gateway-http.ts";
-export { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, DOOR_DEFAULT_CAPTURE, DOOR_VERSION, MAX_CHALLENGE_TOKEN, RECEIPT_HEADER, RATE_BURST_MS, RATE_MINUTE_MS, cedarArgs, classifyArrival, createDoorHost, createRateTracker, matchRoute, normalizePath, remoteOf, serveDoor, signedRequestOf, verifyChallengeToken } from "./door.ts";
+export { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, DOOR_DEFAULT_CAPTURE, DOOR_VERSION, MAX_CHALLENGE_TOKEN, RECEIPT_HEADER, RATE_BURST_MS, RATE_MINUTE_MS, PASSPORT_COVERED, cedarArgs, classifyArrival, createDoorHost, createRateTracker, matchRoute, normalizePath, remoteOf, serveDoor, signedRequestOf, verifyChallengeToken } from "./door.ts";
 export { DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, WEB_BOT_AUTH_TAG, agentOrigin, contentDigestMatches, createMemoryNonceStore, createWebBotAuthVerifier, jwkThumbprint, normalizeAuthority, parseDictionary, signatureBase } from "./web-bot-auth.ts";
 export { DESTINATION_FACT, EGRESS_VERSION, PROXY_REALM, checkProxyCredential, createEgressHost, destinationName, normalizeHost, parseAuthority, publicOnlyLookup, serveEgress } from "./egress.ts";
 export { internalAddress } from "./addresses.ts";

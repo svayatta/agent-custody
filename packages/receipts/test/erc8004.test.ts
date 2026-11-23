@@ -244,7 +244,7 @@ describe("the registry with ERC-8004 links", () => {
 
     // the door reads the link from the passport, and asks the chain nothing
     const req = { method: "POST", url: "/refunds", headers: { host: "shop.example", [PASSPORT_HEADER]: passportHeader(r.json.passport) }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
-    const a = classifyArrival(req, [], "refund", false, new Date().toISOString(), { outcome: "verified", agent: did, keyid: did, label: "sig1", covered: ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"] }, undefined, [registryKey], true).arrival;
+    const a = classifyArrival(req, [], "refund", false, new Date().toISOString(), { outcome: "verified", agent: did, keyid: did, label: "sig1", covered: ["@authority", "@method", "@path", "@query", PASSPORT_HEADER, "content-digest"] }, undefined, [registryKey], true).arrival;
     expect(a).toMatchObject({ class: "verified", passport: { outcome: "verified", erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "7", owner: OWNER } } });
 
     // someone verified as themselves, by their own grant, attaching this agent's public passport: the link stays out
@@ -253,7 +253,7 @@ describe("the registry with ERC-8004 links", () => {
     const thiefDid = didKeyOf(thief.publicKey);
     const grant = createDelegation(principal, { version: "0.1", principal: "shop-owner", agent: thiefDid, scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: inDays(1) });
     const carried = { method: "POST", url: "/refunds", headers: { host: "shop.example", authorization: `Bearer ${grantHeader(grant)}`, [PASSPORT_HEADER]: passportHeader(r.json.passport) }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
-    const t = classifyArrival(carried, [principal], "refund", false, new Date().toISOString(), { outcome: "verified", agent: thiefDid, keyid: thiefDid, label: "sig1", covered: ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"] }, undefined, [registryKey], true).arrival;
+    const t = classifyArrival(carried, [principal], "refund", false, new Date().toISOString(), { outcome: "verified", agent: thiefDid, keyid: thiefDid, label: "sig1", covered: ["@authority", "@method", "@path", "@query", PASSPORT_HEADER, "content-digest"] }, undefined, [registryKey], true).arrival;
     expect(t).toMatchObject({ class: "verified", subject: thiefDid, passport: { outcome: "wrong-sender" } });
     expect(t.passport!.erc8004).toBeUndefined();
   });
