@@ -1035,10 +1035,10 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       if (o.registry && agents && req.method === "GET" && url.pathname === "/registry/agents") {
         const q = (k: string) => url.searchParams.get(k) ?? undefined;
         const limit = q("limit");
-        if (limit !== undefined && !/^[0-9]{1,3}$/.test(limit)) return json(400, { error: "limit is 1 to 100" });
+        if (limit !== undefined && !(/^[1-9][0-9]{0,2}$/.test(limit) && Number(limit) <= 100)) return json(400, { error: "limit is 1 to 100" });
         try {
           const page = await agents.search({ ...(q("capability") !== undefined ? { capability: q("capability")! } : {}), ...(q("owner") !== undefined ? { owner: q("owner")! } : {}), ...(q("after") !== undefined ? { after: q("after")! } : {}), ...(limit !== undefined ? { limit: Number(limit) } : {}) });
-          return json(200, { agents: page.agents.map((e) => publicEntry(e)), next: page.next });
+          return json(200, { registry: portalBase, agents: page.agents.map((e) => publicEntry(e)), next: page.next });
         } catch (e) {
           if (e instanceof RegistryInputError) return json(400, { error: e.message });
           throw e;

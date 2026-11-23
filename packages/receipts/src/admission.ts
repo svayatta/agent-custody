@@ -14,13 +14,37 @@ export const LIST_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const MAX_LISTS = 64;
 export const MAX_LIST_ENTRIES = 10_000;
 
+/**
+ * One spelling for a URL, so that a list entry matches whatever case, default port, or trailing slash it was written
+ * with: a bare origin becomes `URL.origin` (how the door names a Web Bot Auth agent), any other URL its `href`. A value
+ * that is not an http(s) URL, such as a did:key, is left as it is.
+ */
+export function canonicalAgent(v: string): string {
+  if (!/^https?:\/\//i.test(v)) return v;
+  try {
+    const u = new URL(v);
+    return u.pathname === "/" && !u.search && !u.hash && !u.username && !u.password ? u.origin : u.href;
+  } catch {
+    return v;
+  }
+}
+
+/** A registry's URL as its passports name it: `URL.href`, so `https://APP.example:443` is `https://app.example/`. */
+export const canonicalRegistry = (v: string): string => {
+  try {
+    return new URL(v).href;
+  } catch {
+    return v;
+  }
+};
+
 const EntrySchema = z.union([
   /** a registry entry: the registry's URL, as its passports name it, and the agent's id there; it survives key rotation */
-  z.object({ registry: z.string().url().max(200), agentId: z.string().regex(AGENT_ID) }).strict(),
+  z.object({ registry: z.string().url().max(200).transform(canonicalRegistry), agentId: z.string().regex(AGENT_ID) }).strict(),
   /** an ERC-8004 identity, as a verified passport's registry checked it on chain */
   z.object({ erc8004: z.object({ agentRegistry: z.string().regex(ERC8004_REGISTRY).transform((r) => r.toLowerCase()), agentId: z.string().regex(/^(0|[1-9][0-9]{0,77})$/) }).strict() }).strict(),
   /** the subject of a verified arrival: a did:key, a Web Bot Auth signature agent's origin, or a grant's agent */
-  z.object({ agent: z.string().min(1).max(200) }).strict(),
+  z.object({ agent: z.string().min(1).max(200).transform(canonicalAgent) }).strict(),
 ]);
 export type AdmissionEntry = z.infer<typeof EntrySchema>;
 
@@ -75,10 +99,10 @@ export function compileAdmissionLists(text: string): AdmissionLists {
     names,
     match(a) {
       if (a.class !== "verified") return [];
-      const keys = [`agent ${a.subject}`];
+      const keys = [`agent ${canonicalAgent(a.subject)}`];
       const p = a.passport;
       if (p?.outcome === "verified" && p.registry && p.agentId) {
-        keys.push(`registry ${p.registry} ${p.agentId}`);
+        keys.push(`registry ${canonicalRegistry(p.registry)} ${p.agentId}`);
         if (p.erc8004) keys.push(`erc8004 ${p.erc8004.agentRegistry.toLowerCase()} ${p.erc8004.agentId}`);
       }
       const on = new Set<string>();

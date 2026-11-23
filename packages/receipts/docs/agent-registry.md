@@ -156,7 +156,7 @@ when {
 | a passport at a door with no `trustedRegistryKeys` | `unchecked` | `claimed` |
 | a grant and a passport | recorded | decided by the grant alone |
 
-A replayed request is refused as any Web Bot Auth signature is: the nonce is kept for the passport's did:key, whatever grant the request also carries, so the second use is `invalid`, and the arrival is `claimed`. The signature covers `@query`, so the request cannot be sent again with another query either.
+A replayed request is refused as any Web Bot Auth signature is: the nonce is kept for the passport's did:key, whatever grant the request also carries, so the second use is `invalid`, and the arrival is `claimed`. The nonce is kept too for a passport that is not yet valid at the door, because the registry's clock is ahead, so the request cannot be sent again once its window opens. The signature covers `@query`, so the request cannot be sent again with another query either.
 
 ## What the receipt shows
 

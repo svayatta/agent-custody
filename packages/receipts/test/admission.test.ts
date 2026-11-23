@@ -48,6 +48,23 @@ describe("admission lists", () => {
     expect(lists.match(verified({ passport: { outcome: "verified", registry: "https://registry.example/", agentId: "agt_00000000000000a1" } }))).toEqual([]);
   });
 
+  it("matches an entry however its registry URL or origin is spelled, so a block list cannot miss its agent", () => {
+    // the door names a registry as its passports do (with a trailing slash) and a Web Bot Auth agent by URL.origin; an
+    // entry spelled another way must still match, or a blocked agent gets in and nothing says so
+    const spelled = (entry: object) => compileAdmissionLists(JSON.stringify({ lists: { blocked: [entry] } }));
+    const byRegistry = verified({ passport: { outcome: "verified", registry: "https://app.example.test/", agentId: "agt_00000000000000a1" } });
+    for (const registry of ["https://app.example.test/", "https://app.example.test", "https://APP.example.test/", "https://app.example.test:443/"]) {
+      expect(spelled({ registry, agentId: "agt_00000000000000a1" }).match(byRegistry), registry).toEqual(["blocked"]);
+    }
+    for (const agent of ["https://crawler.example", "https://crawler.example/", "https://Crawler.Example"]) {
+      expect(spelled({ agent }).match(verified({ subject: "https://crawler.example" })), agent).toEqual(["blocked"]);
+    }
+    // a grant's agent with a path is compared whole, and a did:key exactly
+    expect(spelled({ agent: "https://Agents.example/bot" }).match(verified({ subject: "https://agents.example/bot" }))).toEqual(["blocked"]);
+    expect(spelled({ agent: "https://agents.example/bot" }).match(verified({ subject: "https://agents.example/other" }))).toEqual([]);
+    expect(spelled({ agent: "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH" }).match(verified({ subject: "did:key:z6mkpthr8vnsbxyaawhut2geadd9jswubv8xroanwwsdvkth" }))).toEqual([]);
+  });
+
   it("puts nothing the door did not check on a list", () => {
     expect(lists.match({ class: "claimed", subject: "https://crawler.example" })).toEqual([]);
     expect(lists.match({ class: "unknown", subject: "unknown" })).toEqual([]);
@@ -216,6 +233,8 @@ describe("the registry's search by capability", () => {
     expect(all.json.agents.map((e: { id: string }) => e.id)).toEqual([a, b].sort());
     expect(all.json.agents[0]).toMatchObject({ status: "active", capabilities: expect.arrayContaining(["refunds"]), keys: [{ kty: "OKP" }] });
     expect(all.json.next).toBeNull();
+    // the registry names itself as its passports do, so a site copies it into a list entry rather than typing it
+    expect(all.json.registry).toBe(REGISTRY);
     const first = await get("/registry/agents?capability=refunds&limit=1");
     expect(first.json.agents).toHaveLength(1);
     const second = await get(`/registry/agents?capability=refunds&limit=1&after=${first.json.next}`);
@@ -229,6 +248,7 @@ describe("the registry's search by capability", () => {
     expect((await get("/registry/agents?capability=Refunds!")).json.error).toContain("capability");
     expect((await get("/registry/agents?owner=NO")).json.error).toContain("owner");
     expect((await get("/registry/agents?after=1;drop")).json.error).toContain("after");
-    expect((await get("/registry/agents?limit=lots")).status).toBe(400);
+    for (const limit of ["lots", "0", "101", "500", "999", "1000", "-1", ""]) expect((await get(`/registry/agents?limit=${limit}`)).status, `limit=${limit}`).toBe(400);
+    expect((await get("/registry/agents?limit=100")).status).toBe(200);
   });
 });

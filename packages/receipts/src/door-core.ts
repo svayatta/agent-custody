@@ -11,7 +11,7 @@ import { digestOf, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } f
 import { DID_KEY_PREFIX } from "./did-key.ts";
 import { decodeDelegation, delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { parseGrantHeader, GRANT_HEADER } from "./grant-header.ts";
-import { MAX_PASSPORT_HEADER, PASSPORT_HEADER, parsePassportHeader, verifyPassport } from "./passport.ts";
+import { MAX_PASSPORT_HEADER, PASSPORT_HEADER, parsePassportHeader, passportSignedBy, verifyPassport } from "./passport.ts";
 import { compileAdmissionLists, type AdmissionLists } from "./admission.ts";
 import type { Issuer } from "./issue.ts";
 import { ReceiptPending, type FlushResult } from "./receipt-pending.ts";
@@ -649,8 +649,12 @@ export interface DoorIO {
   readPolicy(): { text: string; key: string };
   /** names the policy in messages: its file, or the variable it came from */
   policySource: string;
-  /** the admission lists file's text, and a value that changes whenever it may have; read on every arrival. Absent when the door has no lists. Throws when it cannot be read: the lists in force stay */
-  readAdmission?(): { text: string; key: string };
+  /**
+   * a value that changes whenever the admission lists file may have, and its text, which may be left out when the key
+   * is `known`, the key of the lists in force; asked on every arrival. Absent when the door has no lists. Throws when it
+   * cannot be read: the lists in force stay
+   */
+  readAdmission?(known?: string): { text?: string; key: string };
   /** names the admission lists in messages */
   admissionSource?: string;
   /** why a grant with these chain digests (leaf first) is revoked, or null when it is not. A list that cannot be read must revoke: return the reason */
@@ -708,14 +712,16 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
   let admissionNow: { lists: AdmissionLists; key: string } | undefined;
   if (io.readAdmission) {
     const a = io.readAdmission();
+    if (a.text === undefined) throw new Error(`${io.admissionSource}: the admission lists were not read`);
     admissionNow = { lists: compileAdmissionLists(a.text), key: a.key };
   }
   const currentAdmission = (): AdmissionLists | undefined => {
     if (!io.readAdmission || !admissionNow) return undefined;
     try {
-      const next = io.readAdmission();
+      const next = io.readAdmission(admissionNow.key);
       if (next.key !== admissionNow.key) {
         try {
+          if (next.text === undefined) throw new Error("the file changed and its text was not read");
           admissionNow = { lists: compileAdmissionLists(next.text), key: next.key };
         } catch (e) {
           console.error(`agent-custody door: ADMISSION LISTS NOT RELOADED: ${io.admissionSource}: ${e instanceof Error ? e.message : String(e)}; lists ${admissionNow.lists.digest} stay in force`);
@@ -755,8 +761,11 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     // a did:key signature keeps its nonce only for an agent that a trusted grant or a trusted passport names; both are
     // given, so that a grant header, trusted or not, cannot stop the nonce of a signature that a passport is checked against
     const passportEnv = webBotAuth && registry.length && req.headers["signature-input"] !== undefined ? parsePassportHeader(req.headers) : null;
-    const trustedPassport = passportEnv ? verifyPassport(passportEnv, registry, timestamp) : undefined;
-    const keyAgents = [...(trustedGrant?.ok ? [trustedGrant.delegation.agent] : []), ...(trustedPassport?.ok ? [trustedPassport.passport.agent] : [])];
+    // a passport not yet valid at this door (its registry's clock is ahead) still keeps the nonce, or the same request
+    // could be sent again, and admitted, once the passport's window opens
+    const signedPassport = passportEnv ? passportSignedBy(passportEnv, registry) : undefined;
+    const passportAgent = signedPassport?.ok && Date.parse(timestamp) <= Date.parse(signedPassport.passport.expiresAt) ? signedPassport.passport.agent : undefined;
+    const keyAgents = [...(trustedGrant?.ok ? [trustedGrant.delegation.agent] : []), ...(passportAgent ? [passportAgent] : [])];
     const signature = webBotAuth ? await webBotAuth.verify(signedRequestOf(req), keyAgents) : undefined;
     // the body is read before the arrival is classified: a passport on a write binds to it through Content-Digest
     const read = readArrivalBody ? await readArrivalBody(cfg.maxBodyBytes) : null;

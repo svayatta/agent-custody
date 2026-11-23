@@ -48,6 +48,15 @@ export const passportDigest = (env: Envelope): string => sha256Hex(Buffer.from(e
 
 /** Checks a passport: signed by one of the registry keys, well formed, naming a did:key that decodes, and valid at `at`. */
 export function verifyPassport(env: Envelope, registryKeys: PublicKeyRef[], at: string): PassportVerifyResult {
+  const r = passportSignedBy(env, registryKeys);
+  if (!r.ok) return r;
+  const t = Date.parse(at);
+  if (t < Date.parse(r.passport.issuedAt) || t > Date.parse(r.passport.expiresAt)) return { ok: false, error: `the passport is valid from ${r.passport.issuedAt} to ${r.passport.expiresAt}` };
+  return r;
+}
+
+/** A passport signed by one of the registry keys, well formed, naming a did:key that decodes, whatever its window. */
+export function passportSignedBy(env: Envelope, registryKeys: PublicKeyRef[]): PassportVerifyResult {
   if (env.payloadType !== PASSPORT_TYPE) return { ok: false, error: `the passport's payloadType is ${String(env.payloadType).slice(0, 80)}, not ${PASSPORT_TYPE}` };
   if (registryKeys.length === 0) return { ok: false, error: "the door trusts no registry key" };
   const r = dsseVerify(env, registryKeys);
@@ -60,8 +69,6 @@ export function verifyPassport(env: Envelope, registryKeys: PublicKeyRef[], at: 
   } catch (e) {
     return { ok: false, error: `the passport's agent key does not decode: ${e instanceof Error ? e.message : String(e)}` };
   }
-  const t = Date.parse(at);
-  if (t < Date.parse(p.issuedAt) || t > Date.parse(p.expiresAt)) return { ok: false, error: `the passport is valid from ${p.issuedAt} to ${p.expiresAt}` };
   return { ok: true, passport: p, keyid: r.keyid, digest: passportDigest(env) };
 }
 
