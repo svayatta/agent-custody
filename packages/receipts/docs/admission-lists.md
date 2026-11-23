@@ -13,7 +13,7 @@ curl 'https://app.agent-custody.dev/registry/agents?capability=refunds&limit=50'
 # { "registry": "https://app.agent-custody.dev/", "agents": [ <entry>, … ], "next": "agt_…" | null }
 ```
 
-It lists active agents only, never a revoked or expired one, ordered by id. `capability` filters by one capability and `owner` by one tenant. `limit` is 1 to 100 (50 by default); any other value is a `400`. To get the next page, send `after=<next>`. `registry` is the registry's URL as its passports name it: copy it into a list entry. Each entry is the one `GET /registry/agents/<id>` publishes, without `contact`: id, name, owner, capabilities, its key as a did:key and a JWK, and its ERC-8004 link when it has one. A search finds agents; it is not a directory of contacts. An agent's contact is on its own entry and in its passport, which reaches every site the agent visits.
+It lists active agents only, never a revoked or expired one, ordered by id. `capability` filters by one capability and `owner` by one tenant. `limit` is 1 to 100 (50 by default); any other value is a `400`. To get the next page, send `after=<next>`. `registry` is the registry's URL as its passports name it: copy it into a list entry. Each entry is the one `GET /registry/agents/<id>` publishes, without `contact` or `history`: id, name, owner, capabilities, its key as a did:key and a JWK, and its ERC-8004 link when it has one. A search finds agents; it is not a directory of contacts. An agent's contact is on its own entry and in its passport, which reaches every site the agent visits.
 
 The registry's public reads (the search, an agent's entry, and its passport) allow each address a burst of 120 and then one every 2 seconds; past that they answer `429` with `Retry-After`.
 
@@ -44,9 +44,11 @@ A list name is lowercase letters, digits, and `. _ -`, at most 64 characters. Th
 
 | entry | matches a `verified` arrival | survives a key rotation |
 | --- | --- | --- |
-| `{ "registry", "agentId" }` | whose [passport](agent-registry.md#admit-registered-agents-at-a-door) is `verified`, from that registry, for that agent id | yes |
+| `{ "registry", "agentId", "version"? \| "versions"? }` | whose [passport](agent-registry.md#admit-registered-agents-at-a-door) is `verified`, from that registry, for that agent id | yes |
 | `{ "erc8004": { "agentRegistry", "agentId" } }` | whose `verified` passport carries that [ERC-8004 link](agent-registry.md#link-an-erc-8004-identity), which the registry checked on chain | yes, while the token's file names the new key |
 | `{ "agent" }` | whose `subject` is that value: a did:key, a Web Bot Auth signature agent's origin, or the agent a trusted grant names | no, for a did:key |
+
+A registry entry may also name the agent's versions: `"version": "1.4.0"` for one, or `"versions": { "from": "1.2.0", "below": "2.0.0" }` for a range (`from` included, `below` not, either may be left out). Versions compare as numbers, so 1.10.0 is above 1.2.0. An entry with a version matches only a `verified` passport that carries a version in it; an agent whose owner registered no version is not on the list by that entry. When the agent arrives at a version the list does not name, the receipt shows `passport.agentVersion` and lists without that name, so the site sees the change before it admits it.
 
 The registry's URL is part of a registry entry because an agent id is unique only within one registry. A URL or origin is compared in one spelling, so `https://APP.example.test:443` and `https://app.example.test/` name the same registry, and `https://Crawler.Example/` the agent `https://crawler.example`; a did:key is compared exactly.
 

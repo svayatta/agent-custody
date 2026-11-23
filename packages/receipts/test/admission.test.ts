@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { compileAdmissionLists, type ArrivalIdentity } from "../src/admission.ts";
+import { compareVersions } from "../src/passport.ts";
 import { checkDoorConfig } from "../src/check.ts";
 import { loadDoorConfig } from "../src/config.ts";
 import { generateKeyPair, loadPublicKey, type Envelope, type KeyPair } from "../src/crypto.ts";
@@ -63,6 +64,31 @@ describe("admission lists", () => {
     expect(spelled({ agent: "https://Agents.example/bot" }).match(verified({ subject: "https://agents.example/bot" }))).toEqual(["blocked"]);
     expect(spelled({ agent: "https://agents.example/bot" }).match(verified({ subject: "https://agents.example/other" }))).toEqual([]);
     expect(spelled({ agent: "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH" }).match(verified({ subject: "did:key:z6mkpthr8vnsbxyaawhut2geadd9jswubv8xroanwwsdvkth" }))).toEqual([]);
+  });
+
+  it("names an agent at one version or a range of versions, and never an arrival whose passport carries none", () => {
+    const ranged = compileAdmissionLists(JSON.stringify({ lists: {
+      exact: [{ registry: REGISTRY, agentId: "agt_00000000000000a1", version: "1.4.0" }],
+      ones: [{ registry: REGISTRY, agentId: "agt_00000000000000a1", versions: { from: "1.2.0", below: "2.0.0" } }],
+      old: [{ registry: REGISTRY, agentId: "agt_00000000000000a1", versions: { below: "1.0.0" } }],
+      any: [{ registry: REGISTRY, agentId: "agt_00000000000000a1" }],
+    } }));
+    const at = (agentVersion?: string) => ranged.match(verified({ passport: { outcome: "verified", registry: REGISTRY, agentId: "agt_00000000000000a1", ...(agentVersion ? { agentVersion } : {}) } }));
+    expect(at("1.4.0")).toEqual(["any", "exact", "ones"]);
+    expect(at("1.4.1")).toEqual(["any", "ones"]);
+    expect(at("1.10.0")).toEqual(["any", "ones"]); // numbers, not strings: 1.10 is above 1.2
+    expect(at("2.0.0")).toEqual(["any"]);
+    expect(at("0.9.9")).toEqual(["any", "old"]);
+    expect(at()).toEqual(["any"]);
+    // not a version: in no range, never admitted by one (the door's passport check refuses these first; the export must not admit them either)
+    for (const v of ["1.4", "garbage", "1.4.0.1"]) expect(at(v), v).toEqual(["any"]);
+    expect(() => compareVersions("garbage", "1.0.0")).toThrow("not a version");
+    for (const [bad, why] of [
+      [{ version: "1.4" }, "MAJOR.MINOR.PATCH"],
+      [{ versions: {} }, "versions needs from, below, or both"],
+      [{ versions: { from: "2.0.0", below: "1.0.0" } }, "from must be below below"],
+      [{ version: "1.0.0", versions: { from: "1.0.0" } }, "give version or versions, not both"],
+    ] as const) expect(() => compileAdmissionLists(JSON.stringify({ lists: { x: [{ registry: REGISTRY, agentId: "agt_00000000000000a1", ...bad }] } })), why).toThrow(why);
   });
 
   it("puts nothing the door did not check on a list", () => {
@@ -175,6 +201,26 @@ when { context.facts.arrival has admission && context.facts.arrival.admission.li
     expect(r).toMatchObject({ status: 403, arrival: { class: "claimed", passport: { outcome: "wrong-sender" }, admission: { lists: [] } }, ok: true });
   });
 
+  it("admits an agent at the version its list names, and at the next version records the version and that no list named it", async () => {
+    // the site admits version 1.4.0; the agent's owner ships 1.5.0
+    const key = generateKeyPair();
+    const entry: AgentEntry = { id: "agt_00000000000000d4", owner: "carted", name: "versioned agent", contact: "agents@carted.example", capabilities: ["refunds"], agent: didKeyOf(key.publicKey), createdAt: new Date().toISOString(), expiresAt: inDays(30), revokedAt: null, endpoints: ["api.stripe.com", "https://mcp.carted.example/mcp"] };
+    const before = readFileSync(listsFile(), "utf8");
+    const lists = JSON.parse(before) as { lists: Record<string, unknown[]> };
+    lists.lists.partners!.push({ registry: REGISTRY, agentId: entry.id, version: "1.4.0" });
+    writeLists(lists);
+    try {
+      const at = (version: string) => issuePassport(signer, REGISTRY, { ...entry, version }, 3600);
+      const known = await send(signedBy(key, await at("1.4.0")));
+      expect(known).toMatchObject({ status: 200, ok: true, arrival: { class: "verified", passport: { outcome: "verified", agentVersion: "1.4.0", endpoints: ["api.stripe.com", "https://mcp.carted.example/mcp"] }, admission: { lists: ["partners"] } } });
+      const next = await send(signedBy(key, await at("1.5.0")));
+      expect(next).toMatchObject({ status: 403, ok: true, arrival: { class: "verified", passport: { outcome: "verified", agentVersion: "1.5.0" }, admission: { lists: [] } } });
+      expect(next.st.predicate.policy?.decision).toBe("deny");
+    } finally {
+      writeLists(before);
+    }
+  });
+
   it("reads a changed lists file on the next arrival, and keeps the lists in force when the file breaks", async () => {
     writeLists({ lists: { partners: [{ registry: REGISTRY, agentId: partner.id }, { registry: REGISTRY, agentId: stranger.id }], blocked: [{ agent: banned.did }] } });
     const added = await send(signedBy(stranger.key, stranger.passport));
@@ -237,6 +283,8 @@ describe("the registry's search by capability", () => {
     expect(all.json.registry).toBe(REGISTRY);
     // a search is not a directory of contacts: the contact is on the agent's own entry, and in its passport
     expect(all.json.agents.every((e: object) => !("contact" in e))).toBe(true);
+    // nor of histories, which are each agent's own and can be long
+    expect(all.json.agents.every((e: object) => !("history" in e))).toBe(true);
     expect((await get(`/registry/agents/${a}`)).json.contact).toBe("a@carted.example");
     const first = await get("/registry/agents?capability=refunds&limit=1");
     expect(first.json.agents).toHaveLength(1);
