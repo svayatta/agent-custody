@@ -890,6 +890,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   if (!Number.isInteger(passportSeconds) || passportSeconds < 60 || passportSeconds > MAX_PASSPORT_SECONDS) throw new Error(`a passport lives from 60 to ${MAX_PASSPORT_SECONDS} seconds; got ${passportSeconds}`);
   const agents = o.registry ? new RegistryStore(o.client, (o.portalUrl ?? "http://localhost/").replace(/\/?$/, "/"), o.prefix) : null;
   const recheckSeconds = o.registry?.erc8004RecheckSeconds ?? 3600;
+  if (!Number.isInteger(recheckSeconds) || recheckSeconds < 60 || recheckSeconds > 86_400) throw new Error(`an ERC-8004 link is rechecked every 60 to 86400 seconds; got ${recheckSeconds}`);
   const resolver = o.registry?.erc8004;
   const checker = resolver ? (link: Parameters<Erc8004Resolver["check"]>[0], didKey: string) => resolver.check(link, didKey) : undefined;
   // a stale link is checked again at most once a minute per agent, so anonymous passport requests cannot drive the chain

@@ -91,7 +91,7 @@ describe("a door with admission lists, in front of registered agents", () => {
   const signedBy = (key: KeyPair, passport: Envelope) => {
     const fields: Record<string, string> = { [PASSPORT_HEADER]: passportHeader(passport), "content-digest": `sha-256=:${createHash("sha256").update(BODY).digest("base64")}:` };
     const created = Math.floor(Date.now() / 1000);
-    const input = `sig1=("@authority" "@method" "@path" "${PASSPORT_HEADER}" "content-digest");created=${created};expires=${created + 60};keyid="${didKeyOf(key.publicKey)}";alg="ed25519";nonce="adm-${process.pid}-${++n}";tag="web-bot-auth"`;
+    const input = `sig1=("@authority" "@method" "@path" "@query" "${PASSPORT_HEADER}" "content-digest");created=${created};expires=${created + 60};keyid="${didKeyOf(key.publicKey)}";alg="ed25519";nonce="adm-${process.pid}-${++n}";tag="web-bot-auth"`;
     const base = signatureBase({ method: "POST", target: "/refunds", authority: AUTHORITY, header: (name) => (fields[name] !== undefined ? [fields[name]!] : undefined) }, parseDictionary(input).get("sig1") as SfInnerList);
     return { ...fields, "signature-input": input, signature: `sig1=:${edSign(null, Buffer.from(base), key.privateKey).toString("base64")}:` };
   };

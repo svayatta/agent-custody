@@ -54,7 +54,7 @@ curl -b session.txt -H 'content-type: application/json' https://app.example/api/
 
 The proof is the key's Ed25519 signature over the registry's URL, the tenant, and the did:key (`registrationProof` in code), so it registers that key with that tenant at that registry only. Without it, a tenant could register a did:key it saw in a grant or a signature and choose that agent's capabilities. A key rotation needs the new key's proof.
 
-The answer has the registry entry and a first passport. Every key belongs to one live agent, which the database enforces, and a tenant has at most 100 active agents. `POST /api/agents/<id>` changes the name, contact, capabilities, key, or expiry, and `POST /api/agents/<id>/revoke` revokes the agent for good. Each is in the tenant's audit trail. The [hosted reference](../../../site/reference/hosted.md) lists every route.
+The answer has the registry entry and a first passport. Every key belongs to one live agent, which the database enforces, and a tenant has at most 100 agents that are not revoked. An expired agent counts until it is revoked. `POST /api/agents/<id>` changes the name, contact, capabilities, key, or expiry, and `POST /api/agents/<id>/revoke` revokes the agent for good. Each is in the tenant's audit trail. The [hosted reference](../../../site/reference/hosted.md) lists every route.
 
 In code, `didKeyOf(publicKey)` gives a key's did:key.
 
@@ -77,7 +77,7 @@ The owner adds `"erc8004": { "agentRegistry": "eip155:8453:0x…", "agentId": "7
 
 So the agent's owner publishes its did:key in the token's registration file first. Anything that does not agree is refused with the reason. The entry records the owner address, the block, the file's sha256, and when it was checked. A new key while a link stands is checked against the file again, so rotate the key in the file first. `"erc8004": null` unlinks.
 
-A link is checked again before a passport carries it, when the last check is older than `--erc8004-recheck-seconds` (an hour by default), at most once a minute per agent. When that check fails, for example because the owner marked the agent inactive or moved the token to a file that no longer lists the key, passports carry no link until a check succeeds, and the entry shows the error. A check that finishes after the owner changed the link or rotated the key is not stored: it was for a link the agent no longer has.
+A link is checked again before a passport carries it, when the last check is older than `--erc8004-recheck-seconds` (an hour by default, 60 to 86400), at most once a minute per agent. When that check fails, for example because the owner marked the agent inactive or moved the token to a file that no longer lists the key, passports carry no link until a check succeeds, and the entry shows the error. A check that finishes after the owner changed the link or rotated the key is not stored: it was for a link the agent no longer has.
 
 The door reads no chain. It records the link from the passport in `arrival.passport.erc8004`, only when the passport is `verified`, bound to the request by the agent's signature; a passport under another key carries no link into the policy. A policy can require it, testing the outcome too:
 
@@ -120,11 +120,11 @@ The door refuses to start with `trustedRegistryKeys` and no `webBotAuth`. In a W
 
 The agent sends the passport as base64url JSON in `X-Agent-Custody-Passport`, and signs the request as for [Web Bot Auth](door.md#a-did-key-signature): RFC 9421, Ed25519, `tag="web-bot-auth"`, a nonce, and `keyid` set to its did:key. For the passport to count, the signature also covers what binds it to this one request:
 
-- `@authority`, `@method`, `@path`, and `x-agent-custody-passport`;
+- `@authority`, `@method`, `@path`, `@query` (the query string, or `?` when there is none), and `x-agent-custody-passport`;
 - on any method but GET, HEAD, and OPTIONS, `content-digest`: a `Content-Digest` field (RFC 9530, `sha-256` or `sha-512`) that the door checks against the body it read.
 
 ```
-Signature-Input: sig1=("@authority" "@method" "@path" "x-agent-custody-passport" "content-digest");created=…;expires=…;keyid="did:key:z6Mk…";alg="ed25519";nonce="…";tag="web-bot-auth"
+Signature-Input: sig1=("@authority" "@method" "@path" "@query" "x-agent-custody-passport" "content-digest");created=…;expires=…;keyid="did:key:z6Mk…";alg="ed25519";nonce="…";tag="web-bot-auth"
 ```
 
 A passport is public, so without that a signature the agent made for one request, or before it held a passport the door would take, could be sent again with the passport attached. A door in authz mode does not see the body, so it admits a passport on a safe method only. With no grant in the request, the door then records:
@@ -156,7 +156,7 @@ when {
 | a passport at a door with no `trustedRegistryKeys` | `unchecked` | `claimed` |
 | a grant and a passport | recorded | decided by the grant alone |
 
-A replayed request is refused as any Web Bot Auth signature is: the nonce is kept for the passport's did:key, so the second use is `invalid`, and the arrival is `claimed`.
+A replayed request is refused as any Web Bot Auth signature is: the nonce is kept for the passport's did:key, whatever grant the request also carries, so the second use is `invalid`, and the arrival is `claimed`. The signature covers `@query`, so the request cannot be sent again with another query either.
 
 ## What the receipt shows
 

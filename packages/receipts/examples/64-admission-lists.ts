@@ -80,7 +80,7 @@ const body = JSON.stringify({ order: "o_9", amount: 1500 });
 const refund = (agent: { key: KeyPair; passport: Envelope }) => new Promise<{ status: number; arrival: Arrival; decision?: string; verified: boolean }>((resolve, reject) => {
   const fields: Record<string, string> = { [PASSPORT_HEADER]: passportHeader(agent.passport), "content-digest": `sha-256=:${createHash("sha256").update(body).digest("base64")}:` };
   const created = Math.floor(Date.now() / 1000);
-  const input = `sig1=("@authority" "@method" "@path" "${PASSPORT_HEADER}" "content-digest");created=${created};expires=${created + 60};keyid="${didKeyOf(agent.key.publicKey)}";alg="ed25519";nonce="example-${++n}";tag="web-bot-auth"`;
+  const input = `sig1=("@authority" "@method" "@path" "@query" "${PASSPORT_HEADER}" "content-digest");created=${created};expires=${created + 60};keyid="${didKeyOf(agent.key.publicKey)}";alg="ed25519";nonce="example-${++n}";tag="web-bot-auth"`;
   const base = signatureBase({ method: "POST", target: "/refunds", authority: SHOP, header: (name) => (fields[name] !== undefined ? [fields[name]!] : undefined) }, parseDictionary(input).get("sig1") as SfInnerList);
   const u = new URL(door.url);
   const req = httpRequest({ host: u.hostname, port: u.port, method: "POST", path: "/refunds", headers: { host: SHOP, "content-type": "application/json", ...fields, "signature-input": input, signature: `sig1=:${edSign(null, Buffer.from(base), agent.key.privateKey).toString("base64")}:` } }, (res) => {

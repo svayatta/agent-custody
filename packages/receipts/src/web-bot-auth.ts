@@ -321,8 +321,8 @@ interface DirectoryKey { key: KeyObject; nbf?: number; exp?: number }
 type Directory = { ok: true; keys: Map<string, DirectoryKey> } | { ok: false; outcome: "invalid" | "unavailable"; error: string };
 
 export interface WebBotAuthVerifier {
-  /** `grantAgent`: the did:key that a trusted grant, or a trusted registry's passport, in the request names; a did:key signature keeps its nonce only for that agent */
-  verify(req: SignedRequest, grantAgent?: string): Promise<SignatureCheck>;
+  /** `keyAgents`: the did:key, or did:keys, that a trusted grant or a trusted registry's passport in the request names; a did:key signature keeps its nonce only for one of them */
+  verify(req: SignedRequest, keyAgents?: string | readonly string[]): Promise<SignatureCheck>;
   /** nonces held now, or undefined when the nonce store does not count them */
   nonces(): number | undefined;
 }
@@ -465,7 +465,7 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
     return p;
   };
 
-  async function verify(req: SignedRequest, grantAgent?: string): Promise<SignatureCheck> {
+  async function verify(req: SignedRequest, keyAgents: string | readonly string[] = []): Promise<SignatureCheck> {
     const inputText = req.header("signature-input");
     const sigText = req.header("signature");
     if (!inputText && !sigText) return { outcome: "absent" };
@@ -551,7 +551,7 @@ export function createWebBotAuthVerifier(opts: WebBotAuthOptions, f: typeof fetc
     if (opts.requireNonce && !nonceP) return invalid(`${label} has no nonce, and this door requires one`, { agent, keyid });
     // Anyone can make a did:key, so a stranger's signatures must not fill the nonce store. A did:key signature that no
     // trusted grant or passport names is never accepted by the door, and its nonce is not kept.
-    const nonceKey = nonceP && (!didKey || keyid === grantAgent) ? `${agent} ${keyid} ${nonceP.v}` : undefined;
+    const nonceKey = nonceP && (!didKey || (typeof keyAgents === "string" ? keyAgents === keyid : keyAgents.includes(keyid))) ? `${agent} ${keyid} ${nonceP.v}` : undefined;
     const full: SignatureCheck = { outcome: "unavailable", error: nonceStore ? "the door's nonce store is full and cannot record another" : `the door holds ${opts.maxNonces} nonces and cannot record another`, agent, keyid };
     if (nonceKey && nonces.check) {
       let state: NonceState;

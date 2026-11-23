@@ -240,7 +240,7 @@ export function createRateTracker(now: () => number = () => performance.now(), l
 /**
  * What became of the passport an arrival presented. `verified`: a trusted registry key signed it, it is in its window,
  * and the request is signed by the did:key it names, with a signature that covers the passport, `@method`, `@path`,
- * and, on a method that can change something, a `Content-Digest` that matches the body; that alone makes an arrival
+ * `@query`, and, on a method that can change something, a `Content-Digest` that matches the body; that alone makes an arrival
  * without a grant `verified`. `unbound`: it verified and the request is signed by its key, but the signature does not
  * cover all of that, so it could be a signature made for another request with a public passport attached.
  * `wrong-sender`: it verified, and the request is not signed by its key. `invalid`: it did not verify, or the header is
@@ -279,7 +279,7 @@ export interface ArrivalAdmission {
 }
 
 /** The components a signature must cover for the passport it carries to admit its agent. */
-export const PASSPORT_COVERED = ["@method", "@path", PASSPORT_HEADER] as const;
+export const PASSPORT_COVERED = ["@method", "@path", "@query", PASSPORT_HEADER] as const;
 
 /**
  * The passport check for an arrival. `signer` is the did:key whose signature on this request the door verified, with
@@ -752,11 +752,12 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     const route = "path" in norm ? matchRoute(cfg.routes, cfg.unmatchedRoute, method, path) : cfg.unmatchedRoute;
     const presented = webBotAuth && req.headers["signature-input"] !== undefined ? parseGrantHeader(req) : null;
     const trustedGrant = presented ? verifyDelegation(presented, trusted) : undefined;
-    // a did:key signature keeps its nonce only for the agent a trusted grant, or else a trusted passport, names
-    const passportEnv = webBotAuth && registry.length && req.headers["signature-input"] !== undefined && !presented ? parsePassportHeader(req.headers) : null;
+    // a did:key signature keeps its nonce only for an agent that a trusted grant or a trusted passport names; both are
+    // given, so that a grant header, trusted or not, cannot stop the nonce of a signature that a passport is checked against
+    const passportEnv = webBotAuth && registry.length && req.headers["signature-input"] !== undefined ? parsePassportHeader(req.headers) : null;
     const trustedPassport = passportEnv ? verifyPassport(passportEnv, registry, timestamp) : undefined;
-    const keyAgent = trustedGrant?.ok ? trustedGrant.delegation.agent : trustedPassport?.ok ? trustedPassport.passport.agent : undefined;
-    const signature = webBotAuth ? await webBotAuth.verify(signedRequestOf(req), keyAgent) : undefined;
+    const keyAgents = [...(trustedGrant?.ok ? [trustedGrant.delegation.agent] : []), ...(trustedPassport?.ok ? [trustedPassport.passport.agent] : [])];
+    const signature = webBotAuth ? await webBotAuth.verify(signedRequestOf(req), keyAgents) : undefined;
     // the body is read before the arrival is classified: a passport on a write binds to it through Content-Digest
     const read = readArrivalBody ? await readArrivalBody(cfg.maxBodyBytes) : null;
     const body = read === null ? Buffer.alloc(0) : "body" in read ? read.body : null;
