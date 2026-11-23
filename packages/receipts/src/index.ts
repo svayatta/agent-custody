@@ -9,7 +9,7 @@ export { serveConsole, type ConsoleOptions, type RunningConsole } from "./consol
 export { checkConfig, formatFindings, type CheckFinding, type CheckOptions } from "./check.ts";
 export { GRANT_HEADER, grantHeader, parseGrantHeader, serveHttp } from "./gateway-http.ts";
 export { AGENT_HEADER, ARRIVAL_FACT, CLASS_HEADER, DOOR_DEFAULT_CAPTURE, DOOR_VERSION, MAX_CHALLENGE_TOKEN, RECEIPT_HEADER, RATE_BURST_MS, RATE_MINUTE_MS, cedarArgs, classifyArrival, createDoorHost, createRateTracker, matchRoute, normalizePath, remoteOf, serveDoor, signedRequestOf, verifyChallengeToken } from "./door.ts";
-export { DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, WEB_BOT_AUTH_TAG, agentOrigin, createMemoryNonceStore, createWebBotAuthVerifier, jwkThumbprint, normalizeAuthority, parseDictionary, signatureBase } from "./web-bot-auth.ts";
+export { DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, WEB_BOT_AUTH_TAG, agentOrigin, contentDigestMatches, createMemoryNonceStore, createWebBotAuthVerifier, jwkThumbprint, normalizeAuthority, parseDictionary, signatureBase } from "./web-bot-auth.ts";
 export { DESTINATION_FACT, EGRESS_VERSION, PROXY_REALM, checkProxyCredential, createEgressHost, destinationName, normalizeHost, parseAuthority, publicOnlyLookup, serveEgress } from "./egress.ts";
 export { internalAddress } from "./addresses.ts";
 export { DRAFT_WARNING, draftEgressPolicy } from "./egress-draft.ts";
@@ -72,7 +72,7 @@ export * from "./operations.ts";
 export * from "./crypto.ts";
 export * from "./delegation.ts";
 export { base58btcDecode, base58btcEncode, DID_KEY_PREFIX, didKeyOf, publicKeyFromDidKey } from "./did-key.ts";
-export { DEFAULT_PASSPORT_SECONDS, MAX_PASSPORT_HEADER, MAX_PASSPORT_SECONDS, PASSPORT_HEADER, PASSPORT_TYPE, PassportSchema, REGISTRY_DOCUMENT_PATH, issuePassport, parsePassportHeader, passportDigest, passportHeader, verifyPassport } from "./registry.ts";
+export { DEFAULT_PASSPORT_SECONDS, MAX_PASSPORT_HEADER, MAX_PASSPORT_SECONDS, PASSPORT_HEADER, PASSPORT_TYPE, PassportSchema, REGISTRY_DOCUMENT_PATH, issuePassport, parsePassportHeader, passportDigest, passportHeader, registrationMessage, registrationProof, verifyPassport } from "./registry.ts";
 export type { AgentEntry, Passport, PassportVerifyResult } from "./registry.ts";
 export { createErc8004Resolver, decodeAbiString, ERC8004_REGISTRATION_TYPE, ERC8004_REGISTRY, Erc8004LinkSchema } from "./erc8004.ts";
 export type { Erc8004Check, Erc8004Checked, Erc8004Link, Erc8004Resolver, Erc8004ResolverOptions } from "./erc8004.ts";

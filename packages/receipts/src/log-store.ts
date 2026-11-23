@@ -80,7 +80,7 @@ function queued<T>(client: PostgresLike, fn: () => Promise<T>): Promise<T> {
 }
 
 /** Runs `fn` inside one transaction on one connection, whichever kind of client this is. */
-async function transaction<T>(client: PostgresLike, fn: (q: PostgresLike["query"]) => Promise<T>): Promise<T> {
+export async function transaction<T>(client: PostgresLike, fn: (q: PostgresLike["query"]) => Promise<T>): Promise<T> {
   if (!client.connect) return queued(client, () => singleConnectionTransaction(client, fn));
   {
     const c = await client.connect();

@@ -4,7 +4,7 @@
 // agent, nothing asked of the registry at request time. A passport is public, so it is worth nothing on its own: under
 // another key's signature, or with no signature, the arrival is claimed. Revoking an agent stops its passports.
 // Postgres runs in-process through PGlite; the portal and the door run on loopback.
-import { sign as edSign } from "node:crypto";
+import { createHash, sign as edSign } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,7 +20,7 @@ import { grantHeader } from "../src/gateway-http.ts";
 import { PostgresTenancy } from "../src/log-store.ts";
 import { PortalStore, servePortal, signSession, type RunningPortal } from "../src/portal.ts";
 import type { ReceiptBundle, ReceiptStatement } from "../src/receipt.ts";
-import { issuePassport, passportHeader, PASSPORT_HEADER, PASSPORT_TYPE, REGISTRY_DOCUMENT_PATH, RegistryStore, verifyPassport, type AgentEntry } from "../src/registry.ts";
+import { issuePassport, passportHeader, PASSPORT_HEADER, PASSPORT_TYPE, REGISTRY_DOCUMENT_PATH, registrationProof, RegistryStore, verifyPassport, type AgentEntry } from "../src/registry.ts";
 import { localSigner } from "../src/signer.ts";
 import { verifyBundle } from "../src/verify.ts";
 import { parseDictionary, signatureBase, type SfInnerList } from "../src/web-bot-auth.ts";
@@ -94,6 +94,8 @@ describe("the agent registry on the portal", () => {
       return { status: res.status, json: (await res.json().catch(() => ({}))) as any };
     };
   };
+  /** the agent's did:key and its proof of holding the key, for registering it with `tenant` */
+  const keyed = (tenant: string, key: KeyPair = generateKeyPair()) => registrationProof(key, PORTAL_URL, tenant);
   const open = (path: string) => fetch(new URL(path, portal.url)).then(async (r) => ({ status: r.status, json: (await r.json()) as any }));
   const owner = async (tenant: string) => {
     const call = browser(() => portal.url);
@@ -124,7 +126,7 @@ describe("the agent registry on the portal", () => {
   it("registers an agent with its key, owner, contact, capabilities, and expiry, and hands back a passport that verifies", async () => {
     const call = await owner("acme");
     const agent = generateKeyPair();
-    const r = await call("POST", "/api/agents", { name: "Acme shopper", contact: "agents@acme.example", capabilities: ["refunds", "catalogue", "refunds"], agent: didKeyOf(agent.publicKey), expiresAt: inDays(90) });
+    const r = await call("POST", "/api/agents", { name: "Acme shopper", contact: "agents@acme.example", capabilities: ["refunds", "catalogue", "refunds"], ...keyed("acme", agent), expiresAt: inDays(90) });
     expect(r.status).toBe(200);
     expect(r.json.agent).toMatchObject({ id: expect.stringMatching(/^agt_[0-9a-f]{16}$/), name: "Acme shopper", owner: "acme", contact: "agents@acme.example", capabilities: ["catalogue", "refunds"], agent: didKeyOf(agent.publicKey), status: "active" });
     expect(r.json.agent.keys).toEqual([{ kty: "OKP", crv: "Ed25519", x: agent.publicKey.export({ format: "jwk" }).x, kid: didKeyOf(agent.publicKey), exp: Math.floor(Date.parse(r.json.agent.expiresAt) / 1000) }]);
@@ -146,8 +148,8 @@ describe("the agent registry on the portal", () => {
 
   it("refuses a key that is not an Ed25519 did:key, an expiry in the past or over a year out, and a key another agent holds", async () => {
     const call = await owner("bravo");
-    const key = didKeyOf(generateKeyPair().publicKey);
-    const base = { name: "Bravo bot", contact: "ops@bravo.example", agent: key, expiresAt: inDays(30) };
+    const key = generateKeyPair();
+    const base = { name: "Bravo bot", contact: "ops@bravo.example", ...keyed("bravo", key), expiresAt: inDays(30) };
     for (const [body, error] of [
       [{ ...base, agent: "did:key:z6Mk0bad" }, "agent:"],
       [{ ...base, agent: "https://bravo.example" }, "agent:"],
@@ -165,24 +167,53 @@ describe("the agent registry on the portal", () => {
     expect((await call("POST", "/api/agents", { ...base, name: "Copy" })).json.error).toContain("already registered to an agent");
   });
 
+  it("registers a key only with its holder's proof, for this registry and this tenant", async () => {
+    const call = await owner("kilo");
+    const key = generateKeyPair();
+    const body = { name: "Kilo bot", contact: "k@kilo.example", expiresAt: inDays(30) };
+    // a did:key seen in a grant or a signature, without its holder's proof
+    expect((await call("POST", "/api/agents", { ...body, agent: didKeyOf(key.publicKey) })).json.error).toContain("proof: a key is registered with its proof");
+    // a proof made for another tenant, or for another registry, does not carry over
+    const forLima = keyed("lima", key);
+    expect((await call("POST", "/api/agents", { ...body, ...forLima })).json.error).toContain("proof: the signature does not verify");
+    const elsewhere = registrationProof(key, "https://registry.example/", "kilo");
+    expect((await call("POST", "/api/agents", { ...body, ...elsewhere })).json.error).toContain("proof: the signature does not verify");
+    // a proof by another key for this key
+    expect((await call("POST", "/api/agents", { ...body, agent: didKeyOf(key.publicKey), proof: keyed("kilo").proof })).json.error).toContain("proof: the signature does not verify");
+    expect((await call("POST", "/api/agents", { ...body, ...keyed("kilo", key) })).status).toBe(200);
+  });
+
+  it("lets only one of two registrations of one key at once through, and holds the cap under a burst", async () => {
+    const store = new RegistryStore(db, PORTAL_URL, "race_");
+    const key = generateKeyPair();
+    const both = await Promise.allSettled([store.register("mike", { name: "a", contact: "m@mike.example", ...registrationProof(key, PORTAL_URL, "mike"), expiresAt: inDays(5) }), store.register("november", { name: "b", contact: "n@november.example", ...registrationProof(key, PORTAL_URL, "november"), expiresAt: inDays(5) })]);
+    expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(both.find((r) => r.status === "rejected")).toMatchObject({ reason: { message: "agent: this key is already registered to an agent; each agent has its own key" } });
+    const burst = await Promise.allSettled(Array.from({ length: 110 }, (_, i) => store.register("oscar", { name: `bot ${i}`, contact: "o@oscar.example", ...registrationProof(generateKeyPair(), PORTAL_URL, "oscar"), expiresAt: inDays(5) })));
+    expect(burst.filter((r) => r.status === "fulfilled")).toHaveLength(100);
+    expect((await store.list("oscar")).length).toBe(100);
+  }, 60_000);
+
   it("rotates an agent's key: the new passport names the new key", async () => {
     const call = await owner("charlie");
     const first = generateKeyPair();
     const second = generateKeyPair();
-    const r = await call("POST", "/api/agents", { name: "Charlie agent", contact: "c@charlie.example", agent: didKeyOf(first.publicKey), expiresAt: inDays(30) });
-    const u = await call("POST", `/api/agents/${r.json.agent.id}`, { agent: didKeyOf(second.publicKey), capabilities: ["checkout"] });
+    const r = await call("POST", "/api/agents", { name: "Charlie agent", contact: "c@charlie.example", ...keyed("charlie", first), expiresAt: inDays(30) });
+    // a new key needs its holder's proof too
+    expect((await call("POST", `/api/agents/${r.json.agent.id}`, { agent: didKeyOf(second.publicKey) })).json.error).toContain("proof:");
+    const u = await call("POST", `/api/agents/${r.json.agent.id}`, { ...keyed("charlie", second), capabilities: ["checkout"] });
     expect(u.status).toBe(200);
     expect(u.json.agent).toMatchObject({ agent: didKeyOf(second.publicKey), capabilities: ["checkout"], name: "Charlie agent" });
     const v = verifyPassport(u.json.passport, [registryKey], new Date().toISOString());
     expect(v.ok && v.passport.agent).toBe(didKeyOf(second.publicKey));
     expect((await call("POST", `/api/agents/${r.json.agent.id}`, {})).json.error).toContain("nothing to change");
-    expect((await tenancy.audit({ tenant: "charlie" })).find((e) => e.action === "agent.update")?.detail).toMatchObject({ changed: ["agent", "capabilities"] });
+    expect((await tenancy.audit({ tenant: "charlie" })).find((e) => e.action === "agent.update")?.detail).toMatchObject({ changed: ["agent", "capabilities", "proof"] });
   });
 
   it("revokes an agent: its entry says so and it gets no more passports; another tenant cannot touch it", async () => {
     const call = await owner("delta");
     const other = await owner("echo");
-    const r = await call("POST", "/api/agents", { name: "Delta agent", contact: "d@delta.example", agent: didKeyOf(generateKeyPair().publicKey), expiresAt: inDays(30) });
+    const r = await call("POST", "/api/agents", { name: "Delta agent", contact: "d@delta.example", ...keyed("delta"), expiresAt: inDays(30) });
     const id = r.json.agent.id;
     expect((await other("POST", `/api/agents/${id}/revoke`, {})).status).toBe(404);
     expect((await other("POST", `/api/agents/${id}`, { name: "Mine now" })).status).toBe(404);
@@ -200,7 +231,7 @@ describe("the agent registry on the portal", () => {
     await store.addMember(reader.id, "foxtrot", "readonly");
     const call = browser(() => portal.url, `custody_session=${signSession(SECRET, reader.id)}`);
     expect((await call("GET", "/api/agents")).status).toBe(200);
-    const r = await call("POST", "/api/agents", { name: "Nope", contact: "n@foxtrot.example", agent: didKeyOf(generateKeyPair().publicKey), expiresAt: inDays(30) });
+    const r = await call("POST", "/api/agents", { name: "Nope", contact: "n@foxtrot.example", ...keyed("foxtrot"), expiresAt: inDays(30) });
     expect(r.status).toBe(403);
   });
 
@@ -212,9 +243,9 @@ describe("the agent registry on the portal", () => {
   });
 
   it("caps the agents an owner registers", async () => {
-    const store = new RegistryStore(db, "cap_");
-    for (let i = 0; i < 100; i++) await store.register("hotel", { name: `bot ${i}`, contact: "h@hotel.example", agent: didKeyOf(generateKeyPair().publicKey), expiresAt: inDays(10) });
-    await expect(store.register("hotel", { name: "one more", contact: "h@hotel.example", agent: didKeyOf(generateKeyPair().publicKey), expiresAt: inDays(10) })).rejects.toThrow("at most 100 agents");
+    const store = new RegistryStore(db, PORTAL_URL, "cap_");
+    for (let i = 0; i < 100; i++) await store.register("hotel", { name: `bot ${i}`, contact: "h@hotel.example", ...registrationProof(generateKeyPair(), PORTAL_URL, "hotel"), expiresAt: inDays(10) });
+    await expect(store.register("hotel", { name: "one more", contact: "h@hotel.example", ...registrationProof(generateKeyPair(), PORTAL_URL, "hotel"), expiresAt: inDays(10) })).rejects.toThrow("at most 100 agents");
   }, 60_000);
 
   describe("and a door that holds only the registry's key", () => {
@@ -227,15 +258,23 @@ describe("the agent registry on the portal", () => {
     let passport: Envelope;
     let n = 0;
 
-    /** RFC 9421 headers over @authority, signed by `key` with its did:key as keyid, as a Web Bot Auth client sends them. */
-    const signedBy = (key: KeyPair, o: { nonce?: string } = {}) => {
+    const BODY = (amount: number) => JSON.stringify({ order: "o_1", amount });
+    const digestOf = (body: string) => `sha-256=:${createHash("sha256").update(body).digest("base64")}:`;
+    /**
+     * A request as a registered agent sends it: the passport, a Content-Digest of the body, and an RFC 9421 signature by
+     * `key` (its did:key as keyid) over @authority, @method, @path, the passport, and the digest. `cover` replaces the list.
+     */
+    const signedBy = (key: KeyPair, o: { nonce?: string; passport?: Envelope | null; body?: string; cover?: string[]; digest?: string } = {}) => {
+      const body = o.body ?? BODY(100);
+      const fields: Record<string, string> = { "content-digest": o.digest ?? digestOf(body), ...(o.passport === null ? {} : { [PASSPORT_HEADER]: passportHeader(o.passport ?? passport) }) };
+      const cover = o.cover ?? ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"];
       const created = Math.floor(Date.now() / 1000);
-      const input = `sig1=("@authority");created=${created};expires=${created + 60};keyid="${didKeyOf(key.publicKey)}";alg="ed25519";nonce="${o.nonce ?? `reg-${process.pid}-${++n}`}";tag="web-bot-auth"`;
-      const base = signatureBase({ method: "POST", target: "/refunds", authority: AUTHORITY, header: () => undefined }, parseDictionary(input).get("sig1") as SfInnerList);
-      return { "signature-input": input, signature: `sig1=:${edSign(null, Buffer.from(base), key.privateKey).toString("base64")}:` };
+      const input = `sig1=(${cover.map((c) => `"${c}"`).join(" ")});created=${created};expires=${created + 60};keyid="${didKeyOf(key.publicKey)}";alg="ed25519";nonce="${o.nonce ?? `reg-${process.pid}-${++n}`}";tag="web-bot-auth"`;
+      const base = signatureBase({ method: "POST", target: "/refunds", authority: AUTHORITY, header: (name) => (fields[name] !== undefined ? [fields[name]!] : undefined) }, parseDictionary(input).get("sig1") as SfInnerList);
+      return { ...fields, "signature-input": input, signature: `sig1=:${edSign(null, Buffer.from(base), key.privateKey).toString("base64")}:` };
     };
     // node:http, because fetch does not send a Host other than the URL's
-    const send = (headers: Record<string, string>, amount = 100) => new Promise<{ status: number; st: ReceiptStatement; arrival: Arrival; ok: boolean }>((resolve, reject) => {
+    const send = (headers: Record<string, string>, body = BODY(100)) => new Promise<{ status: number; st: ReceiptStatement; arrival: Arrival; ok: boolean }>((resolve, reject) => {
       const u = new URL(door.url);
       const req = httpRequest({ host: u.hostname, port: u.port, method: "POST", path: "/refunds", headers: { host: AUTHORITY, "content-type": "application/json", ...headers } }, (res) => {
         res.resume();
@@ -246,15 +285,17 @@ describe("the agent registry on the portal", () => {
         });
       });
       req.on("error", reject);
-      req.end(JSON.stringify({ order: "o_1", amount }));
+      req.end(body);
     });
+    /** what the door's signature check reports for a signature by `key` that covered everything a passport needs */
+    const bound = (key: KeyPair) => ({ outcome: "verified" as const, agent: didKeyOf(key.publicKey), keyid: didKeyOf(key.publicKey), label: "sig1", covered: ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"] });
 
     beforeAll(async () => {
       origin = await startOrigin();
       // the agent's organisation registers it and takes the passport the portal hands back
       const call = await owner("india");
       agent = generateKeyPair();
-      const r = await call("POST", "/api/agents", { name: "India shopper", contact: "agents@india.example", capabilities: ["refunds"], agent: didKeyOf(agent.publicKey), expiresAt: inDays(30) });
+      const r = await call("POST", "/api/agents", { name: "India shopper", contact: "agents@india.example", capabilities: ["refunds"], ...keyed("india", agent), expiresAt: inDays(30) });
       agentId = r.json.agent.id;
       passport = r.json.passport;
       // the site's door: no principal key, no signature agent; the registry's key from its key document, and a policy
@@ -266,6 +307,7 @@ describe("the agent registry on the portal", () => {
 when {
   context.facts.arrival.class == "verified" &&
   context.facts.arrival has passport &&
+  context.facts.arrival.passport.outcome == "verified" &&
   context.facts.arrival.passport.capabilities.contains("refunds") &&
   context.args.body.amount <= 5000
 };
@@ -281,7 +323,7 @@ when {
     });
 
     it("admits the registered agent as verified, the policy reads its capabilities, and the receipt verifies", async () => {
-      const r = await send({ ...signedBy(agent), [PASSPORT_HEADER]: passportHeader(passport) });
+      const r = await send(signedBy(agent));
       expect(r.status).toBe(200);
       expect(r.arrival).toMatchObject({ class: "verified", subject: didKeyOf(agent.publicKey), grant: "absent", signature: "verified", signatureAgent: didKeyOf(agent.publicKey) });
       expect(r.arrival.signatureError).toBeUndefined();
@@ -296,17 +338,18 @@ when {
     });
 
     it("refuses the amount the policy does not allow, as a verified agent", async () => {
-      const r = await send({ ...signedBy(agent), [PASSPORT_HEADER]: passportHeader(passport) }, 9000);
+      const r = await send(signedBy(agent, { body: BODY(9000) }), BODY(9000));
       expect(r).toMatchObject({ status: 403, arrival: { class: "verified" }, ok: true });
     });
 
     it("treats the passport under another key's signature as handed on: claimed, and refused", async () => {
       const thief = generateKeyPair();
-      const r = await send({ ...signedBy(thief), [PASSPORT_HEADER]: passportHeader(passport) });
+      const r = await send(signedBy(thief));
       expect(r.status).toBe(403);
-      expect(r.arrival).toMatchObject({ class: "claimed", subject: didKeyOf(agent.publicKey), signature: "invalid", passport: { outcome: "wrong-sender", agentId, error: `the passport names ${didKeyOf(agent.publicKey)}, and the request is signed by ${didKeyOf(thief.publicKey)}` } });
+      expect(r.arrival).toMatchObject({ class: "claimed", subject: didKeyOf(agent.publicKey), signature: "invalid", passport: { outcome: "wrong-sender", agent: didKeyOf(agent.publicKey), registry: PORTAL_URL, error: `the passport names ${didKeyOf(agent.publicKey)}, and the request is signed by ${didKeyOf(thief.publicKey)}` } });
       expect(r.arrival.signatureError).toContain("nor a passport from a trusted registry");
-      expect(r.arrival.passport!.envelope).toBeUndefined();
+      // a passport the signer is not bound to carries none of the registry's word into the policy
+      expect(Object.keys(r.arrival.passport!).sort()).toEqual(["agent", "error", "outcome", "registry"]);
       expect(r.st.predicate.agent).toEqual({ id: didKeyOf(agent.publicKey), provenance: "claimed" });
       expect(r.ok).toBe(true);
     });
@@ -317,7 +360,7 @@ when {
     });
 
     it("refuses a replayed signature, so a passport and one captured request do not admit anyone twice", async () => {
-      const headers = { ...signedBy(agent), [PASSPORT_HEADER]: passportHeader(passport) };
+      const headers = signedBy(agent);
       expect((await send(headers)).arrival.class).toBe("verified");
       const again = await send(headers);
       expect(again.arrival).toMatchObject({ class: "claimed", signature: "invalid", signatureError: "sig1 repeats a nonce already used", passport: { outcome: "wrong-sender" } });
@@ -325,26 +368,60 @@ when {
 
     it("does not admit on a passport from another registry, an edited one, or a header that is not a passport", async () => {
       const elsewhere = await issuePassport(localSigner(generateKeyPair()), "https://registry.example/", { id: agentId, owner: "india", name: "India shopper", contact: "x@india.example", capabilities: ["refunds"], agent: didKeyOf(agent.publicKey), createdAt: new Date().toISOString(), expiresAt: inDays(1), revokedAt: null });
-      const foreign = await send({ ...signedBy(agent), [PASSPORT_HEADER]: passportHeader(elsewhere) });
+      const foreign = await send(signedBy(agent, { passport: elsewhere }));
       expect(foreign.arrival).toMatchObject({ class: "claimed", signature: "invalid", passport: { outcome: "invalid", error: expect.stringContaining("not signed by a trusted registry key") } });
-      const junk = await send({ ...signedBy(agent), [PASSPORT_HEADER]: "not-a-passport" });
+      const junkHeaders = signedBy(agent, { passport: null, cover: ["@authority", "@method", "@path", "content-digest"] });
+      const junk = await send({ ...junkHeaders, [PASSPORT_HEADER]: "not-a-passport" });
       expect(junk.arrival).toMatchObject({ class: "claimed", passport: { outcome: "invalid", error: expect.stringContaining("is not a base64url DSSE envelope") } });
       expect(junk.ok).toBe(true);
+    });
+
+    it("does not admit on a signature that does not bind the passport to this request", async () => {
+      // a signature over @authority alone: the agent's, made for some request, with the public passport attached later
+      const loose = await send(signedBy(agent, { cover: ["@authority"] }));
+      expect(loose.arrival).toMatchObject({ class: "claimed", signature: "invalid", passport: { outcome: "unbound", error: "the signature does not cover @method, @path, x-agent-custody-passport, content-digest, which bind the passport to this request" } });
+      expect(loose.arrival.passport!.capabilities).toBeUndefined();
+      // covering everything but the passport
+      const noPassport = await send(signedBy(agent, { cover: ["@authority", "@method", "@path", "content-digest"] }));
+      expect(noPassport.arrival.passport).toMatchObject({ outcome: "unbound", error: expect.stringContaining("x-agent-custody-passport") });
+      // a write without the digest, and a digest that is not of this body
+      expect((await send(signedBy(agent, { cover: ["@authority", "@method", "@path", PASSPORT_HEADER] }))).arrival.passport).toMatchObject({ outcome: "unbound", error: expect.stringContaining("content-digest") });
+      const swapped = await send(signedBy(agent), BODY(4999));
+      expect(swapped).toMatchObject({ status: 403, arrival: { class: "claimed", passport: { outcome: "unbound", error: expect.stringContaining("does not match the body") } }, ok: true });
+    });
+
+    it("does not let a signature made without a passport be replayed with one", async () => {
+      // the agent signed a request when it held no passport the door would take; the door kept no nonce for it
+      const unpassported = signedBy(agent, { passport: null, cover: ["@authority", "@method", "@path", "content-digest"] });
+      expect((await send(unpassported)).arrival.class).toBe("claimed");
+      // someone who saw it attaches the public passport and sends it again
+      const replayed = await send({ ...unpassported, [PASSPORT_HEADER]: passportHeader(passport) });
+      expect(replayed.arrival).toMatchObject({ class: "claimed", passport: { outcome: "unbound" } });
     });
 
     it("judges an arrival that presents a grant by its grant, and only records the passport", () => {
       const principal = generateKeyPair();
       const grant = createDelegation(principal, { version: "0.1", principal: "shop-owner", agent: didKeyOf(agent.publicKey), scopes: ["other"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: inDays(1) });
       const req = { method: "POST", url: "/refunds", headers: { host: AUTHORITY, authorization: `Bearer ${grantHeader(grant)}`, [PASSPORT_HEADER]: passportHeader(passport) }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
-      const sig = { outcome: "verified" as const, agent: didKeyOf(agent.publicKey), keyid: didKeyOf(agent.publicKey), label: "sig1" };
-      const a = classifyArrival(req, [principal], "refund", false, new Date().toISOString(), sig, undefined, [registryKey]).arrival;
+      const a = classifyArrival(req, [principal], "refund", false, new Date().toISOString(), bound(agent), undefined, [registryKey], true).arrival;
       expect(a).toMatchObject({ class: "claimed", grant: "out-of-scope", passport: { outcome: "verified" } });
+    });
+
+    it("keeps another agent's passport out of the policy when the arrival is verified by its own grant", () => {
+      // verified as the thief, by the thief's own grant, carrying the registered agent's public passport
+      const principal = generateKeyPair();
+      const thief = generateKeyPair();
+      const grant = createDelegation(principal, { version: "0.1", principal: "shop-owner", agent: didKeyOf(thief.publicKey), scopes: ["refund"], issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: inDays(1) });
+      const req = { method: "POST", url: "/refunds", headers: { host: AUTHORITY, authorization: `Bearer ${grantHeader(grant)}`, [PASSPORT_HEADER]: passportHeader(passport) }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
+      const a = classifyArrival(req, [principal], "refund", false, new Date().toISOString(), bound(thief), undefined, [registryKey], true).arrival;
+      expect(a).toMatchObject({ class: "verified", subject: didKeyOf(thief.publicKey), passport: { outcome: "wrong-sender" } });
+      expect(a.passport!.capabilities).toBeUndefined();
+      expect(a.passport!.owner).toBeUndefined();
     });
 
     it("records a passport as unchecked at a door that trusts no registry", () => {
       const req = { method: "POST", url: "/refunds", headers: { host: AUTHORITY, [PASSPORT_HEADER]: passportHeader(passport) }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
-      const sig = { outcome: "verified" as const, agent: didKeyOf(agent.publicKey), keyid: didKeyOf(agent.publicKey), label: "sig1" };
-      expect(classifyArrival(req, [], "refund", false, new Date().toISOString(), sig).arrival).toMatchObject({ class: "claimed", signature: "invalid", passport: { outcome: "unchecked" } });
+      expect(classifyArrival(req, [], "refund", false, new Date().toISOString(), bound(agent)).arrival).toMatchObject({ class: "claimed", signature: "invalid", passport: { outcome: "unchecked" } });
     });
 
     it("refuses to start with registry keys and no webBotAuth to check the agent's signature", async () => {
@@ -355,15 +432,14 @@ when {
     it("loses the agent at the door once its passport expires after a revocation", async () => {
       const call = await owner("juliet");
       const key = generateKeyPair();
-      const r = await call("POST", "/api/agents", { name: "Juliet agent", contact: "j@juliet.example", capabilities: ["refunds"], agent: didKeyOf(key.publicKey), expiresAt: inDays(30) });
+      const r = await call("POST", "/api/agents", { name: "Juliet agent", contact: "j@juliet.example", capabilities: ["refunds"], ...keyed("juliet", key), expiresAt: inDays(30) });
       expect((await call("POST", `/api/agents/${r.json.agent.id}/revoke`, {})).status).toBe(200);
       expect((await open(`/registry/agents/${r.json.agent.id}/passport`)).status).toBe(410);
       // the passport it already held lives out its hour; then the door sees it as expired
       const req = { method: "POST", url: "/refunds", headers: { host: AUTHORITY, [PASSPORT_HEADER]: passportHeader(r.json.passport) }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
-      const sig = { outcome: "verified" as const, agent: didKeyOf(key.publicKey), keyid: didKeyOf(key.publicKey), label: "sig1" };
-      expect(classifyArrival(req, [], "refund", false, new Date().toISOString(), sig, undefined, [registryKey]).arrival.class).toBe("verified");
+      expect(classifyArrival(req, [], "refund", false, new Date().toISOString(), bound(key), undefined, [registryKey], true).arrival.class).toBe("verified");
       const later = new Date(Date.now() + 3601_000).toISOString();
-      expect(classifyArrival(req, [], "refund", false, later, sig, undefined, [registryKey]).arrival).toMatchObject({ class: "claimed", passport: { outcome: "invalid", error: expect.stringContaining("the passport is valid from") } });
+      expect(classifyArrival(req, [], "refund", false, later, bound(key), undefined, [registryKey], true).arrival).toMatchObject({ class: "claimed", passport: { outcome: "invalid", error: expect.stringContaining("the passport is valid from") } });
     });
   });
 });

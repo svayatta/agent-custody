@@ -12,7 +12,7 @@ import { didKeyOf } from "../src/did-key.ts";
 import { createErc8004Resolver, ERC8004_REGISTRATION_TYPE } from "../src/erc8004.ts";
 import { PostgresTenancy } from "../src/log-store.ts";
 import { servePortal } from "../src/portal.ts";
-import { verifyPassport } from "../src/registry.ts";
+import { registrationProof, verifyPassport } from "../src/registry.ts";
 import { localSigner } from "../src/signer.ts";
 import { step } from "./_out.ts";
 
@@ -50,14 +50,14 @@ await call("/api/register", { email: "ops@carted.example", password: "a-long-eno
 
 step(3, "the company registers its agent and links token 7: the chain and the file agree");
 const expiresAt = new Date(Date.now() + 90 * 86_400_000).toISOString();
-const linked = await call("/api/agents", { name: "Carted shopper", contact: "agents@carted.example", capabilities: ["refunds"], agent: did, expiresAt, erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "7" } });
+const linked = await call("/api/agents", { name: "Carted shopper", contact: "agents@carted.example", capabilities: ["refunds"], ...registrationProof(agentKey, "https://app.example.test/", "carted"), expiresAt, erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "7" } });
 const l = linked.json.agent.erc8004;
 console.log(`   ${linked.status}: linked to ${l.agentRegistry} token ${l.agentId}, owner ${l.owner}, read at block ${l.block}`);
 const v = verifyPassport(linked.json.passport, [registryKey], new Date().toISOString());
 console.log(`   the passport carries it: ${v.ok ? JSON.stringify(v.passport.erc8004) : v.error}`);
 
 step(4, "a link to token 8, whose file names another key, is refused");
-const refused = await call("/api/agents", { name: "Impostor", contact: "x@carted.example", agent: didKeyOf(generateKeyPair().publicKey), expiresAt, erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "8" } });
+const refused = await call("/api/agents", { name: "Impostor", contact: "x@carted.example", ...registrationProof(generateKeyPair(), "https://app.example.test/", "carted"), expiresAt, erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "8" } });
 console.log(`   ${refused.status}: ${refused.json.error}`);
 
 await portal.close();

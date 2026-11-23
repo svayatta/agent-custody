@@ -888,7 +888,7 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   if (o.registry && !o.portalUrl) throw new Error("the agent registry needs portalUrl: it names the registry in every passport");
   const passportSeconds = o.registry?.passportSeconds ?? DEFAULT_PASSPORT_SECONDS;
   if (!Number.isInteger(passportSeconds) || passportSeconds < 60 || passportSeconds > MAX_PASSPORT_SECONDS) throw new Error(`a passport lives from 60 to ${MAX_PASSPORT_SECONDS} seconds; got ${passportSeconds}`);
-  const agents = o.registry ? new RegistryStore(o.client, o.prefix) : null;
+  const agents = o.registry ? new RegistryStore(o.client, (o.portalUrl ?? "http://localhost/").replace(/\/?$/, "/"), o.prefix) : null;
   const recheckSeconds = o.registry?.erc8004RecheckSeconds ?? 3600;
   const resolver = o.registry?.erc8004;
   const checker = resolver ? (link: Parameters<Erc8004Resolver["check"]>[0], didKey: string) => resolver.check(link, didKey) : undefined;

@@ -1326,7 +1326,7 @@ describe("web bot auth", () => {
     const { f, asked } = directories({ [SA]: jwks(directory(RFC_X)) });
     const v = createWebBotAuthVerifier(options({ agents: [SA], authorities: ["example.com"] }), f, () => 1735689660_000);
     const req = signed("/", "example.com", headers);
-    expect(await v.verify(req)).toEqual({ outcome: "verified", agent: SA, keyid: RFC_KEYID, label: "sig2" });
+    expect(await v.verify(req)).toEqual({ outcome: "verified", agent: SA, keyid: RFC_KEYID, label: "sig2", covered: ["@authority", "signature-agent"] });
     expect(asked).toEqual([`${SA}${DIRECTORY_PATH}`]);
     expect(await v.verify(req)).toMatchObject({ outcome: "invalid", error: "sig2 repeats a nonce already used" });
     // the published request, an hour after it expired

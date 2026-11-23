@@ -20,6 +20,7 @@ import { postgresResolver, serveLog } from "./log-sink.ts";
 import { importLogFile, PostgresTenancy, type PostgresLike, type Plan } from "./log-store.ts";
 import { bothCheckpoints, dirCheckpoints, postgresCheckpoints, type CheckpointStore } from "./checkpoints.ts";
 import { connectSigner, fetchLogKeys, localSigner, serveSigner, type RetiredKey, type Signer } from "./signer.ts";
+import { registrationProof } from "./registry.ts";
 import { createErc8004Resolver } from "./erc8004.ts";
 import { fetchWitnessKeys, Witness } from "./witness.ts";
 import { checkLog, formatLogCheck } from "./log-check.ts";
@@ -275,6 +276,8 @@ const USAGE = `agent-custody <command>
                                                    the tenant portal: register, first key, usage against plan, keys, billing, export
                                                    with a registry key, also the agent registry: register agents, sign their passports
                                                    with an RPC per chain, it links agents to ERC-8004 identities it checks on chain
+  registry proof --key <agent.key> --registry <portal url> --tenant <id>
+                                                   prints { agent, proof }: the agent's did:key and its signature for registering it
   log-admin --db-env NAME import --file <log.jsonl> [--tenant default]      copies a file log into the database as hashes
   portal-followup --db-env NAME --secret-env NAME --mail-key-env NAME --mail-from <address> [--mail-notify <address>] [--mail-reply-to <address>]
                   [--signer <name>] [--signer-role <role>] [--portal-url <url>] [--dry-run]
@@ -777,6 +780,14 @@ async function main(argv: string[]): Promise<number> {
       const r = await sendFollowUps(new PortalStore(openPostgres(values["db-env"])), { apiKey, from: values["mail-from"], ...(values["mail-notify"] ? { notify: values["mail-notify"] } : {}), ...(values["mail-reply-to"] ? { replyTo: values["mail-reply-to"] } : {}) }, { portalUrl: values["portal-url"], secret, ...(values.signer ? { signer: values.signer } : {}), ...(values["signer-role"] ? { signerRole: values["signer-role"] } : {}), dryRun: values["dry-run"] });
       console.log(`${values["dry-run"] ? "would send" : "sent"} ${r.sent.length}, skipped ${r.skipped.length} (operator's own), failed ${r.failed.length}${r.sent.length ? `: ${r.sent.join(", ")}` : ""}`);
       return r.failed.length ? 1 : 0;
+    }
+    case "registry": {
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { key: { type: "string" }, registry: { type: "string" }, tenant: { type: "string" } } });
+      if (positionals[0] !== "proof") throw new Error("usage: registry proof --key <agent.key> --registry <portal url> --tenant <id>");
+      if (!values.key || !values.registry || !values.tenant) throw new Error("registry proof needs --key, --registry, and --tenant");
+      // the URL as the portal names itself: with its trailing slash
+      console.log(JSON.stringify(registrationProof(loadPrivateKey(values.key), values.registry.replace(/\/?$/, "/"), values.tenant)));
+      return 0;
     }
     case "portal": {
       const { values } = parseArgs({ args: rest, options: { "db-env": { type: "string" }, "secret-env": { type: "string" }, "public-url": { type: "string" }, "checkpoints-url": { type: "string" }, "portal-url": { type: "string" }, port: { type: "string", default: "8792" }, host: { type: "string", default: "127.0.0.1" }, "stripe-key-env": { type: "string" }, "stripe-webhook-env": { type: "string" }, "stripe-price-team": { type: "string" }, "mail-key-env": { type: "string" }, "mail-from": { type: "string" }, "mail-notify": { type: "string" }, "mail-reply-to": { type: "string" }, "github-client-id": { type: "string" }, "github-secret-env": { type: "string" }, "google-client-id": { type: "string" }, "google-secret-env": { type: "string" }, "trust-proxy": { type: "boolean", default: false }, "registry-key-env": { type: "string" }, "registry-signer-url": { type: "string" }, "registry-signer-token-env": { type: "string" }, "passport-seconds": { type: "string" }, "erc8004-rpc-env": { type: "string", multiple: true }, "ipfs-gateway": { type: "string" }, "erc8004-recheck-seconds": { type: "string" } } });

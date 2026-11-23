@@ -7,91 +7,35 @@
 // A passport is public. It proves nothing without a signature by the agent's own key on the same request, so it is
 // served to anyone who asks, like a certificate. It lives for a day by default: revoking an agent stops new passports,
 // and the last one issued stops working when it expires.
-import { randomBytes } from "node:crypto";
+import { randomBytes, sign as edSign, verify as edVerify } from "node:crypto";
 import { z } from "zod";
-import { dsseVerify, sha256Hex, type Envelope, type PublicKeyRef } from "./crypto.ts";
-import { DID_KEY_PREFIX, publicKeyFromDidKey } from "./did-key.ts";
-import type { PostgresLike } from "./log-store.ts";
+import type { Envelope, KeyPair } from "./crypto.ts";
+import { DID_KEY_PREFIX, didKeyOf, publicKeyFromDidKey } from "./did-key.ts";
+import { transaction, type PostgresLike } from "./log-store.ts";
+import { AGENT_ID, CAPABILITY, DEFAULT_PASSPORT_SECONDS, DID_KEY, PASSPORT_HEADER, PASSPORT_TYPE, PassportSchema, text, type Passport } from "./passport.ts";
 import type { Signer } from "./signer.ts";
-import { ERC8004_REGISTRY, Erc8004LinkSchema, type Erc8004Check, type Erc8004Checked, type Erc8004Link } from "./erc8004-link.ts";
+import { Erc8004LinkSchema, type Erc8004Check, type Erc8004Checked, type Erc8004Link } from "./erc8004-link.ts";
 
-export const PASSPORT_TYPE = "application/vnd.agent-custody.passport+json";
-/** the header an agent presents its passport in: the DSSE envelope as base64url JSON */
-export const PASSPORT_HEADER = "x-agent-custody-passport";
-/** where a registry publishes its keys and how it issues passports */
-export const REGISTRY_DOCUMENT_PATH = "/.well-known/agent-custody-registry.json";
-/** a passport header longer than this is not read */
-export const MAX_PASSPORT_HEADER = 8192;
-/** how long a passport lives unless the registry is configured otherwise */
-export const DEFAULT_PASSPORT_SECONDS = 86_400;
-export const MAX_PASSPORT_SECONDS = 7 * 86_400;
+export * from "./passport.ts";
+
+const didKeyOfKey = (k: KeyPair) => didKeyOf(k.publicKey);
+
 /** the furthest ahead an agent's registration may expire */
 export const MAX_REGISTRATION_DAYS = 366;
 export const MAX_AGENTS_PER_OWNER = 100;
 
-export const AGENT_ID = /^agt_[0-9a-f]{16}$/;
-export const CAPABILITY = /^[a-z0-9][a-z0-9._:-]{0,63}$/;
-const DID_KEY = /^did:key:z[1-9A-HJ-NP-Za-km-z]{40,60}$/;
-const text = (max: number) => z.string().trim().min(1).max(max).refine((s) => !/[\u0000-\u001f\u007f]/.test(s), { message: "control characters are not allowed" });
-
-export const PassportSchema = z.object({
-  version: z.literal("0.1"),
-  /** the registry that issued it: its public URL */
-  registry: z.string().url().max(200),
-  agentId: z.string().regex(AGENT_ID),
-  /** the agent's key; a door admits the passport only on a request this key signed */
-  agent: z.string().regex(DID_KEY),
-  name: text(100),
-  /** the portal tenant that registered the agent */
-  owner: text(64),
-  /** how a site reaches the agent's operator */
-  contact: text(200),
-  capabilities: z.array(z.string().regex(CAPABILITY)).max(32),
-  /** the agent's ERC-8004 identity, as the registry last checked it against the chain; absent when it has none or the check is stale */
-  erc8004: z.object({ agentRegistry: z.string().regex(ERC8004_REGISTRY), agentId: z.string().regex(/^[0-9]{1,78}$/), owner: z.string().regex(/^0x[0-9a-f]{40}$/), block: z.number().int().nonnegative() }).optional(),
-  issuedAt: z.iso.datetime({ offset: true }),
-  expiresAt: z.iso.datetime({ offset: true }),
-});
-export type Passport = z.infer<typeof PassportSchema>;
-
-export type PassportVerifyResult = { ok: true; passport: Passport; keyid: string; digest: string } | { ok: false; error: string };
-
-/** What a passport names by: sha256 over the payload its signature covers. */
-export const passportDigest = (env: Envelope): string => sha256Hex(Buffer.from(env.payload, "base64"));
-
-/** Checks a passport: signed by one of the registry keys, well formed, naming a did:key that decodes, and valid at `at`. */
-export function verifyPassport(env: Envelope, registryKeys: PublicKeyRef[], at: string): PassportVerifyResult {
-  if (env.payloadType !== PASSPORT_TYPE) return { ok: false, error: `the passport's payloadType is ${String(env.payloadType).slice(0, 80)}, not ${PASSPORT_TYPE}` };
-  if (registryKeys.length === 0) return { ok: false, error: "the door trusts no registry key" };
-  const r = dsseVerify(env, registryKeys);
-  if (!r.ok) return { ok: false, error: `the passport is not signed by a trusted registry key: ${r.error}` };
-  const parsed = PassportSchema.safeParse(r.payload);
-  if (!parsed.success) return { ok: false, error: `the passport is not well formed: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}` };
-  const p = parsed.data;
-  try {
-    publicKeyFromDidKey(p.agent);
-  } catch (e) {
-    return { ok: false, error: `the passport's agent key does not decode: ${e instanceof Error ? e.message : String(e)}` };
-  }
-  const t = Date.parse(at);
-  if (t < Date.parse(p.issuedAt) || t > Date.parse(p.expiresAt)) return { ok: false, error: `the passport is valid from ${p.issuedAt} to ${p.expiresAt}` };
-  return { ok: true, passport: p, keyid: r.keyid, digest: passportDigest(env) };
+/**
+ * What an agent's key signs to show that whoever registers it holds it: the registry, the owner, and the key. Without
+ * it, a tenant could register a did:key it saw in a grant or a signature, and choose that agent's capabilities.
+ */
+export function registrationMessage(registryUrl: string, owner: string, didKey: string): Buffer {
+  return Buffer.from(`agent-custody registry registration v1\n${registryUrl}\n${owner}\n${didKey}`, "utf8");
 }
 
-export function passportHeader(env: Envelope): string {
-  return Buffer.from(JSON.stringify(env)).toString("base64url");
-}
-
-/** The passport an arrival presented, unverified; null when there is none or it is not an envelope. */
-export function parsePassportHeader(headers: Record<string, string | string[] | undefined>): Envelope | null {
-  const raw = headers[PASSPORT_HEADER];
-  if (typeof raw !== "string" || !raw || raw.length > MAX_PASSPORT_HEADER) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Envelope;
-    return parsed && typeof parsed === "object" && typeof parsed.payloadType === "string" && typeof parsed.payload === "string" && Array.isArray(parsed.signatures) ? parsed : null;
-  } catch {
-    return null;
-  }
+/** The proof a registration carries: the agent's key's Ed25519 signature over `registrationMessage`, base64url. */
+export function registrationProof(agentKey: KeyPair, registryUrl: string, owner: string): { agent: string; proof: string } {
+  const agent = didKeyOfKey(agentKey);
+  return { agent, proof: edSign(null, registrationMessage(registryUrl, owner, agent), agentKey.privateKey).toString("base64url") };
 }
 
 /** One registered agent, as the registry keeps it. */
@@ -143,6 +87,8 @@ export const AgentInputSchema = z.object({
   contact: text(200),
   capabilities: z.array(z.string().regex(CAPABILITY, { message: "a capability is lowercase letters, digits, and . _ : -, at most 64 characters" })).max(32).optional(),
   agent: z.string().regex(DID_KEY, { message: "the agent's key is an Ed25519 did:key (did:key:z6Mk...)" }),
+  /** the agent key's signature over `registrationMessage`, base64url: needed to register a key, and to change to a new one */
+  proof: z.string().regex(/^[A-Za-z0-9_-]{86}$/, { message: "proof is the agent key's Ed25519 signature over the registration message, base64url" }).optional(),
   expiresAt: z.iso.datetime({ offset: true }),
   /** link an ERC-8004 identity (checked against the chain before it is stored), or null to unlink */
   erc8004: Erc8004LinkSchema.nullable().optional(),
@@ -160,6 +106,15 @@ async function checkedLink(checker: Erc8004Checker | undefined, link: Erc8004Lin
   if (!r.ok) throw new RegistryInputError(`erc8004: ${r.error}`);
   return r.link;
 }
+
+function checkProof(registryUrl: string, owner: string, didKey: string, proof: string | undefined): void {
+  if (!proof) throw new RegistryInputError("proof: a key is registered with its proof, the agent key's signature over the registration message (registrationProof, or agent-custody registry proof)");
+  if (!edVerify(null, registrationMessage(registryUrl, owner, didKey), publicKeyFromDidKey(didKey).publicKey, Buffer.from(proof, "base64url"))) throw new RegistryInputError(`proof: the signature does not verify with ${didKey} over the registration message for this registry and owner`);
+}
+
+/** Postgres refused a row that breaks the one-live-agent-per-key index. */
+const keyTaken = (e: unknown) => !!e && typeof e === "object" && (e as { code?: unknown }).code === "23505";
+const TAKEN = "agent: this key is already registered to an agent; each agent has its own key";
 
 function checkInput(raw: unknown, partial: boolean, now: number): Partial<AgentInput> {
   const schema = partial ? AgentInputSchema.partial() : AgentInputSchema;
@@ -187,15 +142,20 @@ export class RegistryStore {
   private readonly client: PostgresLike;
   private readonly t: string;
   private ready: Promise<void> | null = null;
-  constructor(client: PostgresLike, prefix = "portal_") {
+  private readonly registryUrl: string;
+  /** `registryUrl` is what a registration's proof names */
+  constructor(client: PostgresLike, registryUrl: string, prefix = "portal_") {
     if (!/^[a-z_][a-z0-9_]*$/.test(prefix)) throw new Error(`invalid table prefix ${prefix}`);
     this.client = client;
+    this.registryUrl = registryUrl;
     this.t = `${prefix}agents`;
   }
   private init(): Promise<void> {
     this.ready ??= (async () => {
       await this.client.query(`CREATE TABLE IF NOT EXISTS ${this.t} (id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, contact TEXT NOT NULL, capabilities TEXT[] NOT NULL, agent TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, revoked_at TIMESTAMPTZ)`);
       await this.client.query(`CREATE INDEX IF NOT EXISTS ${this.t}_owner ON ${this.t} (owner)`);
+      // one live agent per key, held by the database so that two registrations at once cannot both pass
+      await this.client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${this.t}_live_key ON ${this.t} (agent) WHERE revoked_at IS NULL`);
       await this.client.query(`ALTER TABLE ${this.t} ADD COLUMN IF NOT EXISTS erc8004 TEXT`);
     })();
     return this.ready;
@@ -207,15 +167,23 @@ export class RegistryStore {
   async register(owner: string, raw: unknown, now = Date.now(), erc8004?: Erc8004Checker): Promise<AgentEntry> {
     await this.init();
     const v = checkInput(raw, false, now) as AgentInput;
-    const capabilities = v.capabilities ?? [];
-    const { rows: count } = await this.client.query(`SELECT count(*)::int AS n FROM ${this.t} WHERE owner = $1 AND revoked_at IS NULL`, [owner]);
-    if (Number((count[0] as { n: number }).n) >= MAX_AGENTS_PER_OWNER) throw new RegistryInputError(`an owner registers at most ${MAX_AGENTS_PER_OWNER} agents; revoke one first`);
-    const { rows: taken } = await this.client.query(`SELECT id FROM ${this.t} WHERE agent = $1 AND revoked_at IS NULL`, [v.agent]);
-    if (taken.length) throw new RegistryInputError("agent: this key is already registered to an agent; each agent has its own key");
+    checkProof(this.registryUrl, owner, v.agent, v.proof);
     const link = v.erc8004 ? await checkedLink(erc8004, v.erc8004, v.agent) : null;
+    const capabilities = v.capabilities ?? [];
     const id = `agt_${randomBytes(8).toString("hex")}`;
-    const { rows } = await this.client.query(`INSERT INTO ${this.t} (id, owner, name, contact, capabilities, agent, created_at, expires_at, erc8004) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`, [id, owner, v.name, v.contact, capabilities, v.agent, new Date(now).toISOString(), v.expiresAt, link ? JSON.stringify(link) : null]);
-    return RegistryStore.row(rows[0] as Record<string, unknown>);
+    try {
+      // the owner's lock makes the count and the insert one step, so registrations at once cannot pass the cap together
+      return await transaction(this.client, async (q) => {
+        await q("SELECT pg_advisory_xact_lock(hashtext($1))", [`${this.t}:${owner}`]);
+        const { rows: count } = await q(`SELECT count(*)::int AS n FROM ${this.t} WHERE owner = $1 AND revoked_at IS NULL`, [owner]);
+        if (Number((count[0] as { n: number }).n) >= MAX_AGENTS_PER_OWNER) throw new RegistryInputError(`an owner registers at most ${MAX_AGENTS_PER_OWNER} agents; revoke one first`);
+        const { rows } = await q(`INSERT INTO ${this.t} (id, owner, name, contact, capabilities, agent, created_at, expires_at, erc8004) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`, [id, owner, v.name, v.contact, capabilities, v.agent, new Date(now).toISOString(), v.expiresAt, link ? JSON.stringify(link) : null]);
+        return RegistryStore.row(rows[0] as Record<string, unknown>);
+      });
+    } catch (e) {
+      if (keyTaken(e)) throw new RegistryInputError(TAKEN);
+      throw e;
+    }
   }
   async get(id: string): Promise<AgentEntry | null> {
     if (!AGENT_ID.test(id)) return null;
@@ -228,27 +196,26 @@ export class RegistryStore {
     const { rows } = await this.client.query(`SELECT * FROM ${this.t} WHERE owner = $1 ORDER BY created_at, id`, [owner]);
     return rows.map((r) => RegistryStore.row(r as Record<string, unknown>));
   }
-  /**
-   * Changes an active agent of this owner: any of name, contact, capabilities, key, expiry, and its ERC-8004 link. A new
-   * link, or a new key while a link stands, is checked against the chain first. Null when the owner has no such active agent.
-   */
+  /** Changes an active agent of this owner: any of name, contact, capabilities, key, expiry. Null when the owner has no such active agent. */
   async update(owner: string, id: string, raw: unknown, now = Date.now(), erc8004?: Erc8004Checker): Promise<AgentEntry | null> {
     await this.init();
     const v = checkInput(raw, true, now);
-    if (Object.keys(v).length === 0) throw new RegistryInputError("nothing to change: give name, contact, capabilities, agent, expiresAt, or erc8004");
+    if (Object.keys(v).filter((k) => k !== "proof").length === 0) throw new RegistryInputError("nothing to change: give name, contact, capabilities, agent, expiresAt, or erc8004");
     const current = await this.get(id);
     if (!current || current.owner !== owner || agentStatus(current, now) === "revoked") return null;
-    if (v.agent && v.agent !== current.agent) {
-      const { rows: taken } = await this.client.query(`SELECT id FROM ${this.t} WHERE agent = $1 AND revoked_at IS NULL`, [v.agent]);
-      if (taken.length) throw new RegistryInputError("agent: this key is already registered to an agent; each agent has its own key");
-    }
-    const { erc8004: wanted, ...fields } = v;
+    if (v.agent && v.agent !== current.agent) checkProof(this.registryUrl, owner, v.agent, v.proof);
+    const { proof: _proof, erc8004: wanted, ...fields } = v;
     const next = { ...current, ...fields };
     // a link stays only while the registration file lists the agent's key: a new key checks the standing link again
     const target = wanted === undefined ? (current.erc8004 && next.agent !== current.agent ? current.erc8004 : undefined) : wanted;
     const link = target === undefined ? current.erc8004 : target === null ? null : await checkedLink(erc8004, target, next.agent);
-    const { rows } = await this.client.query(`UPDATE ${this.t} SET name = $3, contact = $4, capabilities = $5, agent = $6, expires_at = $7, erc8004 = $8 WHERE id = $1 AND owner = $2 AND revoked_at IS NULL RETURNING *`, [id, owner, next.name, next.contact, next.capabilities, next.agent, next.expiresAt, link ? JSON.stringify(link) : null]);
-    return rows[0] ? RegistryStore.row(rows[0] as Record<string, unknown>) : null;
+    try {
+      const { rows } = await this.client.query(`UPDATE ${this.t} SET name = $3, contact = $4, capabilities = $5, agent = $6, expires_at = $7, erc8004 = $8 WHERE id = $1 AND owner = $2 AND revoked_at IS NULL RETURNING *`, [id, owner, next.name, next.contact, next.capabilities, next.agent, next.expiresAt, link ? JSON.stringify(link) : null]);
+      return rows[0] ? RegistryStore.row(rows[0] as Record<string, unknown>) : null;
+    } catch (e) {
+      if (keyTaken(e)) throw new RegistryInputError(TAKEN);
+      throw e;
+    }
   }
   /** Records a later check of an agent's standing link: the fresh result, or the error beside the last good one. */
   async recordErc8004(id: string, r: Erc8004Check, now = Date.now()): Promise<AgentEntry | null> {

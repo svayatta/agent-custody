@@ -5,13 +5,13 @@
 // JSON-RPC endpoint and the file hosts are stand-ins: nothing leaves the machine.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { generateKeyPair } from "../src/crypto.ts";
+import { generateKeyPair, type KeyPair } from "../src/crypto.ts";
 import { didKeyOf } from "../src/did-key.ts";
 import { classifyArrival, type DoorRequest } from "../src/door.ts";
 import { createErc8004Resolver, decodeAbiString, ERC8004_REGISTRATION_TYPE, type Erc8004Resolver } from "../src/erc8004.ts";
 import { PostgresTenancy } from "../src/log-store.ts";
 import { servePortal, type RunningPortal } from "../src/portal.ts";
-import { PASSPORT_HEADER, passportHeader, REGISTRY_DOCUMENT_PATH, verifyPassport } from "../src/registry.ts";
+import { PASSPORT_HEADER, passportHeader, REGISTRY_DOCUMENT_PATH, registrationProof, verifyPassport } from "../src/registry.ts";
 import { localSigner } from "../src/signer.ts";
 
 const CHAIN = "8453";
@@ -163,6 +163,8 @@ describe("the registry with ERC-8004 links", () => {
     return call;
   };
   const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString();
+  /** the key's did:key and its proof for registering it with `tenant` */
+  const keyed = (tenant: string, key: KeyPair) => registrationProof(key, "https://app.example.test/", tenant);
   const publish = (id: string, did: string, o: { active?: boolean } = {}) => {
     chain.tokens.set(id, `https://agents.example/${id}.json`);
     files.set(`https://agents.example/${id}.json`, registration({ did, agentId: id, ...o }));
@@ -188,7 +190,7 @@ describe("the registry with ERC-8004 links", () => {
     const agent = generateKeyPair();
     const did = didKeyOf(agent.publicKey);
     publish("7", did);
-    const r = await call("POST", "/api/agents", { name: "Carted shopper", contact: "agents@carted.example", capabilities: ["refunds"], agent: did, expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY.toUpperCase().replace("EIP155", "eip155").replace("0X", "0x"), agentId: "7" } });
+    const r = await call("POST", "/api/agents", { name: "Carted shopper", contact: "agents@carted.example", capabilities: ["refunds"], ...keyed("carted", agent), expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY.toUpperCase().replace("EIP155", "eip155").replace("0X", "0x"), agentId: "7" } });
     expect(r.status).toBe(200);
     expect(r.json.agent.erc8004).toMatchObject({ agentRegistry: AGENT_REGISTRY, agentId: "7", owner: OWNER, block: 0x1a2b3c });
     const v = verifyPassport(r.json.passport, [registryKey], new Date().toISOString());
@@ -196,36 +198,38 @@ describe("the registry with ERC-8004 links", () => {
 
     // the door reads the link from the passport, and asks the chain nothing
     const req = { method: "POST", url: "/refunds", headers: { host: "shop.example", [PASSPORT_HEADER]: passportHeader(r.json.passport) }, socket: { remoteAddress: "203.0.113.9" } } as unknown as DoorRequest;
-    const a = classifyArrival(req, [], "refund", false, new Date().toISOString(), { outcome: "verified", agent: did, keyid: did, label: "sig1" }, undefined, [registryKey]).arrival;
+    const a = classifyArrival(req, [], "refund", false, new Date().toISOString(), { outcome: "verified", agent: did, keyid: did, label: "sig1", covered: ["@authority", "@method", "@path", PASSPORT_HEADER, "content-digest"] }, undefined, [registryKey], true).arrival;
     expect(a).toMatchObject({ class: "verified", passport: { outcome: "verified", erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "7", owner: OWNER } } });
   });
 
   it("refuses a link the chain does not back, and a link on a registry that reads no chain", async () => {
     const call = await owner(portal.url, "bravo");
-    const did = didKeyOf(generateKeyPair().publicKey);
+    const bravo = keyed("bravo", generateKeyPair());
     publish("50", didKeyOf(generateKeyPair().publicKey));
-    const r = await call("POST", "/api/agents", { name: "Bravo bot", contact: "ops@bravo.example", agent: did, expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "50" } });
+    const r = await call("POST", "/api/agents", { name: "Bravo bot", contact: "ops@bravo.example", ...bravo, expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "50" } });
     expect(r.status).toBe(400);
     expect(r.json.error).toContain("erc8004: the registration file lists no DID service with the agent's key");
-    expect((await call("POST", "/api/agents", { name: "Bravo bot", contact: "ops@bravo.example", agent: did, expiresAt: inDays(30), erc8004: { agentRegistry: "eip155:8453:not-an-address", agentId: "50" } })).json.error).toContain("agentRegistry");
+    expect((await call("POST", "/api/agents", { name: "Bravo bot", contact: "ops@bravo.example", ...bravo, expiresAt: inDays(30), erc8004: { agentRegistry: "eip155:8453:not-an-address", agentId: "50" } })).json.error).toContain("agentRegistry");
     const other = await owner(bare.url, "charlie");
-    const nolink = await other("POST", "/api/agents", { name: "Charlie", contact: "c@charlie.example", agent: didKeyOf(generateKeyPair().publicKey), expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "7" } });
+    const nolink = await other("POST", "/api/agents", { name: "Charlie", contact: "c@charlie.example", ...keyed("charlie", generateKeyPair()), expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "7" } });
     expect(nolink).toEqual({ status: 400, json: { error: "erc8004: this registry reads no ERC-8004 registry" } });
   });
 
   it("checks a standing link again when the key rotates, and unlinks on null", async () => {
     const call = await owner(portal.url, "delta");
-    const first = didKeyOf(generateKeyPair().publicKey);
-    const second = didKeyOf(generateKeyPair().publicKey);
+    const firstKey = generateKeyPair();
+    const secondKey = generateKeyPair();
+    const first = didKeyOf(firstKey.publicKey);
+    const second = didKeyOf(secondKey.publicKey);
     publish("60", first);
-    const r = await call("POST", "/api/agents", { name: "Delta", contact: "d@delta.example", agent: first, expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "60" } });
+    const r = await call("POST", "/api/agents", { name: "Delta", contact: "d@delta.example", ...keyed("delta", firstKey), expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "60" } });
     const id = r.json.agent.id;
     // the file still names the old key: the rotation is refused, and nothing changes
-    const refused = await call("POST", `/api/agents/${id}`, { agent: second });
+    const refused = await call("POST", `/api/agents/${id}`, keyed("delta", secondKey));
     expect(refused.status).toBe(400);
     expect(refused.json.error).toContain("no DID service with the agent's key");
     publish("60", second);
-    const rotated = await call("POST", `/api/agents/${id}`, { agent: second });
+    const rotated = await call("POST", `/api/agents/${id}`, keyed("delta", secondKey));
     expect(rotated.json.agent).toMatchObject({ agent: second, erc8004: { agentId: "60" } });
     const unlinked = await call("POST", `/api/agents/${id}`, { erc8004: null });
     expect(unlinked.json.agent.erc8004).toBeNull();
@@ -235,9 +239,10 @@ describe("the registry with ERC-8004 links", () => {
 
   it("checks a stale link again before a passport carries it, drops it when the file stops agreeing, and does not ask the chain on every request", async () => {
     const call = await owner(portal.url, "echo");
-    const did = didKeyOf(generateKeyPair().publicKey);
+    const echoKey = generateKeyPair();
+    const did = didKeyOf(echoKey.publicKey);
     publish("70", did);
-    const r = await call("POST", "/api/agents", { name: "Echo", contact: "e@echo.example", agent: did, expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "70" } });
+    const r = await call("POST", "/api/agents", { name: "Echo", contact: "e@echo.example", ...keyed("echo", echoKey), expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "70" } });
     const id = r.json.agent.id;
     // the last check is two hours old, and since then the owner marked the agent inactive
     await db.query(`UPDATE portal_agents SET erc8004 = jsonb_set(erc8004::jsonb, '{checkedAt}', to_jsonb($2::text))::text WHERE id = $1`, [id, new Date(Date.now() - 7200_000).toISOString()]);
