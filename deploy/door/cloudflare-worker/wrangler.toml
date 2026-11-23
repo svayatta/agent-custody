@@ -55,6 +55,9 @@ REPLACE WITH THE LOG'S PUBLIC KEY
 """
 # The principal keys whose grants this door accepts as a passport, SPKI PEM, one or more. Empty: no grant is trusted.
 TRUSTED_PRINCIPAL_KEYS = ""
+# Agent registry keys, SPKI PEM, from the registry's /.well-known/agent-custody-registry.json. With them, an agent that
+# presents the registry's passport and signs with its did:key is verified; needs webBotAuth in DOOR_CONFIG. Empty: none.
+TRUSTED_REGISTRY_KEYS = ""
 # Digests of revoked grants, as `agent-custody revoke` writes them.
 REVOKED_GRANTS = "[]"
 DOOR_POLICY = """

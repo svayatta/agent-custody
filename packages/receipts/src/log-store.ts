@@ -242,7 +242,7 @@ export interface TokenRecord {
 
 const sha256hex = (s: string) => createHash("sha256").update(s).digest("hex");
 
-export const AUDIT_ACTIONS = ["tenant.add", "tenant.disable", "tenant.plan", "token.add", "token.revoke", "policy.add", "policy.remove", "sso.set", "sso.remove", "user.mfa-reset"] as const;
+export const AUDIT_ACTIONS = ["tenant.add", "tenant.disable", "tenant.plan", "token.add", "token.revoke", "policy.add", "policy.remove", "sso.set", "sso.remove", "user.mfa-reset", "agent.register", "agent.update", "agent.revoke"] as const;
 
 /** One administrative action: who did what to which tenant, when. Written by every mutation and never deleted. */
 export interface AuditEntry {

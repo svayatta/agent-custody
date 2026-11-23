@@ -8,7 +8,8 @@ import { closeSync, constants as fsConstants, createReadStream, existsSync, fchm
 import { createInterface } from "node:readline";
 import { dirname, join, resolve } from "node:path";
 import { loadAcsGuardianConfig, loadConfig, loadDoorConfig, loadEgressConfig, loadSdkConfig, type A2aUpstreamConfig } from "./config.ts";
-import { dsseVerify, generateKeyPair, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
+import { dsseVerify, generateKeyPair, keyidOf, loadPrivateKey, loadPublicKey, writeKeyPair } from "./crypto.ts";
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import { DEFAULT_APPROVAL_LIFETIME_SECONDS } from "./approval.ts";
 import { approvalRequestExpiresAt, approveApprovalRequest, denyApprovalRequest, listApprovalRequests, readApprovalRequest } from "./approval-requests.ts";
 import type { Envelope } from "./crypto.ts";
@@ -268,7 +269,9 @@ const USAGE = `agent-custody <command>
   log-admin --db-env NAME user mfa-reset <email>   turns MFA off for a portal account that lost its authenticator
   portal  --db-env NAME --secret-env NAME --public-url <log url> [--checkpoints-url <url>] [--portal-url <url>] [--port 8792] [--host 127.0.0.1]
           [--stripe-key-env NAME --stripe-webhook-env NAME --stripe-price-team <price id>] [--trust-proxy]
+          [--registry-key-env NAME | --registry-signer-url <url> [--registry-signer-token-env NAME]] [--passport-seconds 86400]
                                                    the tenant portal: register, first key, usage against plan, keys, billing, export
+                                                   with a registry key, also the agent registry: register agents, sign their passports
   log-admin --db-env NAME import --file <log.jsonl> [--tenant default]      copies a file log into the database as hashes
   portal-followup --db-env NAME --secret-env NAME --mail-key-env NAME --mail-from <address> [--mail-notify <address>] [--mail-reply-to <address>]
                   [--signer <name>] [--signer-role <role>] [--portal-url <url>] [--dry-run]
@@ -773,8 +776,27 @@ async function main(argv: string[]): Promise<number> {
       return r.failed.length ? 1 : 0;
     }
     case "portal": {
-      const { values } = parseArgs({ args: rest, options: { "db-env": { type: "string" }, "secret-env": { type: "string" }, "public-url": { type: "string" }, "checkpoints-url": { type: "string" }, "portal-url": { type: "string" }, port: { type: "string", default: "8792" }, host: { type: "string", default: "127.0.0.1" }, "stripe-key-env": { type: "string" }, "stripe-webhook-env": { type: "string" }, "stripe-price-team": { type: "string" }, "mail-key-env": { type: "string" }, "mail-from": { type: "string" }, "mail-notify": { type: "string" }, "mail-reply-to": { type: "string" }, "github-client-id": { type: "string" }, "github-secret-env": { type: "string" }, "google-client-id": { type: "string" }, "google-secret-env": { type: "string" }, "trust-proxy": { type: "boolean", default: false } } });
+      const { values } = parseArgs({ args: rest, options: { "db-env": { type: "string" }, "secret-env": { type: "string" }, "public-url": { type: "string" }, "checkpoints-url": { type: "string" }, "portal-url": { type: "string" }, port: { type: "string", default: "8792" }, host: { type: "string", default: "127.0.0.1" }, "stripe-key-env": { type: "string" }, "stripe-webhook-env": { type: "string" }, "stripe-price-team": { type: "string" }, "mail-key-env": { type: "string" }, "mail-from": { type: "string" }, "mail-notify": { type: "string" }, "mail-reply-to": { type: "string" }, "github-client-id": { type: "string" }, "github-secret-env": { type: "string" }, "google-client-id": { type: "string" }, "google-secret-env": { type: "string" }, "trust-proxy": { type: "boolean", default: false }, "registry-key-env": { type: "string" }, "registry-signer-url": { type: "string" }, "registry-signer-token-env": { type: "string" }, "passport-seconds": { type: "string" } } });
       if (!values["db-env"] || !values["secret-env"] || !values["public-url"]) throw new Error("portal needs --db-env, --secret-env, and --public-url");
+      // the registry's key is its own, never the log's: in the environment, or held by a signer process
+      let registry: { signer: Signer; passportSeconds?: number } | undefined;
+      if (values["registry-key-env"] && values["registry-signer-url"]) throw new Error("give --registry-key-env or --registry-signer-url, not both");
+      if (values["registry-key-env"] || values["registry-signer-url"]) {
+        if (!values["portal-url"]) throw new Error("the agent registry needs --portal-url: it names the registry in every passport");
+        let signer: Signer;
+        if (values["registry-key-env"]) {
+          const pem = process.env[values["registry-key-env"]];
+          if (!pem) throw new Error(`portal: environment variable ${values["registry-key-env"]} is not set`);
+          const privateKey = createPrivateKey(pem);
+          const publicKey = createPublicKey(privateKey);
+          signer = localSigner({ privateKey, publicKey, keyid: keyidOf(publicKey) });
+        } else {
+          const token = values["registry-signer-token-env"] ? process.env[values["registry-signer-token-env"]] : undefined;
+          if (values["registry-signer-token-env"] && !token) throw new Error(`portal: environment variable ${values["registry-signer-token-env"]} is not set`);
+          signer = await connectSigner(values["registry-signer-url"]!, token ? { token } : {});
+        }
+        registry = { signer, ...(values["passport-seconds"] ? { passportSeconds: Number(values["passport-seconds"]) } : {}) };
+      } else if (values["passport-seconds"] || values["registry-signer-token-env"]) throw new Error("--passport-seconds and --registry-signer-token-env need --registry-key-env or --registry-signer-url");
       let oauth: OAuthOptions | undefined;
       for (const p of ["github", "google"] as const) {
         const id = values[`${p}-client-id`];
@@ -811,8 +833,8 @@ async function main(argv: string[]): Promise<number> {
       } catch {
         // the log may not be reachable from here at start; the sheet then omits the keyid
       }
-      const running = await servePortal({ tenancy, client, secret, publicUrl: values["public-url"], ...(values["checkpoints-url"] ? { checkpointsUrl: values["checkpoints-url"] } : {}), ...(values["portal-url"] ? { portalUrl: values["portal-url"] } : {}), ...(keyid ? { keyid } : {}), ...(stripe ? { stripe } : {}), ...(mail ? { mail } : {}), ...(oauth ? { oauth } : {}), trustProxy: values["trust-proxy"] }, { port: Number(values.port), host: values.host });
-      console.error(`agent-custody portal: ${running.url} log=${values["public-url"]} billing=${stripe ? "stripe" : "off"}${values["trust-proxy"] ? " trust-proxy" : ""}`);
+      const running = await servePortal({ tenancy, client, secret, publicUrl: values["public-url"], ...(values["checkpoints-url"] ? { checkpointsUrl: values["checkpoints-url"] } : {}), ...(values["portal-url"] ? { portalUrl: values["portal-url"] } : {}), ...(keyid ? { keyid } : {}), ...(stripe ? { stripe } : {}), ...(mail ? { mail } : {}), ...(oauth ? { oauth } : {}), ...(registry ? { registry } : {}), trustProxy: values["trust-proxy"] }, { port: Number(values.port), host: values.host });
+      console.error(`agent-custody portal: ${running.url} log=${values["public-url"]} billing=${stripe ? "stripe" : "off"} registry=${registry ? registry.signer.keyid.slice(0, 16) : "off"}${values["trust-proxy"] ? " trust-proxy" : ""}`);
       await untilStopped();
       await running.close();
       return 0;

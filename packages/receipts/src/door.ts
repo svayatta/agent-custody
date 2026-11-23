@@ -74,6 +74,7 @@ export function nodeDoorIO(cfg: DoorConfig, options: Omit<DoorOptions, "fetch"> 
   return {
     key,
     trustedPrincipalKeys: cfg.trustedPrincipalKeys.map(loadPublicKey),
+    trustedRegistryKeys: cfg.trustedRegistryKeys.map(loadPublicKey),
     // the bytes and the metadata come from one open file
     readPolicy() {
       const fd = openSync(cfg.policyFile, "r");

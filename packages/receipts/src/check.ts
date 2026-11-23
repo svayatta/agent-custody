@@ -146,8 +146,22 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
       add("error", "principal keys", `${f}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-  if (cfg.trustedPrincipalKeys.length === 0) add("warn", "principal keys", "no trusted principal keys: no arrival can be verified, every one is claimed or unknown");
-  else if (principals === cfg.trustedPrincipalKeys.length) add("ok", "principal keys", `${principals} trusted principal key${principals === 1 ? "" : "s"} load`);
+  let registries = 0;
+  for (const f of cfg.trustedRegistryKeys) {
+    try {
+      loadPublicKey(f);
+      registries++;
+    } catch (e) {
+      add("error", "registry keys", `${f}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  const signatures = !!cfg.webBotAuth && cfg.webBotAuth.agents.length > 0;
+  if (cfg.trustedPrincipalKeys.length === 0 && cfg.trustedRegistryKeys.length === 0 && !signatures) add("warn", "principal keys", "no trusted principal keys, registry keys, or signature agents: no arrival can be verified, every one is claimed or unknown");
+  else if (cfg.trustedPrincipalKeys.length > 0 && principals === cfg.trustedPrincipalKeys.length) add("ok", "principal keys", `${principals} trusted principal key${principals === 1 ? "" : "s"} load`);
+  if (cfg.trustedRegistryKeys.length > 0) {
+    if (!cfg.webBotAuth) add("error", "registry keys", "trustedRegistryKeys needs webBotAuth: a passport admits an agent only on a request its did:key signed, and webBotAuth checks that signature");
+    else if (registries === cfg.trustedRegistryKeys.length) add("ok", "registry keys", `${registries} trusted registry key${registries === 1 ? "" : "s"} load`);
+  }
   if (!existsSync(cfg.policyFile)) add("error", "policy", `${cfg.policyFile} does not exist`);
   else {
     const text = readFileSync(cfg.policyFile, "utf8");

@@ -273,6 +273,8 @@ export const DoorConfigSchema = z.object({
   unmatchedRoute: z.string().min(1).default("other"),
   /** principal keys whose grants the door accepts as a passport: an arrival carrying one of their grants, in scope for its route, is `verified` */
   trustedPrincipalKeys: z.array(z.string()).default([]),
+  /** agent registry keys (the key document at the registry's /.well-known/agent-custody-registry.json): an arrival that presents a passport one of them signed, and signs the request with the did:key the passport names, is `verified`. Needs `webBotAuth`, which checks the signature */
+  trustedRegistryKeys: z.array(z.string()).default([]),
   /** a JSON file listing digests of revoked grant envelopes, the same file and format as the gateway's (`agent-custody revoke --config door.json` appends to it); re-read whenever it changes, checked on every arrival. A grant it lists, or one whose chain it lists, is `revoked` */
   revokedGrants: z.string().min(1).optional(),
   policyFile: z.string(),
@@ -310,8 +312,8 @@ export const DoorConfigSchema = z.object({
    * so an arrival cannot point it at a URL of its choosing.
    */
   webBotAuth: z.object({
-    /** the signature agents whose directories the door fetches, as https origins (`https://crawler.example`) */
-    agents: z.array(z.string().refine((u) => { try { return agentOrigin(u) === new URL(u).origin; } catch { return false; } }, { message: "a signature agent is an https origin, with no path, query, or credentials" }).transform((u) => new URL(u).origin)).min(1),
+    /** the signature agents whose directories the door fetches, as https origins (`https://crawler.example`). Empty when the door checks only did:key signatures, for a grant or a passport */
+    agents: z.array(z.string().refine((u) => { try { return agentOrigin(u) === new URL(u).origin; } catch { return false; } }, { message: "a signature agent is an https origin, with no path, query, or credentials" }).transform((u) => new URL(u).origin)).default([]),
     /** the authorities (host, or host:port) this door serves; a signature must cover `@authority` and name one of them */
     authorities: z.array(z.string().min(1).transform(normalizeAuthority)).min(1),
     /** refuse a signature without a nonce; with one, a signature serves one request. Default true */
@@ -432,6 +434,7 @@ export function loadDoorConfig(path: string): DoorConfig {
     ...cfg,
     identity: { keyFile: r(cfg.identity.keyFile) },
     trustedPrincipalKeys: cfg.trustedPrincipalKeys.map(r),
+    trustedRegistryKeys: cfg.trustedRegistryKeys.map(r),
     ...(cfg.revokedGrants ? { revokedGrants: r(cfg.revokedGrants) } : {}),
     policyFile: r(cfg.policyFile),
     receiptsDir: r(cfg.receiptsDir),

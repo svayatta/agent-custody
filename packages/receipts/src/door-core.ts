@@ -11,6 +11,7 @@ import { digestOf, sha256Hex, type Envelope, type KeyPair, type PublicKeyRef } f
 import { DID_KEY_PREFIX } from "./did-key.ts";
 import { decodeDelegation, delegationValidAt, grantChainDigests, verifyDelegation, type Delegation } from "./delegation.ts";
 import { parseGrantHeader, GRANT_HEADER } from "./grant-header.ts";
+import { MAX_PASSPORT_HEADER, PASSPORT_HEADER, parsePassportHeader, verifyPassport } from "./registry.ts";
 import type { Issuer } from "./issue.ts";
 import { ReceiptPending, type FlushResult } from "./receipt-pending.ts";
 import { createWebBotAuthVerifier, normalizeAuthority, type NonceStore, type SignatureCheck, type SignedRequest } from "./web-bot-auth.ts";
@@ -58,6 +59,8 @@ export interface Arrival {
   signatureError?: string;
   /** the agent name from the `x-agent-custody-agent` header, when sent; a claim */
   declared?: string;
+  /** what became of an agent registry passport; absent when none was presented */
+  passport?: ArrivalPassport;
   remote: string;
   method: string;
   path: string;
@@ -231,6 +234,46 @@ export function createRateTracker(now: () => number = () => performance.now(), l
   };
 }
 
+/**
+ * What became of the passport an arrival presented. `verified`: a trusted registry key signed it, it is in its window,
+ * and the request is signed by the did:key it names; that alone makes an arrival without a grant `verified`.
+ * `wrong-sender`: it verified, and the request is not signed by its key, so it was handed on or taken. `invalid`: it did
+ * not verify, or the header is not a passport. `unchecked`: the door trusts no registry key. The registry's entry is
+ * recorded when the passport verified, and the passport itself when it admitted the agent, so a reader with the
+ * registry's key can check it again.
+ */
+export interface ArrivalPassport {
+  outcome: "verified" | "wrong-sender" | "invalid" | "unchecked";
+  error?: string;
+  registry?: string;
+  registryKeyid?: string;
+  agentId?: string;
+  /** the did:key the passport names */
+  agent?: string;
+  name?: string;
+  owner?: string;
+  capabilities?: string[];
+  expiresAt?: string;
+  /** sha256 over the passport's signed payload */
+  digest?: string;
+  envelope?: Envelope;
+}
+
+/** The passport check for an arrival: `didSigner` is the did:key whose signature on this request the door verified. */
+function checkPassport(req: DoorRequest, registry: PublicKeyRef[] | undefined, at: string, signer: { agent: string } | undefined): ArrivalPassport | undefined {
+  const raw = req.headers[PASSPORT_HEADER];
+  if (raw === undefined) return undefined;
+  const env = parsePassportHeader(req.headers);
+  if (!env) return { outcome: "invalid", error: `the ${PASSPORT_HEADER} header is not a base64url DSSE envelope of at most ${MAX_PASSPORT_HEADER} characters` };
+  if (!registry?.length) return { outcome: "unchecked" };
+  const v = verifyPassport(env, registry, at);
+  if (!v.ok) return { outcome: "invalid", error: v.error };
+  const p = v.passport;
+  const entry = { registry: p.registry, registryKeyid: v.keyid, agentId: p.agentId, agent: p.agent, name: p.name, owner: p.owner, capabilities: p.capabilities, expiresAt: p.expiresAt, digest: v.digest };
+  if (signer?.agent === p.agent) return { outcome: "verified", ...entry, envelope: env };
+  return { outcome: "wrong-sender", error: signer ? `the passport names ${p.agent}, and the request is signed by ${signer.agent}` : `the passport names ${p.agent}, and the request carries no signature by that key that the door verified`, ...entry };
+}
+
 export interface Classified {
   arrival: Arrival;
   /** set when the arrival is verified by a grant: the grant, as presented */
@@ -394,12 +437,15 @@ export function signedRequestOf(req: DoorRequest): SignedRequest {
  * Without a grant, a Web Bot Auth signature the door verified (`signature`, from `createWebBotAuthVerifier`) makes the
  * arrival `verified` as its signature agent. With both, the signature binds the grant to its sender when the grant names
  * that signature agent; a grant presented under another agent's signature is `wrong-sender` and the arrival `claimed`.
- * A signature by a did:key's own key binds a grant that names that did:key in the same way, and counts for nothing else.
+ * A signature by a did:key's own key binds a grant that names that did:key in the same way. Without a grant, it binds a
+ * passport from a trusted registry (`registry`) that names that did:key, and the arrival is `verified` as the did:key;
+ * a request that presents a grant is judged by its grant, and its passport is only recorded. Otherwise a did:key
+ * signature counts for nothing.
  * An `x-agent-custody-agent` header or a signature that did not verify alone is `claimed`. Nothing at all is `unknown`.
  * Without `signature`, a `Signature-Input` header is recorded as `unchecked`. `revoked`, when given, says why a grant
  * that verified is revoked (from its chain's digests, leaf first), or null when it is not; a revoked grant is `claimed`.
  */
-export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string, signature?: SignatureCheck, revoked?: (chainDigests: string[]) => string | null): Classified {
+export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route: string, trustProxy: boolean, at: string, signature?: SignatureCheck, revoked?: (chainDigests: string[]) => string | null, registry?: PublicKeyRef[]): Classified {
   const url = requestUrl(req);
   const method = (req.method ?? "GET").toUpperCase();
   const declaredRaw = req.headers[AGENT_HEADER];
@@ -410,6 +456,8 @@ export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route
   // only on the last line, with a verified grant for that did:key. Everywhere else it is invalid, so that no policy
   // takes it for a checked identity.
   const didSigner = signer?.agent.startsWith(DID_KEY_PREFIX) ? signer : undefined;
+  const passport = checkPassport(req, registry, at, didSigner);
+  const admitted = passport?.outcome === "verified";
   const norm = normalizePath(url.pathname);
   const baseOf = (s: SignatureCheck) => ({
     signature: s.outcome,
@@ -417,17 +465,18 @@ export function classifyArrival(req: DoorRequest, trusted: PublicKeyRef[], route
     ...("keyid" in s && s.keyid ? { signatureKeyid: s.keyid } : {}),
     ...("error" in s ? { signatureError: s.error } : {}),
     ...(declared ? { declared } : {}),
+    ...(passport ? { passport } : {}),
     remote: remoteOf(req, trustProxy),
     method,
     path: "path" in norm ? norm.path : url.pathname,
     route,
   });
-  const base = baseOf(didSigner ? { outcome: "invalid", error: `the request is signed by the key of ${didSigner.agent}, and no verified grant in the request names that did:key`, ...didSigner } : sig);
   const envelope = parseGrantHeader(req);
+  const base = baseOf(didSigner && !(admitted && !envelope) ? { outcome: "invalid", error: `the request is signed by the key of ${didSigner.agent}, and no verified grant in the request names that did:key${admitted ? "" : ", nor a passport from a trusted registry"}`, ...didSigner } : sig);
   if (!envelope) {
-    if (signer && !didSigner) return { arrival: { class: "verified", subject: signer.agent, grant: "absent", ...base }, signer };
-    const claimed = !!declared || sig.outcome !== "absent";
-    return { arrival: { class: claimed ? "claimed" : "unknown", subject: declared ?? "unknown", grant: "absent", ...base } };
+    if (signer && (!didSigner || admitted)) return { arrival: { class: "verified", subject: signer.agent, grant: "absent", ...base }, signer };
+    const claimed = !!declared || sig.outcome !== "absent" || !!passport;
+    return { arrival: { class: claimed ? "claimed" : "unknown", subject: declared ?? passport?.agent ?? "unknown", grant: "absent", ...base } };
   }
   const checked = verifyDelegation(envelope, trusted);
   const asserted = decodeDelegation(envelope)?.agent;
@@ -565,6 +614,8 @@ export interface DoorIO {
   key: KeyPair;
   /** principal keys whose grants are a passport */
   trustedPrincipalKeys: PublicKeyRef[];
+  /** agent registry keys whose passports admit the did:key they name */
+  trustedRegistryKeys?: PublicKeyRef[];
   /** the policy text, and a value that changes whenever the text may have; read on every arrival. Throws when it cannot be read: the policy in force stays */
   readPolicy(): { text: string; key: string };
   /** names the policy in messages: its file, or the variable it came from */
@@ -585,6 +636,8 @@ export interface DoorIO {
 /** The decision loop for a door config over the given I/O; `framework` is the receipt's `issuer.framework`. Throws when the config cannot be served. */
 export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: string, opts: { autoFlush?: boolean | undefined } = {}): DoorCore {
   const trusted = io.trustedPrincipalKeys;
+  const registry = io.trustedRegistryKeys ?? [];
+  if (registry.length && !cfg.webBotAuth) throw new Error("trustedRegistryKeys needs webBotAuth: a passport admits an agent only on a request its did:key signed, and webBotAuth checks that signature");
   const revoked = io.revoked;
   const captureSecret = cfg.captureKeyEnv ? io.secret(cfg.captureKeyEnv) : undefined;
   if (cfg.captureKeyEnv && captureSecret === undefined) throw new Error(`capture key: environment variable ${cfg.captureKeyEnv} is not set`);
@@ -642,8 +695,12 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     const route = "path" in norm ? matchRoute(cfg.routes, cfg.unmatchedRoute, method, path) : cfg.unmatchedRoute;
     const presented = webBotAuth && req.headers["signature-input"] !== undefined ? parseGrantHeader(req) : null;
     const trustedGrant = presented ? verifyDelegation(presented, trusted) : undefined;
-    const signature = webBotAuth ? await webBotAuth.verify(signedRequestOf(req), trustedGrant?.ok ? trustedGrant.delegation.agent : undefined) : undefined;
-    const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature, revoked);
+    // a did:key signature keeps its nonce only for the agent a trusted grant, or else a trusted passport, names
+    const passportEnv = webBotAuth && registry.length && req.headers["signature-input"] !== undefined && !presented ? parsePassportHeader(req.headers) : null;
+    const trustedPassport = passportEnv ? verifyPassport(passportEnv, registry, timestamp) : undefined;
+    const keyAgent = trustedGrant?.ok ? trustedGrant.delegation.agent : trustedPassport?.ok ? trustedPassport.passport.agent : undefined;
+    const signature = webBotAuth ? await webBotAuth.verify(signedRequestOf(req), keyAgent) : undefined;
+    const { arrival, delegation, signer } = classifyArrival(req, trusted, route, !!cfg.trustProxy, timestamp, signature, revoked, registry);
     const checkedAgent = arrival.class === "verified";
     const by = checkedAgent ? "agent" : "remote";
     const source = `${by}:${checkedAgent ? arrival.subject : arrival.remote}`;
@@ -788,7 +845,7 @@ export function createDoorCoreWith(cfg: DoorConfig, io: DoorIO, framework: strin
     busy: () => json(503, { "retry-after": "1" }, { error: `the door is handling ${cfg.maxInFlight} requests; this one was not read, decided, or relayed. Retry` }),
     decide,
     consumed: (name, req, arrival) =>
-      name === GRANT_HEADER || name === AGENT_HEADER || name === challengeHeader || (!!history && name === FORM_REPORT_HEADER) ||
+      name === GRANT_HEADER || name === AGENT_HEADER || name === PASSPORT_HEADER || name === challengeHeader || (!!history && name === FORM_REPORT_HEADER) ||
       // the grant travelled in Authorization: it is the door's credential, not the origin's
       (name === "authorization" && arrival.grant !== "absent" && !req.headers[GRANT_HEADER]),
     async record(d, execution) {
