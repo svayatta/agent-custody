@@ -913,6 +913,8 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
   const mfaFailures = new RateLimiter({ perSecond: 1 / 120, burst: 5 });
   const resetsByClient = new RateLimiter({ perSecond: 1 / 600, burst: 5 });
   const resetsByEmail = new RateLimiter({ perSecond: 1 / 900, burst: 3 });
+  // the registry's public reads need no session; per address, so one client cannot walk every entry at once
+  const registryReads = new RateLimiter({ perSecond: 1 / 2, burst: 120 });
   const base = o.publicUrl.endsWith("/") ? o.publicUrl : `${o.publicUrl}/`;
   const cookieName = "custody_session";
 
@@ -1033,6 +1035,22 @@ export function portalHandler(o: PortalOptions): (req: IncomingMessage, res: Ser
       // ---- the agent registry's public side: its keys, each agent's entry, and passports, for anyone ----
       if (o.registry && agents && req.method === "GET" && url.pathname === REGISTRY_DOCUMENT_PATH) return json(200, await registryDocument(o.registry.signer, portalBase, passportSeconds, resolver?.chains ?? []));
       const agentPath = /^\/registry\/agents\/([^/]+)(\/passport)?$/.exec(url.pathname);
+      if (o.registry && agents && req.method === "GET" && (url.pathname === "/registry/agents" || agentPath) && !registryReads.take(`registry:${addr}`)) {
+        return json(429, { error: "too many registry reads from this address; slow down" }, { "retry-after": "2" });
+      }
+      if (o.registry && agents && req.method === "GET" && url.pathname === "/registry/agents") {
+        const q = (k: string) => url.searchParams.get(k) ?? undefined;
+        const limit = q("limit");
+        if (limit !== undefined && !(/^[1-9][0-9]{0,2}$/.test(limit) && Number(limit) <= 100)) return json(400, { error: "limit is 1 to 100" });
+        try {
+          const page = await agents.search({ ...(q("capability") !== undefined ? { capability: q("capability")! } : {}), ...(q("owner") !== undefined ? { owner: q("owner")! } : {}), ...(q("after") !== undefined ? { after: q("after")! } : {}), ...(limit !== undefined ? { limit: Number(limit) } : {}) });
+          // a search finds agents; it is not a directory of contacts, which each agent's own entry and passport carry
+          return json(200, { registry: portalBase, agents: page.agents.map((e) => { const { contact: _contact, ...listed } = publicEntry(e); return listed; }), next: page.next });
+        } catch (e) {
+          if (e instanceof RegistryInputError) return json(400, { error: e.message });
+          throw e;
+        }
+      }
       if (o.registry && agents && req.method === "GET" && agentPath) {
         const entry = await agents.get(agentPath[1]!);
         if (!entry) return json(404, { error: "no agent with this id is registered" });

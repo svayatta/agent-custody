@@ -30,7 +30,7 @@ export { challengeLabels, DOOR_QUESTIONS, DoorLabelSchema, doorErrorRates, forma
 export type { DoorArrivals, DoorLabel, DoorQuestion, ErrorRateRow, LabelSource } from "./door-error-rates.ts";
 export { buildDoorTestSet, DOOR_TEST_KINDS, formatTestKinds } from "./door-test-set.ts";
 export type { DoorTestSet, TestKind } from "./door-test-set.ts";
-export type { Arrival, ArrivalChallenge, ArrivalClass, ArrivalPassport, ArrivalRate, ChallengeCheck, Classified, DoorHost, DoorOptions, DoorRequest, DoorServerOptions, RateTracker, RateTrackerLimits, RunningDoor } from "./door.ts";
+export type { Arrival, ArrivalChallenge, ArrivalAdmission, ArrivalClass, ArrivalPassport, ArrivalRate, ChallengeCheck, Classified, DoorHost, DoorOptions, DoorRequest, DoorServerOptions, RateTracker, RateTrackerLimits, RunningDoor } from "./door.ts";
 export type { NonceState, NonceStore, SignatureCheck, SignedRequest, WebBotAuthOptions, WebBotAuthVerifier } from "./web-bot-auth.ts";
 export * from "./capture.ts";
 export { A2A_CARD_PATH, A2A_RECEIPT_METADATA_KEY, A2A_STREAM_META_KEY, a2aUpstream, fetchAgentCard, serveA2a, textOf } from "./a2a.ts";
@@ -74,6 +74,8 @@ export * from "./delegation.ts";
 export { base58btcDecode, base58btcEncode, DID_KEY_PREFIX, didKeyOf, publicKeyFromDidKey } from "./did-key.ts";
 export { DEFAULT_PASSPORT_SECONDS, MAX_PASSPORT_HEADER, MAX_PASSPORT_SECONDS, PASSPORT_HEADER, PASSPORT_TYPE, PassportSchema, REGISTRY_DOCUMENT_PATH, issuePassport, parsePassportHeader, passportDigest, passportHeader, registrationMessage, registrationProof, verifyPassport } from "./registry.ts";
 export type { AgentEntry, Passport, PassportVerifyResult } from "./registry.ts";
+export { AdmissionListsSchema, canonicalAgent, canonicalRegistry, compileAdmissionLists, LIST_NAME, MAX_LIST_ENTRIES, MAX_LISTS } from "./admission.ts";
+export type { AdmissionEntry, AdmissionLists, ArrivalIdentity } from "./admission.ts";
 export { createErc8004Resolver, decodeAbiString, ERC8004_REGISTRATION_TYPE, ERC8004_REGISTRY, Erc8004LinkSchema } from "./erc8004.ts";
 export type { Erc8004Check, Erc8004Checked, Erc8004Link, Erc8004Resolver, Erc8004ResolverOptions } from "./erc8004.ts";
 export * from "./approval.ts";

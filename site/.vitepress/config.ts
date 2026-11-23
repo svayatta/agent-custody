@@ -125,6 +125,7 @@ export default withMermaid(
             { text: "Door signals", link: "/receipts/door-signals" },
             { text: "Door error rates", link: "/receipts/door-error-rates" },
             { text: "The agent registry", link: "/receipts/agent-registry" },
+            { text: "Admission lists", link: "/receipts/admission-lists" },
             { text: "Safe financial operations", link: "/receipts/financial-operations" },
             { text: "Completeness", link: "/receipts/completeness" },
             { text: "Anchoring the log on a chain", link: "/receipts/anchoring" },

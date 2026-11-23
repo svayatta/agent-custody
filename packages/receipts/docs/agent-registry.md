@@ -100,7 +100,10 @@ What the link does not do: it reads the ERC-8004 Identity Registry only, not its
 | --- | --- |
 | `GET /.well-known/agent-custody-registry.json` | the registry's key document: its URL, the passport type and header, how long a passport lives, the chain ids whose ERC-8004 registries it reads (`erc8004Chains`), and its keys (`keyid`, `alg`, `publicKeyPem`, `validFrom`) |
 | `GET /registry/agents/<id>` | the agent's entry: name, owner, contact, capabilities, its key as a did:key and as an Ed25519 JWK (`kid` is the did:key, `exp` the registration's expiry), `status` (`active`, `revoked`, or `expired`), and `erc8004`, the linked identity as last checked (with `error` when the last check failed) or null |
+| `GET /registry/agents?capability=&owner=&limit=&after=` | the active agents that hold a capability (or belong to an owner), by id, a page of up to 100 at a time; see [admission lists](admission-lists.md#find-agents-in-the-registry) |
 | `GET /registry/agents/<id>/passport` | a fresh passport for an active agent; `410` for a revoked or expired one |
+
+These reads need no session. Each address gets a burst of 120 of them (search, entries, and passports together) and then one every 2 seconds; past that the registry answers `429` with `Retry-After`.
 
 The agent fetches a fresh passport before the one it holds expires. It needs no session for that.
 
@@ -155,7 +158,7 @@ when {
 | a passport at a door with no `trustedRegistryKeys` | `unchecked` | `claimed` |
 | a grant and a passport | recorded | decided by the grant alone |
 
-A replayed request is refused as any Web Bot Auth signature is: the nonce is kept for the passport's did:key, whatever grant the request also carries, so the second use is `invalid`, and the arrival is `claimed`. The signature covers `@query`, so the request cannot be sent again with another query either.
+A replayed request is refused as any Web Bot Auth signature is: the nonce is kept for the passport's did:key, whatever grant the request also carries, so the second use is `invalid`, and the arrival is `claimed`. The nonce is kept too for a passport that is not yet valid at the door, because the registry's clock is ahead, so the request cannot be sent again once its window opens. The signature covers `@query`, so the request cannot be sent again with another query either.
 
 ## What the receipt shows
 
@@ -167,4 +170,4 @@ The receipt names the agent as `observed`, never `attested`: `agent: { id: "did:
 - **A key rotation is the same.** A passport for the old key works until it expires.
 - **Capabilities are the owner's claim.** The registry records what the organisation says the agent does, and signs that it said so. It does not check it.
 - **A passport says who, not on whose behalf.** It does not name a principal or a route. For that, the agent presents a [grant](door.md#presenting-a-passport) from a principal the site trusts, and the door decides by the grant.
-- **Admission lists** (allow these registered agents, block those) and a search of the registry by capability are not built yet.
+- **Who a site admits is the site's own list.** The registry answers a search by capability (`GET /registry/agents?capability=`), and a site lists the agents it admits or blocks in its door's [admission lists](admission-lists.md).

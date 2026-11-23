@@ -86,6 +86,20 @@ export function nodeDoorIO(cfg: DoorConfig, options: Omit<DoorOptions, "fetch"> 
       }
     },
     policySource: cfg.policyFile,
+    ...(cfg.admissionLists ? {
+      readAdmission(known?: string) {
+        const fd = openSync(cfg.admissionLists!, "r");
+        try {
+          const st = fstatSync(fd);
+          const key = `${st.ino}:${st.mtimeMs}:${st.ctimeMs}:${st.size}`;
+          // a file of 64 full lists is tens of megabytes: it is read only when it has changed
+          return key === known ? { key } : { text: readFileSync(fd, "utf8"), key };
+        } finally {
+          closeSync(fd);
+        }
+      },
+      admissionSource: cfg.admissionLists,
+    } : {}),
     revoked(chainDigests) {
       try {
         revocations.reload();

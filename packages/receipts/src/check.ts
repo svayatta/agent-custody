@@ -2,6 +2,7 @@
 // config, the keys, the policy, the grant, the environment, and the paths; --connect also starts the upstreams, which
 // is where tool-name collisions and unreachable servers show up, and compares every tool name the config mentions with
 // the tools the upstreams actually offer.
+import { compileAdmissionLists } from "./admission.ts";
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -235,6 +236,14 @@ export function checkDoorConfig(configPath: string): CheckFinding[] {
       }
     }
   } else if (cfg.trustedPrincipalKeys.length > 0) add("warn", "revokedGrants", "no revokedGrants file: a grant cannot be revoked at this door before it expires");
+  if (cfg.admissionLists) {
+    try {
+      const lists = compileAdmissionLists(readFileSync(cfg.admissionLists, "utf8"));
+      add("ok", "admissionLists", `${lists.names.length} admission list(s) in ${cfg.admissionLists}: ${lists.names.join(", ") || "none"}`);
+    } catch (e) {
+      add("error", "admissionLists", `${cfg.admissionLists}: ${e instanceof Error ? e.message : String(e)}; the door refuses to start, and a file that stops reading while it runs leaves the lists in force`);
+    }
+  }
   return out;
 }
 

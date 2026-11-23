@@ -177,6 +177,12 @@ describe("an ERC-8004 link", () => {
     expect(over.success).toBe(false);
     expect(over.error?.issues[0]?.message).toBe("agentId is not a uint256");
     expect(Erc8004LinkSchema.safeParse({ agentRegistry: AGENT_REGISTRY, agentId: "9".repeat(78) }).success).toBe(false);
+    // not decimal: refused with the reason, never thrown out of safeParse (which would make the portal answer 500)
+    for (const agentId of ["abc", "1e3", "7.5"]) {
+      const r = Erc8004LinkSchema.safeParse({ agentRegistry: AGENT_REGISTRY, agentId });
+      expect(r.success, agentId).toBe(false);
+      expect(r.error?.issues.map((i) => i.message), agentId).toContain("agentId is the token id in decimal");
+    }
   });
 
   it("reads an ABI string only when its encoding holds together", () => {
@@ -272,6 +278,9 @@ describe("the registry with ERC-8004 links", () => {
     expect(r.status).toBe(400);
     expect(r.json.error).toContain("erc8004: the registration file lists no DID service with the agent's key");
     expect((await call("POST", "/api/agents", { name: "Bravo bot", contact: "ops@bravo.example", ...bravo, expiresAt: inDays(30), erc8004: { agentRegistry: "eip155:8453:not-an-address", agentId: "50" } })).json.error).toContain("agentRegistry");
+    const notDecimal = await call("POST", "/api/agents", { name: "Bravo bot", contact: "ops@bravo.example", ...bravo, expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "abc" } });
+    expect(notDecimal.status).toBe(400);
+    expect(notDecimal.json.error).toContain("agentId is the token id in decimal");
     const other = await owner(bare.url, "charlie");
     const nolink = await other("POST", "/api/agents", { name: "Charlie", contact: "c@charlie.example", ...keyed("charlie", generateKeyPair()), expiresAt: inDays(30), erc8004: { agentRegistry: AGENT_REGISTRY, agentId: "7" } });
     expect(nolink).toEqual({ status: 400, json: { error: "erc8004: this registry reads no ERC-8004 registry" } });

@@ -366,6 +366,17 @@ when {
       expect(again.arrival).toMatchObject({ class: "claimed", signature: "invalid", signatureError: "sig1 repeats a nonce already used", passport: { outcome: "wrong-sender" } });
     });
 
+    it("keeps the nonce of a signature whose passport is not yet valid at the door, so it is not admitted once the window opens", async () => {
+      // the registry's clock is ahead of the door's: the passport's window opens 1.5 s from now
+      const early = await issuePassport(signer, PORTAL_URL, { id: agentId, owner: "india", name: "India shopper", contact: "agents@india.example", capabilities: ["refunds"], agent: didKeyOf(agent.publicKey), createdAt: new Date().toISOString(), expiresAt: inDays(30), revokedAt: null }, 3600, Date.now() + 1500);
+      const headers = signedBy(agent, { passport: early });
+      const first = await send(headers);
+      expect(first.arrival).toMatchObject({ class: "claimed", passport: { outcome: "invalid", error: expect.stringContaining("the passport is valid from") } });
+      // the same request again, before or after the window opens, is a replay
+      const again = await send(headers);
+      expect(again.arrival).toMatchObject({ class: "claimed", signature: "invalid", signatureError: "sig1 repeats a nonce already used" });
+    });
+
     it("refuses a replayed signature with a grant header attached, so a grant cannot stop the door keeping the nonce", async () => {
       // the grant header is not a covered component, so the signature still verifies; a grant from a key the door does
       // not trust must not keep the door from recording the nonce of the signature the passport is checked against
