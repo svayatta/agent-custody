@@ -9,6 +9,28 @@ compatibility_flags = ["nodejs_compat"]
 # WebAssembly beside it.
 no_bundle = true
 
+# For deployment verification, see DEPLOYMENT_VERIFICATION.md for complete setup instructions
+# When deploying to production, replace placeholder values with your actual credentials
+
+# REQUIRED: Replace with your actual Cloudflare account ID
+# CLOUDFLARE_ACCOUNT_ID = "your-account-id"
+
+# REQUIRED: Replace with your actual origin URL
+# ORIGIN_URL = "https://your-origin.example.com"
+
+# REQUIRED: Replace with your actual log tenant URL
+# LOG_URL = "https://log.agent-custody.dev/t/your-tenant/"
+
+# REQUIRED: Replace with your actual log tenant ID
+# LOG_ID = "your-tenant-id"
+
+# REQUIRED: Replace with your actual log public key
+# Get from: https://log.agent-custody.dev/.well-known/agent-custody-log.json
+# LOG_KEYS = """-----BEGIN PUBLIC KEY-----\nYOUR_LOG_PUBLIC_KEY\n-----END PUBLIC KEY-----"""
+
+# OPTIONAL: If using grants, replace with your trusted principal keys
+# TRUSTED_PRINCIPAL_KEYS = """-----BEGIN PUBLIC KEY-----\nYOUR_TRUSTED_KEYS\n-----END PUBLIC KEY-----"""
+
 # Put the Worker in front of the site. Uncomment and set your zone; a subrequest from a Worker to its own zone goes to
 # the origin, so ORIGIN_URL may be the site's own hostname. It stays above [build]: TOML puts a key below a table
 # header into that table, and the Worker would then have no route.
@@ -79,3 +101,6 @@ DOOR_CONFIG = """
   "precommit": ["orders"]
 }
 """
+
+# For testing with verify-deployment.mjs, use these routes:
+# routes = [{ pattern = "test-worker.example.com/*", zone_name = "example.com" }]
