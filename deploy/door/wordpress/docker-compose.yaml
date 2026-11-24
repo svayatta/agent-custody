@@ -1,0 +1,57 @@
+# The smoke test's site: stock WordPress, its database, a hash-only agent-custody log, and WP-CLI. smoke.sh runs it.
+# It is not a deployment: the passwords are fixed and the log is plain HTTP on the compose network.
+
+name: agent-custody-door-wordpress
+
+x-wordpress-env: &wordpress-env
+  WORDPRESS_DB_HOST: db
+  WORDPRESS_DB_USER: wordpress
+  WORDPRESS_DB_PASSWORD: wordpress
+  WORDPRESS_DB_NAME: wordpress
+  # the smoke log is plain HTTP; a real site connects to an https log
+  WORDPRESS_CONFIG_EXTRA: "define( 'AGENT_CUSTODY_DOOR_ALLOW_HTTP', true );"
+
+services:
+  db:
+    image: mariadb:11
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: wordpress
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      retries: 60
+
+  wordpress:
+    image: wordpress:${WORDPRESS_TAG:-latest}
+    depends_on:
+      db:
+        condition: service_healthy
+    environment: *wordpress-env
+    volumes:
+      - site:/var/www/html
+    ports:
+      - "127.0.0.1:${WORDPRESS_PORT:-18080}:80"
+
+  cli:
+    image: wordpress:cli
+    profiles: [cli]
+    user: "33:33"
+    environment: *wordpress-env
+    volumes:
+      - site:/var/www/html
+      - ${SMOKE_WORK:?smoke.sh sets SMOKE_WORK}:/work
+
+  log:
+    image: ${AGENT_CUSTODY_IMAGE:?smoke.sh sets AGENT_CUSTODY_IMAGE}
+    command: ["log", "--file", "/work/log/log.jsonl", "--key", "/work/keys/log.key", "--host", "0.0.0.0", "--port", "8787", "--token-env", "LOG_TOKEN", "--hash-only"]
+    user: "${SMOKE_UID:-10001}:${SMOKE_GID:-10001}"
+    environment:
+      LOG_TOKEN: ${LOG_TOKEN:?smoke.sh sets LOG_TOKEN}
+    volumes:
+      - ${SMOKE_WORK:?smoke.sh sets SMOKE_WORK}:/work
+
+volumes:
+  site:
