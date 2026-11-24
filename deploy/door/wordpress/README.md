@@ -11,7 +11,7 @@ The agent-custody door for a stock WordPress site: a plugin in PHP that decides 
 
 ```bash
 ./build.sh                                                   # agent-custody-door.zip
-./smoke.sh ghcr.io/svayatta/agent-custody-gateway:0.16.13    # needs docker with compose, curl, zip, and a free port 18080
+./smoke.sh ghcr.io/svayatta/agent-custody-gateway:0.16.14    # needs docker with compose, curl, zip, and a free port 18080
 ```
 
 The smoke test installs the plugin from its zip and connects it to the log through the settings form. It sends a comment, a login, and a Contact Form 7 form without the challenge (403) and with it (accepted), a login with an action that WordPress does not know (403), a login from a signed-in user without the challenge (403), the contact form by three other ways (403), a login in Watch (accepted, receipt in the queue), a comment while the log is down (503), and a refused comment while the queue of receipts is full (403, no receipt). It then verifies all thirteen receipts with `agent-custody verify`. The challenge uses Cloudflare Turnstile's public test keys, so the site calls Cloudflare, and Contact Form 7 comes from wordpress.org. It ends with `smoke: OK`. `SMOKE_KEEP=1 ./smoke.sh <image>` leaves the site up at `http://localhost:18080` to try it by hand.
