@@ -277,7 +277,7 @@ export const DoorConfigSchema = z.object({
   trustedRegistryKeys: z.array(z.union([z.string().min(1), z.object({ key: z.string().min(1), registry: z.string().url().refine((u) => /^https?:\/\//.test(u), { message: "registry is an http(s) URL" }) }).strict()])).default([]),
   /** a JSON file listing digests of revoked grant envelopes, the same file and format as the gateway's (`agent-custody revoke --config door.json` appends to it); re-read whenever it changes, checked on every arrival. A grant it lists, or one whose chain it lists, is `revoked` */
   revokedGrants: z.string().min(1).optional(),
-  /** a JSON file of the site's named admission lists (`{ "lists": { "partners": [ { "registry", "agentId" } | { "erc8004": { "agentRegistry", "agentId" } } | { "agent" } ] } }`); re-read whenever it changes. The names of the lists a verified arrival's agent is on are `arrival.admission.lists` */
+  /** a JSON file of the site's named admission lists (`{ "lists": { "partners": [ { "registry", "agentId" } | { "erc8004": { "agentRegistry", "agentId" }, "registry"? } | { "agent" } ] } }`); re-read whenever it changes. The names of the lists a verified arrival's agent is on are `arrival.admission.lists` */
   admissionLists: z.string().min(1).optional(),
   policyFile: z.string(),
   /** "enforce" (default) refuses what the policy denies; "observe" forwards everything and records the decision with `enforced: false` */
