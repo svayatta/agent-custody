@@ -139,10 +139,11 @@ sleep 2
 wp cron event run agent_custody_door_flush > /dev/null 2>&1 || fail "the flush did not run"
 
 wp eval 'echo Agent_Custody_Door::public_pem( get_option( "agent_custody_door_key" ) );' > "$work/keys/door.pub"
+# shellcheck disable=SC2016  # PHP variables, not shell ones
 wp eval 'global $wpdb; foreach ( $wpdb->get_results( "SELECT receipt_id, status, bundle FROM " . acd_table() ) as $r ) { file_put_contents( "/work/receipts/" . $r->receipt_id . "." . $r->status . ".json", $r->bundle ); }'
 for id in "$denied" "$allowed" "$login_denied" "$login_allowed" "$login_action" "$contact_denied" "$contact_allowed" "$watched" "$withheld"; do
   [ -f "$work/receipts/$id.logged.json" ] || fail "receipt $id is not logged: $(ls "$work/receipts")"
   cli verify "/work/receipts/$id.logged.json" --issuer-key /work/keys/door.pub --log-key /work/keys/log.pub > "$work/verify.txt" 2>&1 || { cat "$work/verify.txt" >&2; fail "receipt $id did not verify"; }
 done
-[ "$(ls "$work/receipts" | wc -l | tr -d ' ')" = 12 ] || fail "want 12 receipts, got: $(ls "$work/receipts")"
+[ "$(find "$work/receipts" -type f | wc -l | tr -d ' ')" = 12 ] || fail "want 12 receipts, got: $(ls "$work/receipts")"
 echo "smoke: OK (the plugin installed from its zip; 12 receipts, 9 of them verified: comment $denied denied and $allowed executed, login $login_denied and $login_action denied and $login_allowed executed, contact form $contact_denied denied and $contact_allowed executed, $watched in Watch, $withheld withheld)"
