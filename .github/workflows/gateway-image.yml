@@ -4,7 +4,8 @@
 #     tags `edge` and `sha-<short sha>`;
 #   - a finished release for a version tag builds from the published npm package of that version and pushes
 #     `<version>`, `<major>.<minor>` and `latest`;
-#   - a pull request that touches deploy/gateway or deploy/door builds the image and runs the smoke tests, and pushes nothing.
+#   - a pull request that touches deploy/gateway or deploy/door builds the image and runs the smoke tests, the one of
+#     the WordPress plugin (deploy/door/wordpress/smoke.sh) included, and pushes nothing.
 # Run it by hand with a version to rebuild a release, or with none to rebuild main. Every build is smoke-tested
 # (deploy/gateway/smoke.sh, then deploy/door/smoke.sh for door mode) before it is pushed. Every pushed image carries a
 # provenance attestation and an SBOM and is signed with cosign, keyless, by this workflow's identity (deploy/gateway/README.md says how to verify one). Uses the repository's own token; no personal token.
@@ -84,7 +85,7 @@ jobs:
       - run: kubectl kustomize deploy/gateway/k8s > /dev/null
       - run: kubectl kustomize deploy/gateway/lockdown/k8s > /dev/null
       - run: kubectl kustomize deploy/door/k8s > /dev/null
-      - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh deploy/door/smoke.sh deploy/gateway/lockdown/vm/check-lockdown.sh .github/scripts/*.sh
+      - run: shellcheck deploy/gateway/gateway-entrypoint.sh deploy/gateway/smoke.sh deploy/door/smoke.sh deploy/door/wordpress/*.sh deploy/gateway/lockdown/vm/check-lockdown.sh .github/scripts/*.sh
       - name: the VM lockdown ruleset and units parse
         run: |
           sudo apt-get install -y -qq nftables > /dev/null
@@ -192,6 +193,10 @@ jobs:
       - name: smoke-test door mode
         # a rebuild of a release from before door mode checks out a tag without it
         run: if [ -f deploy/door/smoke.sh ]; then deploy/door/smoke.sh gateway-smoke:local; else echo "this release has no door mode"; fi
+      - name: smoke-test the WordPress plugin on a stock WordPress site
+        # on a pull request only: the test needs wordpress.org and Cloudflare, and they must not stop a release
+        if: github.event_name == 'pull_request' && matrix.platform == 'linux/amd64'
+        run: deploy/door/wordpress/smoke.sh gateway-smoke:local
       - name: log in to the registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4

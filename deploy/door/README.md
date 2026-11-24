@@ -1,6 +1,6 @@
 # Running the door
 
-Three ways to put the agent-custody door in front of a site: as the reverse proxy itself, from the gateway image in `door` mode; behind a site's own nginx or Envoy, answering their authz checks; or at Cloudflare's edge, as a Worker ([cloudflare-worker](cloudflare-worker/README.md)).
+Four ways to put the agent-custody door in front of a site: as the reverse proxy itself, from the gateway image in `door` mode; behind a site's own nginx or Envoy, answering their authz checks; at Cloudflare's edge, as a Worker ([cloudflare-worker](cloudflare-worker/README.md)); or inside a WordPress site, as a plugin ([wordpress](wordpress/README.md)).
 
 ## As a reverse proxy, from the gateway image
 
