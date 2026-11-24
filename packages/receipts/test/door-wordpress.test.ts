@@ -228,7 +228,14 @@ describe.skipIf(!hasPhp)("the WordPress door (PHP)", () => {
       { fn: "route", args: ["index.php", "", "/Blog//index.php/wp-admin/admin-ajax.php/x", all, ["/wp-admin/admin-ajax.php"], "/blog/"] },
       route("wp-trackback.php", "", "/wp-trackback.php"),
       route("wp-signup.php", "", "/wp-signup.php"),
+      route("index.php", "", "/wp-json/wp/v2/comments"),
+      route("index.php", "", "//WP-JSON/wp/v2/Comments/"),
+      route("index.php", "", ["/", "/wp-json//wp/v2/comments"] as unknown as string),
+      { fn: "route", args: ["index.php", "", "/blog/index.php/wp-json/wp/v2/comments", all, [], "/blog"] },
+      { fn: "route", args: ["index.php", "", "/api/wp/v2/comments", all, [], "", "api"] },
+      route("index.php", "", "/wp-json/wp/v2/comments/7"),
+      route("index.php", "", "/wp-json/wp/v2/comments", ["login"]),
     ]);
-    expect(answers.map((a) => a.result)).toEqual(["comment", "login", "register", "lostpassword", "lostpassword", null, "login", "login", null, null, null, null, "form", "form", "form", null, "form", "form", "form", "form", null, "form", null, "form", "form", "form", "form", "comment", "register"]);
+    expect(answers.map((a) => a.result)).toEqual(["comment", "login", "register", "lostpassword", "lostpassword", null, "login", "login", null, null, null, null, "form", "form", "form", null, "form", "form", "form", "form", null, "form", null, "form", "form", "form", "form", "comment", "register", "comment", "comment", "comment", "comment", "comment", null, null]);
   });
 });

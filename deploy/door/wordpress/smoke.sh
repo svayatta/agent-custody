@@ -101,6 +101,9 @@ login_action=$(receipt)
 # wp-login.php also takes a login from a sender who is signed in, so the owner's cookie does not replace the challenge.
 post -b "$jar" "$site/wp-login.php" -d log=owner -d pwd=wrong
 [ "$(status)" = 403 ] || fail "a login from a signed-in user without the challenge got $(status), want 403"
+# The REST API also makes a comment. Without the door, WordPress answers 401 to a visitor here.
+post "$site/wp-json/wp/v2/comments" -d post=1 -d content="a comment through the REST API"
+[ "$(status)" = 403 ] || fail "a REST comment without the challenge got $(status), want 403"
 
 contact
 [ "$(status)" = 403 ] || fail "a contact form without the challenge got $(status), want 403"
@@ -117,7 +120,7 @@ contact -F "cf-turnstile-response=$token"
 contact_allowed=$(receipt)
 
 # A refused submission makes no request to the log: its receipt waits for the flush.
-[ "$(wp eval 'echo acd_pending();')" = 8 ] || fail "want 8 refused receipts in the queue, got $(wp eval 'echo acd_pending();')"
+[ "$(wp eval 'echo acd_pending();')" = 9 ] || fail "want 9 refused receipts in the queue, got $(wp eval 'echo acd_pending();')"
 
 # The log is down: the comment is not accepted, and its receipt waits.
 compose stop log > /dev/null 2>&1
@@ -130,7 +133,7 @@ wp eval 'update_option( "agent_custody_door", array( "preset" => "watch" ) + get
 post "$site/wp-login.php" -d log=owner -d pwd=wrong
 [ "$(status)" = 200 ] || fail "a login in Watch got $(status), want 200 from WordPress"
 watched=$(receipt); [ -n "$watched" ] || fail "the login in Watch has no receipt"
-[ "$(wp eval 'echo acd_pending();')" = 9 ] || fail "the receipt of the login in Watch is not in the queue"
+[ "$(wp eval 'echo acd_pending();')" = 10 ] || fail "the receipt of the login in Watch is not in the queue"
 wp eval 'update_option( "agent_custody_door", array( "preset" => "humans" ) + get_option( "agent_custody_door" ) );'
 # The queue is full: the door still refuses, and it signs no receipt.
 wp eval 'wp_mkdir_p( WPMU_PLUGIN_DIR ); file_put_contents( WPMU_PLUGIN_DIR . "/full.php", "<?php add_filter( \"agent_custody_door_max_pending\", \"__return_zero\" );" );'
@@ -152,5 +155,5 @@ for file in "$work"/receipts/*.json; do
   case "$name" in *.logged.json) ;; *) fail "receipt $name is not in the log" ;; esac
   cli verify "/work/receipts/$name" --issuer-key /work/keys/door.pub --log-key /work/keys/log.pub > "$work/verify.txt" 2>&1 || { cat "$work/verify.txt" >&2; fail "receipt $name did not verify"; }
 done
-[ "$(find "$work/receipts" -type f | wc -l | tr -d ' ')" = 13 ] || fail "want 13 receipts, got: $(ls "$work/receipts")"
-echo "smoke: OK (the plugin installed from its zip; 13 receipts verified, with: comment $denied denied and $allowed executed, login $login_denied and $login_action denied and $login_allowed executed, contact form $contact_denied denied and $contact_allowed executed, $watched in Watch, $withheld withheld)"
+[ "$(find "$work/receipts" -type f | wc -l | tr -d ' ')" = 14 ] || fail "want 14 receipts, got: $(ls "$work/receipts")"
+echo "smoke: OK (the plugin installed from its zip; 14 receipts verified, with: comment $denied denied and $allowed executed, login $login_denied and $login_action denied and $login_allowed executed, contact form $contact_denied denied and $contact_allowed executed, $watched in Watch, $withheld withheld)"

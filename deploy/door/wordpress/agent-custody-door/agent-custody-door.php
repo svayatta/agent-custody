@@ -262,7 +262,7 @@ add_action(
 		$action = isset( $_REQUEST['action'] ) && is_string( $_REQUEST['action'] ) ? $_REQUEST['action'] : '';
 		// phpcs:enable
 		$home  = (string) wp_parse_url( home_url(), PHP_URL_PATH );
-		$route = Agent_Custody_Door::route( (string) $pagenow, $action, $paths, (array) $s['protect'], acd_paths( $s ), $home );
+		$route = Agent_Custody_Door::route( (string) $pagenow, $action, $paths, (array) $s['protect'], acd_paths( $s ), $home, rest_get_url_prefix() );
 		if ( null === $route ) {
 			return;
 		}

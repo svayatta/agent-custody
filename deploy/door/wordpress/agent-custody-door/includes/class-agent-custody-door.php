@@ -310,9 +310,10 @@ CEDAR;
 	 * The route of a request, or null when the door does not protect it. `protect` lists the stock forms that are
 	 * protected. `paths` are more paths, each exact or with a `/*` suffix, under the route `form`. `path` is the
 	 * request path, or a list of the paths that the request reaches (the REST route can also come in the query).
-	 * `home` is the path of the site's address: the listed paths start after it.
+	 * `home` is the path of the site's address: the listed paths start after it. `rest` is the prefix of the REST API:
+	 * the REST route that makes a comment is under the route `comment`.
 	 */
-	public static function route( $pagenow, $action, $path, array $protect, array $paths, $home = '' ) {
+	public static function route( $pagenow, $action, $path, array $protect, array $paths, $home = '', $rest = 'wp-json' ) {
 		$route = null;
 		if ( 'wp-comments-post.php' === $pagenow || 'wp-trackback.php' === $pagenow ) {
 			$route = 'comment';
@@ -331,8 +332,12 @@ CEDAR;
 		if ( null !== $route && in_array( $route, $protect, true ) ) {
 			return $route;
 		}
+		$comments = rtrim( self::normal_path( '/' . $rest . '/wp/v2/comments' ), '/' ) . '/';
 		foreach ( (array) $path as $candidate ) {
 			$candidate = rtrim( self::normal_path( $candidate, $home ), '/' ) . '/';
+			if ( $candidate === $comments && in_array( 'comment', $protect, true ) ) {
+				return 'comment';
+			}
 			foreach ( $paths as $p ) {
 				$prefix = '/*' === substr( $p, -2 );
 				$base   = rtrim( self::normal_path( $prefix ? substr( $p, 0, -2 ) : $p ), '/' ) . '/';
