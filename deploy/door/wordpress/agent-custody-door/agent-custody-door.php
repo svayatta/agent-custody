@@ -163,6 +163,12 @@ function acd_send( $receipt_id, array $envelope, array $s ) {
 	return true;
 }
 
+/** How many receipts of submissions that the policy did not allow wait for the flush. */
+function acd_pending() {
+	global $wpdb;
+	return (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . acd_table() . " WHERE status = 'pending' AND decision = 'deny'" );
+}
+
 /** Signs the receipt, stores it as `pending`, and returns the envelope. */
 function acd_record( array $head, array $execution, $authorization ) {
 	$envelope = Agent_Custody_Door::receipt( $head, $execution, $authorization, get_option( ACD_KEY_OPTION ) );
@@ -178,15 +184,22 @@ add_action(
 		if ( ! acd_connected( $s ) ) {
 			return;
 		}
-		// ponytail: 50 receipts an hour, oldest first. A site under a long attack needs a shorter schedule or a batch append.
-		foreach ( $wpdb->get_results( 'SELECT receipt_id, bundle FROM ' . acd_table() . " WHERE status = 'pending' ORDER BY created LIMIT 50" ) as $row ) {
+		// ponytail: 50 receipts an hour, so refused submissions use at most 50 appends of the log's quota an hour. A site
+		// that needs more changes the filter or the schedule. A receipt of an allowed submission goes first.
+		$batch = (int) apply_filters( 'agent_custody_door_flush_batch', 50 );
+		foreach ( $wpdb->get_results( $wpdb->prepare( 'SELECT receipt_id, bundle FROM ' . acd_table() . " WHERE status = 'pending' ORDER BY decision = 'deny', created LIMIT %d", $batch ) ) as $row ) {
 			$bundle = json_decode( $row->bundle, true );
 			if ( ! isset( $bundle['envelope'] ) || ! acd_send( $row->receipt_id, $bundle['envelope'], $s ) ) {
 				break;
 			}
 		}
+		// The table has a bound in time and in rows. The log has only the hash of a receipt, so a deleted receipt is gone.
 		$days = (int) apply_filters( 'agent_custody_door_retention_days', 90 );
-		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . acd_table() . " WHERE status = 'logged' AND created < %s", gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS ) ) );
+		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . acd_table() . ' WHERE created < %s', gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS ) ) );
+		$oldest = $wpdb->get_var( $wpdb->prepare( 'SELECT created FROM ' . acd_table() . ' ORDER BY created DESC LIMIT 1 OFFSET %d', (int) apply_filters( 'agent_custody_door_max_receipts', 10000 ) ) );
+		if ( $oldest ) {
+			$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . acd_table() . ' WHERE created <= %s', $oldest ) );
+		}
 	}
 );
 
@@ -221,7 +234,11 @@ add_action(
 	'init',
 	function () {
 		global $pagenow;
-		if ( 'POST' !== ( isset( $_SERVER['REQUEST_METHOD'] ) ? $_SERVER['REQUEST_METHOD'] : '' ) ) {
+		$method  = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( (string) $_SERVER['REQUEST_METHOD'] ) : 'GET';
+		$headers = acd_request_headers();
+		// A request that reads is not decided. The REST API runs a GET as another method when the request asks for it.
+		// phpcs:ignore WordPress.Security.NonceVerification -- the door reads what the request is; it changes nothing itself.
+		if ( in_array( $method, array( 'GET', 'HEAD', 'OPTIONS' ), true ) && ! isset( $_GET['_method'] ) && ! isset( $headers['x-http-method-override'] ) ) {
 			return;
 		}
 		// The way back in for an owner whom the door locked out: `define( 'AGENT_CUSTODY_DOOR_OFF', true );` in wp-config.php.
@@ -232,15 +249,20 @@ add_action(
 		if ( ! acd_connected( $s ) ) {
 			return;
 		}
-		$path = (string) wp_parse_url( isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : '/', PHP_URL_PATH );
-		// phpcs:ignore WordPress.Security.NonceVerification -- the door reads which form this is; it changes nothing itself.
+		// Not wp_parse_url: it reads the first segment of a path that starts with `//` as a host.
+		$path  = preg_replace( '/[?#].*$/s', '', isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '/' );
+		$paths = array( $path );
+		// phpcs:disable WordPress.Security.NonceVerification -- the door reads which form this is; it changes nothing itself.
+		if ( isset( $_REQUEST['rest_route'] ) && is_string( $_REQUEST['rest_route'] ) ) {
+			$paths[] = '/' . rest_get_url_prefix() . '/' . wp_unslash( $_REQUEST['rest_route'] );
+		}
 		$action = isset( $_REQUEST['action'] ) && is_string( $_REQUEST['action'] ) ? $_REQUEST['action'] : '';
-		$route  = Agent_Custody_Door::route( (string) $pagenow, $action, $path, (array) $s['protect'], acd_paths( $s ) );
+		// phpcs:enable
+		$route = Agent_Custody_Door::route( (string) $pagenow, $action, $paths, (array) $s['protect'], acd_paths( $s ), (string) wp_parse_url( home_url(), PHP_URL_PATH ) );
 		if ( null === $route ) {
 			return;
 		}
 		$key       = get_option( ACD_KEY_OPTION );
-		$headers   = acd_request_headers();
 		$challenge = acd_challenge( $s );
 		$outcome   = null;
 		if ( $challenge ) {
@@ -249,23 +271,33 @@ add_action(
 			$token   = isset( $_POST[ $field ] ) && is_string( $_POST[ $field ] ) ? wp_unslash( $_POST[ $field ] ) : ( isset( $headers[ Agent_Custody_Door::CHALLENGE_HEADER ] ) ? $headers[ Agent_Custody_Door::CHALLENGE_HEADER ] : '' );
 			$outcome = Agent_Custody_Door::check_challenge( $challenge, $token, 'acd_http' );
 		}
-		$arrival = Agent_Custody_Door::arrival( $headers, isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '', 'POST', $path, $route, $outcome );
+		$arrival = Agent_Custody_Door::arrival( $headers, isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '', $method, $path, $route, $outcome );
 		$d       = Agent_Custody_Door::decide( $key, $s['preset'], $arrival, $headers, is_user_logged_in() );
 		$head    = $d['head'];
 		$watch   = isset( $head['policy']['enforced'] );
+		$allowed = 'allow' === $head['policy']['decision'];
+		$room    = function () {
+			return acd_pending() < (int) apply_filters( 'agent_custody_door_max_pending', 500 );
+		};
 
 		if ( ! $d['forward'] ) {
-			$envelope = acd_record( $head, $d['denied'], null );
-			register_shutdown_function( 'acd_finish', $head['receiptId'], $envelope, $s );
+			// A submission that the policy does not allow costs the sender nothing, so it makes no request to the log here: the
+			// timed flush sends its receipt. When the queue is full, the door still refuses, and it signs no receipt.
+			if ( $room() ) {
+				acd_record( $head, $d['denied'], null );
+			}
 			acd_refuse( 403, $head, $challenge ? __( 'This form needs the challenge. Go back, complete the challenge, and send the form again.', 'agent-custody-door' ) : __( 'This form does not accept this request.', 'agent-custody-door' ) );
 		}
 
 		// The decision is in the log before WordPress acts on the request. If the log does not take it, the request stops here.
 		$authorization = null;
+		// In Watch, a submission that the policy does not allow goes on. It gets no authorization: see above.
 		try {
-			$envelope      = Agent_Custody_Door::authorization( $head, $key );
-			$authorization = array( 'envelope' => $envelope ) + Agent_Custody_Door::append( $envelope, acd_log( $s ), 'acd_http' );
-			acd_store( $head['receiptId'], $head, 'authorized', $authorization );
+			if ( $allowed ) {
+				$envelope      = Agent_Custody_Door::authorization( $head, $key );
+				$authorization = array( 'envelope' => $envelope ) + Agent_Custody_Door::append( $envelope, acd_log( $s ), 'acd_http' );
+				acd_store( $head['receiptId'], $head, 'authorized', $authorization );
+			}
 		} catch ( Exception $e ) {
 			if ( ! $watch ) {
 				$execution = array( 'status' => 'withheld', 'reason' => 'the log did not commit the authorization, so WordPress did not get the request: ' . $e->getMessage(), 'provenance' => 'observed' );
@@ -280,9 +312,14 @@ add_action(
 			header( 'X-Agent-Custody-Class: ' . $arrival['class'] );
 		}
 		register_shutdown_function(
-			function () use ( $head, $authorization, $s ) {
+			function () use ( $head, $authorization, $s, $allowed, $room ) {
+				if ( ! $allowed && ! $room() ) {
+					return;
+				}
 				$envelope = acd_record( $head, Agent_Custody_Door::answered( http_response_code() ), $authorization );
-				acd_finish( $head['receiptId'], $envelope, $s );
+				if ( $allowed ) {
+					acd_finish( $head['receiptId'], $envelope, $s );
+				}
 			}
 		);
 	},
@@ -378,8 +415,8 @@ function acd_clean( $in ) {
 	};
 	$out = array(
 		'log_url'   => esc_url_raw( $get( 'log_url' ), array( 'https', 'http' ) ),
-		// An empty secret field keeps the stored secret: the form never shows it.
-		'log_token' => '' !== $get( 'log_token' ) ? $get( 'log_token' ) : $old['log_token'],
+		// An empty secret field keeps the stored secret: the form never shows it. A log at a new URL does not get the old token.
+		'log_token' => '' !== $get( 'log_token' ) ? $get( 'log_token' ) : ( esc_url_raw( $get( 'log_url' ), array( 'https', 'http' ) ) === $old['log_url'] ? $old['log_token'] : '' ),
 		'secret'    => '' !== $get( 'secret' ) ? $get( 'secret' ) : $old['secret'],
 		'preset'    => array_key_exists( $get( 'preset' ), Agent_Custody_Door::presets() ) ? $get( 'preset' ) : 'watch',
 		'provider'  => 'hcaptcha' === $get( 'provider' ) ? 'hcaptcha' : 'turnstile',

@@ -39,8 +39,9 @@ describe.skipIf(!hasPhp)("the WordPress door (PHP)", () => {
   const log = fileLog(join(mkdtempSync(join(tmpdir(), "door-wordpress-")), "log.jsonl"), logKey);
   const logKeys = { [logKey.keyid]: logKey.publicKey.export({ type: "spki", format: "der" }).subarray(12).toString("base64") };
   const logCfg = { url: "https://log.example/", token: "t0ken", keys: logKeys };
-  const key = one<string>("new_key", []);
-  const doorKey = publicKeyFromPem(one<string>("public_pem", [key]));
+  // vitest runs this body also when it skips the suite
+  const key = hasPhp ? one<string>("new_key", []) : "";
+  const doorKey = hasPhp ? publicKeyFromPem(one<string>("public_pem", [key])) : logKey;
   const appendVia = async (envelope: Envelope) => {
     const answer = await log.append(canonicalize(envelope));
     const [a] = php([{ fn: "append", args: [envelope, logCfg], http: { status: 200, body: JSON.stringify(answer) } }]);
@@ -202,14 +203,30 @@ describe.skipIf(!hasPhp)("the WordPress door (PHP)", () => {
       route("wp-login.php", "lostpassword", "/wp-login.php"),
       route("wp-login.php", "retrievepassword", "/wp-login.php"),
       route("wp-login.php", "logout", "/wp-login.php"),
+      // wp-login.php signs in on an action that it does not know
       route("wp-login.php", "form", "/wp-login.php"),
+      route("wp-login.php", "Login", "/wp-login.php"),
+      route("wp-login.php", "postpass", "/wp-login.php"),
+      route("wp-login.php", "form", "/wp-login.php", ["comment"]),
       route("wp-comments-post.php", "", "/wp-comments-post.php", ["login"]),
       route("index.php", "", "/contact/"),
       route("index.php", "", "/contact/", all, ["/contact/"]),
       route("index.php", "", "/wp-json/contact-form-7/v1/x", all, ["/wp-json/contact-form-7/*"]),
       route("index.php", "", "//wp-json/%63ontact-form-7/v1/x", all, ["/wp-json/contact-form-7/*"]),
       route("index.php", "", "/wp-json/other", all, ["/wp-json/contact-form-7/*"]),
+      // other spellings of a protected path, and the other ways to its form
+      route("index.php", "", "/WP-JSON/Contact-Form-7/V1/x", all, ["/wp-json/contact-form-7/*"]),
+      route("index.php", "", "/index.php/wp-json/contact-form-7/v1/x", all, ["/wp-json/contact-form-7/*"]),
+      route("index.php", "", "/x/../wp-json/./contact-form-7/v1/x", all, ["/wp-json/contact-form-7/*"]),
+      route("index.php", "", ["/", "/wp-json//contact-form-7/v1/x"] as unknown as string, all, ["/wp-json/contact-form-7/*"]),
+      route("index.php", "", "/wp-json/contact-form-70/v1/x", all, ["/wp-json/contact-form-7/*"]),
+      route("index.php", "", "/Contact", all, ["/contact/"]),
+      route("index.php", "", "/contact/more", all, ["/contact/"]),
+      route("admin-ajax.php", "", "/wp-admin/admin-ajax.php/x", all, ["/wp-admin/admin-ajax.php"]),
+      { fn: "route", args: ["index.php", "", "/blog/contact/", all, ["/contact"], "/blog"] },
+      route("wp-trackback.php", "", "/wp-trackback.php"),
+      route("wp-signup.php", "", "/wp-signup.php"),
     ]);
-    expect(answers.map((a) => a.result)).toEqual(["comment", "login", "register", "lostpassword", "lostpassword", null, null, null, null, "form", "form", "form", null]);
+    expect(answers.map((a) => a.result)).toEqual(["comment", "login", "register", "lostpassword", "lostpassword", null, "login", "login", null, null, null, null, "form", "form", "form", null, "form", "form", "form", "form", null, "form", null, "form", "form", "comment", "register"]);
   });
 });

@@ -29,7 +29,7 @@ This plugin checks no agent credential. An arrival that presents a grant, a sign
 
 == Privacy ==
 
-Each receipt holds the address and the User-Agent of the arrival, the form, and the decision. Receipts are in your site's database. Receipts that are in the log are deleted after 90 days.
+Each receipt holds the address and the User-Agent of the arrival, the form, and the decision. Receipts are in your site's database. A receipt is deleted after 90 days, and the table keeps the newest 10,000 receipts.
 
 == Installation ==
 

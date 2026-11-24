@@ -21,7 +21,11 @@ class Agent_Custody_Door {
 	const CHALLENGE_HEADER       = 'x-agent-custody-challenge';
 	const MAX_CHALLENGE_TOKEN    = 4096;
 	const MAX_DECLARED           = 256;
+	// The sender chooses the path and the headers, so a receipt keeps this much of each.
+	const MAX_RECORDED           = 1024;
 	const ROUTES                 = array( 'comment', 'login', 'register', 'lostpassword' );
+	// The actions of wp-login.php that are not a login, a registration, or a lost password. The door does not decide them.
+	const LOGIN_OTHER = array( 'logout', 'postpass', 'resetpass', 'rp', 'checkemail', 'confirmaction', 'confirm_admin_email', 'entered_recovery_mode' );
 
 	// The SPKI DER encoding of an Ed25519 public key is this prefix and the 32 bytes of the key.
 	const SPKI_PREFIX = '302a300506032b6570032100';
@@ -266,25 +270,65 @@ CEDAR;
 	// ---- the arrival ----
 
 	/**
-	 * The route of a POST, or null when the door does not protect it. `protect` lists the stock forms that are
-	 * protected. `paths` are more paths, each exact or with a `/*` suffix, under the route `form`.
+	 * A path as the web server and WordPress read it: decoded once, in lower case, with no empty, `.` or `..` segment,
+	 * no `index.php` at the start, no trailing slash, and nothing after a script name. Two paths that reach one form
+	 * have one normal path, so a sender cannot spell a protected path in a way that the list does not match.
 	 */
-	public static function route( $pagenow, $action, $path, array $protect, array $paths ) {
-		$route = null;
-		if ( 'wp-comments-post.php' === $pagenow ) {
-			$route = 'comment';
-		} elseif ( 'wp-login.php' === $pagenow ) {
-			$action = '' === (string) $action ? 'login' : $action;
-			$route  = 'retrievepassword' === $action ? 'lostpassword' : $action;
+	public static function normal_path( $path ) {
+		$out = array();
+		foreach ( explode( '/', strtolower( rawurldecode( (string) $path ) ) ) as $segment ) {
+			if ( '' === $segment || '.' === $segment || ( 'index.php' === $segment && ! $out ) ) {
+				continue;
+			}
+			if ( '..' === $segment ) {
+				array_pop( $out );
+				continue;
+			}
+			$out[] = $segment;
+			if ( '.php' === substr( $segment, -4 ) ) {
+				break;
+			}
 		}
-		if ( null !== $route && in_array( $route, self::ROUTES, true ) && in_array( $route, $protect, true ) ) {
+		return '/' . implode( '/', $out );
+	}
+
+	/**
+	 * The route of a request, or null when the door does not protect it. `protect` lists the stock forms that are
+	 * protected. `paths` are more paths, each exact or with a `/*` suffix, under the route `form`. `path` is the
+	 * request path, or a list of the paths that the request reaches (the REST route can also come in the query).
+	 * `home` is the path of the site's address: the listed paths start after it.
+	 */
+	public static function route( $pagenow, $action, $path, array $protect, array $paths, $home = '' ) {
+		$route = null;
+		if ( 'wp-comments-post.php' === $pagenow || 'wp-trackback.php' === $pagenow ) {
+			$route = 'comment';
+		} elseif ( 'wp-signup.php' === $pagenow ) {
+			$route = 'register';
+		} elseif ( 'wp-login.php' === $pagenow ) {
+			// wp-login.php signs in on each action that it does not know, so each action that is not in a list here is a login.
+			if ( 'register' === $action ) {
+				$route = 'register';
+			} elseif ( in_array( $action, array( 'lostpassword', 'retrievepassword' ), true ) ) {
+				$route = 'lostpassword';
+			} elseif ( ! in_array( $action, self::LOGIN_OTHER, true ) ) {
+				$route = 'login';
+			}
+		}
+		if ( null !== $route && in_array( $route, $protect, true ) ) {
 			return $route;
 		}
-		// The path as WordPress reads it: decoded once, with empty segments merged.
-		$decoded = preg_replace( '#/+#', '/', rawurldecode( (string) $path ) );
-		foreach ( $paths as $p ) {
-			if ( $decoded === $p || ( '/*' === substr( $p, -2 ) && 0 === strpos( $decoded, substr( $p, 0, -1 ) ) ) ) {
-				return 'form';
+		$home = self::normal_path( $home );
+		foreach ( (array) $path as $candidate ) {
+			$candidate = self::normal_path( $candidate ) . '/';
+			if ( '/' !== $home && 0 === strpos( $candidate, $home . '/' ) ) {
+				$candidate = substr( $candidate, strlen( $home ) );
+			}
+			foreach ( $paths as $p ) {
+				$prefix = '/*' === substr( $p, -2 );
+				$base   = rtrim( self::normal_path( $prefix ? substr( $p, 0, -2 ) : $p ), '/' ) . '/';
+				if ( $candidate === $base || ( $prefix && 0 === strpos( $candidate, $base ) ) ) {
+					return 'form';
+				}
 			}
 		}
 		return null;
@@ -306,7 +350,7 @@ CEDAR;
 			'signature' => $signed ? 'unchecked' : 'absent',
 			'remote'    => (string) $remote,
 			'method'    => $method,
-			'path'      => $path,
+			'path'      => substr( (string) $path, 0, self::MAX_RECORDED ),
 			'route'     => $route,
 		);
 		if ( $grant ) {
@@ -419,7 +463,7 @@ CEDAR;
 		$recorded = new stdClass();
 		foreach ( array( 'user-agent', 'content-type', 'accept', 'host' ) as $name ) {
 			if ( isset( $headers[ $name ] ) ) {
-				$recorded->{$name} = $headers[ $name ];
+				$recorded->{$name} = substr( $headers[ $name ], 0, self::MAX_RECORDED );
 			}
 		}
 		$args      = array( 'method' => $arrival['method'], 'path' => $arrival['path'], 'headers' => $recorded );
