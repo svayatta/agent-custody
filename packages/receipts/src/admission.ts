@@ -53,8 +53,14 @@ const EntrySchema = z.union([
       .refine((r) => r.from === undefined || r.below === undefined || compareVersions(r.from, r.below) < 0, { message: "versions: from must be below below" })
       .optional(),
   }).strict().refine((e) => e.version === undefined || e.versions === undefined, { message: "give version or versions, not both" }),
-  /** an ERC-8004 identity, as a verified passport's registry checked it on chain */
-  z.object({ erc8004: z.object({ agentRegistry: z.string().regex(ERC8004_REGISTRY).transform((r) => r.toLowerCase()), agentId: z.string().regex(/^(0|[1-9][0-9]{0,77})$/) }).strict() }).strict(),
+  /**
+   * an ERC-8004 identity, as a verified passport's registry checked it on chain. `registry` names the one registry
+   * whose check counts; without it, every registry whose key the door trusts can put an agent on the list by this entry
+   */
+  z.object({
+    erc8004: z.object({ agentRegistry: z.string().regex(ERC8004_REGISTRY).transform((r) => r.toLowerCase()), agentId: z.string().regex(/^(0|[1-9][0-9]{0,77})$/) }).strict(),
+    registry: z.string().url().max(200).transform(canonicalRegistry).optional(),
+  }).strict(),
   /** the subject of a verified arrival: a did:key, a Web Bot Auth signature agent's origin, or a grant's agent */
   z.object({ agent: z.string().min(1).max(200).transform(canonicalAgent) }).strict(),
 ]);
@@ -84,11 +90,12 @@ export interface ArrivalIdentity {
   passport?: { outcome: string; registry?: string; agentId?: string; agentVersion?: string; erc8004?: { agentRegistry: string; agentId: string } };
 }
 
-const keyOf = (e: AdmissionEntry): string => ("registry" in e ? `registry ${e.registry} ${e.agentId}` : "erc8004" in e ? `erc8004 ${e.erc8004.agentRegistry} ${e.erc8004.agentId}` : `agent ${e.agent}`);
+const erc8004Key = (link: { agentRegistry: string; agentId: string }, registry?: string): string => `erc8004 ${link.agentRegistry} ${link.agentId}${registry === undefined ? "" : ` from ${registry}`}`;
+const keyOf = (e: AdmissionEntry): string => ("erc8004" in e ? erc8004Key(e.erc8004, e.registry) : "registry" in e ? `registry ${e.registry} ${e.agentId}` : `agent ${e.agent}`);
 
 /** The versions an entry admits (`from` and `upTo` inclusive, `below` exclusive), or undefined for every version. */
 type VersionRange = { from?: string; upTo?: string; below?: string } | undefined;
-const rangeOf = (e: AdmissionEntry): VersionRange => ("registry" in e ? (e.version !== undefined ? { from: e.version, upTo: e.version } : e.versions) : undefined);
+const rangeOf = (e: AdmissionEntry): VersionRange => ("agentId" in e ? (e.version !== undefined ? { from: e.version, upTo: e.version } : e.versions) : undefined);
 function inRange(r: VersionRange, version: string | undefined): boolean {
   if (!r) return true;
   // a version that is not one is in no range: compareVersions would refuse it, and a list must not admit it
@@ -126,7 +133,10 @@ export function compileAdmissionLists(text: string): AdmissionLists {
       const p = a.passport;
       if (p?.outcome === "verified" && p.registry && p.agentId) {
         keys.push(`registry ${canonicalRegistry(p.registry)} ${p.agentId}`);
-        if (p.erc8004) keys.push(`erc8004 ${p.erc8004.agentRegistry.toLowerCase()} ${p.erc8004.agentId}`);
+        if (p.erc8004) {
+          const link = { agentRegistry: p.erc8004.agentRegistry.toLowerCase(), agentId: p.erc8004.agentId };
+          keys.push(erc8004Key(link), erc8004Key(link, canonicalRegistry(p.registry)));
+        }
       }
       const on = new Set<string>();
       const version = p?.outcome === "verified" ? p.agentVersion : undefined;
