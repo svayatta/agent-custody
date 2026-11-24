@@ -64,13 +64,13 @@ describe.skipIf(!hasPhp)("the WordPress door (PHP)", () => {
   it("decides each preset as Cedar decides the preset's policy text", () => {
     const presets = one<Record<string, { policy: string; enforced: boolean }>>("presets", []);
     expect(Object.keys(presets).sort()).toEqual(["humans", "strict", "watch"]);
-    const arrivals = [null, { provider: "turnstile", outcome: "absent" }, { provider: "turnstile", outcome: "failed", error: "x" }, { provider: "hcaptcha", outcome: "unavailable" }, passed].flatMap((c) => ["comment", "form", "login", "register", "lostpassword"].map((route) => ({ ...arrivalOf(c), route })));
+    const arrivals = [null, { provider: "turnstile", outcome: "absent" }, { provider: "turnstile", outcome: "failed", error: "x" }, { provider: "hcaptcha", outcome: "unavailable" }, passed].map((c) => arrivalOf(c)).flatMap((a) => ["comment", "form", "login", "register", "lostpassword"].map((route): Record<string, unknown> => ({ ...a, route })));
     const cases = Object.keys(presets).flatMap((preset) => arrivals.flatMap((arrival) => [true, false].map((loggedIn) => ({ preset, arrival, loggedIn }))));
     const answers = php(cases.map((c) => ({ fn: "evaluate", args: [c.preset, c.arrival, c.loggedIn] })));
     cases.forEach((c, i) => {
       const got = answers[i]!.result as { decision: string; reasons: string[]; errors: string[]; policyDigest: string; enforced?: boolean };
       const want = evaluate(presets[c.preset]!.policy, { agentId: "unknown", tool: "comment", context: { args: {}, facts: { arrival: c.arrival, wordpress: { loggedIn: c.loggedIn } } } });
-      expect({ ...got, reasons: [...got.reasons].sort() }, `${c.preset} ${JSON.stringify(c.arrival.challenge)} loggedIn=${c.loggedIn}`).toEqual({ ...want, reasons: [...want.reasons].sort(), ...(presets[c.preset]!.enforced ? {} : { enforced: false }) });
+      expect({ ...got, reasons: [...got.reasons].sort() }, `${c.preset} ${String(c.arrival.route)} ${JSON.stringify(c.arrival.challenge)} loggedIn=${c.loggedIn}`).toEqual({ ...want, reasons: [...want.reasons].sort(), ...(presets[c.preset]!.enforced ? {} : { enforced: false }) });
     });
     expect(one<{ decision: string }>("evaluate", ["no-such-preset", arrivals[4], true]).decision).toBe("deny");
   });
