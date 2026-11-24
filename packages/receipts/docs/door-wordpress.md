@@ -8,6 +8,8 @@ The owner does three things: install the zip, connect the plugin to a log, and c
 
 ## Install
 
+No release publishes the plugin, and a merge to `main` installs it on no site. You build the zip from the repository and upload it.
+
 1. Build the zip: `deploy/door/wordpress/build.sh` writes `agent-custody-door.zip`.
 2. In WordPress, go to **Plugins > Add New > Upload Plugin**. Upload the zip and activate the plugin.
 3. Go to **Settings > Agent Custody Door**.
@@ -42,6 +44,19 @@ Humans and Strict need a challenge. Make a widget at Cloudflare Turnstile or hCa
 A signed-in user is exempt in Humans for comments and the more protected paths only. `wp-login.php` takes a login, a registration, or a lost password from a sender who is signed in already, so those forms always need the challenge. On a REST path (`/wp-json/...`), a sender is signed in only with the REST nonce, as for WordPress itself.
 
 **Challenge hostnames** are the hostnames of the pages that show the widget. Empty means the hostname of the site, with and without `www.`. A token from a page on another hostname fails.
+
+## Put it on a live site
+
+Do the first install on a test site, not on the live one.
+
+1. Install the plugin, connect it to the log, and keep Watch. Watch refuses nothing, so a wrong setting stops nobody.
+2. Send a comment while you are signed in, then sign out and sign in. Look at **The last 20 decisions** on the settings page. The comment has the decision `allow` and must show `logged` in the Log column at once: the site reaches the log, and the token is good. The login has the decision `deny`, because no challenge is set yet, and shows `pending` until the hourly run sends it.
+3. Download a receipt that shows `logged` from that table and verify it ([Verify a receipt](#verify-a-receipt)).
+4. Enter the challenge keys and change the preset to Humans.
+5. In a browser window that is not signed in, sign in and send a comment. Each form must show the widget, and each submission must pass.
+6. Do the same steps on the live site. Leave Watch on for some days before you change to Humans, and read what Humans would refuse.
+
+If step 5 fails and you cannot sign in, see "When the door locks you out".
 
 ## What it protects
 
