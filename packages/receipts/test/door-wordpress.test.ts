@@ -64,7 +64,7 @@ describe.skipIf(!hasPhp)("the WordPress door (PHP)", () => {
   it("decides each preset as Cedar decides the preset's policy text", () => {
     const presets = one<Record<string, { policy: string; enforced: boolean }>>("presets", []);
     expect(Object.keys(presets).sort()).toEqual(["humans", "strict", "watch"]);
-    const arrivals = [null, { provider: "turnstile", outcome: "absent" }, { provider: "turnstile", outcome: "failed", error: "x" }, { provider: "hcaptcha", outcome: "unavailable" }, passed].map((c) => arrivalOf(c));
+    const arrivals = [null, { provider: "turnstile", outcome: "absent" }, { provider: "turnstile", outcome: "failed", error: "x" }, { provider: "hcaptcha", outcome: "unavailable" }, passed].flatMap((c) => ["comment", "form", "login", "register", "lostpassword"].map((route) => ({ ...arrivalOf(c), route })));
     const cases = Object.keys(presets).flatMap((preset) => arrivals.flatMap((arrival) => [true, false].map((loggedIn) => ({ preset, arrival, loggedIn }))));
     const answers = php(cases.map((c) => ({ fn: "evaluate", args: [c.preset, c.arrival, c.loggedIn] })));
     cases.forEach((c, i) => {
@@ -224,9 +224,11 @@ describe.skipIf(!hasPhp)("the WordPress door (PHP)", () => {
       route("index.php", "", "/contact/more", all, ["/contact/"]),
       route("admin-ajax.php", "", "/wp-admin/admin-ajax.php/x", all, ["/wp-admin/admin-ajax.php"]),
       { fn: "route", args: ["index.php", "", "/blog/contact/", all, ["/contact"], "/blog"] },
+      { fn: "route", args: ["index.php", "", "/blog/index.php/wp-json/contact-form-7/v1/x", all, ["/wp-json/contact-form-7/*"], "/blog"] },
+      { fn: "route", args: ["index.php", "", "/Blog//index.php/wp-admin/admin-ajax.php/x", all, ["/wp-admin/admin-ajax.php"], "/blog/"] },
       route("wp-trackback.php", "", "/wp-trackback.php"),
       route("wp-signup.php", "", "/wp-signup.php"),
     ]);
-    expect(answers.map((a) => a.result)).toEqual(["comment", "login", "register", "lostpassword", "lostpassword", null, "login", "login", null, null, null, null, "form", "form", "form", null, "form", "form", "form", "form", null, "form", null, "form", "form", "comment", "register"]);
+    expect(answers.map((a) => a.result)).toEqual(["comment", "login", "register", "lostpassword", "lostpassword", null, "login", "login", null, null, null, null, "form", "form", "form", null, "form", "form", "form", "form", null, "form", null, "form", "form", "form", "form", "comment", "register"]);
   });
 });

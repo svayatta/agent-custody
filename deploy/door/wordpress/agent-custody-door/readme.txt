@@ -15,7 +15,7 @@ Protects comments and forms with a policy preset, and signs a receipt of each de
 The door decides each comment, login, registration, and lost-password request before WordPress acts on it. You choose a policy preset:
 
 * Watch: record each decision and refuse nothing.
-* Humans: a visitor must pass a Cloudflare Turnstile or hCaptcha challenge. A signed-in user needs no challenge.
+* Humans: a visitor must pass a Cloudflare Turnstile or hCaptcha challenge. A signed-in user needs no challenge for a comment or another form. Login, registration, and lost password always need it.
 * Strict: each submission must pass the challenge.
 
 The door signs a receipt for each decision with a key that stays on your site, and appends the hash of the receipt to an agent-custody log. The receipt shows what arrived, what the policy decided, and what WordPress answered. A person with your public key can verify a receipt without trust in you or in the log's operator.
@@ -29,7 +29,7 @@ This plugin checks no agent credential. An arrival that presents a grant, a sign
 
 == Privacy ==
 
-Each receipt holds the address and the User-Agent of the arrival, the form, and the decision. Receipts are in your site's database. A receipt is deleted after 90 days, and the table keeps the newest 10,000 receipts.
+Each receipt holds the address and the User-Agent of the arrival, the form, and the decision. Receipts are in your site's database. A receipt that is in the log is deleted after 90 days, and the table keeps the newest 10,000 of them.
 
 == Installation ==
 

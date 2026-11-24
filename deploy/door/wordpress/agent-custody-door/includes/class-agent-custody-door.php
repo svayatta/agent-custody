@@ -43,8 +43,9 @@ class Agent_Custody_Door {
 	const PROVIDER_FAULTS = array( 'internal-error', 'missing-input-secret', 'invalid-input-secret', 'bad-request', 'sitekey-secret-mismatch', 'invalid-sitekey', 'missing-sitekey', 'invalid-remoteip' );
 
 	const POLICY_HUMANS = <<<'CEDAR'
-// A user who is signed in to this WordPress site.
-permit(principal, action, resource) when { context.facts.wordpress.loggedIn };
+// A user who is signed in to this WordPress site, on a form that is not about an account: wp-login.php takes a
+// login, a registration, or a lost password from a sender who is signed in already.
+permit(principal, action, resource) when { context.facts.wordpress.loggedIn && ["comment", "form"].contains(context.facts.arrival.route) };
 // A visitor who passed the challenge.
 permit(principal, action, resource) when { context.facts.arrival has challenge && context.facts.arrival.challenge.outcome == "passed" };
 
@@ -269,27 +270,40 @@ CEDAR;
 
 	// ---- the arrival ----
 
+	/** The segments of a path: decoded once, in lower case, with no empty, `.` or `..` segment. */
+	private static function segments( $path ) {
+		$out = array();
+		foreach ( explode( '/', strtolower( rawurldecode( (string) $path ) ) ) as $segment ) {
+			if ( '..' === $segment ) {
+				array_pop( $out );
+			} elseif ( '' !== $segment && '.' !== $segment ) {
+				$out[] = $segment;
+			}
+		}
+		return $out;
+	}
+
 	/**
-	 * A path as the web server and WordPress read it: decoded once, in lower case, with no empty, `.` or `..` segment,
+	 * A path as the web server and WordPress read it: its segments after the path of the site's address (`home`), with
 	 * no `index.php` at the start, no trailing slash, and nothing after a script name. Two paths that reach one form
 	 * have one normal path, so a sender cannot spell a protected path in a way that the list does not match.
 	 */
-	public static function normal_path( $path ) {
-		$out = array();
-		foreach ( explode( '/', strtolower( rawurldecode( (string) $path ) ) ) as $segment ) {
-			if ( '' === $segment || '.' === $segment || ( 'index.php' === $segment && ! $out ) ) {
-				continue;
-			}
-			if ( '..' === $segment ) {
-				array_pop( $out );
-				continue;
-			}
-			$out[] = $segment;
+	public static function normal_path( $path, $home = '' ) {
+		$segments = self::segments( $path );
+		$home     = self::segments( $home );
+		if ( $home && array_slice( $segments, 0, count( $home ) ) === $home ) {
+			$segments = array_slice( $segments, count( $home ) );
+		}
+		if ( $segments && 'index.php' === $segments[0] ) {
+			array_shift( $segments );
+		}
+		foreach ( $segments as $i => $segment ) {
 			if ( '.php' === substr( $segment, -4 ) ) {
+				$segments = array_slice( $segments, 0, $i + 1 );
 				break;
 			}
 		}
-		return '/' . implode( '/', $out );
+		return '/' . implode( '/', $segments );
 	}
 
 	/**
@@ -317,12 +331,8 @@ CEDAR;
 		if ( null !== $route && in_array( $route, $protect, true ) ) {
 			return $route;
 		}
-		$home = self::normal_path( $home );
 		foreach ( (array) $path as $candidate ) {
-			$candidate = self::normal_path( $candidate ) . '/';
-			if ( '/' !== $home && 0 === strpos( $candidate, $home . '/' ) ) {
-				$candidate = substr( $candidate, strlen( $home ) );
-			}
+			$candidate = rtrim( self::normal_path( $candidate, $home ), '/' ) . '/';
 			foreach ( $paths as $p ) {
 				$prefix = '/*' === substr( $p, -2 );
 				$base   = rtrim( self::normal_path( $prefix ? substr( $p, 0, -2 ) : $p ), '/' ) . '/';
@@ -427,7 +437,7 @@ CEDAR;
 				$reasons[] = 'policy0';
 			}
 		} else {
-			if ( $logged_in ) {
+			if ( $logged_in && in_array( $arrival['route'], array( 'comment', 'form' ), true ) ) {
 				$reasons[] = 'policy0';
 			}
 			if ( $passed ) {

@@ -70,7 +70,9 @@ function acd_challenge( array $s ) {
 	}
 	$hosts = array_filter( array_map( 'trim', explode( ',', strtolower( $s['hostnames'] ) ) ) );
 	if ( ! $hosts ) {
-		$hosts = array( strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) ) );
+		// The site's hostname, with and without `www.`: visitors use both.
+		$host  = preg_replace( '/^www\./', '', strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) ) );
+		$hosts = array( $host, 'www.' . $host );
 	}
 	return array( 'provider' => $s['provider'], 'siteKey' => $s['site_key'], 'secret' => $s['secret'], 'hostnames' => array_values( $hosts ) );
 }
@@ -193,12 +195,13 @@ add_action(
 				break;
 			}
 		}
-		// The table has a bound in time and in rows. The log has only the hash of a receipt, so a deleted receipt is gone.
+		// The receipts that are in the log have a bound in time and in rows. A receipt that is not in the log yet stays: the
+		// database has the only evidence of it, and the 500 bound on the queue is its bound.
 		$days = (int) apply_filters( 'agent_custody_door_retention_days', 90 );
-		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . acd_table() . ' WHERE created < %s', gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS ) ) );
-		$oldest = $wpdb->get_var( $wpdb->prepare( 'SELECT created FROM ' . acd_table() . ' ORDER BY created DESC LIMIT 1 OFFSET %d', (int) apply_filters( 'agent_custody_door_max_receipts', 10000 ) ) );
+		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . acd_table() . " WHERE status = 'logged' AND created < %s", gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS ) ) );
+		$oldest = $wpdb->get_var( $wpdb->prepare( 'SELECT created FROM ' . acd_table() . " WHERE status = 'logged' ORDER BY created DESC LIMIT 1 OFFSET %d", (int) apply_filters( 'agent_custody_door_max_receipts', 10000 ) ) );
 		if ( $oldest ) {
-			$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . acd_table() . ' WHERE created <= %s', $oldest ) );
+			$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . acd_table() . " WHERE status = 'logged' AND created < %s", $oldest ) );
 		}
 	}
 );
@@ -258,7 +261,8 @@ add_action(
 		}
 		$action = isset( $_REQUEST['action'] ) && is_string( $_REQUEST['action'] ) ? $_REQUEST['action'] : '';
 		// phpcs:enable
-		$route = Agent_Custody_Door::route( (string) $pagenow, $action, $paths, (array) $s['protect'], acd_paths( $s ), (string) wp_parse_url( home_url(), PHP_URL_PATH ) );
+		$home  = (string) wp_parse_url( home_url(), PHP_URL_PATH );
+		$route = Agent_Custody_Door::route( (string) $pagenow, $action, $paths, (array) $s['protect'], acd_paths( $s ), $home );
 		if ( null === $route ) {
 			return;
 		}
@@ -272,7 +276,15 @@ add_action(
 			$outcome = Agent_Custody_Door::check_challenge( $challenge, $token, 'acd_http' );
 		}
 		$arrival = Agent_Custody_Door::arrival( $headers, isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '', $method, $path, $route, $outcome );
-		$d       = Agent_Custody_Door::decide( $key, $s['preset'], $arrival, $headers, is_user_logged_in() );
+		// The REST API takes the login cookie only with its nonce. Without the nonce, WordPress handles the request as a
+		// visitor's, so the door decides it as a visitor's.
+		$signed_in = is_user_logged_in();
+		if ( $signed_in && ( isset( $paths[1] ) || 0 === strpos( Agent_Custody_Door::normal_path( $path, $home ) . '/', '/' . rest_get_url_prefix() . '/' ) ) ) {
+			// phpcs:ignore WordPress.Security.NonceVerification -- this is the check.
+			$nonce     = isset( $headers['x-wp-nonce'] ) ? $headers['x-wp-nonce'] : ( isset( $_REQUEST['_wpnonce'] ) && is_string( $_REQUEST['_wpnonce'] ) ? wp_unslash( $_REQUEST['_wpnonce'] ) : '' );
+			$signed_in = (bool) wp_verify_nonce( $nonce, 'wp_rest' );
+		}
+		$d       = Agent_Custody_Door::decide( $key, $s['preset'], $arrival, $headers, $signed_in );
 		$head    = $d['head'];
 		$watch   = isset( $head['policy']['enforced'] );
 		$allowed = 'allow' === $head['policy']['decision'];
@@ -340,7 +352,7 @@ function acd_finish( $receipt_id, array $envelope, array $s ) {
 function acd_widget( $route ) {
 	$s         = acd_settings();
 	$challenge = acd_challenge( $s );
-	if ( ! $challenge || ! acd_connected( $s ) || ( 'form' !== $route && ! in_array( $route, (array) $s['protect'], true ) ) || ( 'strict' !== $s['preset'] && is_user_logged_in() ) ) {
+	if ( ! $challenge || ! acd_connected( $s ) || ( 'form' !== $route && ! in_array( $route, (array) $s['protect'], true ) ) || ( 'strict' !== $s['preset'] && is_user_logged_in() && 'comment' === $route ) ) {
 		return '';
 	}
 	$turnstile = 'turnstile' === $challenge['provider'];
@@ -426,6 +438,11 @@ function acd_clean( $in ) {
 		'paths'     => sanitize_textarea_field( $get( 'paths' ) ),
 		'log_keys'  => array(),
 	);
+	// Humans and Strict with no challenge admit no login, the owner's included.
+	if ( 'watch' !== $out['preset'] && ( '' === $out['site_key'] || ( '' === $out['secret'] && ! defined( 'AGENT_CUSTODY_DOOR_CHALLENGE_SECRET' ) ) ) ) {
+		$out['preset'] = 'watch';
+		add_settings_error( ACD_OPTION, 'acd_preset', __( 'Humans and Strict need the challenge site key and the challenge secret. The preset is Watch.', 'agent-custody-door' ) );
+	}
 	if ( '' === $out['log_url'] ) {
 		return $out;
 	}
@@ -497,7 +514,7 @@ function acd_page() {
 	};
 	$labels = array(
 		'watch'  => __( 'Watch: record what Humans decides, and refuse nothing. Start here.', 'agent-custody-door' ),
-		'humans' => __( 'Humans: a visitor must pass the challenge. A signed-in user needs no challenge.', 'agent-custody-door' ),
+		'humans' => __( 'Humans: a visitor must pass the challenge. A signed-in user needs no challenge for a comment or another form. Login, registration, and lost password always need it.', 'agent-custody-door' ),
 		'strict' => __( 'Strict: each submission must pass the challenge, also from a signed-in user.', 'agent-custody-door' ),
 	);
 	$forms  = array(
