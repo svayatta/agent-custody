@@ -35,6 +35,8 @@ comments() { wp comment list --post_id=1 --format=count; }
 token=XXXX.DUMMY.TOKEN.XXXX
 
 mkdir -p "$work/keys" "$work/log" "$work/receipts"
+# WP-CLI runs as www-data in its container and writes the receipts here.
+chmod 777 "$work/receipts"
 "$here/build.sh" "$work" > /dev/null || fail "build.sh failed"
 chmod 644 "$work/agent-custody-door.zip"
 cli keygen --dir /work/keys --name log > /dev/null 2>&1 || fail "keygen failed"
