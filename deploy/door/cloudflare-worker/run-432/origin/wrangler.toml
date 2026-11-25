@@ -1,0 +1,13 @@
+# The test origin for the door Worker run. It answers each path and keeps a log of each request.
+name = "door-origin-test"
+main = "index.js"
+compatibility_date = "2025-11-01"
+workers_dev = true
+preview_urls = false
+
+[observability]
+enabled = true
+
+[[r2_buckets]]
+binding = "HITS"
+bucket_name = "door-origin-test-hits"
