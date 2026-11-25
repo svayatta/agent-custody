@@ -173,16 +173,20 @@ describe("the Shopify door", () => {
     expect(toDecimal(1234, "KWD")).toBe("1.234");
   });
 
-  const keyOf = (who: { key: KeyPair }, header: string) => createHash("sha256").update(`${didKeyOf(who.key.publicKey)}|${header}`).digest("hex");
+  const recordKeyOf = (who: { key: KeyPair }, header: string) => createHash("sha256").update(`${didKeyOf(who.key.publicKey)}|${header}`).digest("hex");
+  const keyOf = (who: { key: KeyPair }, header: string) => {
+    const h = recordKeyOf(who, header);
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+  };
+  const shopifyKeyOf = (c: { query: string }) => /refundCreate\(input: \$input\) @idempotent\(key: "([0-9a-f-]+)"\)/.exec(c.query)?.[1];
   const keysOnDisk = () => (existsSync(join(dir, "data", "idempotency.json")) ? JSON.parse(readFileSync(join(dir, "data", "idempotency.json"), "utf8")) : {});
 
   it("sends refundCreate with @idempotent and a key from the agent and its Idempotency-Key", async () => {
     const before = mutations("refundCreate").length;
     await send("/refunds", refund(100, "5001"), listed, { "idempotency-key": "derive-1" });
     const c = mutations("refundCreate")[before]!;
-    expect(c.query).toContain("@idempotent(key: $key)");
-    expect(c.variables.key).toBe(keyOf(listed, "derive-1"));
-    expect(c.variables.key).toMatch(/^[0-9a-f]{64}$/);
+    expect(shopifyKeyOf(c)).toBe(keyOf(listed, "derive-1"));
+    expect(shopifyKeyOf(c)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
 
   it("makes one refund for a retry with the same Idempotency-Key, and answers it with the first answer", async () => {
@@ -212,7 +216,7 @@ describe("the Shopify door", () => {
     expect([a.status, b.status]).toEqual([201, 201]);
     expect(b.body.refund_id).not.toBe(a.body.refund_id);
     const made = mutations("refundCreate").slice(before);
-    expect(made.map((c) => c.variables.key)).toEqual([keyOf(listed, "shared"), keyOf(listed2, "shared")]);
+    expect(made.map((c) => shopifyKeyOf(c))).toEqual([keyOf(listed, "shared"), keyOf(listed2, "shared")]);
   });
 
   it("answers 504 with outcome_unknown when Shopify may have refunded, and a retry sends the same Shopify key, also after a restart", async () => {
@@ -221,12 +225,12 @@ describe("the Shopify door", () => {
     const lost = await send("/refunds", refund(250, "7001"), listed, { "idempotency-key": "lost-1" });
     expect(lost.status).toBe(504);
     expect(lost.body).toMatchObject({ outcome_unknown: true, retry: "same Idempotency-Key" });
-    expect(keysOnDisk()[keyOf(listed, "lost-1")]).toMatchObject({ state: "pending" });
+    expect(keysOnDisk()[recordKeyOf(listed, "lost-1")]).toMatchObject({ state: "pending" });
     const retry = await send("/refunds", refund(250, "7001"), listed, { "idempotency-key": "lost-1" });
     expect(retry.status).toBe(201);
     const made = mutations("refundCreate").slice(before);
     expect(made).toHaveLength(2);
-    expect(made[1]!.variables.key).toBe(made[0]!.variables.key);
+    expect(shopifyKeyOf(made[1]!)).toBe(shopifyKeyOf(made[0]!));
     // the receipt of the lost try says failed: the door maps a 5xx to failed
     expect((await receipt(lost.receipt)).predicate.execution).toMatchObject({ status: "failed", result: { status: 504 } });
 
@@ -255,7 +259,7 @@ describe("the Shopify door", () => {
     let release!: () => void;
     hold = new Promise<void>((r) => (release = r));
     const first = send("/refunds", refund(100, "8001"), listed, { "idempotency-key": "flight-1" });
-    for (let i = 0; i < 200 && !calls.some((c) => c.query.includes("refundCreate(") && c.variables.key === keyOf(listed, "flight-1")); i++) await new Promise((r) => setTimeout(r, 10));
+    for (let i = 0; i < 200 && !calls.some((c) => c.query.includes("refundCreate(") && shopifyKeyOf(c) === keyOf(listed, "flight-1")); i++) await new Promise((r) => setTimeout(r, 10));
     const sameOrder = await send("/refunds", refund(50, "8001"), listed2, { "idempotency-key": "flight-2" });
     const sameKey = await send("/refunds", refund(100, "8001"), listed, { "idempotency-key": "flight-1" });
     const elsewhere = send("/refunds", refund(50, "8002"), listed2, { "idempotency-key": "flight-3" });
@@ -264,7 +268,7 @@ describe("the Shopify door", () => {
     expect([sameOrder.status, sameKey.status]).toEqual([409, 409]);
     expect((await first).status).toBe(201);
     expect((await elsewhere).status).toBe(201);
-    expect(mutations("refundCreate").filter((c) => c.variables.key === keyOf(listed2, "flight-2"))).toHaveLength(0);
+    expect(mutations("refundCreate").filter((c) => shopifyKeyOf(c) === keyOf(listed2, "flight-2"))).toHaveLength(0);
   });
 
   it("leaves no pending key when the order lookup fails", async () => {
@@ -273,7 +277,7 @@ describe("the Shopify door", () => {
     const r = await send("/refunds", refund(100, "9001"), listed, { "idempotency-key": "lookup-1" });
     expect(r.status).toBe(502);
     expect(Object.keys(keysOnDisk())).toHaveLength(keysBefore);
-    expect(keysOnDisk()[keyOf(listed, "lookup-1")]).toBeUndefined();
+    expect(keysOnDisk()[recordKeyOf(listed, "lookup-1")]).toBeUndefined();
   });
 
   it("counts a refund that Shopify made as done, also when the answer has errors or userErrors beside it", async () => {
@@ -281,7 +285,7 @@ describe("the Shopify door", () => {
     const r = await send("/refunds", refund(120, "9101"), listed, { "idempotency-key": "partial-1" });
     expect(r.status).toBe(201);
     expect(r.body.refund_id).toBe("gid://shopify/Refund/77");
-    expect(keysOnDisk()[keyOf(listed, "partial-1")]).toMatchObject({ state: "done" });
+    expect(keysOnDisk()[recordKeyOf(listed, "partial-1")]).toMatchObject({ state: "done" });
   });
 
   it("sends no gateway when the transaction has none", async () => {

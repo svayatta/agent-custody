@@ -38,7 +38,7 @@ Change the limit in `policy.cedar`. The limit is in minor units, so 50000 is 500
 
 A refund moves money, and an agent may retry. So the app needs an `Idempotency-Key` header (1 to 128 printable characters) and refuses a refund without one.
 
-The app sends `refundCreate` with Shopify's `@idempotent(key: ...)` directive. Shopify requires it for this mutation. The Shopify key is the sha256 hex (64 characters) of the agent and the header: `sha256(agent|key)`. So Shopify makes one refund for each key, and one agent cannot read or block the key of another agent.
+The app sends `refundCreate` with Shopify's `@idempotent(key: ...)` directive. Shopify requires it for this mutation. The app takes the sha256 hex of the agent and the header, `sha256(agent|key)`, and gives Shopify its first 32 characters in the form of a UUID, as a literal on the `refundCreate` field. So Shopify makes one refund for each key, and one agent cannot read or block the key of another agent.
 
 The app knows the agent from the keyid of the request's Web Bot Auth signature. The door gives the app no subject: it passes only the receipt id and the class. It keeps `Signature-Input`, and the door has checked that signature. The refund route admits only a `verified` arrival, so the keyid is the did:key of the agent that holds the passport. The app refuses a refund whose `Signature-Input` has no keyid or more than one.
 

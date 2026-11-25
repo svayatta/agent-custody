@@ -177,6 +177,9 @@ export function shopifyServer(guard: Guard, env: ShopifyEnv, dataDir: string): S
   const inFlightKeys = new Set<string>();
   const inFlightOrders = new Set<string>();
 
+  // UUID-shaped, the form that Shopify recommends; Shopify states no length limit
+  const uuidOf = (hex: string) => `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+
   /**
    * A refund once for each key of each agent. Shopify dedupes the mutation by `@idempotent`, so a retry with a key that
    * did not finish sends the same mutation with the same Shopify key. The checks and the in-flight marks run with no
@@ -188,7 +191,7 @@ export function shopifyServer(guard: Guard, env: ShopifyEnv, dataDir: string): S
     if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 200)) throw new Failure("reason is text of at most 200 characters", 400, true);
     const orderId = gid("Order", String(body.order_id));
     const fingerprint = sha256(`${orderId}|${body.amount}`);
-    // the Shopify key: 64 hex characters, from the agent and its key, so one agent cannot read or block another's key
+    // the record key: a hash of the agent and its key, and Shopify gets it in UUID form, so one agent cannot read or block another's key
     const shopifyKey = sha256(`${agent}|${key}`);
     const seen = keys.get(shopifyKey);
     if (seen) {
@@ -207,8 +210,9 @@ export function shopifyServer(guard: Guard, env: ShopifyEnv, dataDir: string): S
       let j: { data?: any; errors?: unknown };
       try {
         j = await graphql(
-          `mutation($input: RefundInput!, $key: String!) @idempotent(key: $key) { refundCreate(input: $input) { refund { id } userErrors { message } } }`,
-          { key: shopifyKey, input: { orderId, currency, note: `agent-custody receipt ${receiptId}${body.reason ? `: ${body.reason}` : ""}`, transactions: [{ orderId, parentId: sale.id, ...(sale.gateway ? { gateway: sale.gateway } : {}), kind: "REFUND", amount: toDecimal(body.amount, currency) }] } },
+          // Shopify's examples put the key on the field as a literal; it is hex and dashes, so it is safe in the query
+          `mutation($input: RefundInput!) { refundCreate(input: $input) @idempotent(key: "${uuidOf(shopifyKey)}") { refund { id } userErrors { message } } }`,
+          { input: { orderId, currency, note: `agent-custody receipt ${receiptId}${body.reason ? `: ${body.reason}` : ""}`, transactions: [{ orderId, parentId: sale.id, ...(sale.gateway ? { gateway: sale.gateway } : {}), kind: "REFUND", amount: toDecimal(body.amount, currency) }] } },
         );
       } catch (e) {
         if (e instanceof Failure && !e.definite) throw new Failure(e.message, 504, false);
