@@ -12,7 +12,7 @@ A small Node server that runs the agent-custody door in front of two agent route
 ```bash
 npm install
 npx agent-custody keygen --dir data/keys --name door      # and put your registry's public key in keys/registry.pub
-SHOPIFY_SHOP=your-store.myshopify.com SHOPIFY_ADMIN_TOKEN=shpat_... node start.ts
+SHOPIFY_SHOP=your-store.myshopify.com SHOPIFY_CLIENT_ID=... SHOPIFY_CLIENT_SECRET=... node start.ts
 ```
 
 `packages/receipts/test/door-shopify.test.ts` tests the server against a stand-in Shopify on loopback. A change here must pass `bun run test`.

@@ -1,7 +1,8 @@
 // Smoke test, run BY HAND against a real Shopify development store. CI does not run it: it needs a store and a token.
 //   (cd deploy/door/shopify && npm install)     # once: the server loads the published door
-//   SHOPIFY_SHOP=x.myshopify.com SHOPIFY_ADMIN_TOKEN=shpat_... SMOKE_VARIANT_ID=<a variant id of the store> node deploy/door/shopify/smoke.ts
-// (or SHOPIFY_CLIENT_ID with SHOPIFY_CLIENT_SECRET instead of the token). It makes a registry key, a passport, and an agent;
+//   SHOPIFY_SHOP=x.myshopify.com SHOPIFY_CLIENT_ID=... SHOPIFY_CLIENT_SECRET=... SMOKE_VARIANT_ID=<a variant id of the store> node deploy/door/shopify/smoke.ts
+// (or SHOPIFY_ADMIN_TOKEN=shpat_... for a legacy custom app). With SHOPIFY_SMOKE_ORDER_ID, the id of a paid order of the store
+// (for example one paid with the Bogus Gateway), it also refunds 1 minor unit twice with one Idempotency-Key and checks that one refund was made. It makes a registry key, a passport, and an agent;
 // starts the server on a free port with a copy of the shipped config; places one order as the agent; shows that an agent
 // with no passport is refused; and verifies each receipt. It leaves one draft order in the store, tagged agent-custody.
 import { spawn } from "node:child_process";
@@ -17,7 +18,7 @@ import { agentHeaders } from "../../../packages/receipts/scripts/door-fixture.ts
 import type { ReceiptBundle } from "../../../packages/receipts/src/receipt.ts";
 
 const variant = process.env.SMOKE_VARIANT_ID;
-if (!process.env.SHOPIFY_SHOP || !variant) throw new Error("set SHOPIFY_SHOP, SMOKE_VARIANT_ID, and SHOPIFY_ADMIN_TOKEN (or SHOPIFY_CLIENT_ID with SHOPIFY_CLIENT_SECRET)");
+if (!process.env.SHOPIFY_SHOP || !variant) throw new Error("set SHOPIFY_SHOP, SMOKE_VARIANT_ID, and SHOPIFY_CLIENT_ID with SHOPIFY_CLIENT_SECRET (or SHOPIFY_ADMIN_TOKEN)");
 const here = import.meta.dirname;
 const dir = mkdtempSync(join(tmpdir(), "agent-custody-shopify-smoke-"));
 const port = 18790;
@@ -44,18 +45,28 @@ try {
     await new Promise((r) => setTimeout(r, 200));
   }
   let n = 0;
-  const order = async (who: "agent" | "stranger") => {
-    const body = JSON.stringify({ lines: [{ variant_id: variant, quantity: 1 }], email: "smoke@example.com" });
+  const call = async (target: string, payload: unknown, who: "agent" | "stranger", extra: Record<string, string> = {}) => {
+    const body = JSON.stringify(payload);
     const key = who === "agent" ? agent : generateKeyPair();
-    const res = await fetch(`http://${authority}/orders`, { method: "POST", headers: { "content-type": "application/json", ...agentHeaders(key, { method: "POST", target: "/orders", authority, body, ...(who === "agent" ? { passport } : {}), nonce: `smoke-${Date.now()}-${++n}` }) }, body });
-    return { status: res.status, body: await res.json(), receipt: res.headers.get("x-agent-custody-receipt")! };
+    const res = await fetch(`http://${authority}${target}`, { method: "POST", headers: { "content-type": "application/json", ...extra, ...agentHeaders(key, { method: "POST", target, authority, body, ...(who === "agent" ? { passport } : {}), nonce: `smoke-${Date.now()}-${++n}` }) }, body });
+    return { status: res.status, body: await res.json() };
   };
+  const order = (who: "agent" | "stranger") => call("/orders", { lines: [{ variant_id: variant, quantity: 1 }], email: "smoke@example.com" }, who);
   const admitted = await order("agent");
   console.log(`agent with a passport: ${admitted.status}`, admitted.body);
   if (admitted.status !== 201) throw new Error("the agent was not admitted");
   const refused = await order("stranger");
   console.log(`agent with no passport: ${refused.status}`);
   if (refused.status !== 403) throw new Error("an agent with no passport was not refused");
+  const orderId = process.env.SHOPIFY_SMOKE_ORDER_ID;
+  if (orderId) {
+    const headers = { "idempotency-key": `smoke-${Date.now()}` };
+    const first = await call("/refunds", { order_id: orderId, amount: 1, reason: "smoke" }, "agent", headers);
+    const again = await call("/refunds", { order_id: orderId, amount: 1, reason: "smoke" }, "agent", headers);
+    console.log("refund:", first.status, first.body, "retry:", again.status, again.body);
+    if (first.status !== 201 || again.status !== 201 || JSON.stringify(first.body) !== JSON.stringify(again.body)) throw new Error("the refund and its retry did not give one refund");
+    console.log("check in the store that the order has one refund of 1 minor unit");
+  }
   await new Promise((r) => setTimeout(r, 500));
   const files = readdirSync(join(dir, "data", "receipts")).filter((f) => /^[0-9a-f-]{36}\.json$/.test(f));
   for (const f of files) {

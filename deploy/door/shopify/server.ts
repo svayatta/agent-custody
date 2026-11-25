@@ -28,7 +28,7 @@ export interface ShopifyEnv {
   SHOPIFY_BASE_URL?: string;
 }
 
-/** A failure that the agent sees. `definite` is true when Shopify did nothing, so a retry is safe. */
+/** A failure that the agent sees. `definite` is true when Shopify did nothing. */
 class Failure extends Error {
   status: number;
   definite: boolean;
@@ -58,6 +58,18 @@ const text = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(
 
 type Stored = { fingerprint: string; state: "pending" } | { fingerprint: string; state: "done"; status: number; body: unknown };
 
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+
+/**
+ * The agent that the door verified. The door passes the app no subject. It keeps `Signature-Input` on the request, and it
+ * checked that signature: a refund route admits only a `verified` arrival, so the keyid of the signature is the did:key
+ * of the agent that holds the passport. Exactly one keyid is required, so a second, unchecked signature cannot name another agent.
+ */
+function verifiedAgent(req: IncomingMessage): string | null {
+  const ids = [...String(req.headers["signature-input"] ?? "").matchAll(/keyid="([^"]+)"/g)];
+  return ids.length === 1 ? ids[0]![1]! : null;
+}
+
 /**
  * The app: both routes, behind `guard`. `dataDir` holds `idempotency.json`, the refund keys.
  */
@@ -65,17 +77,17 @@ export function shopifyServer(guard: Guard, env: ShopifyEnv, dataDir: string): S
   const shop = env.SHOPIFY_SHOP ?? "";
   const base = env.SHOPIFY_BASE_URL ?? `https://${shop}`;
   if (!env.SHOPIFY_BASE_URL && !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(shop)) throw new Error("SHOPIFY_SHOP is the store's myshopify.com domain, for example x.myshopify.com");
-  if (!env.SHOPIFY_ADMIN_TOKEN && !(env.SHOPIFY_CLIENT_ID && env.SHOPIFY_CLIENT_SECRET)) throw new Error("set SHOPIFY_ADMIN_TOKEN, or SHOPIFY_CLIENT_ID with SHOPIFY_CLIENT_SECRET");
+  if (!env.SHOPIFY_ADMIN_TOKEN && !(env.SHOPIFY_CLIENT_ID && env.SHOPIFY_CLIENT_SECRET)) throw new Error("set SHOPIFY_CLIENT_ID with SHOPIFY_CLIENT_SECRET, or SHOPIFY_ADMIN_TOKEN for a legacy custom app");
 
   let cached: { token: string; expires: number } | undefined;
   async function accessToken(): Promise<string> {
     if (env.SHOPIFY_ADMIN_TOKEN) return env.SHOPIFY_ADMIN_TOKEN;
     if (cached && cached.expires > Date.now() + 60_000) return cached.token;
-    // the client-credentials grant: the app's own id and secret for a token that expires
+    // the client-credentials grant, form-encoded: the app's own id and secret for a token that expires
     const res = await fetch(`${base}/admin/oauth/access_token`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ client_id: env.SHOPIFY_CLIENT_ID, client_secret: env.SHOPIFY_CLIENT_SECRET, grant_type: "client_credentials" }),
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: new URLSearchParams({ grant_type: "client_credentials", client_id: env.SHOPIFY_CLIENT_ID!, client_secret: env.SHOPIFY_CLIENT_SECRET! }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     }).catch((e: unknown) => { throw new Failure(`Shopify gave no token: ${text(e)}`, 502, true); });
     const j = (await res.json().catch(() => null)) as { access_token?: string; expires_in?: number } | null;
@@ -84,26 +96,41 @@ export function shopifyServer(guard: Guard, env: ShopifyEnv, dataDir: string): S
     return cached.token;
   }
 
-  async function graphql(query: string, variables: unknown): Promise<any> {
-    const token = await accessToken();
-    let res: Response;
-    try {
-      res = await fetch(`${base}/admin/api/${API_VERSION}/graphql.json`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-shopify-access-token": token },
-        body: JSON.stringify({ query, variables }),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
-    } catch (e) {
-      throw new Failure(`Shopify did not answer: ${text(e)}`, 502, false);
+  /** Shopify's answer, with its `data` and `errors` as given. A 401 drops the cached token once and sends the call again: the callers send a read or an idempotent mutation. */
+  async function graphql(query: string, variables: unknown): Promise<{ data?: any; errors?: unknown }> {
+    for (let attempt = 0; ; attempt++) {
+      const token = await accessToken();
+      let res: Response;
+      try {
+        res = await fetch(`${base}/admin/api/${API_VERSION}/graphql.json`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-shopify-access-token": token },
+          body: JSON.stringify({ query, variables }),
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+      } catch (e) {
+        throw new Failure(`Shopify did not answer: ${text(e)}`, 502, false);
+      }
+      if (res.status === 401 && attempt === 0 && !env.SHOPIFY_ADMIN_TOKEN) {
+        cached = undefined;
+        continue;
+      }
+      // a 4xx did nothing; after a 5xx, or a lost answer, Shopify may have acted
+      if (!res.ok) throw new Failure(`Shopify answered ${res.status}`, 502, res.status < 500);
+      const j = (await res.json().catch(() => null)) as { data?: any; errors?: unknown } | null;
+      if (!j) throw new Failure("Shopify's answer was not JSON", 502, false);
+      return j;
     }
-    // a 4xx did nothing; after a 5xx, or a lost answer, Shopify may have acted
-    if (!res.ok) throw new Failure(`Shopify answered ${res.status}`, 502, res.status < 500);
-    const j = (await res.json().catch(() => null)) as { data?: any; errors?: unknown } | null;
-    if (!j) throw new Failure("Shopify's answer was not JSON", 502, false);
-    if (j.errors || !j.data) throw new Failure(`Shopify refused the query: ${text(JSON.stringify(j.errors))}`, 502, true);
-    return j.data;
   }
+
+  /** The data of a call, or a failure when Shopify gave none. The detail goes to the log, not to the agent. */
+  const dataOf = (j: { data?: any; errors?: unknown }) => {
+    if (j.errors || !j.data) {
+      console.error(`agent-custody shopify: Shopify refused the query: ${text(JSON.stringify(j.errors))}`);
+      throw new Failure("Shopify refused the query", 502, true);
+    }
+    return j.data;
+  };
 
   const userErrors = (errors: { message: string }[] | undefined) => {
     if (errors?.length) throw new Failure(`Shopify refused: ${errors.map((e) => e.message).join("; ")}`, 422, true);
@@ -118,37 +145,28 @@ export function shopifyServer(guard: Guard, env: ShopifyEnv, dataDir: string): S
     });
     if (typeof body.email !== "string" || !/^[^\s@]{1,64}@[^\s@]{1,255}$/.test(body.email)) throw new Failure("email is the buyer's address", 400, true);
     // the tag marks the order as an agent's; the note points the store's record at the door receipt
-    const data = await graphql(
+    const data = dataOf(await graphql(
       `mutation($input: DraftOrderInput!) { draftOrderCreate(input: $input) { draftOrder { id invoiceUrl totalPriceSet { shopMoney { amount currencyCode } } } userErrors { message } } }`,
       { input: { email: body.email, lineItems, tags: ["agent-custody"], note: `agent-custody receipt ${receiptId}` } },
-    );
+    ));
     userErrors(data.draftOrderCreate?.userErrors);
     const d = data.draftOrderCreate?.draftOrder;
     if (!d?.id) throw new Failure("Shopify made no draft order", 502, false);
+    // the total is in the shop's currency, never the buyer's presentment currency
     const money = d.totalPriceSet.shopMoney as { amount: string; currencyCode: string };
     return { draft_order_id: d.id as string, total: { amount: toMinor(money.amount, money.currencyCode), currency: money.currencyCode }, invoice_url: d.invoiceUrl as string };
   }
 
-  async function refund(body: any, receiptId: string) {
-    if (!/^(gid:\/\/shopify\/Order\/)?\d+$/.test(String(body?.order_id))) throw new Failure("order_id is the order's id", 400, true);
-    if (!Number.isSafeInteger(body.amount) || body.amount <= 0) throw new Failure("amount is a whole number of minor units above 0", 400, true);
-    if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 200)) throw new Failure("reason is text of at most 200 characters", 400, true);
-    const orderId = gid("Order", String(body.order_id));
-    const found = await graphql(`query($id: ID!) { order(id: $id) { transactions { id kind status gateway amountSet { presentmentMoney { currencyCode } } } } }`, { id: orderId });
+  /** The order's sale or capture, and its presentment currency. A read: it fails before anything is pending. */
+  async function saleOf(orderId: string) {
+    const found = dataOf(await graphql(`query($id: ID!) { order(id: $id) { transactions { id kind status gateway amountSet { presentmentMoney { currencyCode } } } } }`, { id: orderId }));
     if (!found.order) throw new Failure("no such order", 404, true);
-    const sale = (found.order.transactions as { id: string; kind: string; status: string; gateway: string; amountSet: { presentmentMoney: { currencyCode: string } } }[]).find((t) => (t.kind === "SALE" || t.kind === "CAPTURE") && t.status === "SUCCESS");
+    const sale = (found.order.transactions as { id: string; kind: string; status: string; gateway: string | null; amountSet: { presentmentMoney: { currencyCode: string } } }[]).find((t) => (t.kind === "SALE" || t.kind === "CAPTURE") && t.status === "SUCCESS");
     if (!sale) throw new Failure("the order has no successful sale or capture to refund", 422, true);
-    const currency = sale.amountSet.presentmentMoney.currencyCode;
-    const data = await graphql(
-      `mutation($input: RefundInput!) { refundCreate(input: $input) { refund { id } userErrors { message } } }`,
-      { input: { orderId, currency, note: `agent-custody receipt ${receiptId}${body.reason ? `: ${body.reason}` : ""}`, transactions: [{ orderId, parentId: sale.id, gateway: sale.gateway, kind: "REFUND", amount: toDecimal(body.amount, currency) }] } },
-    );
-    userErrors(data.refundCreate?.userErrors);
-    if (!data.refundCreate?.refund?.id) throw new Failure("Shopify made no refund", 502, false);
-    return { refund_id: data.refundCreate.refund.id as string, amount: body.amount as number, currency };
+    return sale;
   }
 
-  // ponytail: the keys live in one process's memory and one file; two processes on one data directory would not see each other's pending keys, so run one process per store
+  // ponytail: the lock and the keys live in one process; two processes on one data directory would not see each other's in-flight refunds (Shopify still dedupes by key), so run one process per store
   const file = join(dataDir, "idempotency.json");
   const keys = new Map<string, Stored>(existsSync(file) ? Object.entries(JSON.parse(readFileSync(file, "utf8")) as Record<string, Stored>) : []);
   const save = () => {
@@ -156,32 +174,66 @@ export function shopifyServer(guard: Guard, env: ShopifyEnv, dataDir: string): S
     writeFileSync(`${file}.tmp`, JSON.stringify(Object.fromEntries(keys)));
     renameSync(`${file}.tmp`, file);
   };
+  const inFlightKeys = new Set<string>();
+  const inFlightOrders = new Set<string>();
 
   /**
-   * A refund once for each key. The lookup and the "pending" write run with no await between them, so no second
-   * request with the key gets in; that is the lock. A key whose Shopify call may have acted stays pending, and a retry
-   * with it gets 409, because a second refund is worse than a refund that someone must look at.
+   * A refund once for each key of each agent. Shopify dedupes the mutation by `@idempotent`, so a retry with a key that
+   * did not finish sends the same mutation with the same Shopify key. The checks and the in-flight marks run with no
+   * await between them, so no second request gets in; that is the lock.
    */
-  async function refundOnce(key: string, body: any, receiptId: string): Promise<{ status: number; body: unknown }> {
-    const fingerprint = createHash("sha256").update(`${body?.order_id}|${body?.amount}`).digest("hex");
-    const seen = keys.get(key);
+  async function refundOnce(agent: string, key: string, body: any, receiptId: string): Promise<{ status: number; body: unknown }> {
+    if (!/^(gid:\/\/shopify\/Order\/)?\d+$/.test(String(body?.order_id))) throw new Failure("order_id is the order's id", 400, true);
+    if (!Number.isSafeInteger(body.amount) || body.amount <= 0) throw new Failure("amount is a whole number of minor units above 0", 400, true);
+    if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 200)) throw new Failure("reason is text of at most 200 characters", 400, true);
+    const orderId = gid("Order", String(body.order_id));
+    const fingerprint = sha256(`${orderId}|${body.amount}`);
+    // the Shopify key: 64 hex characters, from the agent and its key, so one agent cannot read or block another's key
+    const shopifyKey = sha256(`${agent}|${key}`);
+    const seen = keys.get(shopifyKey);
     if (seen) {
       if (seen.fingerprint !== fingerprint) return { status: 422, body: { error: "this Idempotency-Key was used for another refund" } };
-      return seen.state === "done" ? { status: seen.status, body: seen.body } : { status: 409, body: { error: "a refund with this Idempotency-Key is in progress, or did not finish; check the order in Shopify before another try" } };
+      if (seen.state === "done") return { status: seen.status, body: seen.body };
     }
-    keys.set(key, { fingerprint, state: "pending" });
-    save();
+    if (inFlightKeys.has(shopifyKey)) return { status: 409, body: { error: "a refund with this Idempotency-Key is in flight" } };
+    if (inFlightOrders.has(orderId)) return { status: 409, body: { error: "a refund of this order is in flight" } };
+    inFlightKeys.add(shopifyKey);
+    inFlightOrders.add(orderId);
     try {
-      const result = await refund(body, receiptId);
-      keys.set(key, { fingerprint, state: "done", status: 201, body: result });
+      const sale = await saleOf(orderId);
+      const currency = sale.amountSet.presentmentMoney.currencyCode;
+      keys.set(shopifyKey, { fingerprint, state: "pending" });
+      save();
+      let j: { data?: any; errors?: unknown };
+      try {
+        j = await graphql(
+          `mutation($input: RefundInput!, $key: String!) @idempotent(key: $key) { refundCreate(input: $input) { refund { id } userErrors { message } } }`,
+          { key: shopifyKey, input: { orderId, currency, note: `agent-custody receipt ${receiptId}${body.reason ? `: ${body.reason}` : ""}`, transactions: [{ orderId, parentId: sale.id, ...(sale.gateway ? { gateway: sale.gateway } : {}), kind: "REFUND", amount: toDecimal(body.amount, currency) }] } },
+        );
+      } catch (e) {
+        if (e instanceof Failure && !e.definite) throw new Failure(e.message, 504, false);
+        throw e;
+      }
+      const refundId = j.data?.refundCreate?.refund?.id as string | undefined;
+      if (!refundId) {
+        // no refund: a refusal is definite; any other answer may hide one, and the key stays for the retry
+        userErrors(j.data?.refundCreate?.userErrors);
+        if (j.errors) console.error(`agent-custody shopify: refundCreate errors: ${text(JSON.stringify(j.errors))}`);
+        throw j.data ? new Failure("Shopify made no refund", 504, false) : new Failure("Shopify refused the query", 502, true);
+      }
+      const result = { refund_id: refundId, amount: body.amount as number, currency };
+      keys.set(shopifyKey, { fingerprint, state: "done", status: 201, body: result });
       save();
       return { status: 201, body: result };
     } catch (e) {
-      if (e instanceof Failure && e.definite) {
-        keys.delete(key);
+      if (e instanceof Failure && e.definite && keys.get(shopifyKey)?.state === "pending") {
+        keys.delete(shopifyKey);
         save();
       }
       throw e;
+    } finally {
+      inFlightKeys.delete(shopifyKey);
+      inFlightOrders.delete(orderId);
     }
   }
 
@@ -210,7 +262,9 @@ export function shopifyServer(guard: Guard, env: ShopifyEnv, dataDir: string): S
     if (path === "/orders") return json(res, 201, await placeOrder(body, receiptId));
     const key = req.headers["idempotency-key"];
     if (typeof key !== "string" || !/^[\x21-\x7e]{1,128}$/.test(key)) return json(res, 400, { error: "a refund needs an Idempotency-Key header: 1 to 128 printable characters" });
-    const r = await refundOnce(key, body, receiptId);
+    const agent = verifiedAgent(req);
+    if (!agent) return json(res, 400, { error: "a refund needs one signature that names the agent's key" });
+    const r = await refundOnce(agent, key, body, receiptId);
     json(res, r.status, r.body);
   }
 
@@ -219,8 +273,9 @@ export function shopifyServer(guard: Guard, env: ShopifyEnv, dataDir: string): S
       if (err) return json(res, 500, { error: "the door failed" });
       handle(req, res).catch((e: unknown) => {
         if (res.headersSent) return res.destroy();
-        if (e instanceof Failure) return json(res, e.status, { error: e.message });
-        json(res, 502, { error: `the app failed: ${text(e)}` });
+        if (e instanceof Failure) return json(res, e.status, e.status === 504 ? { error: e.message, outcome_unknown: true, retry: "same Idempotency-Key" } : { error: e.message });
+        console.error(`agent-custody shopify: ${text(e)}`);
+        json(res, 502, { error: "the app failed" });
       });
     });
   });
