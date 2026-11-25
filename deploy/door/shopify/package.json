@@ -1,0 +1,7 @@
+{
+  "name": "agent-custody-shopify-door",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node start.ts" },
+  "dependencies": { "@agent-custody/receipts": "0.16.14" }
+}

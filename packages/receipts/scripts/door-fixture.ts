@@ -5,7 +5,11 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { generateKeyPair, writeKeyPair, type KeyPair } from "../src/crypto.ts";
+import { createHash, sign as edSign } from "node:crypto";
+import { generateKeyPair, writeKeyPair, type Envelope, type KeyPair } from "../src/crypto.ts";
+import { didKeyOf } from "../src/did-key.ts";
+import { PASSPORT_HEADER, passportHeader } from "../src/registry.ts";
+import { parseDictionary, signatureBase, type SfInnerList } from "../src/web-bot-auth.ts";
 
 /**
  * Anyone may read the catalogue. A refund is for a verified agent, a positive amount up to £50 (5000 pence); an unknown or claimed
@@ -97,4 +101,17 @@ export function startOrigin(): Promise<Origin> {
       resolve({ url: `http://127.0.0.1:${port}`, seen, close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }) });
     });
   });
+}
+
+/**
+ * The headers of one request from an agent: a Web Bot Auth signature under its did:key that covers the method, path,
+ * query, the body digest, and the passport when it has one. A passport needs this signature to admit its agent.
+ */
+export function agentHeaders(key: KeyPair, o: { method: string; target: string; authority: string; body: string; passport?: Envelope; nonce: string }): Record<string, string> {
+  const fields: Record<string, string> = { "content-digest": `sha-256=:${createHash("sha256").update(o.body).digest("base64")}:`, ...(o.passport ? { [PASSPORT_HEADER]: passportHeader(o.passport) } : {}) };
+  const covered = ["@authority", "@method", "@path", "@query", ...(o.passport ? [PASSPORT_HEADER] : []), "content-digest"];
+  const created = Math.floor(Date.now() / 1000);
+  const input = `sig1=(${covered.map((c) => `"${c}"`).join(" ")});created=${created};expires=${created + 60};keyid="${didKeyOf(key.publicKey)}";alg="ed25519";nonce="${o.nonce}";tag="web-bot-auth"`;
+  const base = signatureBase({ method: o.method, target: o.target, authority: o.authority, header: (name) => (fields[name] !== undefined ? [fields[name]!] : undefined) }, parseDictionary(input).get("sig1") as SfInnerList);
+  return { ...fields, "signature-input": input, signature: `sig1=:${edSign(null, Buffer.from(base), key.privateKey).toString("base64")}:` };
 }
