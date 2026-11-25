@@ -4,6 +4,8 @@ All three packages, `@agent-custody/receipts`, `@agent-custody/state`, and `agen
 
 ## Unreleased
 
+- **The door as a Shopify app** (svayatta/pm#16). `deploy/door/shopify` is a small Node server for one Shopify store. It runs the in-process door in front of `POST /orders` and `POST /refunds`. An order makes a draft order (`draftOrderCreate`) that has the tag `agent-custody` and the receipt id in its note, and moves no money until the buyer pays at the Shopify checkout. A refund (`refundCreate`) needs an `Idempotency-Key`: the server sends it with Shopify's `@idempotent` directive under a key from the verified agent and that header, so a retry, also after a restart, makes no second refund; a refund of an order in flight gets 409, and an unknown result gets 504 with `outcome_unknown`. The default `policy.cedar` admits an agent that has a registry passport and is on the store's `agents` admission list, and limits a refund to 50000 minor units. Each decision is a door receipt that `agent-custody verify` accepts. `smoke.ts` runs by hand on a development store. [The guide](packages/receipts/docs/door-shopify.md) has the install steps and the limits.
+
 ## 0.16.14 — 2026-11-24
 
 - **ERC-8004 admission entries bound to their registry.** An `{ "erc8004": { "agentRegistry", "agentId" } }` list entry may add `"registry": "<url>"`, the registry that must vouch for the link. Only a `verified` passport that names that registry (compared in one spelling) matches it, so a door that trusts two registries no longer lets one sign a passport carrying the ERC-8004 identity of the other's agent and put its own agent on the entry. `registry` is optional: an entry without it matches the link whichever trusted registry vouched for it, as before.

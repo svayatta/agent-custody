@@ -1,0 +1,14 @@
+{
+  "identity": { "keyFile": "data/keys/door.key" },
+  "routes": [
+    { "name": "order", "methods": ["POST"], "path": "/orders" },
+    { "name": "refund", "methods": ["POST"], "path": "/refunds" }
+  ],
+  "trustedRegistryKeys": ["keys/registry.pub"],
+  "webBotAuth": { "authorities": ["agents.your-shop.example"] },
+  "admissionLists": "admission.json",
+  "policyFile": "policy.cedar",
+  "receiptsDir": "data/receipts",
+  "logFile": "data/log.jsonl",
+  "capture": { "refund": { "args": { "mode": "clear" } } }
+}
